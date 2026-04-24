@@ -1,0 +1,258 @@
+# ==========================================
+# 1. 基础 Python (编译与运行)
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# SageMath parsed files
+*.sage.py
+
+# ==========================================
+# 2. 虚拟环境与包管理
+# ==========================================
+# Environments
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+.env.local
+.envrc
+.envrc.local
+.localrc
+.direnv/
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-env/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PEP 582 (pyflow, pdm)
+__pypackages__/
+
+# Lock files & Package Managers
+uv.lock
+.python-version
+# Pipfile.lock      # Uncomment if needed per pipenv#598
+# poetry.lock       # Uncomment for binary packages (https://python-poetry.org/docs/basic-usage/)
+# poetry.toml
+# pdm.lock          # pdm recommends excluding .pdm-python
+# pdm.toml
+.pdm-python
+.pdm-build/
+# pixi.lock
+.pixi
+.pypirc             # PyPI configuration file
+
+# ==========================================
+# 3. 日志、测试与代码质量 (QA)
+# ==========================================
+# Logs
+*.log
+logs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Type checkers & Linters
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ==========================================
+# 4. Web 框架 & 服务
+# ==========================================
+# Django
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Scrapy
+.scrapy
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Abstra (AI-powered process automation)
+.abstra/
+
+# ==========================================
+# 5. 数据、文档与 Notebook
+# ==========================================
+# Jupyter & IPython
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# Marimo
+marimo/_static/
+marimo/_lsp/
+__marimo__/
+
+# Sphinx & mkdocs documentation
+docs/_build/
+/site
+
+# Translations
+*.mo
+*.pot
+
+# Project Data & Docker
+data/
+docker_data/
+
+# ==========================================
+# 6. 构建工具 (Build Tools)
+# ==========================================
+# PyInstaller
+*.manifest
+*.spec
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Cython debug symbols
+cython_debug/
+
+# ==========================================
+# 7. IDE 与编辑器配置
+# ==========================================
+# Visual Studio Code
+.vscode/
+
+# Cursor (AI-powered code editor)
+.cursorignore
+.cursorindexingignore
+
+# JetBrains / PyCharm
+# .idea/
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# ==========================================
+# 8. 私有配置与敏感信息
+# ==========================================
+.private/
+.personal/
+.secrets/
+secrets/
+.credentials/
+*.secret
+*.secrets
+*.token
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ==========================================
+# 9. Node.js / 前端模板
+# ==========================================
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+.svelte-kit/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================================
+# 10. AI 编码工具本地状态
+# ==========================================
+# 保留可共享的模板/指令文件，仅忽略本地运行状态
+.claude/settings.local.json
+.claude/history/
+.claude/cache/
+.claude/tmp/
+.continue/
+.aider*
+.avante/
+
+# ==========================================
+# 11. 操作系统与临时文件
+# ==========================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+tmp/
+temp/
+
+# ==========================================
+# 12. 本地运行输出
+# ==========================================
+out/
+coverage/
