@@ -1,5 +1,7 @@
 """Build text files with optional YAML front matter."""
 
+from __future__ import annotations
+
 import yaml
 
 
