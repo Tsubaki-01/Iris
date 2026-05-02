@@ -194,6 +194,7 @@ cython_debug/
 .secrets/
 secrets/
 .credentials/
+.codex/
 *.secret
 *.secrets
 *.token
@@ -201,6 +202,9 @@ secrets/
 *.key
 *.p12
 *.pfx
+**/AGENTS.md
+**/CLAUDE.md
+**/implementation_plan.md
 
 # ==========================================
 # 9. Node.js / 前端模板
