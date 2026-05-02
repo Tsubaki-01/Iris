@@ -204,6 +204,7 @@ secrets/
 *.pfx
 **/AGENTS.md
 **/CLAUDE.md
+**/implementation_plan.md
 
 # ==========================================
 # 9. Node.js / 前端模板
