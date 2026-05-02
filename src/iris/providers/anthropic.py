@@ -89,7 +89,6 @@ class AnthropicMessageAdapter(MessageAdapter):
                 )
         return {"role": api_role, "content": blocks}
 
-    @classmethod
     def from_provider(cls, response: dict[str, Any]) -> LLMResponse:
         """从 Anthropic 原始 API 的响应报文构造出一个标准的 LLM 响应对象。
 
