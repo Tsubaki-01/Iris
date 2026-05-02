@@ -128,8 +128,7 @@ class OpenAIMessageAdapter(MessageAdapter):
         # 默认回退逻辑。
         return [{"role": "user", "content": msg.text}]
 
-    @classmethod
-    def from_chat(cls, response: dict[str, Any]) -> LLMResponse:
+    def from_chat(self, response: dict[str, Any]) -> LLMResponse:
         """分解常规对话端点输出中包含的角色反馈。
 
         Args:
@@ -230,8 +229,7 @@ class OpenAIMessageAdapter(MessageAdapter):
         items.append({"role": "user", "content": msg.text})
         return items
 
-    @classmethod
-    def from_responses(cls, response: dict[str, Any]) -> LLMResponse:
+    def from_responses(self, response: dict[str, Any]) -> LLMResponse:
         """从特殊 response API 输出序列中过滤提取有效节点块。
 
         需兼顾对 output_text 以及 function_call 体的提取及理由推断摘要。

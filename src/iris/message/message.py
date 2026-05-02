@@ -323,7 +323,7 @@ class Conversation(BaseModel):
         Returns:
             扁平化的消息字典列表。
         """
-        from iris.providers import OpenAIMessageAdapter
+        from ..providers import OpenAIMessageAdapter
 
         provider = OpenAIMessageAdapter(api_style=api_style)
         result: list[dict[str, Any]] = []
@@ -337,7 +337,7 @@ class Conversation(BaseModel):
         Returns:
             含 `system`（字符串）与 `messages`（列表）字段的字典。
         """
-        from iris.providers import AnthropicMessageAdapter
+        from ..providers import AnthropicMessageAdapter
 
         provider = AnthropicMessageAdapter()
         return {
