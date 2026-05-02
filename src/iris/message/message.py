@@ -1,4 +1,4 @@
-﻿"""消息系统。
+"""消息系统。
 
 为 agent、LLM 与工具之间的通信提供统一消息类型。
 所有消息都通过同一个 `Msg` 类型流转：用户输入、LLM 回复、
@@ -15,8 +15,9 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Literal, Self, Sequence
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -81,6 +82,7 @@ class ToolResultBlock(BaseModel):
 
 # agent 支持的所有内容块联合类型。
 ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
+
 
 # endregion
 
@@ -148,7 +150,7 @@ class Msg(BaseModel):
         """
         if isinstance(self.content, str):
             return self.content
-        parts = [b.text for b in self.content if isinstance(b, TextBlock)]
+        parts = [block.text for block in self.content if isinstance(block, TextBlock)]
         return "\n".join(parts)
 
     @property
@@ -156,14 +158,14 @@ class Msg(BaseModel):
         """提取助手消息中的所有工具调用块。"""
         if isinstance(self.content, str):
             return []
-        return [b for b in self.content if isinstance(b, ToolUseBlock)]
+        return [block for block in self.content if isinstance(block, ToolUseBlock)]
 
     @property
     def tool_results(self) -> list[ToolResultBlock]:
-        """提取所有工具结果块（主要用于 role=tool 的消息）。"""
+        """提取所有工具结果块。一般来说一条Msg中只包含一个tool_result。"""
         if isinstance(self.content, str):
             return []
-        return [b for b in self.content if isinstance(b, ToolResultBlock)]
+        return [block for block in self.content if isinstance(block, ToolResultBlock)]
 
     @property
     def has_tool_calls(self) -> bool:
@@ -225,339 +227,19 @@ class Msg(BaseModel):
         )
         return cls(role=Role.USER, content=[block], **kwargs)
 
-    # ==========================================
-    #                OpenAI API Format
-    # ==========================================
-    def to_openai(self, api_style: str = "responses") -> list[dict[str, Any]]:
-        if api_style == "responses":
-            return self.to_openai_responses()
-        else:
-            return self.to_openai_chat()
-
-    def to_openai_chat(self) -> list[dict[str, Any]]:
-        """转换为 OpenAI Chat Completions API 格式。
-
-        OpenAI 的结构与 Anthropic 不同：
-        - `tool_use` 会变成助手消息上的 `tool_calls`
-        - `tool_result` 需要拆成 role="tool" 的独立消息
-
-        Returns:
-            返回字典列表。
-        """
-        if self.role == Role.SYSTEM:
-            return [{"role": "system", "content": self.text}]
-
-        if self.role == Role.USER and not self.tool_results:
-            return [{"role": "user", "content": self.text}]
-
-        # 助手消息可同时包含文本和工具调用。
-        if self.role == Role.ASSISTANT:
-            msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": self.text or None,
-            }
-            if self.tool_calls:
-                msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": _json_dumps(tc.input),
-                        },
-                    }
-                    for tc in self.tool_calls
-                ]
-            return [msg]
-
-        # 工具结果在 OpenAI 中需要拆分为多条 role=tool 消息。
-        if self.tool_results:
-            return [
-                {
-                    "role": "tool",
-                    "tool_call_id": tr.tool_use_id,
-                    "content": tr.content,
-                }
-                for tr in self.tool_results
-            ]
-
-        return [{"role": "user", "content": self.text}]
-
-    def to_openai_responses(self) -> list[dict[str, Any]]:
-        """转换为 OpenAI Responses API 的 input 项格式。
-
-        Returns:
-            一个或多个输入项字典的列表，可直接拼接到请求的 `input` 数组里。
-        """
-        items: list[dict[str, Any]] = []
-
-        if self.role == Role.SYSTEM:
-            items.append({"role": "system", "content": self.text})
-            return items
-
-        if self.role == Role.USER and not self.tool_results:
-            items.append({"role": "user", "content": self.text})
-            return items
-
-        # 助手消息：文本和工具调用分别生成独立的 input item
-        if self.role == Role.ASSISTANT:
-            if self.text:
-                items.append({"role": "assistant", "content": self.text})
-            for tc in self.tool_calls:
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": tc.id,
-                        "name": tc.name,
-                        "arguments": _json_dumps(tc.input),
-                    }
-                )
-            return items
-
-        # 工具结果：每个结果生成一个 function_call_output 项
-        if self.tool_results:
-            for tr in self.tool_results:
-                items.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": tr.tool_use_id,
-                        "output": tr.content,
-                    }
-                )
-            return items
-
-        # 兜底：普通用户消息（理论上不会走到这里）
-        items.append({"role": "user", "content": self.text})
-        return items
-
-    # ==========================================
-    #              Anthropic API Format
-    # ==========================================
-    def to_anthropic(self) -> dict[str, Any]:
-        """转换为 Anthropic Messages API 格式。
-
-        Returns:
-            可直接追加到 Anthropic 请求 `messages` 列表的字典。
-
-        Raises:
-            ValueError: 当角色为 SYSTEM 时抛出。
-                系统消息应放在顶层 `system` 参数，而非 `messages`。
-        """
-        if self.role == Role.SYSTEM:
-            raise ValueError(
-                "System messages should be passed via the `system` parameter "
-                "in the Anthropic API, not in the `messages` list."
-            )
-
-        api_role = "assistant" if self.role == Role.ASSISTANT else "user"
-
-        # 字符串内容直接透传。
-        if isinstance(self.content, str):
-            return {"role": api_role, "content": {"type": "text", "text": self.content}}
-
-        # 内容块按类型转换为 API 结构。
-        blocks: list[dict[str, Any]] = []
-        for block in self.content:
-            if isinstance(block, TextBlock):
-                blocks.append({"type": "text", "text": block.text})
-            elif isinstance(block, ToolUseBlock):
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    }
-                )
-            elif isinstance(block, ToolResultBlock):
-                blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.tool_use_id,
-                        "content": block.content,
-                        "is_error": block.is_error,
-                    }
-                )
-        return {"role": api_role, "content": blocks}
-
-    # ==========================================
-    #               响应反序列化
-    # ==========================================
-    def from_openai(
-        self, response: dict[str, Any], *, api_style: str = "responses"
-    ) -> Msg:
-        if api_style == "responses":
-            return self.from_openai_responses(response)
-        else:
-            return self.from_openai_chat(response)
-
     @classmethod
-    def from_openai_chat(cls, response: dict[str, Any]) -> Msg:
-        """将 OpenAI Chat Completion 响应解析为 `Msg`。
+    def from_dict(cls, data: dict[str, Any]) -> Msg:
+        """从字典构建一个Msg对象，并为其内容块指定类型。"""
+        content = data.get("content", "")
+        if isinstance(content, list):
+            content = [_content_block_from_dict(block) for block in content]
 
-        Args:
-            response: OpenAI API 返回的原始 JSON 字典。
-                期望包含 `choices`（至少一个），可选 `model`、`usage`。
-
-        Returns:
-            已正确映射内容块类型的助手消息。
-        """
-        choices = response.get("choices", [])
-        if not choices:
-            # 无选择时返回空助手消息（可按需处理）
-            return cls.assistant(content=[], metadata={})
-
-        # 通常只取第一个 choice
-        choice = choices[0]
-        message = choice.get("message", {})
-
-        blocks: list[ContentBlock] = []
-
-        # 文本内容
-        text = message.get("content")
-        if text:
-            blocks.append(TextBlock(text=text))
-
-        # 工具调用
-        tool_calls = message.get("tool_calls", [])
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            args = tc.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-            blocks.append(
-                ToolUseBlock(
-                    id=tc["id"],
-                    name=fn.get("name", ""),
-                    input=args,
-                )
-            )
-
-        # 提取用量与元数据
-        usage = response.get("usage", {})
-        metadata = {
-            "model": response.get("model", ""),
-            "finish_reason": choice.get("finish_reason", ""),
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-
-        return cls.assistant(content=blocks, metadata=metadata)
-
-    @classmethod
-    def from_openai_responses(cls, response: dict[str, Any]) -> Msg:
-        """将 OpenAI Responses API 的响应解析为 `Msg`。
-
-        Args:
-            response: Responses API 返回的原始 JSON 字典。
-                期望顶层包含 `output` 列表，可选 `model`、`usage`。
-
-        Returns:
-            已映射内容块类型的助手消息。
-        """
-        output_list: list[dict] = response.get("output", [])
-        blocks: list[ContentBlock] = []
-        reasoning_parts: list[str] = []
-        finish_reason = "stop"
-
-        for item in output_list:
-            item_type = item.get("type")
-
-            # 1. 助手文本消息
-            if item_type == "message":
-                for content_part in item.get("content", []):
-                    if content_part.get("type") == "output_text":
-                        blocks.append(TextBlock(text=content_part["text"]))
-
-            # 2. 工具调用
-            elif item_type == "function_call":
-                args = item.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                blocks.append(
-                    ToolUseBlock(
-                        id=item["id"],
-                        name=item.get("name", ""),
-                        input=args,
-                    )
-                )
-
-            # 3. 推理过程
-            elif item_type == "reasoning":
-                for summary_part in item.get("summary", []):
-                    if summary_part.get("type") == "summary_text":
-                        reasoning_parts.append(summary_part["text"])
-
-            # 其他未知类型可忽略或记录日志
-
-        # 推断 finish_reason
-        if output_list:
-            last_item = output_list[-1]
-            if last_item.get("type") == "function_call":
-                finish_reason = "function_call"
-            # TODO 可扩展：如果最后一个 message 中有 refusal 等
-
-        usage = response.get("usage", {})
-        metadata = {
-            "model": response.get("model", ""),
-            "finish_reason": finish_reason,
-            "input_tokens": usage.get("input_tokens", 0),
-            "output_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-        if reasoning_parts:
-            metadata["reasoning"] = "\n".join(reasoning_parts)
-
-        return cls.assistant(content=blocks, metadata=metadata)
-
-    @classmethod
-    def from_anthropic(cls, response: dict[str, Any]) -> Msg:
-        """将 Anthropic API 响应解析为 `Msg`。
-
-        Args:
-            response: Anthropic API 返回的原始 JSON 字典。
-                期望包含 `role`、`content`（内容块列表），可选 `usage`。
-
-        Returns:
-            已正确映射内容块类型的助手消息。
-        """
-        blocks: list[ContentBlock] = []
-        for raw_block in response.get("content", []):
-            btype = raw_block.get("type")
-            if btype == "text":
-                blocks.append(TextBlock(text=raw_block["text"]))
-            elif btype == "tool_use":
-                args = raw_block.get("input", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {}
-                blocks.append(
-                    ToolUseBlock(
-                        id=raw_block["id"],
-                        name=raw_block["name"],
-                        input=args,
-                    )
-                )
-            # 如 thinking 等其他块类型，可按需扩展到 metadata。
-
-        usage = response.get("usage", {})
-        return cls.assistant(
-            content=blocks,
-            metadata={
-                "model": response.get("model", ""),
-                "stop_reason": response.get("stop_reason", ""),
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-            },
+        return cls(
+            role=data["role"],
+            content=content,
+            sender=data.get("sender", ""),
+            timestamp=data.get("timestamp", time.time()),
+            metadata=data.get("metadata", {}),
         )
 
     # ==========================================
@@ -604,6 +286,7 @@ class Conversation(BaseModel):
     # ==========================================
     #                 查询属性
     # ==========================================
+
     @property
     def system_prompt(self) -> str | None:
         """返回第一条系统消息文本；若不存在则返回 None。"""
@@ -615,7 +298,7 @@ class Conversation(BaseModel):
     @property
     def non_system_messages(self) -> list[Msg]:
         """除系统提示外的全部消息（用于 API 的 `messages` 参数）。"""
-        return [m for m in self.messages if m.role != Role.SYSTEM]
+        return [msg for msg in self.messages if msg.role != Role.SYSTEM]
 
     @property
     def last(self) -> Msg | None:
@@ -626,33 +309,40 @@ class Conversation(BaseModel):
     def turn_count(self) -> int:
         """用户消息数量（即可视作会话轮数）。"""
         return sum(
-            1 for m in self.messages if m.role == Role.USER and not m.tool_results
+            1 for msg in self.messages if msg.role == Role.USER and not msg.tool_results
         )
 
     # ==========================================
     #                API 序列化
     # ==========================================
-    def to_openai(self) -> list[dict[str, Any]]:
-        """将整个会话序列化为 OpenAI API 所需格式。
+    def to_openai(
+        self, api_style: Literal["responses", "chat"] = "chat"
+    ) -> list[dict[str, Any]]:
+        """将整个会话序列化为 OpenAI API 所需的 messages 或 input 字段。
 
         Returns:
             扁平化的消息字典列表。
         """
+        from iris.providers import OpenAIMessageAdapter
+
+        provider = OpenAIMessageAdapter(api_style=api_style)
         result: list[dict[str, Any]] = []
         for msg in self.messages:
-            converted = msg.to_openai()
-            result.extend(converted)
+            result.extend(provider.to_provider(msg))
         return result
 
     def to_anthropic(self) -> dict[str, Any]:
-        """将整个会话序列化为 Anthropic API 调用参数。
+        """将整个会话序列化为 Anthropic API 所需的 system 和 messages 字段。
 
         Returns:
             含 `system`（字符串）与 `messages`（列表）字段的字典。
         """
+        from iris.providers import AnthropicMessageAdapter
+
+        provider = AnthropicMessageAdapter()
         return {
             "system": self.system_prompt or "",
-            "messages": [m.to_anthropic() for m in self.non_system_messages],
+            "messages": [provider.to_provider(msg) for msg in self.non_system_messages],
         }
 
     # ==========================================
@@ -670,11 +360,11 @@ class Conversation(BaseModel):
         Returns:
             整个会话的估算 token 总数。
         """
-        total_chars = sum(len(m.text) for m in self.messages)
+        total_chars = sum(len(msg.text) for msg in self.messages)
         # 计入 tool_use 块中序列化参数带来的额外字符开销。
-        for m in self.messages:
-            for tc in m.tool_calls:
-                total_chars += len(_json_dumps(tc.input))
+        for msg in self.messages:
+            for tool_call in msg.tool_calls:
+                total_chars += len(_json_dumps(tool_call.input))
         return total_chars // chars_per_token
 
     def slice_recent(self, n: int) -> list[Msg]:
@@ -687,7 +377,7 @@ class Conversation(BaseModel):
     def clear(self, keep_system: bool = True) -> None:
         """清空消息；可选保留系统提示。"""
         if keep_system:
-            self.messages = [m for m in self.messages if m.role == Role.SYSTEM]
+            self.messages = [msg for msg in self.messages if msg.role == Role.SYSTEM]
         else:
             self.messages.clear()
 
@@ -715,3 +405,14 @@ def _json_dumps(obj: Any) -> str:
     """紧凑 JSON 序列化。"""
 
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _content_block_from_dict(data: dict[str, Any]) -> ContentBlock:
+    block_type = data.get("type")
+    if block_type == "text":
+        return TextBlock.model_validate(data)
+    if block_type == "tool_use":
+        return ToolUseBlock.model_validate(data)
+    if block_type == "tool_result":
+        return ToolResultBlock.model_validate(data)
+    raise ValueError(f"Unsupported content block type: {block_type!r}")
