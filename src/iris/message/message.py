@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from curses import raw
 from enum import Enum
 from typing import Any, Literal, Self, Sequence
 
@@ -86,6 +85,7 @@ ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
 # endregion
 
 # region Core
+# region Msg
 # ==========================================
 #                 核心消息
 # ==========================================
@@ -570,6 +570,9 @@ class Msg(BaseModel):
         return f"Msg(role={self.role.value!r}, text={preview!r}{tc_info})"
 
 
+# endregion
+
+# region Conversation
 # ==========================================
 #                会话消息序列
 # ==========================================
@@ -700,6 +703,7 @@ class Conversation(BaseModel):
         return iter(self.messages)
 
 
+# endregion
 # endregion
 
 # ==========================================
