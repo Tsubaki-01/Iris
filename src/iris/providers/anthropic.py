@@ -62,7 +62,7 @@ class AnthropicMessageAdapter(MessageAdapter):
         if isinstance(msg.content, str):
             return {
                 "role": api_role,
-                "content": {"type": "text", "text": msg.content},
+                "content": msg.content,
             }
 
         blocks: list[dict[str, Any]] = []
