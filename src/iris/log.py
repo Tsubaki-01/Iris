@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Union
 
 from loguru import logger
 
@@ -35,26 +34,23 @@ _CONSOLE_FORMAT = (
     "<level>{message}</level>"
 )
 
-_FILE_FORMAT = (
-    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
-    "{name}:{function}:{line} | {message}"
-)
+_FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}"
 # endregion
 
 
-def setup_logger(log_dir: Union[str, Path, None] = None) -> None:
+def setup_logger(log_dir: str | Path | None = None) -> None:
     """配置 Loguru 日志系统。
 
     系统配置了两个文件日志输出端，分别设置不同的日志保留周期。
 
     Args:
         log_dir (Union[str, Path, None]): 日志文件的目标目录。当设置为
-        'None'时，默认在当前工作目录下创建log文件夹。
+        'None'时，默认在当前工作目录下创建iris_log文件夹。
 
     Example:
-        >>> setup_logger("./log")
+        >>> setup_logger("./iris_log")
     """
-    log_path = Path(log_dir) if log_dir else Path.cwd() / "log"
+    log_path = Path(log_dir) if log_dir else Path.cwd() / "iris_log"
     log_path.mkdir(parents=True, exist_ok=True)
 
     logger.remove()

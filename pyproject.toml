@@ -23,3 +23,38 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# 启用规则组合：
+# E: pycodestyle 错误
+# F: Pyflakes (检测未使用的导入/变量)
+# I: isort (自动排序 import)
+# B: flake8-bugbear (发现潜在 Bug)
+# UP: pyupgrade (自动升级旧语法，如 list() -> [])
+# N: PEP8-naming
+select = ["E", "F", "I", "B", "UP", "N"]
+# 忽略的规则 (如有特殊需要可添加)
+ignore = []
+
+# 自动修复配置
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# --- Mypy 配置 ---
+[tool.mypy]
+python_version = "3.12"
+files = ["src/"]
+# exclude = ["file or dir"]
+# warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+disable_error_code = ["arg-type"]

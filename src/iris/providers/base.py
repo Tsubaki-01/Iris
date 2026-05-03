@@ -6,7 +6,7 @@ Example:
     class MyProviderAdapter(MessageAdapter):
         def to_provider(self, msg: Msg) -> Any:
             pass
-        def from_provider(self, response: dict[str, Any]) -> Msg:
+        def from_provider(self, response: dict[str, Any]) -> LLMResponse:
             pass
 """
 
