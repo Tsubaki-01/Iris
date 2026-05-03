@@ -119,13 +119,17 @@ class AnthropicMessageAdapter(MessageAdapter):
 
         # --- 3. 提取元信息并组装 ---
         usage = response.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        total_tokens = input_tokens + output_tokens
         return LLMResponse(
             provider="anthropic",
             id=response.get("id", ""),
             model=response.get("model", ""),
             finish_reason=response.get("stop_reason", ""),
-            input_tokens=usage.get("input_tokens", 0),
-            output_tokens=usage.get("output_tokens", 0),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
             content=blocks,
             metadata={"stop_reason": response.get("stop_reason", "")},
         )
