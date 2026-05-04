@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 # region imports
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,7 +51,7 @@ class Config(BaseSettings):
     )
 
     # --- 必填字段 ---
-    api_key: Optional[str] = Field(
+    api_key: str | None = Field(
         default=None,
         description="API 密钥",
         json_schema_extra={"required_runtime": True},
@@ -63,7 +63,6 @@ class Config(BaseSettings):
         description="API base URL",
     )
     timeout: int = Field(default=30, ge=1, description="Request timeout (s)")
-    max_retries: int = Field(default=3, ge=0, description="Max retry attempts")
     debug: bool = Field(default=False, description="Debug mode")
 
     # --- 字段检验 ---
@@ -93,10 +92,10 @@ class Config(BaseSettings):
 # 进程级单例
 # ============================================================
 # region singleton
-_config: Optional[Config] = None
+_config: Config | None = None
 
 
-def init_config(*, env_file: Optional[str] = None, **kwargs: Any) -> Config:
+def init_config(*, env_file: str | None = None, **kwargs: Any) -> Config:
     """
     全局配置只初始化一次。
 

@@ -1,14 +1,16 @@
 """为 Iris 运行时配置日志系统。
 
-本模块定义通用的控制台与文件日志格式
-模块导入时完成初始化。
+本模块定义通用的控制台与文件日志格式。导入模块只暴露 `logger`
+与 `setup_logger`，不会自动创建日志目录或注册文件 sink。
 
 Exports:
-    logger: 控制台与文件双输出的日志器实例
+    logger: Loguru 日志器实例。
+    setup_logger: 显式配置 Iris 日志 sink 的函数。
 
 Example:
-    from iris.log import logger
+    from iris.log import logger, setup_logger
 
+    setup_logger("./iris_log")
     logger.info("This is an info message.")
     logger.error("This is an error message.")
 """
@@ -35,54 +37,73 @@ _CONSOLE_FORMAT = (
 )
 
 _FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}"
+
+_SINK_IDS: list[int] = []
 # endregion
 
 
 def setup_logger(log_dir: str | Path | None = None) -> None:
     """配置 Loguru 日志系统。
 
-    系统配置了两个文件日志输出端，分别设置不同的日志保留周期。
+    默认只配置控制台输出。传入 `log_dir` 时，额外配置两个文件日志输出端，
+    分别设置不同的日志保留周期。
 
     Args:
-        log_dir (Union[str, Path, None]): 日志文件的目标目录。当设置为
-        'None'时，默认在当前工作目录下创建iris_log文件夹。
+        log_dir (str | Path | None): 日志文件的目标目录。为 `None` 时不创建
+            文件日志目录。
 
     Example:
         >>> setup_logger("./iris_log")
     """
-    log_path = Path(log_dir) if log_dir else Path.cwd() / "iris_log"
+    _remove_managed_sinks()
+
+    _SINK_IDS.append(
+        logger.add(
+            sys.stderr,
+            level="DEBUG",
+            format=_CONSOLE_FORMAT,
+            colorize=True,
+        )
+    )
+
+    if log_dir is None:
+        return
+
+    log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    logger.remove()
-
-    logger.add(
-        sys.stderr,
-        level="DEBUG",
-        format=_CONSOLE_FORMAT,
-        colorize=True,
+    _SINK_IDS.append(
+        logger.add(
+            log_path / "runtime.log",
+            level="INFO",
+            format=_FILE_FORMAT,
+            rotation="00:00",
+            retention="30 days",
+            encoding="utf-8",
+            enqueue=True,
+        )
     )
 
-    logger.add(
-        log_path / "runtime.log",
-        level="INFO",
-        format=_FILE_FORMAT,
-        rotation="00:00",
-        retention="30 days",
-        encoding="utf-8",
-        enqueue=True,
-    )
-
-    logger.add(
-        log_path / "error.log",
-        level="ERROR",
-        format=_FILE_FORMAT,
-        rotation="00:00",
-        retention="90 days",
-        encoding="utf-8",
-        enqueue=True,
-        backtrace=True,
-        diagnose=True,
+    _SINK_IDS.append(
+        logger.add(
+            log_path / "error.log",
+            level="ERROR",
+            format=_FILE_FORMAT,
+            rotation="00:00",
+            retention="90 days",
+            encoding="utf-8",
+            enqueue=True,
+            backtrace=True,
+            diagnose=True,
+        )
     )
 
 
-setup_logger()
+def _remove_managed_sinks() -> None:
+    """移除本模块通过 `setup_logger` 添加的 sink。"""
+    while _SINK_IDS:
+        sink_id = _SINK_IDS.pop()
+        try:
+            logger.remove(sink_id)
+        except ValueError:
+            continue
