@@ -16,12 +16,15 @@ import json
 import time
 import uuid
 from collections.abc import Sequence
-from enum import Enum
-from typing import Any, Literal, Self
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 # endregion
+
+if TYPE_CHECKING:
+    from .llm import LLMRequest
 
 # region definitions
 # ==========================================
@@ -29,7 +32,7 @@ from pydantic import BaseModel, Field, model_validator
 # ==========================================
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     """消息发送方角色，与常见 LLM API 约定保持一致。"""
 
     USER = "user"
@@ -126,17 +129,6 @@ class Msg(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"use_enum_values": False}
-
-    # ==========================================
-    #                 数据校验
-    # ==========================================
-    @model_validator(mode="after")
-    def _normalize_content(self) -> Self:
-        """确保内部内容格式可被统一处理。"""
-        if isinstance(self.content, str):
-            # 保留原始字符串，在属性访问或 to_* 序列化时再按需转换。
-            pass
-        return self
 
     # ==========================================
     #                 便捷属性
@@ -315,35 +307,22 @@ class Conversation(BaseModel):
     # ==========================================
     #                API 序列化
     # ==========================================
-    def to_openai(
-        self, api_style: Literal["responses", "chat"] = "chat"
-    ) -> list[dict[str, Any]]:
-        """将整个会话序列化为 OpenAI API 所需的 messages 或 input 字段。
+    def to_llm_request(self, model: str, **options: Any) -> LLMRequest:
+        """将当前会话构建为一次 LLM 调用请求。
+
+        `Conversation` 只负责内部会话历史，不直接生成 OpenAI、Anthropic
+        等厂商 payload。具体 provider 格式转换由 providers adapter 负责。
+
+        Args:
+            model: 本次调用使用的模型名称。
+            **options: 传递给 `LLMRequest` 的请求级参数。
 
         Returns:
-            扁平化的消息字典列表。
+            一次 provider-neutral 的 LLM 调用请求。
         """
-        from ..providers import OpenAIMessageAdapter
+        from .llm import LLMRequest
 
-        provider = OpenAIMessageAdapter(api_style=api_style)
-        result: list[dict[str, Any]] = []
-        for msg in self.messages:
-            result.extend(provider.to_provider(msg))
-        return result
-
-    def to_anthropic(self) -> dict[str, Any]:
-        """将整个会话序列化为 Anthropic API 所需的 system 和 messages 字段。
-
-        Returns:
-            含 `system`（字符串）与 `messages`（列表）字段的字典。
-        """
-        from ..providers import AnthropicMessageAdapter
-
-        provider = AnthropicMessageAdapter()
-        return {
-            "system": self.system_prompt or "",
-            "messages": [provider.to_provider(msg) for msg in self.non_system_messages],
-        }
+        return LLMRequest.from_conversation(self, model, **options)
 
     # ==========================================
     #                上下文管理
@@ -387,10 +366,6 @@ class Conversation(BaseModel):
     def __len__(self) -> int:
         """返回会话中的消息数量。"""
         return len(self.messages)
-
-    def __iter__(self):
-        """返回消息列表迭代器。"""
-        return iter(self.messages)
 
 
 # endregion
