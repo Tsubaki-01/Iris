@@ -36,7 +36,7 @@ from .adapter import ProviderAdapter
 # region constants
 OPENAI_BASE_URL = "https://api.openai.com"
 ANTHROPIC_BASE_URL = "https://api.anthropic.com"
-ANTHROPIC_VERSION = ""
+ANTHROPIC_VERSION = "2023-06-01"
 # endregion
 
 
@@ -51,7 +51,6 @@ class ProviderClient(BaseModel):
         api_key (str): Provider API key。
         base_url (str | None): 自定义 provider base URL；为空时使用内置默认值。
         timeout (float | None): 默认请求超时时间，单位秒。
-        max_retries (int): 预留重试次数；第一版不实现重试。
         http_client (httpx.AsyncClient | None): 可注入的 HTTP client，便于测试。
         headers (dict[str, str]): 追加或覆盖的 HTTP headers。
 
@@ -66,7 +65,6 @@ class ProviderClient(BaseModel):
     api_key: str
     base_url: str | None = None
     timeout: float | None = None
-    max_retries: int = 0
     http_client: httpx.AsyncClient | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
