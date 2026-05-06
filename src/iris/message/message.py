@@ -81,6 +81,8 @@ class ToolResultBlock(BaseModel):
     tool_use_id: str
     content: str = ""
     is_error: bool = False
+    name: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 # agent 支持的所有内容块联合类型。
@@ -205,6 +207,8 @@ class Msg(BaseModel):
         tool_use_id: str,
         content: str = "",
         is_error: bool = False,
+        name: str = "",
+        metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Msg:
         """创建返回给 LLM 的工具结果消息。
@@ -216,6 +220,8 @@ class Msg(BaseModel):
             tool_use_id=tool_use_id,
             content=content,
             is_error=is_error,
+            name=name,
+            metadata=metadata or {},
         )
         return cls(role=Role.USER, content=[block], **kwargs)
 

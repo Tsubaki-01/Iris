@@ -30,6 +30,31 @@ def test_tool_result_keeps_existing_user_role_compatibility() -> None:
     ]
 
 
+def test_tool_result_block_accepts_new_optional_metadata_fields() -> None:
+    block = ToolResultBlock(tool_use_id="call_1")
+
+    assert block.name == ""
+    assert block.metadata == {}
+
+
+def test_msg_tool_result_can_include_name_and_metadata() -> None:
+    message = Msg.tool_result(
+        tool_use_id="call_1",
+        content="完成",
+        name="search",
+        metadata={"trace_id": "trace_1"},
+    )
+
+    assert message.tool_results == [
+        ToolResultBlock(
+            tool_use_id="call_1",
+            content="完成",
+            name="search",
+            metadata={"trace_id": "trace_1"},
+        )
+    ]
+
+
 def test_conversation_builds_llm_request_with_message_order() -> None:
     conversation = Conversation()
     conversation.add(Msg.system("你是助手"))

@@ -64,10 +64,11 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """
         api_style = self._api_style(request)
         payload: dict[str, Any] = {"model": request.model}
-        formatted_messages = self.format_messages(request.messages)
         if api_style == "chat":
+            formatted_messages = self.format_messages(request.messages, api_style=api_style)
             payload["messages"] = formatted_messages
         else:
+            formatted_messages = self.format_messages(request.messages, api_style=api_style)
             payload["input"] = formatted_messages
         self._append_common_options(payload, request)
         return payload
@@ -90,7 +91,12 @@ class OpenAIMessageAdapter(ProviderAdapter):
             return self._from_chat_response(response)
         return self._from_responses_response(response)
 
-    def format_messages(self, messages: list[Msg]) -> list[dict[str, Any]]:
+    def format_messages(
+        self,
+        messages: list[Msg],
+        *,
+        api_style: Literal["chat", "responses"] = "chat",
+    ) -> list[dict[str, Any]]:
         """转换消息列表为 OpenAI 消息格式。
 
         Args:
@@ -105,7 +111,7 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """
         result: list[dict[str, Any]] = []
         for msg in messages:
-            result.extend(self._format_message(msg))
+            result.extend(self._format_message(msg, api_style=api_style))
         return result
 
     def _api_style(self, request: LLMRequest) -> Literal["chat", "responses"]:
@@ -115,10 +121,18 @@ class OpenAIMessageAdapter(ProviderAdapter):
             raise IrisValidationError("不支持的 OpenAI API 风格", api_style=api_style)
         return api_style
 
-    def _format_message(self, msg: Msg) -> list[dict[str, Any]]:
+    def _format_message(
+        self,
+        msg: Msg,
+        *,
+        api_style: Literal["chat", "responses"],
+    ) -> list[dict[str, Any]]:
         """转换单条 Iris 消息为 OpenAI 消息。"""
         if msg.tool_results:
-            return [self._format_tool_result(block) for block in msg.tool_results]
+            return [
+                self._format_tool_result(block, api_style=api_style)
+                for block in msg.tool_results
+            ]
 
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
         if msg.sender and msg.role == Role.USER:
@@ -127,8 +141,19 @@ class OpenAIMessageAdapter(ProviderAdapter):
             item["tool_calls"] = [self._format_tool_call(block) for block in msg.tool_calls]
         return [item]
 
-    def _format_tool_result(self, block: ToolResultBlock) -> dict[str, Any]:
+    def _format_tool_result(
+        self,
+        block: ToolResultBlock,
+        *,
+        api_style: Literal["chat", "responses"],
+    ) -> dict[str, Any]:
         """转换工具结果块为 OpenAI tool message。"""
+        if api_style == "responses":
+            return {
+                "type": "function_call_output",
+                "call_id": block.tool_use_id,
+                "output": block.content,
+            }
         return {
             "role": "tool",
             "tool_call_id": block.tool_use_id,

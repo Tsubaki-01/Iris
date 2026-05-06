@@ -38,6 +38,18 @@ def test_openai_adapter_supports_explicit_responses_payload() -> None:
     }
 
 
+def test_openai_responses_adapter_formats_tool_result_as_function_call_output() -> None:
+    request = LLMRequest(
+        model="gpt-4o",
+        messages=[Msg.tool_result(tool_use_id="call_1", content="完成")],
+        provider_options={"api_style": "responses"},
+    )
+
+    assert OpenAIMessageAdapter().to_provider_request(request)["input"] == [
+        {"type": "function_call_output", "call_id": "call_1", "output": "完成"}
+    ]
+
+
 def test_openai_adapter_parses_chat_completion_response() -> None:
     response = OpenAIMessageAdapter().from_provider_response(
         {
