@@ -1,5 +1,6 @@
 """Iris 工具内核公共导出。"""
 
+from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
     CallableTool,
@@ -11,8 +12,24 @@ from .base import (
     ToolExecutionMode,
     ToolResult,
 )
+from .builtin import (
+    EditFileInput,
+    GrepSearchInput,
+    ListFilesInput,
+    ReadFileInput,
+    WriteFileInput,
+    register_file_tools,
+)
 from .decorators import tool
 from .executor import ToolExecutor
+from .permissions import (
+    DefaultPermissionPolicy,
+    PermissionDecision,
+    PermissionPolicy,
+    ReadFileRecord,
+    ReadFileState,
+    WorkspacePolicy,
+)
 from .registry import ToolRegistry, ToolRegistryView
 from .schema import (
     schema_from_callable,
@@ -25,7 +42,17 @@ from .schema import (
 __all__ = [
     "BaseTool",
     "CallableTool",
+    "DefaultPermissionPolicy",
+    "EditFileInput",
+    "GrepSearchInput",
+    "ListFilesInput",
+    "PermissionDecision",
+    "PermissionPolicy",
+    "ReadFileInput",
+    "ReadFileRecord",
+    "ReadFileState",
     "ToolArtifact",
+    "ToolArtifactStore",
     "ToolCapability",
     "ToolDefinition",
     "ToolErrorInfo",
@@ -35,6 +62,9 @@ __all__ = [
     "ToolRegistry",
     "ToolRegistryView",
     "ToolResult",
+    "WorkspacePolicy",
+    "WriteFileInput",
+    "register_file_tools",
     "schema_from_callable",
     "schema_from_pydantic_model",
     "to_anthropic_tool_schema",

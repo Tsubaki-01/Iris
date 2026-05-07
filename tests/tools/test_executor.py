@@ -9,6 +9,11 @@ from iris.message import ToolUseBlock
 from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
 
 
+class ExplodingPermissionPolicy:
+    def check(self, tool: str, params: dict, context: ToolExecutionContext) -> None:
+        raise RuntimeError("policy failed")
+
+
 @pytest.mark.asyncio
 async def test_executor_runs_registered_function_and_returns_text_result(tmp_path: Path) -> None:
     def greet(name: str) -> str:
@@ -66,6 +71,26 @@ async def test_executor_maps_validation_error_to_error_result(tmp_path: Path) ->
 async def test_executor_maps_callable_exception_to_error_result(tmp_path: Path) -> None:
     def fail() -> str:
         raise RuntimeError("boom")
+
+    registry = ToolRegistry()
+    registry.register_function(fail, description="失败工具")
+
+    result = await ToolExecutor(registry).execute_one(
+        ToolUseBlock(id="call_1", name="fail", input={}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.code == "EXECUTION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_executor_does_not_parse_callable_exception_text_as_structured_code(
+    tmp_path: Path,
+) -> None:
+    def fail() -> str:
+        raise RuntimeError("FILE_NOT_READ: not a file tool error")
 
     registry = ToolRegistry()
     registry.register_function(fail, description="失败工具")
@@ -159,3 +184,26 @@ async def test_executor_rejects_caller_override_for_preset_kwargs(
     assert result.is_error is True
     assert result.error is not None
     assert result.error.code == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_executor_maps_permission_policy_exception_to_permission_error(
+    tmp_path: Path,
+) -> None:
+    def greet(name: str) -> str:
+        return f"你好，{name}"
+
+    registry = ToolRegistry()
+    registry.register_function(greet, description="生成问候语")
+
+    result = await ToolExecutor(
+        registry,
+        permission_policy=ExplodingPermissionPolicy(),
+    ).execute_one(
+        ToolUseBlock(id="call_1", name="greet", input={"name": "Iris"}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.code == "PERMISSION_ERROR"
