@@ -67,7 +67,11 @@ class ToolArtifactStore:
             IrisToolExecutionError: 读写文件权限不足或路径不可达时向上冒出文件挂载异常。
 
         Example:
-            >>> small_result = ToolResult(tool_use_id="1", tool_name="x", content=[TextBlock(text="a")])
+            >>> small_result = ToolResult(
+            ...     tool_use_id="1",
+            ...     tool_name="x",
+            ...     content=[TextBlock(text="a")],
+            ... )
             >>> store.persist_if_large(small_result, max_chars=100)
             [ToolResult keeps original content]
         """

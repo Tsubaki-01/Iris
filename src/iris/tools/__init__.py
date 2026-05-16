@@ -13,10 +13,13 @@ from .base import (
     ToolResult,
 )
 from .builtin import (
+    FILE_TOOL_CLASSES,
     EditFileInput,
+    FileTool,
     GrepSearchInput,
     ListFilesInput,
     ReadFileInput,
+    WorkspaceFileService,
     WriteFileInput,
     register_file_tools,
 )
@@ -44,6 +47,8 @@ __all__ = [
     "CallableTool",
     "DefaultPermissionPolicy",
     "EditFileInput",
+    "FILE_TOOL_CLASSES",
+    "FileTool",
     "GrepSearchInput",
     "ListFilesInput",
     "PermissionDecision",
@@ -62,6 +67,7 @@ __all__ = [
     "ToolRegistry",
     "ToolRegistryView",
     "ToolResult",
+    "WorkspaceFileService",
     "WorkspacePolicy",
     "WriteFileInput",
     "register_file_tools",
