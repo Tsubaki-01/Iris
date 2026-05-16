@@ -37,8 +37,8 @@ async def test_read_file_inside_workspace_updates_read_state(tmp_path: Path) -> 
 
     resolved = path.resolve()
     assert result.is_error is False
-    assert "1: alpha" in result.model_content()
-    assert "2: beta" in result.model_content()
+    assert "1: alpha" in result.model_content
+    assert "2: beta" in result.model_content
     assert str(resolved) in context.read_state.files
 
 
@@ -53,7 +53,7 @@ async def test_read_file_accepts_absolute_path_inside_workspace(tmp_path: Path) 
     )
 
     assert result.is_error is False
-    assert "1: alpha" in result.model_content()
+    assert "1: alpha" in result.model_content
 
 
 @pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_file_tools_reject_parent_path_escape(tmp_path: Path) -> None:
     assert result.is_error is True
     assert result.error is not None
     assert result.error.code == "VALIDATION_ERROR"
-    assert "PATH_OUTSIDE_WORKSPACE" in result.model_content()
+    assert "PATH_OUTSIDE_WORKSPACE" in result.model_content
 
 
 @pytest.mark.asyncio
@@ -99,7 +99,7 @@ async def test_file_tools_reject_symlink_escape(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert result.error is not None
-    assert "PATH_OUTSIDE_WORKSPACE" in result.model_content()
+    assert "PATH_OUTSIDE_WORKSPACE" in result.model_content
 
 
 @pytest.mark.asyncio
@@ -119,7 +119,7 @@ async def test_write_file_refuses_existing_unread_file(tmp_path: Path) -> None:
     assert result.is_error is True
     assert result.error is not None
     assert result.error.code == "FILE_NOT_READ"
-    assert "FILE_NOT_READ" in result.model_content()
+    assert "FILE_NOT_READ" in result.model_content
     assert path.read_text(encoding="utf-8") == "old"
 
 
@@ -170,7 +170,7 @@ async def test_edit_file_refuses_stale_read_state(tmp_path: Path) -> None:
 
     assert result.is_error is True
     assert result.error is not None
-    assert "STALE_FILE_STATE" in result.model_content()
+    assert "STALE_FILE_STATE" in result.model_content
 
 
 @pytest.mark.asyncio
@@ -201,8 +201,8 @@ async def test_edit_file_reports_missing_and_ambiguous_matches(tmp_path: Path) -
         context,
     )
 
-    assert "MATCH_NOT_FOUND" in missing.model_content()
-    assert "AMBIGUOUS_MATCH" in ambiguous.model_content()
+    assert "MATCH_NOT_FOUND" in missing.model_content
+    assert "AMBIGUOUS_MATCH" in ambiguous.model_content
 
 
 @pytest.mark.asyncio
@@ -253,8 +253,8 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
     assert result.artifact.path.exists()
     assert result.artifact.path == tmp_path / ".iris" / "tool-results" / "session_1" / "grep_1.txt"
     assert result.artifact.size_bytes > 120
-    assert ".iris/" in result.model_content()
-    assert "建议将 .iris/ 加入 .gitignore" in result.model_content()
+    assert ".iris/" in result.model_content
+    assert "建议将 .iris/ 加入 .gitignore" in result.model_content
 
 
 @pytest.mark.asyncio
@@ -305,8 +305,8 @@ async def test_recursive_file_tools_skip_symlinked_files_outside_workspace(
         context,
     )
 
-    assert "outside-link.txt" not in listed.model_content()
-    assert "needle secret" not in grepped.model_content()
+    assert "outside-link.txt" not in listed.model_content
+    assert "needle secret" not in grepped.model_content
 
 
 @pytest.mark.asyncio
@@ -341,7 +341,7 @@ async def test_grep_search_max_results_zero_returns_no_matches(tmp_path: Path) -
     )
 
     assert result.is_error is False
-    assert result.model_content() == ""
+    assert result.model_content == ""
 
 
 def test_workspace_policy_resolves_inside_paths_and_rejects_outside(tmp_path: Path) -> None:

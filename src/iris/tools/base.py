@@ -293,6 +293,7 @@ class ToolResult(BaseModel):
     stats: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @property
     def model_content(self) -> str:
         """返回可回灌给模型的文本内容。
 
@@ -302,7 +303,7 @@ class ToolResult(BaseModel):
             str: 格式为错误码或逐行合并的多 Block 纯文本内容。
 
         Example:
-            txt_response = result.model_content()
+            txt_response = result.model_content
         """
         if self.is_error and self.error is not None:
             return f"Error[{self.error.code}]: {self.error.message}"
@@ -368,6 +369,7 @@ class BaseTool(ABC):
         """
         return self.definition.name
 
+    @property
     def input_model(self) -> type[BaseModel] | None:
         """返回显式输入模型。
 
@@ -377,10 +379,11 @@ class BaseTool(ABC):
             type[BaseModel] | None: 可用于验证的对象类，或当未指定时返回 None。
 
         Example:
-            model = tool.input_model()
+            model = tool.input_model
         """
         return None
 
+    @property
     def input_schema(self) -> dict[str, Any]:
         """返回工具输入 JSON Schema。
 
@@ -390,7 +393,7 @@ class BaseTool(ABC):
             dict[str, Any]: 符合 JSON Schema 格式的字典。
 
         Example:
-            schema = tool.input_schema()
+            schema = tool.input_schema
         """
         return self.definition.input_schema
 
@@ -596,6 +599,7 @@ class CallableTool(BaseTool):
     #               Validation Methods
     # ==========================================
     # region
+    @property
     def input_model(self) -> type[BaseModel] | None:
         """返回 callable 的输入模型。
 
@@ -605,7 +609,7 @@ class CallableTool(BaseTool):
             type[BaseModel] | None: 对应的参数校验模型类。
 
         Example:
-            model = tool.input_model()
+            model = tool.input_model
         """
         return self._generated_model
 

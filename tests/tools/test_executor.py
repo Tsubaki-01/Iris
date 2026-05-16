@@ -31,7 +31,7 @@ async def test_executor_runs_registered_function_and_returns_text_result(tmp_pat
     assert result.tool_use_id == "call_1"
     assert result.tool_name == "greet"
     assert result.is_error is False
-    assert result.model_content() == "你好，Iris"
+    assert result.model_content == "你好，Iris"
 
 
 @pytest.mark.asyncio
@@ -46,7 +46,7 @@ async def test_executor_maps_unknown_tool_to_error_result(tmp_path: Path) -> Non
     assert result.is_error is True
     assert result.error is not None
     assert result.error.code == "NOT_FOUND"
-    assert result.model_content() == "Error[NOT_FOUND]: 工具不存在: missing"
+    assert result.model_content == "Error[NOT_FOUND]: 工具不存在: missing"
 
 
 @pytest.mark.asyncio
@@ -122,7 +122,7 @@ async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> Non
         ToolExecutionContext(workspace_root=tmp_path),
     )
 
-    assert [result.model_content() for result in results] == ["a", "b"]
+    assert [result.model_content for result in results] == ["a", "b"]
 
 
 @pytest.mark.asyncio
@@ -150,7 +150,7 @@ async def test_executor_injects_preset_kwargs_before_input_model_validation(
     )
 
     assert result.is_error is False
-    assert result.model_content() == "iris:token"
+    assert result.model_content == "iris:token"
 
 
 @pytest.mark.asyncio

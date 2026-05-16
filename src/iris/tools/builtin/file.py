@@ -1,5 +1,12 @@
-"""Workspace 文件工具。"""
+"""Workspace 文件工具。
 
+提供用于文件操作的工具集合。
+
+Example:
+    registry = register_file_tools(max_result_chars=50000)
+"""
+
+# region imports
 from __future__ import annotations
 
 import re
@@ -16,6 +23,8 @@ from ..base import BaseTool, ToolCapability, ToolDefinition, ToolExecutionContex
 from ..permissions import ReadFileState, WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
+
+# endregion
 
 
 class ReadFileInput(BaseModel):
@@ -37,8 +46,8 @@ class ReadFileInput(BaseModel):
     @classmethod
     def _validate_limit(cls, value: int | None) -> int | None:
         """限制单次读取行数。"""
-        if value is not None and value > 10000:
-            raise ValueError("limit 不能超过 10000")
+        if value is not None and value > 1000:
+            raise ValueError("limit 不能超过 1000")
         return value
 
 
@@ -53,8 +62,8 @@ class ListFilesInput(BaseModel):
     @classmethod
     def _validate_max_results(cls, value: int) -> int:
         """限制最大结果数。"""
-        if value < 0 or value > 10000:
-            raise ValueError("max_results 必须在 0..10000 范围内")
+        if value < 0 or value > 1000:
+            raise ValueError("max_results 必须在 0..1000 范围内")
         return value
 
 
@@ -69,8 +78,8 @@ class GrepSearchInput(BaseModel):
     @classmethod
     def _validate_max_results(cls, value: int) -> int:
         """限制最大结果数。"""
-        if value < 0 or value > 10000:
-            raise ValueError("max_results 必须在 0..10000 范围内")
+        if value < 0 or value > 1000:
+            raise ValueError("max_results 必须在 0..1000 范围内")
         return value
 
 
@@ -98,8 +107,22 @@ class EditFileInput(BaseModel):
 
 
 class FileTool(BaseTool):
-    """文件工具基类。"""
+    """文件工具基类。
 
+    提供核心的文件抽象，处理路径解析并保证文件状态一致。
+
+    Attributes:
+        workspace_policy (WorkspacePolicy): 约束工作区读取等权限的策略机制。
+        definition (ToolDefinition): 暴漏给大语言模型的工具使用模式数据。
+
+    Example:
+        class WriteTool(FileTool): ...
+    """
+
+    # ==========================================
+    #               Initialization
+    # ==========================================
+    # region
     def __init__(
         self,
         *,
@@ -109,7 +132,17 @@ class FileTool(BaseTool):
         capabilities: set[ToolCapability],
         max_result_chars: int,
     ) -> None:
-        """初始化文件工具定义。"""
+        """初始化文件工具定义。
+
+        设置统一属性以及权限策略控制系统，建立对外部系统透明操作的基础。
+
+        Args:
+            name (str): 工具调用名称。
+            description (str): 描述该文件工具用途的文字。
+            input_model (type[BaseModel]): 规定执行此工具调用的输入形状结构。
+            capabilities (set[ToolCapability]): 提供该工具包含的能力边界。
+            max_result_chars (int): 输出结果允许的最大长度。
+        """
         self._input_model = input_model
         self.workspace_policy = WorkspacePolicy()
         self.definition = ToolDefinition(
@@ -121,6 +154,13 @@ class FileTool(BaseTool):
             max_result_chars=max_result_chars,
         )
 
+    # endregion
+
+    # ==========================================
+    #               Public Methods
+    # ==========================================
+    # region
+    @property
     def input_model(self) -> type[BaseModel] | None:
         """返回输入模型。"""
         return self._input_model
@@ -129,8 +169,14 @@ class FileTool(BaseTool):
         """校验输入参数。"""
         return self._input_model.model_validate(params)
 
+    # endregion
+
+    # ==========================================
+    #               Helper Methods
+    # ==========================================
+    # region
     def _resolve(self, file_path: str, context: ToolExecutionContext) -> Path:
-        """解析 workspace 内路径。"""
+        """解析 workspace 内合规路径。"""
         return self.workspace_policy.resolve_path(file_path, workspace_root=context.workspace_root)
 
     def _read_state(self, context: ToolExecutionContext) -> ReadFileState:
@@ -182,42 +228,95 @@ class FileTool(BaseTool):
                 files.append(resolved)
         return files
 
+    # endregion
+
 
 class ReadFileTool(FileTool):
-    """读取 workspace 文件。"""
+    """读取 workspace 文件。
+
+    暴露文件内容的实际读取逻辑，并保持读取到上下文中，作未来编辑使用。
+
+    Example:
+        tool = ReadFileTool(name="read_file", description="读文件", input_model=ReadFileInput,
+                            capabilities={ToolCapability.READ}, max_result_chars=1)
+    """
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行读取。"""
+        """执行读取。
+
+        完成分页与文本拼接提取。
+
+        Args:
+            params (BaseModel | dict[str, Any]): 输入的数据或 Pydantic 模型封装态。
+            context (ToolExecutionContext): 包括工作区的基础执行运行文环境封装态。
+
+        Returns:
+            ToolResult: 带有 TextBlock 返回包装的安全输出标准物。
+
+        Raises:
+            IrisToolExecutionError: 当文件不存在、路径非文件时拦截返回错误提示。
+
+        Example:
+            res = await self.arun({"file_path": "a.py"}, ctx)
+        """
+        # --- 1. 加载并检查参数 ---
         input_data = ReadFileInput.model_validate(params)
         path = self._resolve(input_data.file_path, context)
         if not path.exists():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
         if not path.is_file():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
+
+        # --- 2. 提取分页内容 ---
         offset = input_data.offset or 0
-        limit = input_data.limit if input_data.limit is not None else 10000
+        limit = input_data.limit if input_data.limit is not None else 1000
         with path.open("r", encoding="utf-8") as handle:
             selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
         content = "\n".join(
             f"{index}: {line}" for index, line in enumerate(selected, start=offset + 1)
         )
+
+        # --- 3. 同步状态并返回 ---
         self._read_state(context).update(path)
         return ToolResult(tool_use_id="", tool_name=self.name, content=[TextBlock(text=content)])
 
 
 class ListFilesTool(FileTool):
-    """列出 workspace 文件。"""
+    """列出 workspace 文件。
+
+    为代理提供探测未明工程整体与局部的架构感知。
+
+    Example:
+        tool = ListFilesTool(name="list_files", description="检索列表", input_model=ListFilesInput,
+                            capabilities={ToolCapability.READ}, max_result_chars=1)
+    """
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行文件列出。"""
+        """执行文件列出。
+
+        应用模式匹配获取限定集合下的展示级输出串列表集。
+
+        Args:
+            params (BaseModel | dict[str, Any]): 被提供的结构化目录读取限制及匹配要求设定。
+            context (ToolExecutionContext): 工具工作区所属运行宿主上下文态。
+
+        Returns:
+            ToolResult: 结果带文件列表字符序列态模型。
+
+        Raises:
+            IrisToolExecutionError: 对于要求查询的指定节点未找到抛出中断性提示。
+
+        Example:
+            r = await self.arun({"path": "."}, ctx)
+        """
         input_data = ListFilesInput.model_validate(params)
         root = self._resolve(input_data.path, context)
         if not root.exists():
@@ -232,17 +331,43 @@ class ListFilesTool(FileTool):
 
 
 class GrepSearchTool(FileTool):
-    """搜索 workspace 文本。"""
+    """搜索 workspace 文本。
+
+    利用正则表达式在全部普通文件中跨文件找寻内容，并排查非法逃逸文件。
+
+    Example:
+        tool = GrepSearchTool(name="grep_search", description="搜索", input_model=GrepSearchInput,
+                            capabilities={ToolCapability.READ}, max_result_chars=1)
+    """
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行文本搜索。"""
+        """执行文本搜索。
+
+        进行受控遍历并且过滤内置配置、不可读物并产生带有文件、行列信息的匹配。
+
+        Args:
+            params (BaseModel | dict[str, Any]): 必须带有正则表达式且验证限流要求的定义集模型。
+            context (ToolExecutionContext): 工作环境态实体模型。
+
+        Returns:
+            ToolResult: 带有所有被命中并序列化输出至极限之内的 TextBlock。
+
+        Raises:
+            IrisToolValidationError: 对于用户端书写有错误的非法的正则表达式直接拦截抛出以规避执行错误。
+
+        Example:
+            r = await self.arun({"pattern": "^import "}, ctx)
+        """
+        # --- 1. 验证输入并提前返回 ---
         input_data = GrepSearchInput.model_validate(params)
         if input_data.max_results == 0:
             return ToolResult(tool_use_id="", tool_name=self.name, content=[])
+
+        # --- 2. 编译模式并列出文件树 ---
         root = self._resolve(input_data.path, context)
         try:
             regex = re.compile(input_data.pattern)
@@ -254,6 +379,8 @@ class GrepSearchTool(FileTool):
         matches: list[str] = []
         files = self._iter_files_in_context(root, context)
         workspace_root = context.workspace_root.resolve()
+
+        # --- 3. 在有效的文本文件中处理匹配项 ---
         for path in files:
             if ".iris" in path.parts:
                 continue
@@ -269,6 +396,8 @@ class GrepSearchTool(FileTool):
                         break
             if len(matches) >= input_data.max_results:
                 break
+
+        # --- 4. 返回序列化的匹配结果 ---
         return ToolResult(
             tool_use_id="",
             tool_name=self.name,
@@ -277,18 +406,41 @@ class GrepSearchTool(FileTool):
 
 
 class WriteFileTool(FileTool):
-    """写入 workspace 文件。"""
+    """写入 workspace 文件。
+
+    支撑由零建新或由历史产生安全强制状态验证后的一次性覆盖全量重写能力工具实现类。
+
+    Example:
+        tool = WriteFileTool(name="write_file", description="写入", input_model=WriteFileInput,
+                            capabilities={ToolCapability.WRITE}, max_result_chars=1)
+    """
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行写入。"""
+        """执行写入。
+
+        以保证系统并发与覆写不出问题的方式调用其底层原子的改动替换落盘处理机制操作接口实现层。
+
+        Args:
+            params (BaseModel | dict[str, Any]): 包含内容与指向的数据类参数。
+            context (ToolExecutionContext): 带有上下文以及防脏读要求的历史表执行环实例。
+
+        Returns:
+            ToolResult: 只宣告完毕路径的标志性操作提示包裹对象。
+
+        Raises:
+            IrisToolExecutionError: 当强制依赖检测底层异常如读版本时会从下层溢出异常。
+
+        Example:
+            r = await self.arun({"file_path": "a.txt", "content": "123"}, ctx)
+        """
         input_data = WriteFileInput.model_validate(params)
         path = self._resolve(input_data.file_path, context)
         if path.exists():
-            self._require_fresh_read(path, context)
+            self._require_fresh_read(path, context)  # Must have been read safely.
         self._atomic_write(path, input_data.content)
         self._read_state(context).update(path)
         return ToolResult(
@@ -299,25 +451,53 @@ class WriteFileTool(FileTool):
 
 
 class EditFileTool(FileTool):
-    """编辑 workspace 文件。"""
+    """编辑 workspace 文件。
+
+    运用明确并独一的一个代码段替换形式规避对于结构不可名状产生的大范围替换的不可测现象保障操作原子化。
+
+    Example:
+        tool = EditFileTool(name="edit_file", description="替换", input_model=EditFileInput,
+                            capabilities={ToolCapability.WRITE}, max_result_chars=1)
+    """
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行唯一字符串替换。"""
+        """执行唯一字符串替换。
+
+        核对多重态确保所指代的只允许单一无二的存在方可进行原地的文本切片修改换源后刷新到真实盘面。
+
+        Args:
+            params (BaseModel | dict[str, Any]): 老文字源并携带新修替目标的描述包表。
+            context (ToolExecutionContext): 必须存有被验证历史的操作文背景实体。
+
+        Returns:
+            ToolResult: 返回执行被改变后的通知标识。
+
+        Raises:
+            IrisToolExecutionError: 当发现不存在匹配或有多重同源时产生不可逾越错误以示用户。
+
+        Example:
+            r = await self.arun({"file_path": "a.txt", "old_string": "x", "new_string": "y"}, ctx)
+        """
+        # --- 1. 加载并读取当前状态 ---
         input_data = EditFileInput.model_validate(params)
         path = self._resolve(input_data.file_path, context)
         if not path.exists():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
         self._require_fresh_read(path, context)
         content = path.read_text(encoding="utf-8")
+
+        # --- 2. 检查严格的唯一边界 ---
         count = content.count(input_data.old_string)
         if count == 0:
             raise IrisToolExecutionError("MATCH_NOT_FOUND: 未找到 old_string")
         if count > 1:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
+
+        # --- 3. 原子化替换并返回 ---
         self._atomic_write(path, content.replace(input_data.old_string, input_data.new_string, 1))
         self._read_state(context).update(path)
         return ToolResult(
@@ -328,7 +508,19 @@ class EditFileTool(FileTool):
 
 
 def register_file_tools(*, max_result_chars: int = 50000) -> ToolRegistry:
-    """创建并返回已注册文件工具的 registry。"""
+    """创建并返回已注册文件工具的 registry。
+
+    用以集成装配各种子类型成统一对外的组。
+
+    Args:
+        max_result_chars (int): 指定工具内建对最大返文流字符量的标准长度。 Defaults to 50000.
+
+    Returns:
+        ToolRegistry: 全部实例化的工具注册清单包裹对象化存在体系。
+
+    Example:
+        reg = register_file_tools(max_result_chars=100)
+    """
     registry = ToolRegistry()
     for tool in (
         ReadFileTool(

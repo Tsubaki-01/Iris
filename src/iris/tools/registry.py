@@ -204,6 +204,7 @@ class ToolRegistry:
     #               Internal Helpers
     # ==========================================
     # region
+    @property
     def _active_tools(self) -> list[BaseTool]:
         """返回注册顺序下的全部工具。
 
@@ -245,7 +246,7 @@ class ToolRegistryView:
 
     Example:
         view = ToolRegistryView(reg, deny={"evil_tool"})
-        tools = view.active_tools()
+        tools = view.active_tools
     """
 
     # ==========================================
@@ -297,6 +298,7 @@ class ToolRegistryView:
         """
         return self.registry.get(name)
 
+    @property
     def active_tools(self) -> list[BaseTool]:
         """按视图规则返回活动工具。
 
@@ -306,7 +308,7 @@ class ToolRegistryView:
             list[BaseTool]: 顺次通过约束筛选准予通行的合规件清单。
         """
         tools: list[BaseTool] = []
-        for tool in self.registry._active_tools():
+        for tool in self.registry._active_tools:
             name = tool.definition.name
             if name in self.deny:
                 continue
@@ -337,7 +339,7 @@ class ToolRegistryView:
         """
         return [
             _format_schema(tool.definition, provider=provider, api_style=api_style)
-            for tool in self.active_tools()
+            for tool in self.active_tools
         ]
 
     # endregion
