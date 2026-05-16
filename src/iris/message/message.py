@@ -75,6 +75,8 @@ class ToolResultBlock(BaseModel):
         tool_use_id: 对应 `ToolUseBlock` 的 `id`。
         content: 工具执行产生的文本输出。
         is_error: 工具执行是否失败。
+        name: 工具名称。
+        metadata: 额外元数据。
     """
 
     type: Literal["tool_result"] = "tool_result"
@@ -306,9 +308,7 @@ class Conversation(BaseModel):
     @property
     def turn_count(self) -> int:
         """用户消息数量（即可视作会话轮数）。"""
-        return sum(
-            1 for msg in self.messages if msg.role == Role.USER and not msg.tool_results
-        )
+        return sum(1 for msg in self.messages if msg.role == Role.USER and not msg.tool_results)
 
     # ==========================================
     #                API 序列化

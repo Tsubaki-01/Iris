@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from ..exceptions import IrisValidationError
-from ..message import Msg, Role, TextBlock, ToolResultBlock, ToolUseBlock
+from ..message import ContentBlock, Msg, Role, TextBlock, ToolResultBlock, ToolUseBlock
 from ..message.llm import LLMRequest, LLMResponse
 from .adapter import ProviderAdapter
 
@@ -64,11 +64,10 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """
         api_style = self._api_style(request)
         payload: dict[str, Any] = {"model": request.model}
+        formatted_messages = self.format_messages(request.messages, api_style=api_style)
         if api_style == "chat":
-            formatted_messages = self.format_messages(request.messages, api_style=api_style)
             payload["messages"] = formatted_messages
         else:
-            formatted_messages = self.format_messages(request.messages, api_style=api_style)
             payload["input"] = formatted_messages
         self._append_common_options(payload, request)
         return payload
@@ -130,8 +129,7 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """转换单条 Iris 消息为 OpenAI 消息。"""
         if msg.tool_results:
             return [
-                self._format_tool_result(block, api_style=api_style)
-                for block in msg.tool_results
+                self._format_tool_result(block, api_style=api_style) for block in msg.tool_results
             ]
 
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
@@ -224,9 +222,9 @@ class OpenAIMessageAdapter(ProviderAdapter):
     def _content_blocks_from_chat_message(
         self,
         message: Mapping[str, Any],
-    ) -> list[TextBlock | ToolUseBlock]:
+    ) -> list[ContentBlock]:
         """从 Chat Completions message 中提取 Iris 内容块。"""
-        blocks: list[TextBlock | ToolUseBlock] = []
+        blocks: list[ContentBlock] = []
         content = message.get("content")
         if isinstance(content, str) and content:
             blocks.append(TextBlock(text=content))
@@ -244,9 +242,9 @@ class OpenAIMessageAdapter(ProviderAdapter):
     def _content_blocks_from_responses_output(
         self,
         output: list[Any],
-    ) -> list[TextBlock | ToolUseBlock]:
+    ) -> list[ContentBlock]:
         """从 Responses output 中提取 Iris 内容块。"""
-        blocks: list[TextBlock | ToolUseBlock] = []
+        blocks: list[ContentBlock] = []
         for item in output:
             if not isinstance(item, Mapping):
                 continue

@@ -1,5 +1,13 @@
-"""工具 schema 生成与 provider 包装函数。"""
+"""工具 schema 生成与 provider 包装函数。
 
+负责将 Python 代码（Pydantic 模型或普通函数签名）转换为各个 LLM Provider
+（如 OpenAI, Anthropic）所需的不同格式的工具定义 Schema。
+
+Example:
+    schema = schema_from_pydantic_model(MyModel)
+"""
+
+# region imports
 from __future__ import annotations
 
 import inspect
@@ -10,6 +18,8 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 from pydantic import BaseModel, Field, create_model
 
 from ..exceptions import IrisToolValidationError
+
+# endregion
 
 
 def schema_from_pydantic_model(model: type[BaseModel]) -> dict[str, Any]:
@@ -69,7 +79,7 @@ def callable_input_model(
             raise IrisToolValidationError("工具函数参数必须包含类型注解", parameter=name)
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[name] = (annotation, Field(default=default))
-    return create_model(f"{func.__name__.title().replace('_', '')}ToolInput", **fields)
+    return create_model(f"{func.__name__.title().replace('_', '')}ToolInput", **fields)  # ty:ignore[unresolved-attribute]
 
 
 def to_openai_chat_tool_schema(definition: Any) -> dict[str, Any]:
