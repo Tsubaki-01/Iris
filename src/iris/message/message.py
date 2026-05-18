@@ -17,9 +17,9 @@ import time
 import uuid
 from collections.abc import Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # endregion
 
@@ -85,6 +85,38 @@ class ToolResultBlock(BaseModel):
     is_error: bool = False
     name: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    _standard_metadata_keys: ClassVar[set[str]] = {
+        "tool_name",
+        "error",
+        "stats",
+        "artifact",
+        "permission",
+        "trace_id",
+        "extra",
+    }
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _normalize_metadata(cls, value: Any) -> dict[str, Any]:
+        """将非标准 metadata 顶层键归入 extra。"""
+        if not isinstance(value, dict):
+            return {}
+        metadata: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in cls._standard_metadata_keys:
+                if key == "extra" and isinstance(item, dict):
+                    extra.update(item)
+                else:
+                    metadata[key] = item
+            else:
+                extra[key] = item
+        if extra:
+            existing_extra = metadata.get("extra")
+            merged_extra = dict(existing_extra) if isinstance(existing_extra, dict) else {}
+            merged_extra.update(extra)
+            metadata["extra"] = merged_extra
+        return metadata
 
 
 # agent 支持的所有内容块联合类型。

@@ -12,14 +12,73 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from types import NoneType, UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from pydantic import BaseModel, Field, create_model
 
 from ..exceptions import IrisToolValidationError
 
 # endregion
+
+
+@dataclass(slots=True)
+class DocstringInfo:
+    """Google Style docstring 提取结果。"""
+
+    summary: str = ""
+    args: dict[str, str] = field(default_factory=dict)
+    returns: str = ""
+    examples: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+class DocstringSchemaExtractor:
+    """从函数 docstring 提取 schema 可用的说明文本。"""
+
+    def extract(self, func: Callable[..., Any]) -> DocstringInfo:
+        """提取函数 docstring 中的概要、参数说明和示例。
+
+        Args:
+            func (Callable[..., Any]): 需要分析的函数。
+
+        Returns:
+            DocstringInfo: 可用于合成工具 schema 的说明信息。
+        """
+        doc = inspect.getdoc(func) or ""
+        if not doc:
+            return DocstringInfo(warnings=["缺少 docstring"])
+        lines = doc.splitlines()
+        summary = lines[0].strip() if lines else ""
+        info = DocstringInfo(summary=summary)
+        section = ""
+        current_arg = ""
+        for raw_line in lines[1:]:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if stripped in {"Args:", "Arguments:", "Parameters:"}:
+                section = "args"
+                current_arg = ""
+                continue
+            if stripped in {"Returns:", "Raises:", "Example:", "Examples:"}:
+                section = stripped.rstrip(":").lower()
+                current_arg = ""
+                continue
+            if section == "args":
+                if ":" in stripped:
+                    arg_name, description = stripped.split(":", 1)
+                    current_arg = arg_name.split(" ", 1)[0].strip()
+                    info.args[current_arg] = description.strip()
+                elif current_arg:
+                    info.args[current_arg] = f"{info.args[current_arg]} {stripped}".strip()
+                continue
+            if section == "returns":
+                info.returns = f"{info.returns} {stripped}".strip()
+            elif section in {"example", "examples"}:
+                info.examples.append(stripped)
+        return info
 
 
 def schema_from_pydantic_model(model: type[BaseModel]) -> dict[str, Any]:
@@ -40,12 +99,15 @@ def schema_from_callable(
     *,
     preset_kwargs: set[str],
 ) -> dict[str, Any]:
-    """从函数签名生成阶段 1 支持的 JSON Schema。"""
+    """从函数签名和 docstring 生成 JSON Schema。"""
     properties: dict[str, Any] = {}
     required: list[str] = []
     type_hints = _type_hints(func)
+    doc_info = DocstringSchemaExtractor().extract(func)
     for name, parameter in inspect.signature(func).parameters.items():
         if name in preset_kwargs:
+            continue
+        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
             continue
         if parameter.kind not in {
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
@@ -60,6 +122,8 @@ def schema_from_callable(
             required.append(name)
         else:
             field_schema["default"] = parameter.default
+        if name in doc_info.args:
+            field_schema["description"] = doc_info.args[name]
         properties[name] = field_schema
     return {"type": "object", "properties": properties, "required": required}
 
@@ -73,6 +137,8 @@ def callable_input_model(
     type_hints = _type_hints(func)
     for name, parameter in inspect.signature(func).parameters.items():
         if name in preset_kwargs:
+            continue
+        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
             continue
         annotation = type_hints.get(name, parameter.annotation)
         if annotation is inspect.Parameter.empty:
@@ -125,6 +191,8 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
             schema["nullable"] = True
             return schema
         return {"anyOf": [_schema_for_annotation(arg) for arg in args]}
+    if origin is Literal:
+        return {"enum": list(args)}
     if annotation is str:
         return {"type": "string"}
     if annotation is int:
@@ -136,8 +204,21 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
     if origin is list or annotation is list:
         item_annotation = args[0] if args else Any
         return {"type": "array", "items": _schema_for_annotation(item_annotation)}
+    if origin is set or annotation is set:
+        item_annotation = args[0] if args else Any
+        return {
+            "type": "array",
+            "items": _schema_for_annotation(item_annotation),
+            "uniqueItems": True,
+        }
+    if origin is tuple or annotation is tuple:
+        item_annotation = args[0] if args else Any
+        return {"type": "array", "items": _schema_for_annotation(item_annotation)}
     if origin is dict or annotation is dict:
-        return {"type": "object"}
+        schema = {"type": "object"}
+        if len(args) == 2 and args[1] is not Any:
+            schema["additionalProperties"] = _schema_for_annotation(args[1])
+        return schema
     if annotation is Any:
         return {}
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):

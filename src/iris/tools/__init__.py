@@ -23,8 +23,11 @@ from .builtin import (
     WriteFileInput,
     register_file_tools,
 )
+from .circuit import CircuitBreaker, CircuitBreakerState
 from .decorators import tool
+from .discovery import DeferredToolIndex, ToolSearchInput, ToolSearchTool
 from .executor import ToolExecutor
+from .middleware import ToolMiddleware
 from .permissions import (
     DefaultPermissionPolicy,
     PermissionDecision,
@@ -35,6 +38,8 @@ from .permissions import (
 )
 from .registry import ToolRegistry, ToolRegistryView
 from .schema import (
+    DocstringInfo,
+    DocstringSchemaExtractor,
     schema_from_callable,
     schema_from_pydantic_model,
     to_anthropic_tool_schema,
@@ -45,6 +50,11 @@ from .schema import (
 __all__ = [
     "BaseTool",
     "CallableTool",
+    "CircuitBreaker",
+    "CircuitBreakerState",
+    "DeferredToolIndex",
+    "DocstringInfo",
+    "DocstringSchemaExtractor",
     "DefaultPermissionPolicy",
     "EditFileInput",
     "FILE_TOOL_CLASSES",
@@ -64,9 +74,12 @@ __all__ = [
     "ToolExecutionContext",
     "ToolExecutionMode",
     "ToolExecutor",
+    "ToolMiddleware",
     "ToolRegistry",
     "ToolRegistryView",
     "ToolResult",
+    "ToolSearchInput",
+    "ToolSearchTool",
     "WorkspaceFileService",
     "WorkspacePolicy",
     "WriteFileInput",

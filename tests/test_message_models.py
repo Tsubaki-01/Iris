@@ -8,6 +8,7 @@ from iris.message import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from iris.tools import ToolResult
 
 
 def test_msg_text_blocks_and_tool_blocks_are_accessible() -> None:
@@ -37,6 +38,18 @@ def test_tool_result_block_accepts_new_optional_metadata_fields() -> None:
     assert block.metadata == {}
 
 
+def test_tool_result_block_moves_unknown_metadata_keys_to_extra() -> None:
+    block = ToolResultBlock(
+        tool_use_id="call_1",
+        metadata={"trace_id": "trace_1", "private": "hidden"},
+    )
+
+    assert block.metadata == {
+        "trace_id": "trace_1",
+        "extra": {"private": "hidden"},
+    }
+
+
 def test_msg_tool_result_can_include_name_and_metadata() -> None:
     message = Msg.tool_result(
         tool_use_id="call_1",
@@ -53,6 +66,24 @@ def test_msg_tool_result_can_include_name_and_metadata() -> None:
             metadata={"trace_id": "trace_1"},
         )
     ]
+
+
+def test_tool_result_block_metadata_keeps_private_keys_under_extra() -> None:
+    result = ToolResult(
+        tool_use_id="call_1",
+        tool_name="search",
+        metadata={
+            "trace_id": "trace_1",
+            "private": "hidden",
+            "extra": {"existing": True},
+        },
+    )
+
+    assert result.to_block_metadata() == {
+        "trace_id": "trace_1",
+        "extra": {"existing": True, "private": "hidden"},
+        "tool_name": "search",
+    }
 
 
 def test_conversation_builds_llm_request_with_message_order() -> None:

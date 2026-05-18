@@ -12,8 +12,10 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -24,7 +26,8 @@ from ..exceptions import (
 )
 from ..message import ToolUseBlock
 from .artifacts import ToolArtifactStore
-from .base import ToolErrorInfo, ToolExecutionContext, ToolResult
+from .base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
+from .circuit import CircuitBreaker
 from .permissions import DefaultPermissionPolicy, PermissionPolicy
 from .registry import ToolRegistry
 
@@ -57,6 +60,8 @@ class ToolExecutor:
         *,
         permission_policy: PermissionPolicy | None = None,
         artifact_preview_chars: int = 8000,
+        middleware: Sequence[object] | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         """初始化执行器。
 
@@ -66,10 +71,14 @@ class ToolExecutor:
             registry (ToolRegistry): 配置好可用方法的当前状态总库。
             permission_policy (PermissionPolicy | None): 安全及交互式授权拦截规则处理器。
             artifact_preview_chars (int): 若被启用硬盘持久化，保留前置内容的字符数。
+            middleware (Sequence[object] | None): 工具调用生命周期钩子。
+            circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
         """
         self.registry = registry
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
         self.artifact_preview_chars = artifact_preview_chars
+        self.middleware = list(middleware or [])
+        self.circuit_breaker = circuit_breaker
 
     # endregion
 
@@ -98,19 +107,36 @@ class ToolExecutor:
         context.call_id = tool_use.id
         context.tool_name = tool_use.name
         execution_context = context
+        tool: BaseTool | None = None
         try:
             tool = self.registry.get(tool_use.name)
+            if self.circuit_breaker is not None:
+                try:
+                    self.circuit_breaker.before_call(tool.name)
+                except IrisToolExecutionError as exc:
+                    return self._error_result(
+                        tool_use,
+                        str(exc.context.get("code", "CIRCUIT_OPEN")),
+                        exc.message,
+                        details=exc.context,
+                    )
             params = tool.validate_input(tool_use.input)
             raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
+            middleware_error = await self._run_before_call(tool, raw_params, execution_context)
+            if middleware_error is not None:
+                self._record_breaker_result(tool.name, middleware_error)
+                return middleware_error
 
             # --- 2. 执行权限策略 ---
             try:
                 decision = self.permission_policy.check(tool, raw_params, execution_context)
             except Exception as exc:
-                return self._error_result(tool_use, "PERMISSION_ERROR", str(exc))
+                result = self._error_result(tool_use, "PERMISSION_ERROR", str(exc))
+                self._record_breaker_result(tool.name, result)
+                return result
 
             if not decision.allowed:
-                return self._error_result(
+                result = self._error_result(
                     tool_use,
                     "PERMISSION_ERROR",
                     decision.reason,
@@ -119,9 +145,17 @@ class ToolExecutor:
                         **decision.metadata,
                     },
                 )
+                self._record_breaker_result(tool.name, result)
+                return result
 
             # --- 3. 执行工具并格式化结果 ---
-            result = await tool.arun(params, execution_context)
+            try:
+                result = await tool.arun(params, execution_context)
+            except Exception as exc:
+                handled = await self._run_on_error(tool, exc, execution_context)
+                if handled is None:
+                    raise
+                result = handled
             normalized = result.model_copy(
                 update={
                     "tool_use_id": result.tool_use_id or tool_use.id,
@@ -131,24 +165,43 @@ class ToolExecutor:
 
             # --- 4. 若数据量较大，处理持久化存储 ---
             artifact_store = self._artifact_store(execution_context)
-            return artifact_store.persist_if_large(
+            persisted = artifact_store.persist_if_large(
                 normalized,
                 max_chars=tool.definition.max_result_chars,
             )
+            final_result = await self._run_after_call(tool, persisted, execution_context)
+            final_result = final_result.model_copy(
+                update={
+                    "tool_use_id": final_result.tool_use_id or tool_use.id,
+                    "tool_name": final_result.tool_name or tool_use.name,
+                }
+            )
+            self._record_breaker_result(tool.name, final_result)
+            return final_result
         except IrisToolNotFoundError:
             return self._error_result(tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}")
         except (IrisToolValidationError, ValidationError) as exc:
-            return self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
+            result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
+            if tool is not None:
+                self._record_breaker_result(tool.name, result)
+            return result
         except IrisToolExecutionError as exc:
+            allow_structured = tool is not None and (
+                tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
+            )
             code, message = _tool_error_code_and_message(
                 exc.message,
-                allow_structured=(
-                    tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
-                ),
+                allow_structured=allow_structured,
             )
-            return self._error_result(tool_use, code, message)
+            result = self._error_result(tool_use, code, message)
+            if tool is not None:
+                self._record_breaker_result(tool.name, result)
+            return result
         except Exception as exc:
-            return self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
+            result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
+            if tool is not None:
+                self._record_breaker_result(tool.name, result)
+            return result
 
     async def execute_many(
         self,
@@ -268,6 +321,83 @@ class ToolExecutor:
         root = context.workspace_root / ".iris" / "tool-results" / session_id
         return ToolArtifactStore(root=root, preview_chars=self.artifact_preview_chars)
 
+    async def _run_before_call(
+        self,
+        tool: BaseTool,
+        params: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult | None:
+        """运行 before_call middleware。"""
+        for middleware in self.middleware:
+            hook = getattr(middleware, "before_call", None)
+            if hook is None:
+                continue
+            try:
+                await _maybe_await(hook(tool, params, context))
+            except Exception as exc:
+                return self._error_result(
+                    _tool_use_from_context(context),
+                    "MIDDLEWARE_ERROR",
+                    str(exc),
+                )
+        return None
+
+    async def _run_after_call(
+        self,
+        tool: BaseTool,
+        result: ToolResult,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """运行 after_call 和兼容 after_execute middleware。"""
+        current = result
+        for middleware in self.middleware:
+            try:
+                hook = getattr(middleware, "after_call", None)
+                if hook is not None:
+                    current = await _maybe_await(hook(tool, current, context))
+                legacy_hook = getattr(middleware, "after_execute", None)
+                if legacy_hook is not None:
+                    current = await _maybe_await(legacy_hook(current, context))
+            except Exception as exc:
+                return self._error_result(
+                    _tool_use_from_context(context),
+                    "MIDDLEWARE_ERROR",
+                    str(exc),
+                )
+        return current
+
+    async def _run_on_error(
+        self,
+        tool: BaseTool,
+        error: Exception,
+        context: ToolExecutionContext,
+    ) -> ToolResult | None:
+        """运行 on_error middleware。"""
+        for middleware in self.middleware:
+            hook = getattr(middleware, "on_error", None)
+            if hook is None:
+                continue
+            try:
+                replacement = await _maybe_await(hook(tool, error, context))
+            except Exception as exc:
+                return self._error_result(
+                    _tool_use_from_context(context),
+                    "MIDDLEWARE_ERROR",
+                    str(exc),
+                    details={
+                        "original_error": str(error),
+                        "middleware_error": str(exc),
+                    },
+                )
+            if replacement is not None:
+                return replacement
+        return None
+
+    def _record_breaker_result(self, tool_name: str, result: ToolResult) -> None:
+        """将执行结果写入熔断器。"""
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.after_result(tool_name, result)
+
     # endregion
 
 
@@ -308,3 +438,15 @@ def _safe_path_segment(value: str) -> str:
     """
     segment = re.sub(r"[^A-Za-z0-9_-]", "_", value)
     return segment.strip("_") or "default"
+
+
+async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
+    """兼容同步和异步 middleware 返回值。"""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _tool_use_from_context(context: ToolExecutionContext) -> ToolUseBlock:
+    """用上下文构造错误结果所需的工具调用占位。"""
+    return ToolUseBlock(id=context.call_id, name=context.tool_name, input={})

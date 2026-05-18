@@ -327,9 +327,16 @@ class ToolResult(BaseModel):
             metadata["stats"] = self.stats
         if self.artifact is not None:
             metadata["artifact"] = self.artifact.model_dump()
-        for key in ("permission", "trace_id", "extra"):
-            if key in self.metadata:
-                metadata[key] = self.metadata[key]
+        extra: dict[str, Any] = {}
+        for key, value in self.metadata.items():
+            if key in {"permission", "trace_id"}:
+                metadata[key] = value
+            elif key == "extra" and isinstance(value, dict):
+                extra.update(value)
+            elif key not in {"tool_name", "error", "stats", "artifact"}:
+                extra[key] = value
+        if extra:
+            metadata["extra"] = extra
         if self.tool_name:
             metadata["tool_name"] = self.tool_name
         return metadata
@@ -538,6 +545,11 @@ class CallableTool(BaseTool):
         capabilities: set[ToolCapability] | None = None,
         group: str = "core",
         deferred: bool = False,
+        examples: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        version: str | None = None,
+        deprecated: bool = False,
+        deprecation_message: str | None = None,
     ) -> None:
         """初始化 callable 工具。
 
@@ -552,6 +564,11 @@ class CallableTool(BaseTool):
             capabilities (set[ToolCapability] | None): 设置工具对应的底层能力集。
             group (str): 属于的工具组分类。
             deferred (bool): 是否为延迟执行工具。
+            examples (list[dict[str, Any]] | None): 工具示例。
+            tags (list[str] | None): 搜索辅助标签。
+            version (str | None): 工具版本。
+            deprecated (bool): 是否弃用。
+            deprecation_message (str | None): 弃用说明。
 
         Raises:
             ValueError: 解析模型约束异常时抛出。
@@ -561,7 +578,8 @@ class CallableTool(BaseTool):
         """
         self.func = func
         self._input_model = input_model
-        self.preset_kwargs = dict(preset_kwargs or {})
+        decorated_preset = getattr(func, "iris_tool_preset_kwargs", {})
+        self.preset_kwargs = dict(preset_kwargs if preset_kwargs is not None else decorated_preset)
         tool_name = name or getattr(func, "iris_tool_name", None) or func.__name__  # ty:ignore[unresolved-attribute]
         tool_description = (
             description
@@ -569,9 +587,24 @@ class CallableTool(BaseTool):
             or inspect.getdoc(func)
             or tool_name
         )
-        tool_capabilities = capabilities or getattr(func, "iris_tool_capabilities", set())
+        tool_capabilities = (
+            capabilities
+            if capabilities is not None
+            else getattr(func, "iris_tool_capabilities", set())
+        )
         tool_group = getattr(func, "iris_tool_group", group) if group == "core" else group
         tool_deferred = deferred or bool(getattr(func, "iris_tool_deferred", False))
+        tool_examples = (
+            examples if examples is not None else getattr(func, "iris_tool_examples", [])
+        )
+        tool_tags = tags if tags is not None else getattr(func, "iris_tool_tags", [])
+        tool_version = version if version is not None else getattr(func, "iris_tool_version", None)
+        tool_deprecated = deprecated or bool(getattr(func, "iris_tool_deprecated", False))
+        tool_deprecation_message = (
+            deprecation_message
+            if deprecation_message is not None
+            else getattr(func, "iris_tool_deprecation_message", None)
+        )
         preset_names = set(self.preset_kwargs)
         input_schema = (
             schema_from_pydantic_model(input_model)
@@ -587,14 +620,26 @@ class CallableTool(BaseTool):
         )
         self.definition = ToolDefinition(
             name=tool_name,
-            description=tool_description,
+            description=_description_with_deprecation(
+                tool_description,
+                deprecated=tool_deprecated,
+                deprecation_message=tool_deprecation_message,
+            ),
             input_schema=input_schema,
             capabilities=set(tool_capabilities),
             group=tool_group,
             deferred=tool_deferred,
+            metadata={
+                "examples": list(tool_examples or []),
+                "tags": list(tool_tags or []),
+                "version": tool_version or "",
+                "deprecated": tool_deprecated,
+                "deprecation_message": tool_deprecation_message,
+            },
         )
 
     # endregion
+
     # ==========================================
     #               Validation Methods
     # ==========================================
@@ -716,3 +761,18 @@ class CallableTool(BaseTool):
         )
 
     # endregion
+
+
+def _description_with_deprecation(
+    description: str,
+    *,
+    deprecated: bool,
+    deprecation_message: str | None,
+) -> str:
+    """在工具描述中追加弃用提示。"""
+    if not deprecated:
+        return description
+    message = deprecation_message or "该工具已弃用。"
+    if message in description:
+        return description
+    return f"{description}\n\n弃用：{message}"

@@ -93,6 +93,11 @@ class ToolRegistry:
         group: str = "core",
         deferred: bool = False,
         preset_kwargs: dict[str, Any] | None = None,
+        examples: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        version: str | None = None,
+        deprecated: bool = False,
+        deprecation_message: str | None = None,
     ) -> BaseTool:
         """将普通函数包装为工具并注册。
 
@@ -107,6 +112,11 @@ class ToolRegistry:
             group (str): 工具归属组，有助于切面鉴权与显式过滤。
             deferred (bool): 是否默认隐式，必须明确 allow 才能暴露给模型。
             preset_kwargs (dict[str, Any] | None): 绑定给函数的常数调用参数。
+            examples (list[dict[str, Any]] | None): 工具示例。
+            tags (list[str] | None): 搜索辅助标签。
+            version (str | None): 工具版本。
+            deprecated (bool): 是否弃用。
+            deprecation_message (str | None): 弃用说明。
 
         Returns:
             BaseTool: 包裹原函数并完成全局挂载的新工具。
@@ -123,6 +133,11 @@ class ToolRegistry:
             capabilities=capabilities,
             group=group,
             deferred=deferred,
+            examples=examples,
+            tags=tags,
+            version=version,
+            deprecated=deprecated,
+            deprecation_message=deprecation_message,
         )
         self.register(tool)
         return tool
@@ -197,6 +212,29 @@ class ToolRegistry:
             list[dict[str, object]]: 符合 API 要求的 JSON schema 一维数组。
         """
         return self.view().active_schemas(provider=provider, api_style=api_style)
+
+    def search_deferred(
+        self,
+        query: str,
+        *,
+        include_groups: set[str] | None = None,
+        limit: int = 10,
+    ) -> list[ToolDefinition]:
+        """搜索当前注册表中的 deferred 工具定义。
+
+        Args:
+            query (str): 非空搜索词。
+            include_groups (set[str] | None): 可选组过滤。
+            limit (int): 最大返回数量。
+
+        Returns:
+            list[ToolDefinition]: 按简单相关性排序的候选工具定义。
+        """
+        from .discovery import DeferredToolIndex
+
+        index = DeferredToolIndex()
+        index.build(self._tools.values())
+        return index.search(query, include_groups=include_groups, limit=limit)
 
     # endregion
 

@@ -34,6 +34,12 @@ def tool(
     capabilities: set[ToolCapability] | None = None,
     group: str = "core",
     deferred: bool = False,
+    preset_kwargs: dict[str, Any] | None = None,
+    examples: list[dict[str, Any]] | None = None,
+    tags: list[str] | None = None,
+    version: str | None = None,
+    deprecated: bool = False,
+    deprecation_message: str | None = None,
 ) -> Callable[[F], F]:
     """为函数附加 Iris 工具元数据，不自动触发注册。
 
@@ -47,6 +53,12 @@ def tool(
         capabilities (set[ToolCapability] | None): 工具支持的特殊能力标签集合。
         group (str): 权限组划分标签，便于后续执行时实现粗粒度的组级风控拦截。
         deferred (bool): 声明为延迟工具，如果不通过白名单显式指定，模型侧默认不可见此工具。
+        preset_kwargs (dict[str, Any] | None): 注册时注入且不暴露给模型的固定参数。
+        examples (list[dict[str, Any]] | None): 给文档和搜索展示使用的调用示例。
+        tags (list[str] | None): 搜索辅助标签，不替代 group。
+        version (str | None): 工具版本号。
+        deprecated (bool): 是否已弃用。
+        deprecation_message (str | None): 弃用提示。
 
     Returns:
         Callable[[F], F]: 接收靶函数并回传其原引用的装饰器闭包。
@@ -63,6 +75,12 @@ def tool(
         func.__dict__["iris_tool_capabilities"] = set(capabilities or set())
         func.__dict__["iris_tool_group"] = group
         func.__dict__["iris_tool_deferred"] = deferred
+        func.__dict__["iris_tool_preset_kwargs"] = dict(preset_kwargs or {})
+        func.__dict__["iris_tool_examples"] = list(examples or [])
+        func.__dict__["iris_tool_tags"] = list(tags or [])
+        func.__dict__["iris_tool_version"] = version
+        func.__dict__["iris_tool_deprecated"] = deprecated
+        func.__dict__["iris_tool_deprecation_message"] = deprecation_message
         return func
 
     return decorator
