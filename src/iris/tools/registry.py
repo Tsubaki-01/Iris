@@ -228,7 +228,7 @@ class ToolRegistry:
             limit (int): 最大返回数量。
 
         Returns:
-            list[ToolDefinition]: 按简单相关性排序的候选工具定义。
+            list[ToolDefinition]: 按 BM25-like 本地相关性排序的候选工具定义。
         """
         from .discovery import DeferredToolIndex
 

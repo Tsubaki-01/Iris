@@ -3,7 +3,9 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from iris.tools import (
+    DocstringSchemaExtractor,
     ToolDefinition,
+    ToolRegistry,
     schema_from_pydantic_model,
     to_anthropic_tool_schema,
     to_openai_chat_tool_schema,
@@ -56,3 +58,25 @@ def test_schema_from_pydantic_model_preserves_nested_model_defs() -> None:
 
     assert "$defs" in schema
     assert schema["properties"]["options"] == {"$ref": "#/$defs/SearchOptions"}
+
+
+def test_docstring_args_are_added_to_callable_schema() -> None:
+    def search(query: str, limit: int = 5) -> str:
+        """搜索资料。
+
+        Args:
+            query: 查询关键词。
+            limit: 最多返回数量。
+        """
+        return query * limit
+
+    registry = ToolRegistry()
+    registered = registry.register_function(search)
+
+    properties = registered.definition.input_schema["properties"]
+    assert properties["query"]["description"] == "查询关键词。"
+    assert properties["limit"]["description"] == "最多返回数量。"
+
+
+def test_docstring_schema_extractor_is_public() -> None:
+    assert isinstance(DocstringSchemaExtractor(), DocstringSchemaExtractor)

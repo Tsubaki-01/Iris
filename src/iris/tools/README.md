@@ -211,6 +211,11 @@ executor = ToolExecutor(
 
 `deferred=True` 的工具默认不会出现在 `active_schemas()` 中，适合注册表内存在大量按需工具时降低模型可见面。
 
+`registry.search_deferred()` 使用 `DeferredToolIndex.search()` 的 BM25-like 本地排序：
+它会对 `name`、`tags`、`group`、`description` 分字段加权，使用 IDF、词频饱和和文档长度归一化计算相关性。
+中文文本会额外生成 CJK bigram 和低权重单字 token，并按查询词覆盖率加分，避免只命中单个高权重字段的工具压过同时覆盖多个中文查询词的工具。
+旧的字符子串硬匹配保留为 `DeferredToolIndex.naive_search()`，主要用于调试和对照测试。
+
 ```python
 from iris.tools import ToolRegistry, ToolSearchTool, tool
 
@@ -226,7 +231,7 @@ registry.register_function(vector_lookup)
 registry.register(ToolSearchTool(registry))
 ```
 
-`ToolSearchTool` 的工具名固定为 `tool_search`，输入模型为 `ToolSearchInput(query, include_groups=None, limit=10)`。它调用 `registry.search_deferred()`，按名称、描述、组和 tags 做轻量本地匹配，返回 JSON 文本和 `data["tools"]` 摘要；它不会自动激活匹配到的 deferred 工具。
+`ToolSearchTool` 的工具名固定为 `tool_search`，输入模型为 `ToolSearchInput(query, include_groups=None, limit=10)`。它调用 `registry.search_deferred()`，按名称、描述、组和 tags 做 BM25-like 本地排序，返回 JSON 文本和 `data["tools"]` 摘要；它不会自动激活匹配到的 deferred 工具。
 
 ## Schema 与装饰器
 
