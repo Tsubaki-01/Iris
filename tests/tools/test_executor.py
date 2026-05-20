@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,21 @@ from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
 class ExplodingPermissionPolicy:
     def check(self, tool: str, params: dict, context: ToolExecutionContext) -> None:
         raise RuntimeError("policy failed")
+
+
+class ContextCaptureMiddleware:
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str]] = []
+
+    async def before_call(
+        self,
+        tool: object,
+        params: dict[str, str],
+        context: ToolExecutionContext,
+    ) -> None:
+        del tool
+        await asyncio.sleep(0)
+        self.seen.append((params["value"], context.call_id))
 
 
 @pytest.mark.asyncio
@@ -123,6 +139,27 @@ async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> Non
     )
 
     assert [result.model_content for result in results] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_executor_uses_isolated_context_for_concurrent_read_batch(tmp_path: Path) -> None:
+    def echo(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    middleware = ContextCaptureMiddleware()
+    executor = ToolExecutor(registry, middleware=[middleware])
+
+    await executor.execute_many(
+        [
+            ToolUseBlock(id="call_1", name="echo", input={"value": "a"}),
+            ToolUseBlock(id="call_2", name="echo", input={"value": "b"}),
+        ],
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert set(middleware.seen) == {("a", "call_1"), ("b", "call_2")}
 
 
 @pytest.mark.asyncio

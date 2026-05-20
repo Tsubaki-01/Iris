@@ -284,7 +284,9 @@ class ToolExecutor:
         Returns:
             list[ToolResult]: 生成的已完成数据流集。
         """
-        tasks = (self.execute_one(tool_use, context) for tool_use in tool_uses)
+        tasks = (
+            self.execute_one(tool_use, context.model_copy(deep=True)) for tool_use in tool_uses
+        )
         return list(await asyncio.gather(*tasks))
 
     def _is_read_only_concurrency_safe(self, tool_use: ToolUseBlock) -> bool:
