@@ -412,7 +412,7 @@ class WorkspaceFileService:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
         self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
         self.record_read(path, context)
-        return f"EDITED: {path}"
+        return f"EDITED: {params.file_path}"
     # endregion
 
 
