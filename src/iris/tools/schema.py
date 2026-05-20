@@ -187,9 +187,12 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
     if origin in {UnionType, Union}:
         non_none_args = [arg for arg in args if arg is not NoneType]
         if len(non_none_args) == 1 and len(non_none_args) != len(args):
-            schema = _schema_for_annotation(non_none_args[0])
-            schema["nullable"] = True
-            return schema
+            return {
+                "anyOf": [
+                    _schema_for_annotation(non_none_args[0]),
+                    {"type": "null"},
+                ]
+            }
         return {"anyOf": [_schema_for_annotation(arg) for arg in args]}
     if origin is Literal:
         return {"enum": list(args)}
