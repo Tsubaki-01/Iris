@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from iris.exceptions import IrisToolValidationError
 from iris.message import ToolUseBlock
 from iris.tools import (
+    BaseTool,
     DeferredToolIndex,
     ToolExecutionContext,
     ToolExecutor,
@@ -125,6 +127,44 @@ def test_deferred_tool_search_supports_groups_limit_and_stable_sorting() -> None
 
     stable_results = registry.search_deferred("stable")
     assert [definition.name for definition in stable_results] == ["alpha_tool", "beta_tool"]
+
+
+def test_registry_search_deferred_reuses_cached_index_until_registry_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_calls = 0
+    original_build = DeferredToolIndex.build
+
+    def counted_build(self: DeferredToolIndex, tools: Iterable[BaseTool]) -> None:
+        nonlocal build_calls
+        build_calls += 1
+        original_build(self, tools)
+
+    monkeypatch.setattr(DeferredToolIndex, "build", counted_build)
+
+    @tool(name="alpha_tool", description="stable marker", deferred=True, group="alpha")
+    def alpha_tool(query: str) -> str:
+        return query
+
+    @tool(name="beta_tool", description="stable marker", deferred=True, group="beta")
+    def beta_tool(query: str) -> str:
+        return query
+
+    registry = ToolRegistry()
+    registry.register_function(alpha_tool)
+
+    first = registry.search_deferred("stable")
+    second = registry.search_deferred("stable")
+
+    assert [definition.name for definition in first] == ["alpha_tool"]
+    assert [definition.name for definition in second] == ["alpha_tool"]
+    assert build_calls == 1
+
+    registry.register_function(beta_tool)
+    third = registry.search_deferred("stable")
+
+    assert [definition.name for definition in third] == ["alpha_tool", "beta_tool"]
+    assert build_calls == 2
 
 
 def test_deferred_tool_search_matches_chinese_description_terms() -> None:

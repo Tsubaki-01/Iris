@@ -12,7 +12,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -25,6 +25,9 @@ from .schema import (
 )
 
 # endregion
+
+if TYPE_CHECKING:
+    from .discovery import DeferredToolIndex
 
 
 class ToolRegistry:
@@ -54,6 +57,7 @@ class ToolRegistry:
         """
         self._tools: dict[str, BaseTool] = {}
         self._aliases: dict[str, str] = {}
+        self._deferred_index: DeferredToolIndex | None = None
 
     # endregion
 
@@ -81,6 +85,7 @@ class ToolRegistry:
         self._tools[tool.definition.name] = tool
         for alias in tool.definition.aliases:
             self._aliases[alias] = tool.definition.name
+        self._deferred_index = None
 
     def register_function(
         self,
@@ -232,9 +237,10 @@ class ToolRegistry:
         """
         from .discovery import DeferredToolIndex
 
-        index = DeferredToolIndex()
-        index.build(self._tools.values())
-        return index.search(query, include_groups=include_groups, limit=limit)
+        if self._deferred_index is None:
+            self._deferred_index = DeferredToolIndex()
+            self._deferred_index.build(self._tools.values())
+        return self._deferred_index.search(query, include_groups=include_groups, limit=limit)
 
     # endregion
 
