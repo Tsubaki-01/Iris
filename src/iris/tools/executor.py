@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+import time
 from collections.abc import Awaitable, Sequence
 from typing import Any
 
@@ -25,6 +26,7 @@ from ..exceptions import (
     IrisToolValidationError,
 )
 from ..message import ToolUseBlock
+from ..observability import ToolLogEmitter, ToolLogEventType
 from .artifacts import ToolArtifactStore
 from .base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
 from .circuit import CircuitBreaker
@@ -62,6 +64,7 @@ class ToolExecutor:
         artifact_preview_chars: int = 8000,
         middleware: Sequence[object] | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        tool_log: ToolLogEmitter | None = None,
     ) -> None:
         """初始化执行器。
 
@@ -73,12 +76,14 @@ class ToolExecutor:
             artifact_preview_chars (int): 若被启用硬盘持久化，保留前置内容的字符数。
             middleware (Sequence[object] | None): 工具调用生命周期钩子。
             circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
+            tool_log (ToolLogEmitter | None): 工具执行结构化日志分发器。
         """
         self.registry = registry
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
         self.artifact_preview_chars = artifact_preview_chars
         self.middleware = list(middleware or [])
         self.circuit_breaker = circuit_breaker
+        self.tool_log = tool_log
 
     # endregion
 
@@ -104,27 +109,51 @@ class ToolExecutor:
             ToolResult: 带有确切结果与成功与否标识体，支持大体积落盘记录。
         """
         # --- 1. 准备上下文并验证 ---
+        started_at = time.perf_counter()
         context.call_id = tool_use.id
         context.tool_name = tool_use.name
         execution_context = context
         tool: BaseTool | None = None
+        await self._emit_tool_log(
+            ToolLogEventType.STARTED,
+            execution_context,
+            tool_name=tool_use.name,
+            metadata=self._tool_log_params_metadata(tool_use.input),
+        )
         try:
             tool = self.registry.get(tool_use.name)
             if self.circuit_breaker is not None:
                 try:
                     self.circuit_breaker.before_call(tool.name)
                 except IrisToolExecutionError as exc:
-                    return self._error_result(
+                    result = self._error_result(
                         tool_use,
                         str(exc.context.get("code", "CIRCUIT_OPEN")),
                         exc.message,
                         details=exc.context,
                     )
+                    await self._emit_tool_log(
+                        ToolLogEventType.CIRCUIT_OPEN,
+                        execution_context,
+                        tool=tool,
+                        result=result,
+                        error_code=result.error.code if result.error else "CIRCUIT_OPEN",
+                        elapsed_ms=_elapsed_ms(started_at),
+                    )
+                    return result
             params = tool.validate_input(tool_use.input)
             raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
             middleware_error = await self._run_before_call(tool, raw_params, execution_context)
             if middleware_error is not None:
                 self._record_breaker_result(tool.name, middleware_error)
+                await self._emit_tool_log(
+                    ToolLogEventType.MIDDLEWARE_ERROR,
+                    execution_context,
+                    tool=tool,
+                    result=middleware_error,
+                    error_code=middleware_error.error.code if middleware_error.error else "",
+                    elapsed_ms=_elapsed_ms(started_at),
+                )
                 return middleware_error
 
             # --- 2. 执行权限策略 ---
@@ -133,6 +162,14 @@ class ToolExecutor:
             except Exception as exc:
                 result = self._error_result(tool_use, "PERMISSION_ERROR", str(exc))
                 self._record_breaker_result(tool.name, result)
+                await self._emit_tool_log(
+                    ToolLogEventType.FAILED,
+                    execution_context,
+                    tool=tool,
+                    result=result,
+                    error_code="PERMISSION_ERROR",
+                    elapsed_ms=_elapsed_ms(started_at),
+                )
                 return result
 
             if not decision.allowed:
@@ -146,6 +183,15 @@ class ToolExecutor:
                     },
                 )
                 self._record_breaker_result(tool.name, result)
+                await self._emit_tool_log(
+                    ToolLogEventType.PERMISSION_DENIED,
+                    execution_context,
+                    tool=tool,
+                    result=result,
+                    error_code="PERMISSION_ERROR",
+                    metadata={"permission": result.error.details if result.error else {}},
+                    elapsed_ms=_elapsed_ms(started_at),
+                )
                 return result
 
             # --- 3. 执行工具并格式化结果 ---
@@ -169,6 +215,15 @@ class ToolExecutor:
                 normalized,
                 max_chars=tool.definition.max_result_chars,
             )
+            if persisted.artifact is not None and normalized.artifact is None:
+                await self._emit_tool_log(
+                    ToolLogEventType.ARTIFACT_CREATED,
+                    execution_context,
+                    tool=tool,
+                    result=persisted,
+                    artifact_path=str(persisted.artifact.path),
+                    elapsed_ms=_elapsed_ms(started_at),
+                )
             final_result = await self._run_after_call(tool, persisted, execution_context)
             final_result = final_result.model_copy(
                 update={
@@ -177,13 +232,40 @@ class ToolExecutor:
                 }
             )
             self._record_breaker_result(tool.name, final_result)
+            await self._emit_tool_log(
+                _tool_log_event_type_for_result(final_result),
+                execution_context,
+                tool=tool,
+                result=final_result,
+                error_code=final_result.error.code if final_result.error else "",
+                artifact_path=str(final_result.artifact.path) if final_result.artifact else "",
+                elapsed_ms=_elapsed_ms(started_at),
+            )
             return final_result
         except IrisToolNotFoundError:
-            return self._error_result(tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}")
+            result = self._error_result(tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}")
+            await self._emit_tool_log(
+                ToolLogEventType.FAILED,
+                execution_context,
+                tool_name=tool_use.name,
+                result=result,
+                error_code="NOT_FOUND",
+                elapsed_ms=_elapsed_ms(started_at),
+            )
+            return result
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
             if tool is not None:
                 self._record_breaker_result(tool.name, result)
+            await self._emit_tool_log(
+                ToolLogEventType.FAILED,
+                execution_context,
+                tool=tool,
+                tool_name=tool_use.name,
+                result=result,
+                error_code="VALIDATION_ERROR",
+                elapsed_ms=_elapsed_ms(started_at),
+            )
             return result
         except IrisToolExecutionError as exc:
             allow_structured = tool is not None and (
@@ -196,11 +278,29 @@ class ToolExecutor:
             result = self._error_result(tool_use, code, message)
             if tool is not None:
                 self._record_breaker_result(tool.name, result)
+            await self._emit_tool_log(
+                ToolLogEventType.FAILED,
+                execution_context,
+                tool=tool,
+                tool_name=tool_use.name,
+                result=result,
+                error_code=code,
+                elapsed_ms=_elapsed_ms(started_at),
+            )
             return result
         except Exception as exc:
             result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
             if tool is not None:
                 self._record_breaker_result(tool.name, result)
+            await self._emit_tool_log(
+                ToolLogEventType.FAILED,
+                execution_context,
+                tool=tool,
+                tool_name=tool_use.name,
+                result=result,
+                error_code="EXECUTION_ERROR",
+                elapsed_ms=_elapsed_ms(started_at),
+            )
             return result
 
     async def execute_many(
@@ -400,6 +500,40 @@ class ToolExecutor:
         if self.circuit_breaker is not None:
             self.circuit_breaker.after_result(tool_name, result)
 
+    async def _emit_tool_log(
+        self,
+        event_type: ToolLogEventType,
+        context: ToolExecutionContext,
+        *,
+        tool: BaseTool | None = None,
+        tool_name: str = "",
+        result: ToolResult | None = None,
+        error_code: str = "",
+        metadata: dict[str, Any] | None = None,
+        elapsed_ms: float | None = None,
+        artifact_path: str = "",
+    ) -> None:
+        """发送工具结构化日志事件。"""
+        if self.tool_log is None:
+            return
+        await self.tool_log.emit(
+            event_type,
+            context=context,
+            tool=tool,
+            tool_name=tool_name,
+            result=result,
+            error_code=error_code,
+            metadata=metadata,
+            elapsed_ms=elapsed_ms,
+            artifact_path=artifact_path,
+        )
+
+    def _tool_log_params_metadata(self, params: dict[str, Any]) -> dict[str, Any]:
+        """生成工具参数日志摘要。"""
+        if self.tool_log is None:
+            return {}
+        return self.tool_log.redactor.params_summary(params)
+
     # endregion
 
 
@@ -440,6 +574,20 @@ def _safe_path_segment(value: str) -> str:
     """
     segment = re.sub(r"[^A-Za-z0-9_-]", "_", value)
     return segment.strip("_") or "default"
+
+
+def _elapsed_ms(started_at: float) -> float:
+    """计算从起点到当前的毫秒耗时。"""
+    return round((time.perf_counter() - started_at) * 1000, 3)
+
+
+def _tool_log_event_type_for_result(result: ToolResult) -> ToolLogEventType:
+    """根据工具结果选择日志事件类型。"""
+    if result.error is not None and result.error.code == "MIDDLEWARE_ERROR":
+        return ToolLogEventType.MIDDLEWARE_ERROR
+    if result.is_error:
+        return ToolLogEventType.FAILED
+    return ToolLogEventType.FINISHED
 
 
 async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
