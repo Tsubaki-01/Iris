@@ -124,6 +124,24 @@ async def test_write_file_refuses_existing_unread_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_write_file_reports_workspace_relative_path(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "notes.txt"
+
+    result = await _file_executor(allow_writes=True).execute_one(
+        ToolUseBlock(
+            id="call_1",
+            name="write_file",
+            input={"file_path": str(path), "content": "new"},
+        ),
+        ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState()),
+    )
+
+    assert result.is_error is False
+    assert result.model_content == "WROTE: nested/notes.txt"
+    assert path.read_text(encoding="utf-8") == "new"
+
+
+@pytest.mark.asyncio
 async def test_read_then_edit_works_without_preseeded_read_state(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("hello old\n", encoding="utf-8")

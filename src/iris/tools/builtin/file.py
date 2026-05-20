@@ -385,7 +385,7 @@ class WorkspaceFileService:
             self.require_fresh_read(path, context)
         self.atomic_write(path, params.content)
         self.record_read(path, context)
-        return f"WROTE: {path}"
+        return f"WROTE: {path.relative_to(context.workspace_root.resolve())}"
 
     def edit_file(self, params: EditFileInput, context: ToolExecutionContext) -> str:
         """对已读且未变的文件执行唯一字符串替换。
