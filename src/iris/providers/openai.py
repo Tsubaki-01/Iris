@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from ..exceptions import IrisValidationError
-from ..message import Msg, Role, TextBlock, ToolResultBlock, ToolUseBlock
+from ..message import ContentBlock, Msg, Role, TextBlock, ToolResultBlock, ToolUseBlock
 from ..message.llm import LLMRequest, LLMResponse
 from .adapter import ProviderAdapter
 
@@ -64,7 +64,7 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """
         api_style = self._api_style(request)
         payload: dict[str, Any] = {"model": request.model}
-        formatted_messages = self.format_messages(request.messages)
+        formatted_messages = self.format_messages(request.messages, api_style=api_style)
         if api_style == "chat":
             payload["messages"] = formatted_messages
         else:
@@ -90,7 +90,12 @@ class OpenAIMessageAdapter(ProviderAdapter):
             return self._from_chat_response(response)
         return self._from_responses_response(response)
 
-    def format_messages(self, messages: list[Msg]) -> list[dict[str, Any]]:
+    def format_messages(
+        self,
+        messages: list[Msg],
+        *,
+        api_style: Literal["chat", "responses"] = "chat",
+    ) -> list[dict[str, Any]]:
         """转换消息列表为 OpenAI 消息格式。
 
         Args:
@@ -105,7 +110,7 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """
         result: list[dict[str, Any]] = []
         for msg in messages:
-            result.extend(self._format_message(msg))
+            result.extend(self._format_message(msg, api_style=api_style))
         return result
 
     def _api_style(self, request: LLMRequest) -> Literal["chat", "responses"]:
@@ -115,10 +120,17 @@ class OpenAIMessageAdapter(ProviderAdapter):
             raise IrisValidationError("不支持的 OpenAI API 风格", api_style=api_style)
         return api_style
 
-    def _format_message(self, msg: Msg) -> list[dict[str, Any]]:
+    def _format_message(
+        self,
+        msg: Msg,
+        *,
+        api_style: Literal["chat", "responses"],
+    ) -> list[dict[str, Any]]:
         """转换单条 Iris 消息为 OpenAI 消息。"""
         if msg.tool_results:
-            return [self._format_tool_result(block) for block in msg.tool_results]
+            return [
+                self._format_tool_result(block, api_style=api_style) for block in msg.tool_results
+            ]
 
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
         if msg.sender and msg.role == Role.USER:
@@ -127,8 +139,19 @@ class OpenAIMessageAdapter(ProviderAdapter):
             item["tool_calls"] = [self._format_tool_call(block) for block in msg.tool_calls]
         return [item]
 
-    def _format_tool_result(self, block: ToolResultBlock) -> dict[str, Any]:
+    def _format_tool_result(
+        self,
+        block: ToolResultBlock,
+        *,
+        api_style: Literal["chat", "responses"],
+    ) -> dict[str, Any]:
         """转换工具结果块为 OpenAI tool message。"""
+        if api_style == "responses":
+            return {
+                "type": "function_call_output",
+                "call_id": block.tool_use_id,
+                "output": block.content,
+            }
         return {
             "role": "tool",
             "tool_call_id": block.tool_use_id,
@@ -199,9 +222,9 @@ class OpenAIMessageAdapter(ProviderAdapter):
     def _content_blocks_from_chat_message(
         self,
         message: Mapping[str, Any],
-    ) -> list[TextBlock | ToolUseBlock]:
+    ) -> list[ContentBlock]:
         """从 Chat Completions message 中提取 Iris 内容块。"""
-        blocks: list[TextBlock | ToolUseBlock] = []
+        blocks: list[ContentBlock] = []
         content = message.get("content")
         if isinstance(content, str) and content:
             blocks.append(TextBlock(text=content))
@@ -219,9 +242,9 @@ class OpenAIMessageAdapter(ProviderAdapter):
     def _content_blocks_from_responses_output(
         self,
         output: list[Any],
-    ) -> list[TextBlock | ToolUseBlock]:
+    ) -> list[ContentBlock]:
         """从 Responses output 中提取 Iris 内容块。"""
-        blocks: list[TextBlock | ToolUseBlock] = []
+        blocks: list[ContentBlock] = []
         for item in output:
             if not isinstance(item, Mapping):
                 continue
