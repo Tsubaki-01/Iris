@@ -272,7 +272,8 @@ class ToolSearchTool(BaseTool):
             BaseModel | dict[str, Any]: 校验通过的参数模型或字典对象。
 
         Raises:
-            IrisToolValidationError: 若基础类型校验不通过，或查询字段为空、限量非法等原因导致无法查询。
+            IrisToolValidationError: 若基础类型校验不通过，或查询字段为空、
+                限量非法等原因导致无法查询。
         """
         try:
             value = ToolSearchInput.model_validate(params)

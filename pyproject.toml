@@ -13,6 +13,9 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
+[tool.setuptools.package-data]
+iris = ["templates/builtin/*/*"]
+
 [dependency-groups]
 dev = [
     "black>=26.3.1",

@@ -385,7 +385,7 @@ class WorkspaceFileService:
             self.require_fresh_read(path, context)
         self.atomic_write(path, params.content)
         self.record_read(path, context)
-        return f"WROTE: {path.relative_to(context.workspace_root.resolve())}"
+        return f"WROTE: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
 
     def edit_file(self, params: EditFileInput, context: ToolExecutionContext) -> str:
         """对已读且未变的文件执行唯一字符串替换。
@@ -412,7 +412,7 @@ class WorkspaceFileService:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
         self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
         self.record_read(path, context)
-        return f"EDITED: {params.file_path}"
+        return f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
     # endregion
 
 

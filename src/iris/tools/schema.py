@@ -218,7 +218,7 @@ def _schema_for_annotation(annotation: Any) -> dict[str, Any]:
         item_annotation = args[0] if args else Any
         return {"type": "array", "items": _schema_for_annotation(item_annotation)}
     if origin is dict or annotation is dict:
-        schema = {"type": "object"}
+        schema: dict[str, Any] = {"type": "object"}
         if len(args) == 2 and args[1] is not Any:
             schema["additionalProperties"] = _schema_for_annotation(args[1])
         return schema
