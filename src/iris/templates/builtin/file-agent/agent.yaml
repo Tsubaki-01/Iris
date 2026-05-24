@@ -1,0 +1,21 @@
+name: file-agent
+
+model:
+  provider: openai
+  name: gpt-4o-mini
+
+system: |
+  你是一个本地文件助手。优先读取上下文，再进行回答。
+
+tools:
+  builtin:
+    - file.read
+    - file.list
+    - file.grep
+
+permissions:
+  workspace: .
+  writes: confirm
+
+session:
+  backend: none
