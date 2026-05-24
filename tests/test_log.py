@@ -1,13 +1,15 @@
 import importlib
 import sys
-
 from pathlib import Path
 
 import pytest
 from loguru import logger
 
 
-def test_import_log_does_not_create_default_log_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_import_log_does_not_create_default_log_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.chdir(tmp_path)
     sys.modules.pop("iris.log", None)
 

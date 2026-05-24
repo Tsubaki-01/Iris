@@ -142,6 +142,32 @@ async def test_write_file_reports_workspace_relative_path(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_edit_file_reports_workspace_relative_posix_path(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "notes.txt"
+    path.parent.mkdir()
+    path.write_text("hello old\n", encoding="utf-8")
+    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
+    executor = _file_executor(allow_writes=True)
+    await executor.execute_one(
+        ToolUseBlock(id="read_1", name="read_file", input={"file_path": str(path)}),
+        context,
+    )
+
+    result = await executor.execute_one(
+        ToolUseBlock(
+            id="edit_1",
+            name="edit_file",
+            input={"file_path": str(path), "old_string": "old", "new_string": "new"},
+        ),
+        context,
+    )
+
+    assert result.is_error is False
+    assert result.model_content == "EDITED: nested/notes.txt"
+    assert path.read_text(encoding="utf-8") == "hello new\n"
+
+
+@pytest.mark.asyncio
 async def test_read_then_edit_works_without_preseeded_read_state(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("hello old\n", encoding="utf-8")
