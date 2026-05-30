@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Protocol
 
 from .models import (
+    MemoryCandidate,
+    MemoryCandidateStatus,
     MemoryEpisode,
     MemoryEvent,
     MemoryItem,
@@ -60,6 +62,33 @@ class MemoryStore(Protocol):
         limit: int = 100,
     ) -> list[MemoryEvent]:
         """列出指定 scope 下的审计事件。"""
+
+    def add_candidate(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        event: MemoryEvent,
+    ) -> MemoryCandidate:
+        """保存候选记忆和对应审计事件。"""
+
+    def list_candidates(
+        self,
+        scope: MemoryScope,
+        *,
+        status: MemoryCandidateStatus | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidate]:
+        """列出指定 scope 下的候选记忆。"""
+
+    def update_candidate_status(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        status: MemoryCandidateStatus,
+        *,
+        event: MemoryEvent,
+    ) -> MemoryCandidate:
+        """更新候选记忆状态并记录审计事件。"""
 
 
 __all__ = ["MemoryStore"]

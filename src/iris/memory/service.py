@@ -8,6 +8,8 @@ from .context import MemoryContextBuilder
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
+    MemoryCandidate,
+    MemoryCandidateStatus,
     MemoryContextBundle,
     MemoryEpisode,
     MemoryEvent,
@@ -74,6 +76,7 @@ class MemoryService:
             text=input.text,
             category=input.category,
             kind=input.kind,
+            episode_id=input.episode_id,
             source_type=input.source_type,
             source_id=input.source_id,
             reason=input.reason,
@@ -138,6 +141,105 @@ class MemoryService:
         """列出指定 scope 下的审计事件。"""
         return self.store.list_events(scope, item_id=item_id, limit=limit)
 
+    def add_candidate(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        actor: MemoryActor = MemoryActor.SDK,
+        reason: str = "",
+    ) -> MemoryCandidate:
+        """保存候选记忆并记录审计事件。"""
+        event = MemoryEvent(
+            scope=candidate.scope,
+            event_type=MemoryEventType.CANDIDATE_ADD,
+            actor=actor,
+            episode_id=candidate.episode_ids[0],
+            reason=reason or candidate.reason,
+            metadata={
+                "candidate_id": candidate.id,
+                "candidate_status": candidate.status.value,
+                "episode_ids": candidate.episode_ids,
+            },
+        )
+        stored = self.store.add_candidate(candidate, event=event)
+        if self.mirror is not None:
+            self.mirror.mirror_event(event)
+        return stored
+
+    def list_candidates(
+        self,
+        scope: MemoryScope,
+        *,
+        status: MemoryCandidateStatus | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidate]:
+        """列出指定 scope 下的候选记忆。"""
+        return self.store.list_candidates(scope, status=status, limit=limit)
+
+    def accept_candidate(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        *,
+        actor: MemoryActor = MemoryActor.SDK,
+        reason: str,
+    ) -> MemoryCandidate:
+        """将候选记忆标记为已接受。"""
+        return self._update_candidate_status(
+            candidate_id,
+            scope,
+            MemoryCandidateStatus.ACCEPTED,
+            event_type=MemoryEventType.CANDIDATE_ACCEPT,
+            actor=actor,
+            reason=reason,
+        )
+
+    def reject_candidate(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        *,
+        actor: MemoryActor = MemoryActor.SDK,
+        reason: str,
+    ) -> MemoryCandidate:
+        """将候选记忆标记为已拒绝。"""
+        return self._update_candidate_status(
+            candidate_id,
+            scope,
+            MemoryCandidateStatus.REJECTED,
+            event_type=MemoryEventType.CANDIDATE_REJECT,
+            actor=actor,
+            reason=reason,
+        )
+
     def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """召回并构建结构化记忆上下文。"""
         return self.context_builder.build(self.recall(query), max_chars=max_chars)
+
+    def _update_candidate_status(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        status: MemoryCandidateStatus,
+        *,
+        event_type: MemoryEventType,
+        actor: MemoryActor,
+        reason: str,
+    ) -> MemoryCandidate:
+        """更新候选状态并同步审计事件。"""
+        event = MemoryEvent(
+            scope=scope,
+            event_type=event_type,
+            actor=actor,
+            reason=reason,
+            metadata={"candidate_id": candidate_id, "candidate_status": status.value},
+        )
+        stored = self.store.update_candidate_status(
+            candidate_id,
+            scope,
+            status,
+            event=event,
+        )
+        if self.mirror is not None:
+            self.mirror.mirror_event(event)
+        return stored

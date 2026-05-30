@@ -20,6 +20,8 @@ from ..exceptions import IrisMemoryError
 from .models import (
     MemoryActor,
     MemoryArtifactRef,
+    MemoryCandidate,
+    MemoryCandidateStatus,
     MemoryCategory,
     MemoryEpisode,
     MemoryEvent,
@@ -139,6 +141,42 @@ class SQLiteMemoryStore:
                         reason TEXT NOT NULL,
                         metadata_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_candidates (
+                        id TEXT PRIMARY KEY,
+                        scope_workspace_id TEXT NOT NULL,
+                        scope_agent_id TEXT NOT NULL,
+                        scope_collection TEXT NOT NULL,
+                        scope_visibility TEXT NOT NULL,
+                        scope_session_id TEXT NOT NULL,
+                        episode_ids_json TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        suggested_level TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        confidence REAL,
+                        importance REAL,
+                        reason TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        metadata_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_candidates_scope_status
+                    ON memory_candidates (
+                        scope_workspace_id,
+                        scope_agent_id,
+                        scope_collection,
+                        scope_visibility,
+                        scope_session_id,
+                        status,
+                        created_at
                     )
                     """
                 )
@@ -315,6 +353,74 @@ class SQLiteMemoryStore:
             raise IrisMemoryError("SQLite memory event 列表读取失败", path=str(self.path)) from exc
         return [_row_to_event(row) for row in rows]
 
+    def add_candidate(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        event: MemoryEvent,
+    ) -> MemoryCandidate:
+        """保存候选记忆和对应审计事件。"""
+        try:
+            with self._connect() as connection:
+                self._upsert_candidate(connection, candidate)
+                self._insert_event(connection, event)
+        except sqlite3.Error as exc:
+            raise IrisMemoryError(
+                "SQLite memory candidate 写入失败",
+                path=str(self.path),
+            ) from exc
+        return candidate
+
+    def list_candidates(
+        self,
+        scope: MemoryScope,
+        *,
+        status: MemoryCandidateStatus | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidate]:
+        """列出指定 scope 下的候选记忆。"""
+        safe_limit = _safe_limit(limit)
+        clause, params = _scope_clause(scope)
+        sql = f"SELECT * FROM memory_candidates WHERE {clause}"
+        if status is not None:
+            sql += " AND status = ?"
+            params.append(status.value)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(safe_limit)
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            raise IrisMemoryError(
+                "SQLite memory candidate 列表读取失败",
+                path=str(self.path),
+            ) from exc
+        return [_row_to_candidate(row) for row in rows]
+
+    def update_candidate_status(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        status: MemoryCandidateStatus,
+        *,
+        event: MemoryEvent,
+    ) -> MemoryCandidate:
+        """更新候选记忆状态并记录审计事件。"""
+        try:
+            with self._connect() as connection:
+                current = self._fetch_candidate(connection, candidate_id, scope)
+                if current is None:
+                    raise IrisMemoryError("候选记忆不存在", candidate_id=candidate_id)
+                updated = current.model_copy(update={"status": status})
+                self._upsert_candidate(connection, updated)
+                self._insert_event(connection, event)
+        except sqlite3.Error as exc:
+            raise IrisMemoryError(
+                "SQLite memory candidate 状态更新失败",
+                path=str(self.path),
+            ) from exc
+        return updated
+
     def _connect(self) -> sqlite3.Connection:
         """创建启用 row factory 的 SQLite 连接。"""
         connection = sqlite3.connect(self.path)
@@ -425,6 +531,61 @@ class SQLiteMemoryStore:
             ),
         )
 
+    def _upsert_candidate(
+        self,
+        connection: sqlite3.Connection,
+        candidate: MemoryCandidate,
+    ) -> None:
+        """插入或替换候选记忆。"""
+        scope_values = _scope_values(candidate.scope)
+        connection.execute(
+            """
+            INSERT INTO memory_candidates (
+                id,
+                scope_workspace_id,
+                scope_agent_id,
+                scope_collection,
+                scope_visibility,
+                scope_session_id,
+                episode_ids_json,
+                category,
+                suggested_level,
+                text,
+                confidence,
+                importance,
+                reason,
+                status,
+                metadata_json,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                episode_ids_json = excluded.episode_ids_json,
+                category = excluded.category,
+                suggested_level = excluded.suggested_level,
+                text = excluded.text,
+                confidence = excluded.confidence,
+                importance = excluded.importance,
+                reason = excluded.reason,
+                status = excluded.status,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                candidate.id,
+                *scope_values,
+                _dump_json(candidate.episode_ids),
+                candidate.category.value,
+                candidate.suggested_level.value,
+                candidate.text,
+                candidate.confidence,
+                candidate.importance,
+                candidate.reason,
+                candidate.status.value,
+                _dump_json(candidate.metadata),
+                candidate.created_at,
+            ),
+        )
+
     def _insert_event(self, connection: sqlite3.Connection, event: MemoryEvent) -> None:
         """插入审计事件。"""
         scope_values = _scope_values(event.scope)
@@ -479,6 +640,20 @@ class SQLiteMemoryStore:
         if row is None:
             return None
         return _row_to_item(row)
+
+    def _fetch_candidate(
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        scope: MemoryScope,
+    ) -> MemoryCandidate | None:
+        """在指定 scope 下读取一个候选记忆。"""
+        clause, params = _scope_clause(scope)
+        sql = f"SELECT * FROM memory_candidates WHERE id = ? AND {clause}"
+        row = connection.execute(sql, [candidate_id, *params]).fetchone()
+        if row is None:
+            return None
+        return _row_to_candidate(row)
 
     def _refresh_fts_row(self, connection: sqlite3.Connection, item: MemoryItem) -> None:
         """刷新单条 FTS 索引。"""
@@ -619,6 +794,25 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         deleted_at=row["deleted_at"],
+    )
+
+
+def _row_to_candidate(row: sqlite3.Row) -> MemoryCandidate:
+    """将 SQLite row 转换为候选记忆。"""
+    episode_ids = cast(list[str], json.loads(row["episode_ids_json"]))
+    return MemoryCandidate(
+        id=row["id"],
+        scope=_row_to_scope(row),
+        episode_ids=episode_ids,
+        category=MemoryCategory(row["category"]),
+        suggested_level=MemoryLevel(row["suggested_level"]),
+        text=row["text"],
+        confidence=row["confidence"],
+        importance=row["importance"],
+        reason=row["reason"],
+        status=MemoryCandidateStatus(row["status"]),
+        metadata=_load_metadata(row["metadata_json"]),
+        created_at=row["created_at"],
     )
 
 

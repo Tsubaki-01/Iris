@@ -86,6 +86,15 @@ class MemoryItemStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class MemoryCandidateStatus(StrEnum):
+    """候选记忆状态。"""
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    MERGED = "merged"
+
+
 class MemoryEventType(StrEnum):
     """记忆审计事件类型。"""
 
@@ -96,6 +105,10 @@ class MemoryEventType(StrEnum):
     SUPERSEDE = "supersede"
     SEARCH = "search"
     CONTEXT_INCLUDE = "context_include"
+    CANDIDATE_ADD = "candidate_add"
+    CANDIDATE_ACCEPT = "candidate_accept"
+    CANDIDATE_REJECT = "candidate_reject"
+    CANDIDATE_MERGE = "candidate_merge"
 
 
 class MemoryActor(StrEnum):
@@ -225,6 +238,51 @@ class MemoryItem(BaseModel):
         return value
 
 
+class MemoryCandidate(BaseModel):
+    """从 L1 episode 抽取出的待处理候选记忆。"""
+
+    id: str = Field(default_factory=_new_id)
+    scope: MemoryScope
+    episode_ids: list[str] = Field(default_factory=list)
+    category: MemoryCategory = MemoryCategory.USER
+    suggested_level: MemoryLevel = MemoryLevel.SEMANTIC
+    text: str
+    confidence: float | None = None
+    importance: float | None = None
+    reason: str
+    status: MemoryCandidateStatus = MemoryCandidateStatus.PENDING
+    created_at: str = Field(default_factory=_now_iso)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"use_enum_values": False}
+
+    @field_validator("episode_ids")
+    @classmethod
+    def _validate_episode_ids(cls, value: list[str]) -> list[str]:
+        """校验候选记忆必须可追溯到至少一个 episode。"""
+        if not value:
+            raise ValueError("候选记忆必须包含 episode id")
+        if any(not episode_id.strip() for episode_id in value):
+            raise ValueError("候选记忆 episode id 不能为空")
+        return value
+
+    @field_validator("text", "reason")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        """校验候选正文与原因不能为空。"""
+        if not value.strip():
+            raise ValueError("候选记忆正文和原因不能为空")
+        return value
+
+    @field_validator("confidence", "importance")
+    @classmethod
+    def _validate_score(cls, value: float | None) -> float | None:
+        """校验候选分数范围。"""
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError("候选记忆分数必须在 0.0 到 1.0 之间")
+        return value
+
+
 class MemoryItemPatch(BaseModel):
     """长期记忆条目的部分更新。"""
 
@@ -311,6 +369,7 @@ class MemoryWriteInput(BaseModel):
     reason: str
     category: MemoryCategory = MemoryCategory.USER
     kind: MemoryItemKind = MemoryItemKind.NOTE
+    episode_id: str | None = None
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     actor: MemoryActor = MemoryActor.SDK
