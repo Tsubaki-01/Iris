@@ -40,6 +40,19 @@ from .models import (
 from .service import MemoryService
 from .sqlite import SQLiteMemoryStore
 from .store import MemoryStore
+from .tools import (
+    MEMORY_TOOL_CLASSES,
+    MemoryGetTool,
+    MemoryGetToolInput,
+    MemoryListTool,
+    MemoryListToolInput,
+    MemoryScopeFactory,
+    MemorySearchTool,
+    MemorySearchToolInput,
+    MemoryTool,
+    default_memory_scope_factory,
+    register_memory_tools,
+)
 
 __all__ = [
     "MEMORY_CONTEXT_WARNING",
@@ -75,8 +88,19 @@ __all__ = [
     "MemoryVisibility",
     "MemoryWritePolicyConfig",
     "MemoryWriteInput",
+    "MEMORY_TOOL_CLASSES",
+    "MemoryGetTool",
+    "MemoryGetToolInput",
+    "MemoryListTool",
+    "MemoryListToolInput",
+    "MemoryScopeFactory",
+    "MemorySearchTool",
+    "MemorySearchToolInput",
+    "MemoryTool",
     "SQLiteMemoryStore",
     "WorkingMemoryFrame",
     "build_memory_service_from_config",
+    "default_memory_scope_factory",
+    "register_memory_tools",
     "resolve_memory_path",
 ]
