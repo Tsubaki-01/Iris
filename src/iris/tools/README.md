@@ -162,6 +162,37 @@ executor = ToolExecutor(
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
 | `edit_file` | `EditFileInput` | `WRITE` | 对已读且未变化的文件执行唯一字符串替换 |
 
+### 文件工具的分层设计
+
+文件工具不是把每个操作都实现成一个完整的 `BaseTool` 子类，而是把“执行协议”和
+“文件业务”拆开。`FileTool` 固定 Iris 工具协议的共同部分，具体工具只在受保护的
+`_impl()` 钩子中声明自身差异：
+
+```mermaid
+flowchart LR
+    Executor["ToolExecutor"] --> Adapter["FileTool.arun()"]
+    Adapter --> Impl["Read/Edit/...Tool._impl()"]
+    Impl --> Service["WorkspaceFileService"]
+    Service --> Boundary["WorkspacePolicy / ReadFileState / Filesystem"]
+    Impl --> Result["FileTool._text_result() -> ToolResult"]
+```
+
+职责划分如下：
+
+- `FileTool`: 创建 `ToolDefinition`、从输入模型生成 schema、统一参数模型转换，并将
+  `arun()` 委派给 `_impl()`；具体文件工具无需重复协议包装代码。
+- `ReadFileTool` / `WriteFileTool` 等具体工具：声明 `name`、`description`、
+  `input_type`、`capabilities`，并在 `_impl()` 中将已校验参数转给文件服务、包装结果。
+- `WorkspaceFileService`: 处理实际文件规则，包括 workspace 路径约束、读后写状态记录、
+  stale 检查、符号链接边界、原子写入和具体文件操作。
+- `register_file_tools()`: 为全部具体工具注入同一个 `WorkspaceFileService`，使同一
+  registry 中的路径策略和读取状态语义保持一致。
+
+这种拆分让工具的模型可见协议稳定，而文件安全规则集中在服务层维护。新增同类文件工具时，
+通常只需新增输入模型、声明工具元数据并实现 `_impl()`；如果需要改变权限、middleware、
+artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而不是把跨工具职责写入
+`_impl()` 或 `WorkspaceFileService`。
+
 输入约束：
 
 - `ReadFileInput(file_path, offset=None, limit=None)`: `offset`/`limit` 非负，`limit <= 1000`。
