@@ -1,5 +1,17 @@
 """Iris 记忆内核公共 API。"""
 
+from .config import (
+    MemoryBackend,
+    MemoryConfig,
+    MemoryMirrorConfig,
+    MemoryMirrorMode,
+    MemoryOrchestratorConfig,
+    MemoryScopeConfig,
+    MemorySearchConfig,
+    MemoryWritePolicyConfig,
+    build_memory_service_from_config,
+    resolve_memory_path,
+)
 from .context import MEMORY_CONTEXT_WARNING, MemoryContextBuilder
 from .mirror import FileMemoryMirror
 from .models import (
@@ -34,7 +46,9 @@ __all__ = [
     "FileMemoryMirror",
     "MemoryActor",
     "MemoryArtifactRef",
+    "MemoryBackend",
     "MemoryCategory",
+    "MemoryConfig",
     "MemoryContextBuilder",
     "MemoryContextBundle",
     "MemoryContextFragment",
@@ -46,15 +60,23 @@ __all__ = [
     "MemoryItemPatch",
     "MemoryItemStatus",
     "MemoryLevel",
+    "MemoryMirrorConfig",
+    "MemoryMirrorMode",
     "MemoryObserveInput",
+    "MemoryOrchestratorConfig",
     "MemoryQuery",
     "MemoryScope",
+    "MemoryScopeConfig",
     "MemorySearchResult",
+    "MemorySearchConfig",
     "MemorySourceType",
     "MemoryService",
     "MemoryStore",
     "MemoryVisibility",
+    "MemoryWritePolicyConfig",
     "MemoryWriteInput",
     "SQLiteMemoryStore",
     "WorkingMemoryFrame",
+    "build_memory_service_from_config",
+    "resolve_memory_path",
 ]
