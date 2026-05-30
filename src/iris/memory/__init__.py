@@ -1,6 +1,7 @@
 """Iris 记忆内核公共 API。"""
 
 from .context import MEMORY_CONTEXT_WARNING, MemoryContextBuilder
+from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
     MemoryArtifactRef,
@@ -30,6 +31,7 @@ from .store import MemoryStore
 
 __all__ = [
     "MEMORY_CONTEXT_WARNING",
+    "FileMemoryMirror",
     "MemoryActor",
     "MemoryArtifactRef",
     "MemoryCategory",

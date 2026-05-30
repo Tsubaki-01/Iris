@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from ..exceptions import IrisMemoryError
 from .context import MemoryContextBuilder
+from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
     MemoryContextBundle,
@@ -35,10 +36,12 @@ class MemoryService:
         self,
         store: MemoryStore,
         *,
+        mirror: FileMemoryMirror | None = None,
         context_builder: MemoryContextBuilder | None = None,
     ) -> None:
         """初始化记忆服务。"""
         self.store = store
+        self.mirror = mirror
         self.context_builder = context_builder or MemoryContextBuilder()
 
     def observe(self, input: MemoryObserveInput) -> MemoryEpisode:
@@ -59,7 +62,10 @@ class MemoryService:
             episode_id=episode.id,
             reason=input.reason,
         )
-        return self.store.add_episode(episode, event=event)
+        stored = self.store.add_episode(episode, event=event)
+        if self.mirror is not None:
+            self.mirror.mirror_event(event)
+        return stored
 
     def remember(self, input: MemoryWriteInput) -> MemoryItem:
         """写入 L2 长期记忆条目。"""
@@ -83,7 +89,10 @@ class MemoryService:
             item_id=item.id,
             reason=input.reason,
         )
-        return self.store.add_item(item, event=event)
+        stored = self.store.add_item(item, event=event)
+        if self.mirror is not None:
+            self.mirror.mirror_item(stored)
+        return stored
 
     def recall(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """召回长期记忆。"""
@@ -108,6 +117,8 @@ class MemoryService:
             reason=reason,
         )
         self.store.delete_item(item_id, scope, event=event)
+        if self.mirror is not None:
+            self.mirror.rebuild_from_store(self.store, scope)
 
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
         """读取指定 scope 下的活跃长期记忆条目。"""
