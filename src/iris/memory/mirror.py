@@ -2,6 +2,90 @@
 
 Mirror 是 SQLite 权威数据的只读投影，便于人工审查和 diff；本模块不支持从文件反向导入。
 
+Mirror 文件大致长这样：
+
+```text
+.iris/memory/
+  Memory.md
+  User/
+    user.md
+    profile.json
+    preferences.md
+  Feedback/
+    feedback.md
+    corrections.md
+  Reference/
+    notes.md
+    docs/
+    links.json
+  Tasks/
+    task.md
+    task.json
+    plans/
+  Sessions/
+    session_items.md
+    recent_events.md
+    session_summaries/
+```
+
+`User/user.md`、`User/preferences.md`、`Feedback/feedback.md`、
+`Feedback/corrections.md`、`Reference/notes.md`、`Tasks/task.md`
+与 `Sessions/session_items.md`
+是按记忆类别投影的 Markdown 文件。每条记忆由稳定 marker 包裹，便于后续覆盖更新：
+
+```markdown
+<!-- iris-memory-item:mem_123 -->
+### Memory Item mem_123
+
+- id: mem_123
+- category: user
+- kind: preference
+- scope: workspace=workspace, agent=agent, collection=default, visibility=agent
+- created_at: 2026-06-03T10:00:00
+- updated_at: 2026-06-03T10:00:00
+- confidence: 0.8
+- importance: 0.7
+
+用户偏好简洁中文回答
+<!-- /iris-memory-item:mem_123 -->
+```
+
+`Sessions/recent_events.md` 记录最近审计事件：
+
+```markdown
+<!-- iris-memory-event:evt_123 -->
+### Memory Event evt_123
+
+- id: evt_123
+- event_type: observe
+- actor: agent
+- scope: workspace=workspace, agent=agent, collection=default, visibility=agent
+- created_at: 2026-06-03T10:00:00
+- reason: user message observed
+<!-- /iris-memory-event:evt_123 -->
+```
+
+`Tasks/task.json` 是任务状态的结构化投影：
+
+```json
+{
+  "items": [
+    {
+      "id": "mem_123",
+      "text": "阶段二实现 mirror",
+      "metadata": {
+        "stage": 2,
+        "status": "in_progress"
+      },
+      "updated_at": "2026-06-03T10:00:00"
+    }
+  ]
+}
+```
+
+`User/profile.json` 默认是 `{}`，`Reference/links.json` 默认是
+`{"links": []}`；这些 JSON 文件当前只由 mirror 初始化或特定投影逻辑写入。
+
 Example:
     mirror = FileMemoryMirror(Path(".iris/memory"))
     mirror.initialize_layout()
@@ -53,6 +137,7 @@ LAYOUT_FILES: tuple[str, ...] = (
     "Reference/links.json",
     "Tasks/task.md",
     "Tasks/task.json",
+    "Sessions/session_items.md",
     "Sessions/recent_events.md",
 )
 GENERATED_MARKDOWN_FILES: tuple[str, ...] = (
@@ -62,6 +147,7 @@ GENERATED_MARKDOWN_FILES: tuple[str, ...] = (
     "Feedback/corrections.md",
     "Reference/notes.md",
     "Tasks/task.md",
+    "Sessions/session_items.md",
     "Sessions/recent_events.md",
 )
 JSON_DEFAULTS: dict[str, dict[str, Any]] = {
@@ -142,6 +228,12 @@ class FileMemoryMirror:
             )
             for item in items:
                 self.mirror_item(item)
+            events = sorted(
+                store.list_events(scope, limit=100),
+                key=lambda event: (event.created_at, event.id),
+            )
+            for event in events:
+                self.mirror_event(event)
         except OSError as exc:
             raise IrisMemoryError("memory mirror 重建失败", root=str(self.root)) from exc
 
@@ -211,7 +303,7 @@ class FileMemoryMirror:
             return "Reference/notes.md"
         if item.category == MemoryCategory.TASK:
             return "Tasks/task.md"
-        return "Sessions/recent_events.md"
+        return "Sessions/session_items.md"
 
     def _upsert_markdown_block(
         self,

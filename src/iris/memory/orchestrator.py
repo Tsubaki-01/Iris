@@ -1,6 +1,6 @@
 """可选记忆编排器。
 
-本模块只实现 Stage 5 的候选记忆链路：`observe()` 产生可审计候选，
+本模块只实现候选记忆链路：`observe()` 产生可审计候选，
 `process_candidates()` 在显式调用时才把候选晋升为 L2 item。
 
 Example:
@@ -136,8 +136,8 @@ class MemoryPolicy:
         candidate: MemoryCandidate,
         existing: MemoryItem,
     ) -> PolicyDecision:
-        """Stage 5 不自动合并候选。"""
-        return PolicyDecision(False, "merge is not implemented in stage 5")
+        """不自动合并候选。"""
+        return PolicyDecision(False, "merge is not implemented in this policy")
 
     def _score_decision(self, candidate: MemoryCandidate) -> PolicyDecision:
         """按置信度和重要性阈值判断候选。"""

@@ -114,5 +114,5 @@ for fragment in context_bundle.fragments:
 系统允许自建 Backend 来适配外部持久服务要求。需实现对实体和相关联的 `Event` 操作审计处理支持。自带 `SQLiteMemoryStore` 并已集成简略版 FTS 全文搜索。
 
 ### 工具和其它组件 (`tools.py` 与 `context.py`)
-- **MemoryContextBuilder**: 用于保障不宕机超出 LLM 负载上下文的安全封装生成器。如未超出阈值按原样传递，溢出尾部做预定剪断标记并丢入警示常量。
+- **`MemoryContextBuilder`**: 用于保障不宕机超出 LLM 负载上下文的安全封装生成器。如未超出阈值按原样传递，溢出尾部做预定剪断标记并丢入警示常量。
 - **`register_memory_tools(...)`**: 构建并挂载记忆 `Search`、`Get` 及 `List` 读取组件给大语境框架交互体系使用，保持严格沙箱安全仅读操作。

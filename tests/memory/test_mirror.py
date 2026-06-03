@@ -36,6 +36,7 @@ def test_mirror_initializes_fixed_layout_without_overwriting_existing_files(
     assert (root / "Feedback" / "corrections.md").exists()
     assert (root / "Reference" / "docs").is_dir()
     assert (root / "Tasks" / "plans").is_dir()
+    assert (root / "Sessions" / "session_items.md").exists()
     assert (root / "Sessions" / "session_summaries").is_dir()
     assert existing.read_text(encoding="utf-8") == "人工备注\n"
 
@@ -75,6 +76,60 @@ def test_mirror_item_writes_expected_category_file(tmp_path: Path) -> None:
     assert "用户偏好简洁回答" in content
     assert "confidence: 0.8" in content
     assert "importance: 0.7" in content
+
+
+def test_remember_mirrors_add_event_summary(tmp_path: Path) -> None:
+    mirror = FileMemoryMirror(tmp_path / ".iris" / "memory")
+    scope = _scope()
+    service = MemoryService(
+        SQLiteMemoryStore(tmp_path / ".iris" / "memory" / "memory.db", use_fts=False),
+        mirror=mirror,
+    )
+
+    item = service.remember(
+        MemoryWriteInput(
+            scope=scope,
+            text="用户偏好简洁回答",
+            reason="explicit user preference",
+        )
+    )
+
+    content = (tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md").read_text(
+        encoding="utf-8"
+    )
+    assert item.id in content
+    assert "event_type: add" in content
+    assert f"item_id: {item.id}" in content
+
+
+def test_session_items_do_not_mix_with_recent_events(tmp_path: Path) -> None:
+    mirror = FileMemoryMirror(tmp_path / ".iris" / "memory")
+    scope = _scope()
+    service = MemoryService(
+        SQLiteMemoryStore(tmp_path / ".iris" / "memory" / "memory.db", use_fts=False),
+        mirror=mirror,
+    )
+
+    item = service.remember(
+        MemoryWriteInput(
+            scope=scope,
+            text="当前会话摘要",
+            reason="session summary",
+            category=MemoryCategory.SESSION,
+            kind=MemoryItemKind.SUMMARY,
+        )
+    )
+
+    session_items = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "session_items.md"
+    ).read_text(encoding="utf-8")
+    recent_events = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md"
+    ).read_text(encoding="utf-8")
+    assert item.id in session_items
+    assert "### Memory Item" in session_items
+    assert "### Memory Item" not in recent_events
+    assert "### Memory Event" in recent_events
 
 
 def test_task_state_updates_task_json(tmp_path: Path) -> None:
@@ -151,6 +206,26 @@ def test_rebuild_from_store_is_deterministic_and_omits_deleted_items(tmp_path: P
     assert "保留的记忆" in first
     assert deleted.id not in first
     assert "删除的记忆" not in first
+
+
+def test_rebuild_from_store_reconstructs_recent_events(tmp_path: Path) -> None:
+    root = tmp_path / ".iris" / "memory"
+    store = SQLiteMemoryStore(root / "memory.db", use_fts=False)
+    mirror = FileMemoryMirror(root)
+    service = MemoryService(store, mirror=mirror)
+    scope = _scope()
+
+    item = service.remember(
+        MemoryWriteInput(scope=scope, text="需要事件重建的记忆", reason="seed")
+    )
+    (root / "Sessions" / "recent_events.md").write_text("stale event log\n", encoding="utf-8")
+
+    mirror.rebuild_from_store(store, scope)
+
+    content = (root / "Sessions" / "recent_events.md").read_text(encoding="utf-8")
+    assert "stale event log" not in content
+    assert "event_type: add" in content
+    assert f"item_id: {item.id}" in content
 
 
 def test_forget_rebuilds_active_mirror(tmp_path: Path) -> None:

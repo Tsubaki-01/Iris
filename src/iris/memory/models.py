@@ -121,10 +121,7 @@ class MemoryActor(StrEnum):
 
 
 class WorkingMemoryFrame(BaseModel):
-    """运行态 L0 工作记忆帧。
-
-    Stage 1 中该模型只作为 SDK 数据容器，不由 SQLite store 持久化。
-    """
+    """运行态 L0 工作记忆帧。预留数据模型，用于agent runtime"""
 
     scope: MemoryScope
     task: str = ""
