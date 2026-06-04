@@ -644,20 +644,24 @@ FILE_TOOL_CLASSES: tuple[type[FileTool[Any]], ...] = (
 
 def register_file_tools(
     *,
+    registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
     file_service: WorkspaceFileService | None = None,
 ) -> ToolRegistry:
-    """创建并返回已注册文件工具的 registry。
+    """注册文件工具并返回 registry。
 
     Args:
+        registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个文件工具允许返回给模型的最大字符数。
         file_service (WorkspaceFileService | None): 供所有文件工具共享的服务实例。
             为 None 时创建默认服务。
 
     Returns:
         ToolRegistry: 已按稳定顺序注册内置文件工具的 registry。
+            如果传入了 `registry`，返回值就是同一个对象，便于和记忆工具等其它工具组合注册。
     """
-    registry = ToolRegistry()
+    # 允许调用方把文件工具追加到已有 registry；未传入时保持独立注册入口的旧行为。
+    registry = registry or ToolRegistry()
     service = file_service or WorkspaceFileService()
     for tool_cls in FILE_TOOL_CLASSES:
         registry.register(tool_cls(file_service=service, max_result_chars=max_result_chars))

@@ -17,7 +17,7 @@ from iris.memory import (
     register_memory_tools,
 )
 from iris.message import ToolUseBlock
-from iris.tools import ToolCapability, ToolExecutionContext, ToolExecutor
+from iris.tools import ToolCapability, ToolExecutionContext, ToolExecutor, register_file_tools
 
 
 def test_register_memory_tools_exposes_read_tools_only(tmp_path: Path) -> None:
@@ -33,6 +33,35 @@ def test_register_memory_tools_exposes_read_tools_only(tmp_path: Path) -> None:
     assert all(tool.definition.capabilities == {ToolCapability.READ} for tool in tools)
     assert "memory_remember" not in {tool.name for tool in tools}
     assert "memory_forget" not in {tool.name for tool in tools}
+
+
+def test_register_memory_tools_extends_file_registry(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    registry = register_file_tools()
+
+    returned = register_memory_tools(
+        service=service,
+        scope_factory=default_memory_scope_factory(MemoryConfig()),
+        registry=registry,
+    )
+
+    assert returned is registry
+    assert [
+        tool.definition.name for tool in registry.view(include_groups={"file"}).active_tools
+    ] == [
+        "read_file",
+        "list_files",
+        "grep_search",
+        "write_file",
+        "edit_file",
+    ]
+    assert [
+        tool.definition.name for tool in registry.view(include_groups={"memory"}).active_tools
+    ] == [
+        "memory_search",
+        "memory_list",
+        "memory_get",
+    ]
 
 
 def test_default_memory_scope_factory_uses_context_and_config(tmp_path: Path) -> None:

@@ -245,10 +245,23 @@ def register_memory_tools(
     *,
     service: MemoryService,
     scope_factory: MemoryScopeFactory,
+    registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
 ) -> ToolRegistry:
-    """创建并返回已注册只读记忆工具的 registry。"""
-    registry = ToolRegistry()
+    """注册只读记忆工具并返回 registry。
+
+    Args:
+        service (MemoryService): 供所有记忆工具共享的服务实例。
+        scope_factory (MemoryScopeFactory): 基于工具执行上下文生成记忆 scope 的工厂。
+        registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
+        max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
+
+    Returns:
+        ToolRegistry: 已注册 `memory_search`、`memory_list` 和 `memory_get` 的 registry。
+            如果传入了 `registry`，返回值就是同一个对象，便于和文件工具等其它工具组合注册。
+    """
+    # 允许调用方把记忆工具追加到已有 registry；未传入时保持独立注册入口的旧行为。
+    registry = registry or ToolRegistry()
     for tool_cls in MEMORY_TOOL_CLASSES:
         registry.register(
             tool_cls(

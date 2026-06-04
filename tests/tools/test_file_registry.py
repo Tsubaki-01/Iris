@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from iris.tools import register_file_tools
+from iris.tools import ToolRegistry, register_file_tools
 from iris.tools.builtin.file import (
     FILE_TOOL_CLASSES,
     EditFileTool,
@@ -46,6 +46,23 @@ def test_register_file_tools_injects_one_shared_file_service() -> None:
     assert len(tools) == 5
     assert all(isinstance(tool, FileTool) for tool in tools)
     assert {id(tool.file_service) for tool in tools} == {id(service)}
+
+
+def test_register_file_tools_extends_existing_registry() -> None:
+    registry = ToolRegistry()
+
+    returned = register_file_tools(registry=registry)
+
+    assert returned is registry
+    assert [
+        tool.definition.name for tool in registry.view(include_groups={"file"}).active_tools
+    ] == [
+        "read_file",
+        "list_files",
+        "grep_search",
+        "write_file",
+        "edit_file",
+    ]
 
 
 def test_concrete_file_tools_use_impl_not_custom_arun() -> None:
