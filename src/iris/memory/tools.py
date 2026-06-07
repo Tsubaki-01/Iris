@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..exceptions import IrisMemoryError
 from ..message import TextBlock
 from ..tools import (
     BaseTool,
@@ -42,6 +44,34 @@ from .service import MemoryService
 
 InputT = TypeVar("InputT", bound=BaseModel)
 MemoryScopeFactory = Callable[[ToolExecutionContext], MemoryScope]
+MemoryAccessPolicyFactory = Callable[[ToolExecutionContext], "MemoryAccessPolicy"]
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryAccessPolicy:
+    """一次工具执行可使用的记忆访问策略。
+
+    `actor_agent_id` 表示谁在执行；`write_scope` 表示默认写入位置；
+    `read_scopes` 表示只读工具允许读取的位置。当前注册的 memory tools 仍然只读，
+    但提前把 write/read scope 拆开，便于 runtime 为 subagent 挂载受控策略。
+    """
+
+    actor_agent_id: str
+    write_scope: MemoryScope
+    read_scopes: Sequence[MemoryScope] = ()
+    allow_write_shared: bool = False
+    allow_promote_to_parent: bool = False
+
+    def effective_write_scope(self, context: ToolExecutionContext) -> MemoryScope:
+        """返回本次执行允许写入的默认 scope。"""
+        del context
+        return self.write_scope
+
+    def effective_read_scopes(self, context: ToolExecutionContext) -> list[MemoryScope]:
+        """返回本次执行允许读取的 scope 列表。"""
+        del context
+        scopes = list(self.read_scopes) or [self.write_scope]
+        return _dedupe_scopes(scopes)
 
 
 class MemorySearchToolInput(BaseModel):
@@ -108,12 +138,12 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
         self,
         *,
         service: MemoryService,
-        scope_factory: MemoryScopeFactory,
+        access_policy_factory: MemoryAccessPolicyFactory,
         max_result_chars: int = 50000,
     ) -> None:
         """创建记忆工具实例。"""
         self.service = service
-        self.scope_factory = scope_factory
+        self.access_policy_factory = access_policy_factory
         self.definition = ToolDefinition(
             name=self.name,
             description=self.description,
@@ -155,6 +185,10 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
             content=[TextBlock(text=content)],
         )
 
+    def _read_scopes(self, context: ToolExecutionContext) -> list[MemoryScope]:
+        """读取当前工具调用允许访问的 read scopes。"""
+        return self.access_policy_factory(context).effective_read_scopes(context)
+
 
 class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
     """搜索当前 scope 内的长期记忆。"""
@@ -169,16 +203,20 @@ class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.recall 执行搜索。"""
-        scope = self.scope_factory(context)
-        results = self.service.recall(
-            MemoryQuery(
-                scope=scope,
-                text=params.query,
-                categories=params.categories,
-                kinds=params.kinds,
-                limit=params.limit,
+        results: list[MemorySearchResult] = []
+        for scope in self._read_scopes(context):
+            results.extend(
+                self.service.recall(
+                    MemoryQuery(
+                        scope=scope,
+                        text=params.query,
+                        categories=params.categories,
+                        kinds=params.kinds,
+                        limit=params.limit,
+                    )
+                )
             )
-        )
+        results = _dedupe_results(results)[: params.limit]
         return self._json_result({"results": [_result_payload(result) for result in results]})
 
 
@@ -195,13 +233,17 @@ class MemoryListTool(MemoryTool[MemoryListToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.list_items 执行列表读取。"""
-        scope = self.scope_factory(context)
         categories = [params.category] if params.category is not None else None
-        items = self.service.list_items(
-            scope,
-            limit=params.limit,
-            categories=categories,
-        )
+        items: list[MemoryItem] = []
+        for scope in self._read_scopes(context):
+            items.extend(
+                self.service.list_items(
+                    scope,
+                    limit=params.limit,
+                    categories=categories,
+                )
+            )
+        items = _dedupe_items(items)[: params.limit]
         return self._json_result({"items": [_item_payload(item) for item in items]})
 
 
@@ -218,10 +260,11 @@ class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.get_item 读取单条记忆。"""
-        item = self.service.get_item(params.item_id, self.scope_factory(context))
-        if item is None:
-            return self._json_result({"found": False})
-        return self._json_result({"found": True, "item": _item_payload(item)})
+        for scope in self._read_scopes(context):
+            item = self.service.get_item(params.item_id, scope)
+            if item is not None:
+                return self._json_result({"found": True, "item": _item_payload(item)})
+        return self._json_result({"found": False})
 
 
 MEMORY_TOOL_CLASSES: tuple[type[MemoryTool[Any]], ...] = (
@@ -244,10 +287,32 @@ def default_memory_scope_factory(config: MemoryConfig) -> MemoryScopeFactory:
     return _factory
 
 
+def access_policy_factory_from_scope_factory(
+    scope_factory: MemoryScopeFactory,
+) -> MemoryAccessPolicyFactory:
+    """把旧单 scope factory 包装为默认读写同 scope 的访问策略。"""
+
+    def _factory(context: ToolExecutionContext) -> MemoryAccessPolicy:
+        scope = scope_factory(context)
+        return MemoryAccessPolicy(
+            actor_agent_id=context.agent_id or scope.agent_id,
+            write_scope=scope,
+            read_scopes=[scope],
+        )
+
+    return _factory
+
+
+def default_memory_access_policy_factory(config: MemoryConfig) -> MemoryAccessPolicyFactory:
+    """基于 memory config 构造默认记忆访问策略工厂。"""
+    return access_policy_factory_from_scope_factory(default_memory_scope_factory(config))
+
+
 def register_memory_tools(
     *,
     service: MemoryService,
-    scope_factory: MemoryScopeFactory,
+    scope_factory: MemoryScopeFactory | None = None,
+    access_policy_factory: MemoryAccessPolicyFactory | None = None,
     registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
 ) -> ToolRegistry:
@@ -255,7 +320,10 @@ def register_memory_tools(
 
     Args:
         service (MemoryService): 供所有记忆工具共享的服务实例。
-        scope_factory (MemoryScopeFactory): 基于工具执行上下文生成记忆 scope 的工厂。
+        scope_factory (MemoryScopeFactory | None): 兼容旧调用方的单 scope 工厂。
+            未提供 `access_policy_factory` 时会自动包装成读写同 scope 的访问策略。
+        access_policy_factory (MemoryAccessPolicyFactory | None): 基于工具执行上下文生成
+            read/write scope 分离访问策略的工厂，推荐由 runtime 为 subagent 挂载。
         registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
 
@@ -263,13 +331,19 @@ def register_memory_tools(
         ToolRegistry: 已注册 `memory_search`、`memory_list` 和 `memory_get` 的 registry。
             如果传入了 `registry`，返回值就是同一个对象，便于和文件工具等其它工具组合注册。
     """
+    if access_policy_factory is None:
+        if scope_factory is None:
+            raise IrisMemoryError(
+                "注册 memory tools 必须提供 scope_factory 或 access_policy_factory"
+            )
+        access_policy_factory = access_policy_factory_from_scope_factory(scope_factory)
     # 允许调用方把记忆工具追加到已有 registry；未传入时保持独立注册入口的旧行为。
     registry = registry or ToolRegistry()
     for tool_cls in MEMORY_TOOL_CLASSES:
         registry.register(
             tool_cls(
                 service=service,
-                scope_factory=scope_factory,
+                access_policy_factory=access_policy_factory,
                 max_result_chars=max_result_chars,
             )
         )
@@ -299,3 +373,46 @@ def _result_payload(result: MemorySearchResult) -> dict[str, Any]:
     payload["score"] = result.score
     payload["source"] = result.source
     return payload
+
+
+def _dedupe_results(results: list[MemorySearchResult]) -> list[MemorySearchResult]:
+    """按全局 item id 去重搜索结果，并保持 policy scope 顺序。"""
+    seen: set[str] = set()
+    deduped: list[MemorySearchResult] = []
+    for result in results:
+        if result.item.id in seen:
+            continue
+        seen.add(result.item.id)
+        deduped.append(result)
+    return deduped
+
+
+def _dedupe_items(items: list[MemoryItem]) -> list[MemoryItem]:
+    """按全局 item id 去重列表结果，并保持 policy scope 顺序。"""
+    seen: set[str] = set()
+    deduped: list[MemoryItem] = []
+    for item in items:
+        if item.id in seen:
+            continue
+        seen.add(item.id)
+        deduped.append(item)
+    return deduped
+
+
+def _dedupe_scopes(scopes: list[MemoryScope]) -> list[MemoryScope]:
+    """按完整 scope key 去重，避免重复查询同一块记忆。"""
+    seen: set[tuple[str, str, str, str, str]] = set()
+    deduped: list[MemoryScope] = []
+    for scope in scopes:
+        key = (
+            scope.workspace_id,
+            scope.agent_id,
+            scope.collection,
+            scope.visibility.value,
+            scope.session_id or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(scope)
+    return deduped

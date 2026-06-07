@@ -57,6 +57,8 @@ from .sqlite import SQLiteMemoryStore
 from .store import MemoryStore
 from .tools import (
     MEMORY_TOOL_CLASSES,
+    MemoryAccessPolicy,
+    MemoryAccessPolicyFactory,
     MemoryGetTool,
     MemoryGetToolInput,
     MemoryListTool,
@@ -65,6 +67,8 @@ from .tools import (
     MemorySearchTool,
     MemorySearchToolInput,
     MemoryTool,
+    access_policy_factory_from_scope_factory,
+    default_memory_access_policy_factory,
     default_memory_scope_factory,
     register_memory_tools,
 )
@@ -110,6 +114,8 @@ __all__ = [
     "MemoryWritePolicyConfig",
     "MemoryWriteInput",
     "MEMORY_TOOL_CLASSES",
+    "MemoryAccessPolicy",
+    "MemoryAccessPolicyFactory",
     "MemoryGetTool",
     "MemoryGetToolInput",
     "MemoryListTool",
@@ -126,7 +132,9 @@ __all__ = [
     "WORKSPACE_SHARED_AGENT_ID",
     "WORKSPACE_SHARED_COLLECTION",
     "WorkingMemoryFrame",
+    "access_policy_factory_from_scope_factory",
     "build_memory_service_from_config",
+    "default_memory_access_policy_factory",
     "default_memory_scope_factory",
     "register_memory_tools",
     "resolve_memory_path",
