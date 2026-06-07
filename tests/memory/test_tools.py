@@ -83,6 +83,23 @@ def test_default_memory_scope_factory_uses_context_and_config(tmp_path: Path) ->
     assert scope.session_id == "session"
 
 
+def test_default_memory_scope_factory_ignores_session_for_agent_scope(
+    tmp_path: Path,
+) -> None:
+    factory = default_memory_scope_factory(MemoryConfig())
+
+    scope = factory(
+        ToolExecutionContext(
+            workspace_root=tmp_path,
+            agent_id="agent",
+            session_id="session",
+        )
+    )
+
+    assert scope.visibility == MemoryVisibility.AGENT
+    assert scope.session_id is None
+
+
 @pytest.mark.asyncio
 async def test_memory_search_executes_through_tool_executor(tmp_path: Path) -> None:
     service = _service(tmp_path)
@@ -108,6 +125,39 @@ async def test_memory_search_executes_through_tool_executor(tmp_path: Path) -> N
     assert result.is_error is False
     assert payload["results"][0]["id"] == item.id
     assert payload["results"][0]["text"] == "用户偏好简洁中文回答"
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_is_visible_across_runtime_sessions(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    scope_factory = default_memory_scope_factory(MemoryConfig())
+    write_context = ToolExecutionContext(
+        workspace_root=tmp_path,
+        agent_id="agent",
+        session_id="session-a",
+    )
+    read_context = ToolExecutionContext(
+        workspace_root=tmp_path,
+        agent_id="agent",
+        session_id="session-b",
+    )
+    item = service.remember(
+        MemoryWriteInput(
+            scope=scope_factory(write_context),
+            text="跨会话保留的 agent 记忆",
+            reason="test seed",
+        )
+    )
+
+    result = await ToolExecutor(
+        register_memory_tools(service=service, scope_factory=scope_factory)
+    ).execute_one(
+        ToolUseBlock(id="call_1", name="memory_search", input={"query": "跨会话"}),
+        read_context,
+    )
+
+    payload = json.loads(result.model_content)
+    assert payload["results"][0]["id"] == item.id
 
 
 @pytest.mark.asyncio

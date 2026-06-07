@@ -7,6 +7,7 @@ import pytest
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
     MemoryActor,
+    MemoryCandidate,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
@@ -114,6 +115,103 @@ def test_sqlite_store_keeps_full_scope_isolation(tmp_path: Path) -> None:
     )
 
     assert store.search(MemoryQuery(scope=other_scope, text="agent-a")) == []
+
+
+def test_sqlite_store_rejects_duplicate_item_id_across_scopes(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    owner_scope = _scope(agent_id="agent-a")
+    other_scope = _scope(agent_id="agent-b")
+    item = MemoryItem(id="shared-item-id", scope=owner_scope, text="owner text")
+
+    store.add_item(
+        item,
+        event=MemoryEvent(
+            scope=owner_scope,
+            event_type=MemoryEventType.ADD,
+            item_id=item.id,
+            reason="test seed",
+        ),
+    )
+
+    with pytest.raises(IrisMemoryError):
+        store.add_item(
+            MemoryItem(id=item.id, scope=other_scope, text="other text"),
+            event=MemoryEvent(
+                scope=other_scope,
+                event_type=MemoryEventType.ADD,
+                item_id=item.id,
+                reason="duplicate id",
+            ),
+        )
+
+    stored = store.get_item(item.id, owner_scope)
+    assert stored is not None
+    assert stored.text == "owner text"
+    assert store.get_item(item.id, other_scope) is None
+
+
+def test_sqlite_store_rejects_duplicate_candidate_id_across_scopes(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    owner_scope = _scope(agent_id="agent-a")
+    other_scope = _scope(agent_id="agent-b")
+    candidate = MemoryCandidate(
+        id="shared-candidate-id",
+        scope=owner_scope,
+        episode_ids=["episode-a"],
+        text="owner candidate",
+        reason="test seed",
+    )
+
+    store.add_candidate(
+        candidate,
+        event=MemoryEvent(
+            scope=owner_scope,
+            event_type=MemoryEventType.CANDIDATE_ADD,
+            episode_id="episode-a",
+            reason="test seed",
+        ),
+    )
+
+    with pytest.raises(IrisMemoryError):
+        store.add_candidate(
+            MemoryCandidate(
+                id=candidate.id,
+                scope=other_scope,
+                episode_ids=["episode-b"],
+                text="other candidate",
+                reason="duplicate id",
+            ),
+            event=MemoryEvent(
+                scope=other_scope,
+                event_type=MemoryEventType.CANDIDATE_ADD,
+                episode_id="episode-b",
+                reason="duplicate id",
+            ),
+        )
+
+    assert store.list_candidates(owner_scope)[0].text == "owner candidate"
+    assert store.list_candidates(other_scope) == []
+
+
+def test_sqlite_store_closes_connections_after_operations(tmp_path: Path) -> None:
+    path = tmp_path / "memory.db"
+    store = SQLiteMemoryStore(path, use_fts=False)
+    scope = _scope()
+    item = MemoryItem(scope=scope, text="connection cleanup")
+
+    store.add_item(
+        item,
+        event=MemoryEvent(
+            scope=scope,
+            event_type=MemoryEventType.ADD,
+            item_id=item.id,
+            reason="test seed",
+        ),
+    )
+    assert store.list_items(scope)[0].id == item.id
+
+    path.unlink()
+    assert not path.exists()
 
 
 def test_sqlite_store_wraps_unserializable_metadata(tmp_path: Path) -> None:

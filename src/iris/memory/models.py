@@ -20,7 +20,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # endregion
 
-
 def _new_id() -> str:
     """生成无外部依赖的稳定字符串 ID。"""
     return uuid.uuid4().hex
@@ -47,7 +46,7 @@ class MemoryLevel(StrEnum):
 
 
 class MemoryCategory(StrEnum):
-    """记忆目录类别。"""
+    """记忆目录类别。记录记忆属于哪个业务域。"""
 
     USER = "user"
     FEEDBACK = "feedback"
@@ -68,7 +67,7 @@ class MemorySourceType(StrEnum):
 
 
 class MemoryItemKind(StrEnum):
-    """长期记忆条目类型。"""
+    """长期记忆条目类型。记录记忆的类别和性质。"""
 
     FACT = "fact"
     PREFERENCE = "preference"

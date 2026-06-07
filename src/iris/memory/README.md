@@ -75,7 +75,26 @@ for fragment in context_bundle.fragments:
 ## 重要定义
 
 ### 数据流结构与模型
-- **`MemoryScope`**: 核心隔离边界。由 `workspace_id`、`agent_id` 及其 `collection` 组合而成，可通过 `visibility`（搭配 `session_id`）作会话级别降级，在底层被用作为多租户联合主键。
+- **`MemoryScope`**: 核心访问与隔离边界。由 `workspace_id`、`agent_id`、`collection`、`visibility` 与规范化后的 `session_id` 共同限定读写范围；工具入参不能覆盖 scope 字段。
+
+| visibility | 含义 | session_id | agent_id |
+| ---- | ---- | ---- | ---- |
+| session | 当前会话/任务临时记忆 | 必须有 | 执行 agent |
+| agent | 某个稳定 agent 的长期记忆 | 必须为 None | 稳定 agent id |
+| workspace | 项目共享记忆 | 必须为 None | 建议固定为 __workspace__ |
+
+`MemoryScopeConfig.to_scope()` 会在 `visibility != session` 时忽略运行时 `session_id`，保证 agent/workspace 级记忆不会被会话上下文意外切分。
+
+`collection` 当前是 scope 内的命名空间字段，用于为未来的用途分区预留隔离边界；它已经参与 SQLite 硬过滤，但还不是一等业务对象。当前不提供 collection registry、collection 管理 API、跨 collection 查询或由工具入参切换 collection 的能力。现阶段建议只使用少量约定值：
+
+| collection | 当前定位 |
+| ---- | ---- |
+| default | 默认长期记忆 |
+| shared | workspace 共享记忆 |
+| scratch | 临时工作记忆 / subagent 草稿 |
+
+除非 runtime 或上层策略显式授权，查询默认不跨 collection。
+
 - **`MemoryEpisode`**: 基础观察片段模型（L1）。通常为 LLM 推理响应的快照或工具行为日志。
 - **`MemoryCandidate`**: 从基础片段提取出的未确认候选组，携有原始置信度与重要度的评分。需经历判断验证阶段 `pending`/`accepted`/`rejected` 等才能最终变更为真实长期项。
 - **`MemoryItem`**: 标准的终态持久化知识条目结构（L2）。具备多状态管控及其相关的事件追溯 `episode_id` 标记。
@@ -112,6 +131,10 @@ for fragment in context_bundle.fragments:
 
 ### Pydantic 数据存储协议 (`MemoryStore`)
 系统允许自建 Backend 来适配外部持久服务要求。需实现对实体和相关联的 `Event` 操作审计处理支持。自带 `SQLiteMemoryStore` 并已集成简略版 FTS 全文搜索。
+
+`MemoryItem.id` 与 `MemoryCandidate.id` 作为全局实体 ID 使用；新增 item/candidate 时如果 ID 已存在，SQLite store 会拒绝写入，避免跨 scope 静默覆盖。更新和删除必须通过 `id + scope` 命中目标实体。
+
+SQLite 连接通过 store 内部 helper 管理事务并在退出时显式关闭，避免 Windows 临时数据库文件被连接句柄占用。
 
 ### 工具和其它组件 (`tools.py` 与 `context.py`)
 - **`MemoryContextBuilder`**: 用于保障不宕机超出 LLM 负载上下文的安全封装生成器。如未超出阈值按原样传递，溢出尾部做预定剪断标记并丢入警示常量。

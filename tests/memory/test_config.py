@@ -82,6 +82,32 @@ def test_scope_config_builds_scope_from_runtime_values() -> None:
     assert scope.collection == "notes"
 
 
+def test_agent_scope_ignores_runtime_session_id() -> None:
+    config = MemoryConfig(scope={"visibility": "agent"})
+
+    scope = config.scope.to_scope(
+        workspace_id="workspace",
+        agent_id="agent",
+        session_id="session",
+    )
+
+    assert scope.visibility == MemoryVisibility.AGENT
+    assert scope.session_id is None
+
+
+def test_workspace_scope_ignores_runtime_session_id() -> None:
+    config = MemoryConfig(scope={"visibility": "workspace"})
+
+    scope = config.scope.to_scope(
+        workspace_id="workspace",
+        agent_id="__workspace__",
+        session_id="session",
+    )
+
+    assert scope.visibility == MemoryVisibility.WORKSPACE
+    assert scope.session_id is None
+
+
 def test_session_scope_requires_runtime_session_id() -> None:
     config = MemoryConfig(scope={"visibility": "session"})
 

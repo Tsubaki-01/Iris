@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -69,7 +70,7 @@ class SQLiteMemoryStore:
     def initialize_schema(self) -> None:
         """创建或补齐 Stage 1 记忆表结构。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     CREATE TABLE IF NOT EXISTS memory_schema (
@@ -208,7 +209,7 @@ class SQLiteMemoryStore:
         if not self._fts_enabled:
             return
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute("DELETE FROM memory_items_fts")
                 rows = connection.execute(
                     """
@@ -227,7 +228,7 @@ class SQLiteMemoryStore:
     def add_episode(self, episode: MemoryEpisode, *, event: MemoryEvent) -> MemoryEpisode:
         """保存 L1 片段记忆和对应审计事件。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self._insert_episode(connection, episode)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
@@ -237,7 +238,8 @@ class SQLiteMemoryStore:
     def add_item(self, item: MemoryItem, *, event: MemoryEvent) -> MemoryItem:
         """保存 L2 长期记忆条目和对应审计事件。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
+                self._ensure_new_item_id(connection, item)
                 self._upsert_item(connection, item)
                 self._refresh_fts_row(connection, item)
                 self._insert_event(connection, event)
@@ -263,7 +265,7 @@ class SQLiteMemoryStore:
         updates["updated_at"] = _now_iso()
         updated = current.model_copy(update=updates)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 self._upsert_item(connection, updated)
                 self._refresh_fts_row(connection, updated)
                 self._insert_event(connection, event)
@@ -274,7 +276,7 @@ class SQLiteMemoryStore:
     def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> None:
         """将长期记忆条目标记为删除并记录审计事件。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 current = self._fetch_item(connection, item_id, scope, include_deleted=False)
                 if current is None:
                     return
@@ -294,7 +296,7 @@ class SQLiteMemoryStore:
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
         """读取指定 scope 下的活跃长期记忆条目。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 return self._fetch_item(connection, item_id, scope, include_deleted=False)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 读取失败", path=str(self.path)) from exc
@@ -324,7 +326,7 @@ class SQLiteMemoryStore:
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
         params.append(safe_limit)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 列表读取失败", path=str(self.path)) from exc
@@ -347,7 +349,7 @@ class SQLiteMemoryStore:
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(safe_limit)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory event 列表读取失败", path=str(self.path)) from exc
@@ -361,7 +363,8 @@ class SQLiteMemoryStore:
     ) -> MemoryCandidate:
         """保存候选记忆和对应审计事件。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
+                self._ensure_new_candidate_id(connection, candidate)
                 self._upsert_candidate(connection, candidate)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
@@ -388,7 +391,7 @@ class SQLiteMemoryStore:
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(safe_limit)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise IrisMemoryError(
@@ -407,7 +410,7 @@ class SQLiteMemoryStore:
     ) -> MemoryCandidate:
         """更新候选记忆状态并记录审计事件。"""
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 current = self._fetch_candidate(connection, candidate_id, scope)
                 if current is None:
                     raise IrisMemoryError("候选记忆不存在", candidate_id=candidate_id)
@@ -426,6 +429,16 @@ class SQLiteMemoryStore:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        """创建带事务边界且退出时显式关闭的 SQLite 连接。"""
+        connection = self._connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _insert_episode(self, connection: sqlite3.Connection, episode: MemoryEpisode) -> None:
         """插入 L1 片段记忆。"""
@@ -460,6 +473,38 @@ class SQLiteMemoryStore:
                 _dump_json(episode.metadata),
                 episode.created_at,
             ),
+        )
+
+    def _ensure_new_item_id(
+        self,
+        connection: sqlite3.Connection,
+        item: MemoryItem,
+    ) -> None:
+        """确保新增 item 使用的全局 ID 未被任何 scope 占用。"""
+        existing = self._fetch_item_by_id(connection, item.id)
+        if existing is None:
+            return
+        raise IrisMemoryError(
+            "记忆条目 id 已存在",
+            item_id=item.id,
+            existing_scope=_scope_summary(existing.scope),
+            requested_scope=_scope_summary(item.scope),
+        )
+
+    def _ensure_new_candidate_id(
+        self,
+        connection: sqlite3.Connection,
+        candidate: MemoryCandidate,
+    ) -> None:
+        """确保新增 candidate 使用的全局 ID 未被任何 scope 占用。"""
+        existing = self._fetch_candidate_by_id(connection, candidate.id)
+        if existing is None:
+            return
+        raise IrisMemoryError(
+            "候选记忆 id 已存在",
+            candidate_id=candidate.id,
+            existing_scope=_scope_summary(existing.scope),
+            requested_scope=_scope_summary(candidate.scope),
         )
 
     def _upsert_item(self, connection: sqlite3.Connection, item: MemoryItem) -> None:
@@ -641,6 +686,20 @@ class SQLiteMemoryStore:
             return None
         return _row_to_item(row)
 
+    def _fetch_item_by_id(
+        self,
+        connection: sqlite3.Connection,
+        item_id: str,
+    ) -> MemoryItem | None:
+        """不带 scope 地按全局 ID 读取 item，用于新增前冲突检测。"""
+        row = connection.execute(
+            "SELECT * FROM memory_items WHERE id = ? LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_item(row)
+
     def _fetch_candidate(
         self,
         connection: sqlite3.Connection,
@@ -651,6 +710,20 @@ class SQLiteMemoryStore:
         clause, params = _scope_clause(scope)
         sql = f"SELECT * FROM memory_candidates WHERE id = ? AND {clause}"
         row = connection.execute(sql, [candidate_id, *params]).fetchone()
+        if row is None:
+            return None
+        return _row_to_candidate(row)
+
+    def _fetch_candidate_by_id(
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: str,
+    ) -> MemoryCandidate | None:
+        """不带 scope 地按全局 ID 读取 candidate，用于新增前冲突检测。"""
+        row = connection.execute(
+            "SELECT * FROM memory_candidates WHERE id = ? LIMIT 1",
+            (candidate_id,),
+        ).fetchone()
         if row is None:
             return None
         return _row_to_candidate(row)
@@ -684,7 +757,7 @@ class SQLiteMemoryStore:
             LIMIT ?
         """
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(sql, [query.text, *params, query.limit]).fetchall()
         except sqlite3.Error:
             return None
@@ -712,7 +785,7 @@ class SQLiteMemoryStore:
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
         params.append(query.limit)
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc
@@ -771,6 +844,19 @@ def _scope_values(scope: MemoryScope) -> list[str]:
         scope.visibility.value,
         scope.session_id or "",
     ]
+
+
+def _scope_summary(scope: MemoryScope) -> str:
+    """生成用于错误上下文的稳定 scope 摘要。"""
+    parts = [
+        f"workspace={scope.workspace_id}",
+        f"agent={scope.agent_id}",
+        f"collection={scope.collection}",
+        f"visibility={scope.visibility.value}",
+    ]
+    if scope.session_id:
+        parts.append(f"session={scope.session_id}")
+    return ", ".join(parts)
 
 
 def _row_to_item(row: sqlite3.Row) -> MemoryItem:

@@ -59,7 +59,8 @@ class MemoryScopeConfig(BaseModel):
         Args:
             workspace_id: 运行时 workspace 标识。
             agent_id: 运行时 agent 标识。
-            session_id: 可选运行时 session 标识。
+            session_id: 可选运行时 session 标识。仅 `visibility=session` 时写入 scope；
+                agent/workspace 级记忆会忽略该值以保持跨会话可见。
 
         Returns:
             MemoryScope: 可传给 Stage 1 SDK 的 scope。
@@ -67,19 +68,22 @@ class MemoryScopeConfig(BaseModel):
         Raises:
             IrisConfigError: 当配置的 visibility 与运行时 session 参数不匹配时抛出。
         """
+        effective_session_id = (
+            session_id if self.visibility == MemoryVisibility.SESSION else None
+        )
         try:
             return MemoryScope(
                 workspace_id=workspace_id,
                 agent_id=agent_id,
                 collection=self.collection,
                 visibility=self.visibility,
-                session_id=session_id,
+                session_id=effective_session_id,
             )
         except ValueError as exc:
             raise IrisConfigError(
                 "memory scope 配置无效",
                 visibility=self.visibility.value,
-                session_id=session_id,
+                session_id=effective_session_id,
             ) from exc
 
 

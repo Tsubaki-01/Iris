@@ -87,7 +87,7 @@ class MemoryClassifier(Protocol):
     """候选记忆分类器协议。"""
 
     def classify(self, candidate: MemoryCandidate) -> MemoryCandidate:
-        """返回分类后的候选记忆。"""
+        """更新candidate属性并返回分类后的候选记忆。"""
 
 
 class RuleMemoryClassifier:
