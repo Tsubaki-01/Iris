@@ -273,13 +273,13 @@ class SQLiteMemoryStore:
             raise IrisMemoryError("SQLite memory item 更新失败", path=str(self.path)) from exc
         return updated
 
-    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> None:
-        """将长期记忆条目标记为删除并记录审计事件。"""
+    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> bool:
+        """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
         try:
             with self._connection() as connection:
                 current = self._fetch_item(connection, item_id, scope, include_deleted=False)
                 if current is None:
-                    return
+                    return False
                 deleted = current.model_copy(
                     update={
                         "status": MemoryItemStatus.DELETED,
@@ -290,6 +290,7 @@ class SQLiteMemoryStore:
                 self._upsert_item(connection, deleted)
                 self._delete_fts_row(connection, item_id)
                 self._insert_event(connection, event)
+                return True
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 删除失败", path=str(self.path)) from exc
 
@@ -432,6 +433,77 @@ class SQLiteMemoryStore:
                 path=str(self.path),
             ) from exc
         return updated
+
+    def promote_candidate(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        *,
+        kind: MemoryItemKind,
+        actor: MemoryActor,
+        reason: str,
+    ) -> MemoryItem:
+        """在单个事务中将 pending candidate 晋升为 L2 item。"""
+        try:
+            with self._connection() as connection:
+                candidate = self._fetch_candidate(connection, candidate_id, scope)
+                if candidate is None:
+                    raise IrisMemoryError("候选记忆不存在", candidate_id=candidate_id)
+                if candidate.status == MemoryCandidateStatus.ACCEPTED:
+                    existing = self._fetch_item_by_source_id(connection, candidate_id, scope)
+                    if existing is None:
+                        raise IrisMemoryError("已接受候选缺少晋升条目", candidate_id=candidate_id)
+                    return existing
+                if candidate.status != MemoryCandidateStatus.PENDING:
+                    raise IrisMemoryError(
+                        "候选记忆不可晋升",
+                        candidate_id=candidate_id,
+                        status=candidate.status.value,
+                    )
+
+                item = _item_from_candidate(candidate, kind=kind)
+                accepted = candidate.model_copy(
+                    update={"status": MemoryCandidateStatus.ACCEPTED},
+                )
+                add_event = MemoryEvent(
+                    scope=scope,
+                    event_type=MemoryEventType.ADD,
+                    actor=actor,
+                    item_id=item.id,
+                    episode_id=item.episode_id,
+                    reason=candidate.reason,
+                    metadata={
+                        "candidate_id": candidate.id,
+                        "episode_ids": candidate.episode_ids,
+                    },
+                )
+                accept_event = MemoryEvent(
+                    scope=scope,
+                    event_type=MemoryEventType.CANDIDATE_ACCEPT,
+                    actor=actor,
+                    item_id=item.id,
+                    episode_id=item.episode_id,
+                    reason=reason,
+                    metadata={
+                        "candidate_id": candidate.id,
+                        "candidate_status": MemoryCandidateStatus.ACCEPTED.value,
+                        "promoted_item_id": item.id,
+                    },
+                )
+
+                self._ensure_new_item_id(connection, item)
+                self._upsert_item(connection, item)
+                self._refresh_fts_row(connection, item)
+                self._upsert_candidate(connection, accepted)
+                self._insert_event(connection, add_event)
+                self._insert_event(connection, accept_event)
+                return item
+        except sqlite3.Error as exc:
+            raise IrisMemoryError(
+                "SQLite memory candidate 晋升失败",
+                path=str(self.path),
+                candidate_id=candidate_id,
+            ) from exc
 
     def _connect(self) -> sqlite3.Connection:
         """创建启用 row factory 的 SQLite 连接。"""
@@ -709,6 +781,27 @@ class SQLiteMemoryStore:
             return None
         return _row_to_item(row)
 
+    def _fetch_item_by_source_id(
+        self,
+        connection: sqlite3.Connection,
+        source_id: str,
+        scope: MemoryScope,
+    ) -> MemoryItem | None:
+        """按 source_id 在指定 scope 下查找活跃 item，用于 promotion 重试。"""
+        clause, params = _scope_clause(scope)
+        row = connection.execute(
+            f"""
+            SELECT * FROM memory_items
+            WHERE source_id = ? AND {clause} AND status = ?
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """,
+            [source_id, *params, MemoryItemStatus.ACTIVE.value],
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_item(row)
+
     def _fetch_candidate(
         self,
         connection: sqlite3.Connection,
@@ -889,6 +982,28 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         deleted_at=row["deleted_at"],
+    )
+
+
+def _item_from_candidate(candidate: MemoryCandidate, *, kind: MemoryItemKind) -> MemoryItem:
+    """从 pending candidate 构造晋升后的 L2 item。"""
+    metadata = {
+        **candidate.metadata,
+        "candidate_id": candidate.id,
+        "episode_ids": candidate.episode_ids,
+    }
+    return MemoryItem(
+        scope=candidate.scope,
+        episode_id=candidate.episode_ids[0],
+        category=candidate.category,
+        kind=kind,
+        text=candidate.text,
+        source_type=MemorySourceType.SDK,
+        source_id=candidate.id,
+        reason=candidate.reason,
+        confidence=candidate.confidence,
+        importance=candidate.importance,
+        metadata=metadata,
     )
 
 

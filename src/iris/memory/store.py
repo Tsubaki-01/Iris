@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from .models import (
+    MemoryActor,
     MemoryCandidate,
     MemoryCandidateStatus,
     MemoryCategory,
@@ -39,8 +40,8 @@ class MemoryStore(Protocol):
     ) -> MemoryItem:
         """更新长期记忆条目并记录审计事件。"""
 
-    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> None:
-        """将长期记忆条目标记为删除并记录审计事件。"""
+    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> bool:
+        """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
 
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
         """读取指定 scope 下的活跃长期记忆条目。"""
@@ -98,6 +99,17 @@ class MemoryStore(Protocol):
         event: MemoryEvent,
     ) -> MemoryCandidate:
         """更新候选记忆状态并记录审计事件。"""
+
+    def promote_candidate(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        *,
+        kind: MemoryItemKind,
+        actor: MemoryActor,
+        reason: str,
+    ) -> MemoryItem:
+        """原子晋升 pending candidate 为 L2 item。"""
 
 
 __all__ = ["MemoryStore"]

@@ -97,7 +97,7 @@ for fragment in context_bundle.fragments:
 除非 runtime 或上层策略显式授权，查询默认不跨 collection。
 
 - **`MemoryEpisode`**: 基础观察片段模型（L1）。通常为 LLM 推理响应的快照或工具行为日志。
-- **`MemoryCandidate`**: 从基础片段提取出的未确认候选组，携有原始置信度与重要度的评分。需经历判断验证阶段 `pending`/`accepted`/`rejected` 等才能最终变更为真实长期项。
+- **`MemoryCandidate`**: 从基础片段提取出的未确认候选组，携有原始置信度与重要度的评分。需经历判断验证阶段 `pending`/`accepted`/`rejected` 等才能最终变更为真实长期项；pending 候选晋升通过 `promote_candidate()` 在单个 SQLite 事务内完成。
 - **`MemoryItem`**: 标准的终态持久化知识条目结构（L2）。具备多状态管控及其相关的事件追溯 `episode_id` 标记。
 - **`MemoryEvent`**: 一套伴随系统操作发生记录的操作事件日志实体，提供基于该实体进行的审计。
 - **`MemoryQuery`**: 将文本匹配、元数据和限制边界统合到一次请求查询中配置的数据对象结构。
@@ -116,9 +116,9 @@ for fragment in context_bundle.fragments:
 基础与显式的增删查改内核服务，对存储机制执行持久化（双写）并处理所有的审计派发逻辑。
 - `observe(input: MemoryObserveInput) -> MemoryEpisode`: 忠实记录不可变更的 L1 事件片段作为发生来源备查验证并发布给投影器。
 - `remember(input: MemoryWriteInput) -> MemoryItem`: 单步直写模式，强制产生一条活跃状态的 L2 记忆。
-- `promote_candidate(candidate: MemoryCandidate, kind: MemoryItemKind, actor: MemoryActor, reason: str) -> MemoryItem`: 运用事务安全边界将指定的候选体晋级合并入稳定的 L2 项目堆中。
+- `promote_candidate(candidate_id: str, scope: MemoryScope, kind: MemoryItemKind, actor: MemoryActor, reason: str) -> MemoryItem`: 原子晋升 pending 候选，单事务写入 L2 item、ADD event、candidate accepted 状态和 CANDIDATE_ACCEPT event；已接受候选重试时返回既有 item，不重复生成。
 - `recall(query: MemoryQuery) -> list[MemorySearchResult]`: 返回根据参数结构命中的排序记录。
-- `forget(item_id: str, scope: MemoryScope, actor: MemoryActor, reason: str) -> None`: 为指定记忆打上删除审计标签及清理标识标记。
+- `forget(item_id: str, scope: MemoryScope, actor: MemoryActor, reason: str) -> bool`: 为指定记忆打上删除审计标签及清理标识标记；返回是否实际删除了 active item，未命中时不写 DELETE event 也不重建 mirror。
 - `build_context(query: MemoryQuery, max_chars: int) -> MemoryContextBundle`: 以最安全的姿态集成请求和防暴涨截断控制生成最终的上下文组。
 
 ### `iris.memory.MemoryOrchestrator`
@@ -138,6 +138,8 @@ for fragment in context_bundle.fragments:
 SQLite 连接通过 store 内部 helper 管理事务并在退出时显式关闭，避免 Windows 临时数据库文件被连接句柄占用。
 
 `MemoryStore.list_items(scope, limit=50, include_deleted=False, categories=None, kinds=None)` 会在存储层先应用 `categories` / `kinds` 过滤，再排序并执行 `limit`。因此 `memory_list(category=user, limit=10)` 表示“最近 10 条 user 记忆”，不是“最近 10 条记忆中筛 user”。`limit=None` 仅用于 mirror 全量 active item 投影。
+
+`MemoryStore.delete_item(...) -> bool` 只在命中 active item 时写 tombstone 和 DELETE event。`MemoryStore.promote_candidate(...) -> MemoryItem` 是 candidate 到 L2 item 的原子事务入口，避免 `remember()` 与 `accept_candidate()` 两步之间失败后留下 item 已创建但 candidate 仍 pending 的不一致状态。
 
 ### 文件镜像 (`FileMemoryMirror`)
 `FileMemoryMirror` 保持单一 `.iris/memory/` 文件树，便于用户人工查找；它不会按 scope 拆出隐藏目录。为避免跨 scope rebuild 互相清理，Markdown generated block 的 marker 会包含稳定 `scope_hash`：

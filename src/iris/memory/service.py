@@ -178,7 +178,7 @@ class MemoryService:
         *,
         actor: MemoryActor = MemoryActor.SDK,
         reason: str,
-    ) -> None:
+    ) -> bool:
         """删除指定 scope 下的长期记忆条目。
 
         软删除或硬删除取决于底层引擎的具体实现，但业务上要求提供显式原因
@@ -192,6 +192,9 @@ class MemoryService:
 
         Raises:
             IrisMemoryError: 当没有提供具体的删除原因时。
+
+        Returns:
+            bool: 找到 active item 并实际删除时返回 True；未命中时返回 False。
         """
         if not reason.strip():
             raise IrisMemoryError("删除记忆必须提供原因", item_id=item_id)
@@ -203,11 +206,12 @@ class MemoryService:
             item_id=item_id,
             reason=reason,
         )
-        self.store.delete_item(item_id, scope, event=event)
+        deleted = self.store.delete_item(item_id, scope, event=event)
 
         # 强制由真实数据源重构该作用域镜像，以此确保本地文件与数据库强一致。
-        if self.mirror is not None:
+        if deleted and self.mirror is not None:
             self.mirror.rebuild_from_store(self.store, scope)
+        return deleted
 
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
         """读取指定 scope 下的活跃长期记忆条目。
@@ -329,6 +333,38 @@ class MemoryService:
             list[MemoryCandidate]: 对应的候选态结果集合。
         """
         return self.store.list_candidates(scope, status=status, limit=limit)
+
+    def promote_candidate(
+        self,
+        candidate_id: str,
+        scope: MemoryScope,
+        *,
+        kind: MemoryItemKind,
+        actor: MemoryActor = MemoryActor.SDK,
+        reason: str,
+    ) -> MemoryItem:
+        """原子晋升 pending candidate 为 L2 item。
+
+        Args:
+            candidate_id (str): 目标候选记忆 ID。
+            scope (MemoryScope): 候选资源所在隔离范围。
+            kind (MemoryItemKind): 晋升后的长期记忆类型。
+            actor (MemoryActor): 发起晋升操作的参与实体。
+            reason (str): 通过晋升策略的原因。
+
+        Returns:
+            MemoryItem: 晋升后可召回的 L2 item。
+        """
+        item = self.store.promote_candidate(
+            candidate_id,
+            scope,
+            kind=kind,
+            actor=actor,
+            reason=reason,
+        )
+        if self.mirror is not None:
+            self.mirror.rebuild_from_store(self.store, scope)
+        return item
 
     def accept_candidate(
         self,

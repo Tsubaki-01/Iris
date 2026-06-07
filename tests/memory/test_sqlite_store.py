@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -8,10 +9,12 @@ from iris.exceptions import IrisMemoryError
 from iris.memory import (
     MemoryActor,
     MemoryCandidate,
+    MemoryCandidateStatus,
     MemoryCategory,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
+    MemoryItemKind,
     MemoryItemStatus,
     MemoryQuery,
     MemoryScope,
@@ -79,7 +82,7 @@ def test_sqlite_store_delete_tombstones_and_hides_item_by_default(tmp_path: Path
         ),
     )
 
-    store.delete_item(
+    deleted = store.delete_item(
         item.id,
         scope,
         event=MemoryEvent(
@@ -90,6 +93,7 @@ def test_sqlite_store_delete_tombstones_and_hides_item_by_default(tmp_path: Path
         ),
     )
 
+    assert deleted is True
     assert store.get_item(item.id, scope) is None
     assert store.list_items(scope) == []
     deleted_items = store.list_items(scope, include_deleted=True)
@@ -97,6 +101,27 @@ def test_sqlite_store_delete_tombstones_and_hides_item_by_default(tmp_path: Path
     assert MemoryEventType.DELETE in {
         event.event_type for event in store.list_events(scope, item_id=item.id)
     }
+
+
+def test_sqlite_store_delete_returns_false_when_active_item_is_missing(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    scope = _scope()
+
+    deleted = store.delete_item(
+        "missing",
+        scope,
+        event=MemoryEvent(
+            scope=scope,
+            event_type=MemoryEventType.DELETE,
+            item_id="missing",
+            reason="not found",
+        ),
+    )
+
+    assert deleted is False
+    assert store.list_events(scope) == []
 
 
 def test_sqlite_store_keeps_full_scope_isolation(tmp_path: Path) -> None:
@@ -182,6 +207,141 @@ def test_sqlite_store_rejects_duplicate_item_id_across_scopes(tmp_path: Path) ->
     assert stored is not None
     assert stored.text == "owner text"
     assert store.get_item(item.id, other_scope) is None
+
+
+def test_sqlite_store_promotes_candidate_in_single_transaction(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    scope = _scope()
+    candidate = MemoryCandidate(
+        scope=scope,
+        episode_ids=["episode-a"],
+        category=MemoryCategory.USER,
+        text="用户偏好简洁中文回答",
+        confidence=0.9,
+        importance=0.8,
+        reason="candidate reason",
+        metadata={"memory_kind": "preference"},
+    )
+    store.add_candidate(
+        candidate,
+        event=MemoryEvent(
+            scope=scope,
+            event_type=MemoryEventType.CANDIDATE_ADD,
+            episode_id="episode-a",
+            reason="test seed",
+        ),
+    )
+
+    item = store.promote_candidate(
+        candidate.id,
+        scope,
+        kind=MemoryItemKind.PREFERENCE,
+        actor=MemoryActor.SDK,
+        reason="policy accepted",
+    )
+
+    assert item.text == candidate.text
+    assert item.episode_id == "episode-a"
+    assert item.source_id == candidate.id
+    assert item.kind == MemoryItemKind.PREFERENCE
+    assert item.metadata["candidate_id"] == candidate.id
+    assert store.list_candidates(scope)[0].status == MemoryCandidateStatus.ACCEPTED
+    events = store.list_events(scope)
+    assert {event.event_type for event in events} >= {
+        MemoryEventType.ADD,
+        MemoryEventType.CANDIDATE_ACCEPT,
+    }
+    assert item.id in {event.item_id for event in events}
+    assert candidate.id in {
+        event.metadata.get("candidate_id") for event in events if event.metadata
+    }
+
+
+def test_sqlite_store_promote_candidate_is_idempotent_after_accept(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    scope = _scope()
+    candidate = MemoryCandidate(
+        scope=scope,
+        episode_ids=["episode-a"],
+        text="可重试晋升候选",
+        reason="candidate reason",
+    )
+    store.add_candidate(
+        candidate,
+        event=MemoryEvent(
+            scope=scope,
+            event_type=MemoryEventType.CANDIDATE_ADD,
+            episode_id="episode-a",
+            reason="test seed",
+        ),
+    )
+
+    first = store.promote_candidate(
+        candidate.id,
+        scope,
+        kind=MemoryItemKind.NOTE,
+        actor=MemoryActor.SDK,
+        reason="policy accepted",
+    )
+    second = store.promote_candidate(
+        candidate.id,
+        scope,
+        kind=MemoryItemKind.NOTE,
+        actor=MemoryActor.SDK,
+        reason="retry after accept",
+    )
+
+    assert second.id == first.id
+    assert [item.id for item in store.list_items(scope)] == [first.id]
+    event_types = [event.event_type for event in store.list_events(scope)]
+    assert event_types.count(MemoryEventType.ADD) == 1
+    assert event_types.count(MemoryEventType.CANDIDATE_ACCEPT) == 1
+
+
+def test_sqlite_store_promote_candidate_rolls_back_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    scope = _scope()
+    candidate = MemoryCandidate(
+        scope=scope,
+        episode_ids=["episode-a"],
+        text="失败时不能留下 item",
+        reason="candidate reason",
+    )
+    store.add_candidate(
+        candidate,
+        event=MemoryEvent(
+            scope=scope,
+            event_type=MemoryEventType.CANDIDATE_ADD,
+            episode_id="episode-a",
+            reason="test seed",
+        ),
+    )
+
+    def _fail_candidate_update(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("simulated candidate update failure")
+
+    monkeypatch.setattr(store, "_upsert_candidate", _fail_candidate_update)
+
+    with pytest.raises(IrisMemoryError):
+        store.promote_candidate(
+            candidate.id,
+            scope,
+            kind=MemoryItemKind.NOTE,
+            actor=MemoryActor.SDK,
+            reason="policy accepted",
+        )
+
+    assert store.list_items(scope) == []
+    assert store.list_candidates(scope)[0].status == MemoryCandidateStatus.PENDING
+    assert MemoryEventType.ADD not in {event.event_type for event in store.list_events(scope)}
+    assert MemoryEventType.CANDIDATE_ACCEPT not in {
+        event.event_type for event in store.list_events(scope)
+    }
 
 
 def test_sqlite_store_rejects_duplicate_candidate_id_across_scopes(tmp_path: Path) -> None:

@@ -27,7 +27,6 @@ from .models import (
     MemoryObserveInput,
     MemoryQuery,
     MemoryScope,
-    MemoryWriteInput,
 )
 from .service import MemoryService
 
@@ -210,23 +209,10 @@ class MemoryOrchestrator:
                     reason=decision.reason,
                 )
                 continue
-            item = self.service.remember(
-                MemoryWriteInput(
-                    scope=candidate.scope,
-                    text=candidate.text,
-                    reason=candidate.reason,
-                    category=candidate.category,
-                    kind=_candidate_kind(candidate),
-                    episode_id=candidate.episode_ids[0],
-                    source_id=candidate.id,
-                    confidence=candidate.confidence,
-                    importance=candidate.importance,
-                    metadata={**candidate.metadata, "candidate_id": candidate.id},
-                )
-            )
-            self.service.accept_candidate(
+            item = self.service.promote_candidate(
                 candidate.id,
                 scope,
+                kind=_candidate_kind(candidate),
                 actor=MemoryActor.SDK,
                 reason=decision.reason,
             )
