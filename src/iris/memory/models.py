@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # endregion
 
+WORKSPACE_SHARED_AGENT_ID = "__workspace__"
+WORKSPACE_SHARED_COLLECTION = "shared"
+
+
 def _new_id() -> str:
     """生成无外部依赖的稳定字符串 ID。"""
     return uuid.uuid4().hex
@@ -157,6 +161,25 @@ class MemoryScope(BaseModel):
         if self.visibility == MemoryVisibility.SESSION and self.session_id is None:
             raise ValueError("session 可见记忆必须提供 session_id")
         return self
+
+
+def workspace_shared_scope(workspace_id: str) -> MemoryScope:
+    """构造约定的 workspace 共享记忆 scope。
+
+    Args:
+        workspace_id: 当前 workspace 标识。
+
+    Returns:
+        MemoryScope: 固定使用 `agent_id="__workspace__"`、
+            `collection="shared"`、`visibility=workspace` 且无 session 的共享 scope。
+    """
+    return MemoryScope(
+        workspace_id=workspace_id,
+        agent_id=WORKSPACE_SHARED_AGENT_ID,
+        collection=WORKSPACE_SHARED_COLLECTION,
+        visibility=MemoryVisibility.WORKSPACE,
+        session_id=None,
+    )
 
 
 class MemoryArtifactRef(BaseModel):

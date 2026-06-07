@@ -9,6 +9,9 @@ from iris.memory import (
     MemoryScope,
     MemoryVisibility,
     MemoryWriteInput,
+    WORKSPACE_SHARED_AGENT_ID,
+    WORKSPACE_SHARED_COLLECTION,
+    workspace_shared_scope,
 )
 
 
@@ -25,6 +28,16 @@ def test_session_visibility_requires_session_id() -> None:
 def test_scope_text_fields_must_not_be_empty() -> None:
     with pytest.raises(ValidationError):
         MemoryScope(workspace_id=" ", agent_id="agent", collection="default")
+
+
+def test_workspace_shared_scope_uses_stable_convention() -> None:
+    scope = workspace_shared_scope("workspace")
+
+    assert scope.workspace_id == "workspace"
+    assert scope.agent_id == WORKSPACE_SHARED_AGENT_ID
+    assert scope.collection == WORKSPACE_SHARED_COLLECTION
+    assert scope.visibility == MemoryVisibility.WORKSPACE
+    assert scope.session_id is None
 
 
 def test_query_limit_is_positive_and_capped() -> None:

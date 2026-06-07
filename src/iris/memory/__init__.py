@@ -37,7 +37,10 @@ from .models import (
     MemorySourceType,
     MemoryVisibility,
     MemoryWriteInput,
+    WORKSPACE_SHARED_AGENT_ID,
+    WORKSPACE_SHARED_COLLECTION,
     WorkingMemoryFrame,
+    workspace_shared_scope,
 )
 from .orchestrator import (
     MemoryClassifier,
@@ -120,9 +123,12 @@ __all__ = [
     "RuleMemoryClassifier",
     "RuleMemoryExtractor",
     "SQLiteMemoryStore",
+    "WORKSPACE_SHARED_AGENT_ID",
+    "WORKSPACE_SHARED_COLLECTION",
     "WorkingMemoryFrame",
     "build_memory_service_from_config",
     "default_memory_scope_factory",
     "register_memory_tools",
     "resolve_memory_path",
+    "workspace_shared_scope",
 ]

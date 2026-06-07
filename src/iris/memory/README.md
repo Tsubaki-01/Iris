@@ -84,6 +84,7 @@ for fragment in context_bundle.fragments:
 | workspace | 项目共享记忆 | 必须为 None | 建议固定为 __workspace__ |
 
 `MemoryScopeConfig.to_scope()` 会在 `visibility != session` 时忽略运行时 `session_id`，保证 agent/workspace 级记忆不会被会话上下文意外切分。
+项目共享记忆使用 `workspace_shared_scope(workspace_id)` 构造，内部固定采用 `agent_id="__workspace__"`、`collection="shared"`、`visibility=workspace`。
 
 `collection` 当前是 scope 内的命名空间字段，用于为未来的用途分区预留隔离边界；它已经参与 SQLite 硬过滤，但还不是一等业务对象。当前不提供 collection registry、collection 管理 API、跨 collection 查询或由工具入参切换 collection 的能力。现阶段建议只使用少量约定值：
 
