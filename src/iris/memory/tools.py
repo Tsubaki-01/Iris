@@ -196,9 +196,12 @@ class MemoryListTool(MemoryTool[MemoryListToolInput]):
     ) -> ToolResult:
         """调用 MemoryService.list_items 执行列表读取。"""
         scope = self.scope_factory(context)
-        items = self.service.list_items(scope, limit=params.limit)
-        if params.category is not None:
-            items = [item for item in items if item.category == params.category]
+        categories = [params.category] if params.category is not None else None
+        items = self.service.list_items(
+            scope,
+            limit=params.limit,
+            categories=categories,
+        )
         return self._json_result({"items": [_item_payload(item) for item in items]})
 
 

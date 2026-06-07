@@ -34,7 +34,7 @@ Mirror 文件大致长这样：
 是按记忆类别投影的 Markdown 文件。每条记忆由稳定 marker 包裹，便于后续覆盖更新：
 
 ```markdown
-<!-- iris-memory-item:mem_123 -->
+<!-- iris-memory-item:scopehash12345678:mem_123 -->
 ### Memory Item mem_123
 
 - id: mem_123
@@ -47,13 +47,18 @@ Mirror 文件大致长这样：
 - importance: 0.7
 
 用户偏好简洁中文回答
-<!-- /iris-memory-item:mem_123 -->
+<!-- /iris-memory-item:scopehash12345678:mem_123 -->
 ```
 
-`Sessions/recent_events.md` 记录最近审计事件：
+`Sessions/recent_events.md` 记录每个 scope 最近 100 条审计事件：
 
 ```markdown
-<!-- iris-memory-event:evt_123 -->
+# Recent Memory Events
+
+This file is a generated recent projection. It keeps only the latest 100 events per scope.
+The complete audit logs shall be subject to SQLite memory_events.
+
+<!-- iris-memory-event:scopehash12345678:evt_123 -->
 ### Memory Event evt_123
 
 - id: evt_123
@@ -62,7 +67,7 @@ Mirror 文件大致长这样：
 - scope: workspace=workspace, agent=agent, collection=default, visibility=agent
 - created_at: 2026-06-03T10:00:00
 - reason: user message observed
-<!-- /iris-memory-event:evt_123 -->
+<!-- /iris-memory-event:scopehash12345678:evt_123 -->
 ```
 
 `Tasks/task.json` 是任务状态的结构化投影：
@@ -94,6 +99,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -150,11 +156,24 @@ GENERATED_MARKDOWN_FILES: tuple[str, ...] = (
     "Sessions/session_items.md",
     "Sessions/recent_events.md",
 )
+GENERATED_ITEM_MARKDOWN_FILES: tuple[str, ...] = tuple(
+    relative_path
+    for relative_path in GENERATED_MARKDOWN_FILES
+    if relative_path != "Sessions/recent_events.md"
+)
 JSON_DEFAULTS: dict[str, dict[str, Any]] = {
     "User/profile.json": {},
     "Reference/links.json": {"links": []},
     "Tasks/task.json": {"items": []},
 }
+RECENT_EVENTS_LIMIT = 100
+RECENT_EVENTS_PATH = "Sessions/recent_events.md"
+RECENT_EVENTS_HEADER = (
+    "# Recent Memory Events\n\n"
+    "This file is a generated recent projection. It keeps only the latest "
+    f"{RECENT_EVENTS_LIMIT} events per scope.\n"
+    "The complete audit logs shall be subject to SQLite memory_events.\n"
+)
 # endregion
 
 
@@ -175,13 +194,16 @@ class FileMemoryMirror:
                 path = self._resolve_relative(relative_path)
                 if path.exists():
                     continue
-                if relative_path.endswith(".json"):
+                if relative_path == RECENT_EVENTS_PATH:
+                    path.write_text(RECENT_EVENTS_HEADER, encoding="utf-8")
+                elif relative_path.endswith(".json"):
                     path.write_text(
                         _dump_pretty_json(JSON_DEFAULTS.get(relative_path, {})),
                         encoding="utf-8",
                     )
                 else:
                     path.write_text("", encoding="utf-8")
+            self._ensure_recent_events_header()
         except OSError as exc:
             raise IrisMemoryError("memory mirror 初始化失败", root=str(self.root)) from exc
 
@@ -192,7 +214,13 @@ class FileMemoryMirror:
         self.initialize_layout()
         target = self._target_for_item(item)
         block = self._render_item_markdown(item)
-        self._upsert_markdown_block(target, item.id, block, marker_type="item")
+        self._upsert_markdown_block(
+            target,
+            item.id,
+            block,
+            marker_type="item",
+            scope=item.scope,
+        )
         if item.category == MemoryCategory.TASK and item.kind == MemoryItemKind.TASK_STATE:
             self._upsert_task_state(item)
 
@@ -201,24 +229,24 @@ class FileMemoryMirror:
         self.initialize_layout()
         block = self._render_event_markdown(event)
         self._upsert_markdown_block(
-            "Sessions/recent_events.md",
+            RECENT_EVENTS_PATH,
             event.id,
             block,
             marker_type="event",
+            scope=event.scope,
         )
+        self._trim_recent_events_for_scope(event.scope)
 
     def rebuild_from_store(self, store: MemoryStore, scope: MemoryScope) -> None:
         """从权威 store 确定性重建 active mirror 文件。"""
         self.initialize_layout()
         try:
-            for relative_path in GENERATED_MARKDOWN_FILES:
-                self._resolve_relative(relative_path).write_text("", encoding="utf-8")
-            self._resolve_relative("Tasks/task.json").write_text(
-                _dump_pretty_json({"items": []}),
-                encoding="utf-8",
-            )
+            for relative_path in GENERATED_ITEM_MARKDOWN_FILES:
+                self._remove_scope_markdown_blocks(relative_path, "item", scope)
+            self._remove_scope_markdown_blocks(RECENT_EVENTS_PATH, "event", scope)
+            self._remove_task_states_for_scope(scope)
             items = sorted(
-                store.list_items(scope, limit=100),
+                store.list_items(scope, limit=None),
                 key=lambda item: (
                     item.category.value,
                     item.kind.value,
@@ -229,7 +257,7 @@ class FileMemoryMirror:
             for item in items:
                 self.mirror_item(item)
             events = sorted(
-                store.list_events(scope, limit=100),
+                store.list_events(scope, limit=RECENT_EVENTS_LIMIT),
                 key=lambda event: (event.created_at, event.id),
             )
             for event in events:
@@ -249,6 +277,24 @@ class FileMemoryMirror:
         except ValueError as exc:
             raise IrisMemoryError("memory mirror 路径不能逃逸 root", path=relative_path) from exc
         return resolved
+
+    def _ensure_recent_events_header(self) -> None:
+        """确保 recent events 文件带有 recent-only 投影说明。"""
+        path = self._resolve_relative(RECENT_EVENTS_PATH)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        if content.startswith(RECENT_EVENTS_HEADER):
+            return
+        stripped = content.lstrip()
+        if stripped.startswith(RECENT_EVENTS_HEADER.rstrip()):
+            path.write_text(_normalize_markdown_content(stripped), encoding="utf-8")
+            return
+        if stripped:
+            path.write_text(
+                _normalize_markdown_content(f"{RECENT_EVENTS_HEADER}\n{stripped}"),
+                encoding="utf-8",
+            )
+            return
+        path.write_text(RECENT_EVENTS_HEADER, encoding="utf-8")
 
     def _render_item_markdown(self, item: MemoryItem) -> str:
         """将记忆条目渲染为稳定 Markdown block。"""
@@ -312,15 +358,17 @@ class FileMemoryMirror:
         block: str,
         *,
         marker_type: str,
+        scope: MemoryScope,
     ) -> None:
         """按 marker 替换或追加一段生成内容。"""
         path = self._resolve_relative(relative_path)
         try:
             content = path.read_text(encoding="utf-8") if path.exists() else ""
-            pattern = _block_pattern(marker_type, entity_id)
-            generated = _wrap_block(marker_type, entity_id, block)
+            scope_hash = _scope_hash(scope)
+            pattern = _block_pattern(marker_type, scope_hash, entity_id)
+            generated = _wrap_block(marker_type, scope_hash, entity_id, block)
             if re.search(pattern, content, flags=re.DOTALL):
-                new_content = re.sub(pattern, generated, content, flags=re.DOTALL)
+                new_content = re.sub(pattern, lambda _: generated, content, flags=re.DOTALL)
             else:
                 prefix = content.rstrip()
                 new_content = f"{prefix}\n\n{generated}" if prefix else generated
@@ -328,11 +376,44 @@ class FileMemoryMirror:
         except OSError as exc:
             raise IrisMemoryError("memory mirror 写入失败", path=str(path)) from exc
 
+    def _remove_scope_markdown_blocks(
+        self,
+        relative_path: str,
+        marker_type: str,
+        scope: MemoryScope,
+    ) -> None:
+        """删除指定文件中属于当前 scope 的 generated Markdown blocks。"""
+        path = self._resolve_relative(relative_path)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        pattern = _scope_blocks_pattern(marker_type, scope)
+        cleaned = re.sub(pattern, lambda _: "\n\n", content, flags=re.DOTALL)
+        if relative_path == RECENT_EVENTS_PATH:
+            cleaned = _with_recent_events_header(cleaned)
+        path.write_text(_normalize_markdown_content(cleaned), encoding="utf-8")
+
+    def _trim_recent_events_for_scope(self, scope: MemoryScope) -> None:
+        """只保留指定 scope 的最近 N 条事件投影。"""
+        path = self._resolve_relative(RECENT_EVENTS_PATH)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        matches = list(re.finditer(_scope_blocks_pattern("event", scope), content, re.DOTALL))
+        overflow = len(matches) - RECENT_EVENTS_LIMIT
+        if overflow <= 0:
+            self._ensure_recent_events_header()
+            return
+        remove_spans = [match.span() for match in matches[:overflow]]
+        trimmed = _remove_spans(content, remove_spans)
+        path.write_text(
+            _normalize_markdown_content(_with_recent_events_header(trimmed)),
+            encoding="utf-8",
+        )
+
     def _upsert_task_state(self, item: MemoryItem) -> None:
         """更新结构化 task mirror。"""
         path = self._resolve_relative("Tasks/task.json")
         payload = {
             "id": item.id,
+            "scope_hash": _scope_hash(item.scope),
+            "scope": _scope_summary(item.scope),
             "text": item.text,
             "metadata": item.metadata,
             "updated_at": item.updated_at,
@@ -345,10 +426,31 @@ class FileMemoryMirror:
                 if isinstance(entry, dict) and entry.get("id") != item.id
             ]
             items.append(payload)
-            current["items"] = sorted(items, key=lambda entry: str(entry.get("id", "")))
+            current["items"] = sorted(
+                items,
+                key=lambda entry: (
+                    str(entry.get("scope_hash", "")),
+                    str(entry.get("id", "")),
+                ),
+            )
             path.write_text(_dump_pretty_json(current), encoding="utf-8")
         except (OSError, TypeError) as exc:
             raise IrisMemoryError("memory mirror task.json 写入失败", path=str(path)) from exc
+
+    def _remove_task_states_for_scope(self, scope: MemoryScope) -> None:
+        """删除 task.json 中属于当前 scope 的结构化投影。"""
+        path = self._resolve_relative("Tasks/task.json")
+        scope_hash = _scope_hash(scope)
+        try:
+            current = _load_json_object(path)
+            current["items"] = [
+                entry
+                for entry in current.get("items", [])
+                if not isinstance(entry, dict) or entry.get("scope_hash") != scope_hash
+            ]
+            path.write_text(_dump_pretty_json(current), encoding="utf-8")
+        except (OSError, TypeError) as exc:
+            raise IrisMemoryError("memory mirror task.json 重建失败", path=str(path)) from exc
 
 
 def _scope_summary(scope: MemoryScope) -> str:
@@ -364,22 +466,74 @@ def _scope_summary(scope: MemoryScope) -> str:
     return ", ".join(parts)
 
 
-def _wrap_block(marker_type: str, entity_id: str, block: str) -> str:
+def _scope_key(scope: MemoryScope) -> str:
+    """生成稳定 scope key，用于派生 marker hash。"""
+    session_id = scope.session_id or ""
+    return (
+        f"workspace={scope.workspace_id}|agent={scope.agent_id}|"
+        f"collection={scope.collection}|visibility={scope.visibility.value}|"
+        f"session={session_id}"
+    )
+
+
+def _scope_hash(scope: MemoryScope) -> str:
+    """生成短 hash，避免把长 scope 直接塞进 marker。"""
+    return hashlib.sha256(_scope_key(scope).encode("utf-8")).hexdigest()[:16]
+
+
+def _wrap_block(marker_type: str, scope_hash: str, entity_id: str, block: str) -> str:
     """包裹生成内容，便于后续稳定替换。"""
     return (
-        f"<!-- iris-memory-{marker_type}:{entity_id} -->\n"
+        f"<!-- iris-memory-{marker_type}:{scope_hash}:{entity_id} -->\n"
         f"{block.rstrip()}\n"
-        f"<!-- /iris-memory-{marker_type}:{entity_id} -->"
+        f"<!-- /iris-memory-{marker_type}:{scope_hash}:{entity_id} -->"
     )
 
 
-def _block_pattern(marker_type: str, entity_id: str) -> str:
+def _block_pattern(marker_type: str, scope_hash: str, entity_id: str) -> str:
     """生成匹配指定生成块的正则。"""
+    escaped_scope_hash = re.escape(scope_hash)
     escaped_id = re.escape(entity_id)
     return (
-        rf"<!-- iris-memory-{marker_type}:{escaped_id} -->.*?"
-        rf"<!-- /iris-memory-{marker_type}:{escaped_id} -->"
+        rf"<!-- iris-memory-{marker_type}:{escaped_scope_hash}:{escaped_id} -->.*?"
+        rf"<!-- /iris-memory-{marker_type}:{escaped_scope_hash}:{escaped_id} -->"
     )
+
+
+def _scope_blocks_pattern(marker_type: str, scope: MemoryScope) -> str:
+    """生成匹配同一 scope 下全部生成块的正则。"""
+    escaped_scope_hash = re.escape(_scope_hash(scope))
+    return (
+        rf"(?:\r?\n)*<!-- iris-memory-{marker_type}:{escaped_scope_hash}:[^>\n]+ -->.*?"
+        rf"<!-- /iris-memory-{marker_type}:{escaped_scope_hash}:[^>\n]+ -->(?:\r?\n)*"
+    )
+
+
+def _normalize_markdown_content(content: str) -> str:
+    """清理生成块删除后留下的首尾空白。"""
+    stripped = content.strip()
+    return f"{stripped}\n" if stripped else ""
+
+
+def _with_recent_events_header(content: str) -> str:
+    """给 recent events 内容补上固定文件头。"""
+    stripped = content.lstrip()
+    if stripped.startswith(RECENT_EVENTS_HEADER.rstrip()):
+        return stripped
+    if stripped:
+        return f"{RECENT_EVENTS_HEADER}\n{stripped}"
+    return RECENT_EVENTS_HEADER
+
+
+def _remove_spans(content: str, spans: list[tuple[int, int]]) -> str:
+    """按 span 删除文本片段。"""
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(content[cursor:start])
+        cursor = end
+    pieces.append(content[cursor:])
+    return "".join(pieces)
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:

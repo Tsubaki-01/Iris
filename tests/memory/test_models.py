@@ -4,13 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from iris.memory import (
+    WORKSPACE_SHARED_AGENT_ID,
+    WORKSPACE_SHARED_COLLECTION,
     MemoryArtifactRef,
     MemoryQuery,
     MemoryScope,
     MemoryVisibility,
     MemoryWriteInput,
-    WORKSPACE_SHARED_AGENT_ID,
-    WORKSPACE_SHARED_COLLECTION,
     workspace_shared_scope,
 )
 

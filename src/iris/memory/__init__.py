@@ -15,6 +15,8 @@ from .config import (
 from .context import MEMORY_CONTEXT_WARNING, MemoryContextBuilder
 from .mirror import FileMemoryMirror
 from .models import (
+    WORKSPACE_SHARED_AGENT_ID,
+    WORKSPACE_SHARED_COLLECTION,
     MemoryActor,
     MemoryArtifactRef,
     MemoryCandidate,
@@ -37,8 +39,6 @@ from .models import (
     MemorySourceType,
     MemoryVisibility,
     MemoryWriteInput,
-    WORKSPACE_SHARED_AGENT_ID,
-    WORKSPACE_SHARED_COLLECTION,
     WorkingMemoryFrame,
     workspace_shared_scope,
 )

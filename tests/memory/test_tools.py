@@ -195,6 +195,44 @@ async def test_memory_list_and_get_are_scope_isolated(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_list_applies_category_before_limit(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    scope_factory = default_memory_scope_factory(MemoryConfig())
+    context = ToolExecutionContext(workspace_root=tmp_path, agent_id="agent")
+    scope = scope_factory(context)
+    user_item = service.remember(
+        MemoryWriteInput(
+            scope=scope,
+            text="较早的用户记忆",
+            reason="test seed",
+            category=MemoryCategory.USER,
+        )
+    )
+    service.remember(
+        MemoryWriteInput(
+            scope=scope,
+            text="较新的任务记忆",
+            reason="test seed",
+            category=MemoryCategory.TASK,
+        )
+    )
+
+    result = await ToolExecutor(
+        register_memory_tools(service=service, scope_factory=scope_factory)
+    ).execute_one(
+        ToolUseBlock(
+            id="list_1",
+            name="memory_list",
+            input={"category": "user", "limit": 1},
+        ),
+        context,
+    )
+
+    payload = json.loads(result.model_content)
+    assert [item["id"] for item in payload["items"]] == [user_item.id]
+
+
+@pytest.mark.asyncio
 async def test_memory_tool_input_cannot_override_scope(tmp_path: Path) -> None:
     service = _service(tmp_path)
     result = await ToolExecutor(

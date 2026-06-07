@@ -19,11 +19,13 @@ from .models import (
     MemoryActor,
     MemoryCandidate,
     MemoryCandidateStatus,
+    MemoryCategory,
     MemoryContextBundle,
     MemoryEpisode,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
+    MemoryItemKind,
     MemoryObserveInput,
     MemoryQuery,
     MemoryScope,
@@ -219,17 +221,31 @@ class MemoryService:
         """
         return self.store.get_item(item_id, scope)
 
-    def list_items(self, scope: MemoryScope, *, limit: int = 50) -> list[MemoryItem]:
+    def list_items(
+        self,
+        scope: MemoryScope,
+        *,
+        limit: int | None = 50,
+        categories: list[MemoryCategory] | None = None,
+        kinds: list[MemoryItemKind] | None = None,
+    ) -> list[MemoryItem]:
         """列出指定 scope 下的近期活跃长期记忆条目。
 
         Args:
             scope (MemoryScope): 获取资源所在的作用域。
-            limit (int): 最大返回数量约束。
+            limit (int | None): 最大返回数量约束；None 表示读取完整 active 投影。
+            categories (list[MemoryCategory] | None): 可选的类别过滤条件。
+            kinds (list[MemoryItemKind] | None): 可选的条目类型过滤条件。
 
         Returns:
             list[MemoryItem]: 符合限制大小的数据片段集。
         """
-        return self.store.list_items(scope, limit=limit)
+        return self.store.list_items(
+            scope,
+            limit=limit,
+            categories=categories,
+            kinds=kinds,
+        )
 
     def list_events(
         self,

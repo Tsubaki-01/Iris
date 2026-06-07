@@ -8,6 +8,7 @@ from iris.exceptions import IrisMemoryError
 from iris.memory import (
     MemoryActor,
     MemoryCandidate,
+    MemoryCategory,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
@@ -115,6 +116,39 @@ def test_sqlite_store_keeps_full_scope_isolation(tmp_path: Path) -> None:
     )
 
     assert store.search(MemoryQuery(scope=other_scope, text="agent-a")) == []
+
+
+def test_sqlite_store_filters_items_before_limit(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
+    scope = _scope()
+    user_item = MemoryItem(
+        scope=scope,
+        text="较早的用户记忆",
+        category=MemoryCategory.USER,
+        created_at="2026-01-01T00:00:00",
+        updated_at="2026-01-01T00:00:00",
+    )
+    task_item = MemoryItem(
+        scope=scope,
+        text="较新的任务记忆",
+        category=MemoryCategory.TASK,
+        created_at="2026-01-02T00:00:00",
+        updated_at="2026-01-02T00:00:00",
+    )
+    for item in (user_item, task_item):
+        store.add_item(
+            item,
+            event=MemoryEvent(
+                scope=scope,
+                event_type=MemoryEventType.ADD,
+                item_id=item.id,
+                reason="test seed",
+            ),
+        )
+
+    items = store.list_items(scope, limit=1, categories=[MemoryCategory.USER])
+
+    assert [item.id for item in items] == [user_item.id]
 
 
 def test_sqlite_store_rejects_duplicate_item_id_across_scopes(tmp_path: Path) -> None:

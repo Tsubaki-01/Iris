@@ -137,6 +137,21 @@ for fragment in context_bundle.fragments:
 
 SQLite 连接通过 store 内部 helper 管理事务并在退出时显式关闭，避免 Windows 临时数据库文件被连接句柄占用。
 
+`MemoryStore.list_items(scope, limit=50, include_deleted=False, categories=None, kinds=None)` 会在存储层先应用 `categories` / `kinds` 过滤，再排序并执行 `limit`。因此 `memory_list(category=user, limit=10)` 表示“最近 10 条 user 记忆”，不是“最近 10 条记忆中筛 user”。`limit=None` 仅用于 mirror 全量 active item 投影。
+
+### 文件镜像 (`FileMemoryMirror`)
+`FileMemoryMirror` 保持单一 `.iris/memory/` 文件树，便于用户人工查找；它不会按 scope 拆出隐藏目录。为避免跨 scope rebuild 互相清理，Markdown generated block 的 marker 会包含稳定 `scope_hash`：
+
+```md
+<!-- iris-memory-item:{scope_hash}:{item_id} -->
+...
+<!-- /iris-memory-item:{scope_hash}:{item_id} -->
+```
+
+`rebuild_from_store(store, scope)` 只删除当前 scope 的 generated blocks，然后从 SQLite 重建当前 scope 的投影；其它 scope 的 blocks 会保留。`Tasks/task.json` 同样通过 `scope_hash` 区分不同 scope 的结构化任务条目。
+
+`Sessions/recent_events.md` 是最近事件投影，只保留每个 scope 最近 100 条事件，并在文件头说明完整审计日志以 SQLite `memory_events` 为准。其它 Markdown item mirror 是 active item 的全量投影，不再限制为最近 100 条。block 替换会以字面字符串写入内容，避免 Windows 路径或正则片段中的 `\1`、`\g<name>` 被 `re.sub` 当作替换语法解释。
+
 ### 工具和其它组件 (`tools.py` 与 `context.py`)
 - **`MemoryContextBuilder`**: 用于保障不宕机超出 LLM 负载上下文的安全封装生成器。如未超出阈值按原样传递，溢出尾部做预定剪断标记并丢入警示常量。
-- **`register_memory_tools(...)`**: 构建并挂载记忆 `Search`、`Get` 及 `List` 读取组件给大语境框架交互体系使用，保持严格沙箱安全仅读操作。
+- **`register_memory_tools(...)`**: 构建并挂载记忆 `Search`、`Get` 及 `List` 读取组件给大语境框架交互体系使用，保持严格沙箱安全仅读操作。`memory_list` 的 category 过滤会下推到 store，再应用 limit。

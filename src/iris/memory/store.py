@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol
 
 from .models import (
     MemoryCandidate,
     MemoryCandidateStatus,
+    MemoryCategory,
     MemoryEpisode,
     MemoryEvent,
     MemoryItem,
+    MemoryItemKind,
     MemoryItemPatch,
     MemoryQuery,
     MemoryScope,
@@ -49,10 +52,16 @@ class MemoryStore(Protocol):
         self,
         scope: MemoryScope,
         *,
-        limit: int = 50,
+        limit: int | None = 50,
         include_deleted: bool = False,
+        categories: Sequence[MemoryCategory] | None = None,
+        kinds: Sequence[MemoryItemKind] | None = None,
     ) -> list[MemoryItem]:
-        """列出指定 scope 下的长期记忆条目。"""
+        """列出指定 scope 下的长期记忆条目。
+
+        `categories` 与 `kinds` 必须由 store 在读取层过滤，再应用 `limit`。
+        `limit=None` 表示读取完整投影，主要供 mirror 重建使用。
+        """
 
     def list_events(
         self,

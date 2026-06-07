@@ -313,18 +313,27 @@ class SQLiteMemoryStore:
         self,
         scope: MemoryScope,
         *,
-        limit: int = 50,
+        limit: int | None = 50,
         include_deleted: bool = False,
+        categories: Sequence[MemoryCategory] | None = None,
+        kinds: Sequence[MemoryItemKind] | None = None,
     ) -> list[MemoryItem]:
         """列出指定 scope 下的长期记忆条目。"""
-        safe_limit = _safe_limit(limit)
         clause, params = _scope_clause(scope)
         sql = f"SELECT * FROM memory_items WHERE {clause}"
         if not include_deleted:
             sql += " AND status = ?"
             params.append(MemoryItemStatus.ACTIVE.value)
-        sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
-        params.append(safe_limit)
+        if categories:
+            sql += f" AND category IN ({_placeholders(categories)})"
+            params.extend(category.value for category in categories)
+        if kinds:
+            sql += f" AND kind IN ({_placeholders(kinds)})"
+            params.extend(kind.value for kind in kinds)
+        sql += " ORDER BY updated_at DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(_safe_limit(limit))
         try:
             with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
