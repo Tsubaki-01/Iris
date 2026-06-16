@@ -194,7 +194,6 @@ cython_debug/
 .secrets/
 secrets/
 .credentials/
-.codex/
 *.secret
 *.secrets
 *.token

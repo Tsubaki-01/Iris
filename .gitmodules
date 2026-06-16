@@ -1,0 +1,3 @@
+[submodule ".codex"]
+	path = .codex
+	url = https://github.com/Tsubaki-01/iris.private
