@@ -37,6 +37,12 @@ class IrisExecutionError(IrisError):
     """任务执行过程中发生异常时抛出。"""
 
 
+# ----- Context 领域 -----
+
+
+class IrisContextError(IrisError, ValueError):
+    """Context System 相关错误的基类。"""
+
 # ----- 提供者 (Provider) 领域 -----
 
 
