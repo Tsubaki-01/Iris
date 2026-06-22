@@ -6,6 +6,7 @@ from .exceptions import (
     IrisAuthenticationError,
     # Core / Config
     IrisConfigError,
+    IrisContextError,
     IrisError,
     IrisExecutionError,
     IrisMCPConnectionError,
@@ -33,6 +34,7 @@ from .exceptions import (
 __all__ = [
     "IrisError",
     "IrisConfigError",
+    "IrisContextError",
     "IrisExecutionError",
     "IrisParserError",
     "IrisValidationError",
