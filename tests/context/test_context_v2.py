@@ -3,12 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from iris.context import (
     ContextBuilder,
     ContextBuildInput,
     ContextPosition,
     ContextSlot,
+    ContextTemplateSpec,
     MemoryContextInput,
     MemoryContextItem,
     SystemPromptSpec,
@@ -25,7 +27,7 @@ def test_inline_system_memory_and_runtime_context_messages_are_generated() -> No
             agent_id="agent",
             system=SystemPromptSpec(inline="你是助手"),
             memory=MemoryContextInput(
-                items=[
+                entries=[
                     MemoryContextItem(
                         id="mem_1",
                         source="sqlite",
@@ -42,7 +44,9 @@ def test_inline_system_memory_and_runtime_context_messages_are_generated() -> No
 
     assert output.system_message.role == Role.SYSTEM
     assert output.system_message.text.startswith('<system_context version="1">')
-    assert "<base_instructions>你是助手</base_instructions>" in output.system_message.text
+    assert (
+        "<base_instructions>你是助手</base_instructions>" in output.system_message.text
+    )
 
     assert len(output.memory_messages) == 1
     memory_message = output.memory_messages[0]
@@ -104,13 +108,17 @@ def test_slots_are_filtered_and_sorted() -> None:
     text = output.system_message.text
     assert "disabled" not in text
     assert text.index("base") < text.index("early") < text.index("late")
-    assert [slot.name for slot in output.slots] == ["base_instructions", "early", "late"]
+    assert [slot.name for slot in output.slots] == [
+        "base_instructions",
+        "early",
+        "late",
+    ]
 
 
 def test_template_system_prompt_uses_xml_jinja_file(tmp_path: Path) -> None:
     template = tmp_path / "system.xml.j2"
     template.write_text(
-        "<system_context version=\"{{ version }}\">"
+        '<system_context version="{{ version }}">'
         "<identity>{{ system.identity }}</identity>"
         "<slot_count>{{ slots|length }}</slot_count>"
         "</system_context>",
@@ -151,6 +159,157 @@ def test_template_errors_use_context_exception(tmp_path: Path) -> None:
         )
 
 
+def test_template_runtime_errors_use_context_exception(tmp_path: Path) -> None:
+    template = tmp_path / "system.xml.j2"
+    template.write_text("{{ missing_value }}", encoding="utf-8")
+
+    with pytest.raises(IrisContextError):
+        ContextBuilder().build(
+            ContextBuildInput(
+                agent_id="agent",
+                template_base_dir=tmp_path,
+                system=SystemPromptSpec(
+                    mode="template",
+                    template_path=template.name,
+                ),
+            )
+        )
+
+
+def test_memory_template_uses_documented_entries(
+    tmp_path: Path,
+) -> None:
+    template = tmp_path / "memory.xml.j2"
+    template.write_text(
+        """
+<memory_context version="{{ version }}">
+{% for item in memory.entries %}
+  <memory id="{{ item.id }}" source="{{ item.source }}">{{ item.text }}</memory>
+{% endfor %}
+</memory_context>
+""".strip(),
+        encoding="utf-8",
+    )
+
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            agent_id="agent",
+            template_base_dir=tmp_path,
+            system=SystemPromptSpec(inline="你是助手"),
+            templates=ContextTemplateSpec(memory=template.name),
+            memory=MemoryContextInput(
+                entries=[
+                    MemoryContextItem(
+                        id="mem_1",
+                        source="sqlite",
+                        text="abcdefghij",
+                    )
+                ],
+            ),
+        )
+    )
+
+    assert output.memory_messages[0].text == (
+        '<memory_context version="1">\n'
+        '  <memory id="mem_1" source="sqlite">abcdefghij</memory>\n'
+        "</memory_context>"
+    )
+
+
+def test_template_paths_reject_absolute_and_parent_segments(tmp_path: Path) -> None:
+    absolute_template = tmp_path / "system.xml.j2"
+    absolute_template.write_text("<system_context />", encoding="utf-8")
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+
+    with pytest.raises(IrisContextError):
+        ContextBuilder().build(
+            ContextBuildInput(
+                agent_id="agent",
+                template_base_dir=tmp_path,
+                system=SystemPromptSpec(
+                    mode="template",
+                    template_path=absolute_template,
+                ),
+            )
+        )
+
+    with pytest.raises(IrisContextError):
+        ContextBuilder().build(
+            ContextBuildInput(
+                agent_id="agent",
+                template_base_dir=config_dir,
+                system=SystemPromptSpec(
+                    mode="template",
+                    template_path="../system.xml.j2",
+                ),
+            )
+        )
+
+
+def test_relative_template_path_without_base_does_not_use_cwd() -> None:
+    with pytest.raises(IrisContextError):
+        ContextBuilder().build(
+            ContextBuildInput(
+                agent_id="agent",
+                system=SystemPromptSpec(inline="你是助手"),
+                templates=ContextTemplateSpec(system="pyproject.toml"),
+            )
+        )
+
+
+def test_output_slots_follow_message_position_order() -> None:
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            agent_id="agent",
+            system=SystemPromptSpec(inline="system"),
+            memory=MemoryContextInput(entries=[MemoryContextItem(text="memory")]),
+            environment_state={"cwd": "repo"},
+        )
+    )
+
+    assert [slot.position for slot in output.slots] == [
+        ContextPosition.SYSTEM,
+        ContextPosition.MEMORY,
+        ContextPosition.BEFORE_CURRENT_INPUT,
+    ]
+
+
+def test_disabled_memory_does_not_surface_messages_or_warnings() -> None:
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            agent_id="agent",
+            system=SystemPromptSpec(inline="system"),
+            memory=MemoryContextInput(
+                enabled=False,
+                entries=[MemoryContextItem(text="memory")],
+                warnings=["不应输出"],
+            ),
+        )
+    )
+
+    assert output.memory_messages == []
+    assert output.warnings == []
+
+
+def test_context_slot_rejects_legacy_budget_chars() -> None:
+    with pytest.raises(ValidationError):
+        ContextSlot(
+            name="legacy",
+            position=ContextPosition.SYSTEM,
+            content="legacy",
+            budget_chars=5,
+        )
+
+
+def test_memory_context_input_rejects_legacy_max_chars() -> None:
+    with pytest.raises(ValidationError):
+        MemoryContextInput(
+            max_chars=5,
+            entries=[MemoryContextItem(text="abcdefghij")],
+        )
+
+
 def test_load_context_config_converts_yaml_to_build_input(tmp_path: Path) -> None:
     config_path = tmp_path / "context.yaml"
     config_path.write_text(
@@ -168,10 +327,9 @@ system:
     - 简洁回答。
 memory:
   enabled: true
-  max_chars: 20
   warnings:
     - 记忆可能过期。
-  items:
+  entries:
     - id: mem_yaml
       source: yaml
       text: YAML 中的记忆
@@ -196,27 +354,34 @@ metadata:
     )
 
     assert input_data.system.mode == "template"
-    assert str(input_data.system.template_path).replace("\\", "/") == "templates/system.xml.j2"
+    assert (
+        str(input_data.system.template_path).replace("\\", "/")
+        == "templates/system.xml.j2"
+    )
     assert input_data.system.variables["identity"] == "你是本地助手。"
-    assert str(input_data.templates.memory).replace("\\", "/") == "templates/memory.xml.j2"
+    assert (
+        str(input_data.templates.memory).replace("\\", "/") == "templates/memory.xml.j2"
+    )
     assert (
         str(input_data.templates.before_current_input).replace("\\", "/")
         == "templates/runtime.xml.j2"
     )
     assert input_data.memory is not None
-    assert input_data.memory.items[0].id == "mem_yaml"
+    assert input_data.memory.entries[0].id == "mem_yaml"
     assert input_data.environment_state == {"cwd": "repo", "timezone": "Asia/Shanghai"}
     assert input_data.turn_constraints == ["遵循当前请求。", "运行态约束。"]
     assert input_data.metadata == {"source": "yaml", "trace_id": "trace-1"}
 
 
-def test_load_context_build_input_uses_config_directory_as_template_base(tmp_path: Path) -> None:
+def test_load_context_build_input_uses_config_directory_as_template_base(
+    tmp_path: Path,
+) -> None:
     templates = tmp_path / "templates"
     templates.mkdir()
     (templates / "system.xml.j2").write_text(
         '<system_context version="{{ version }}">'
-        '<identity>{{ system.identity }}</identity>'
-        '</system_context>',
+        "<identity>{{ system.identity }}</identity>"
+        "</system_context>",
         encoding="utf-8",
     )
     config_path = tmp_path / "context.yaml"
@@ -242,6 +407,44 @@ system:
 def test_load_context_config_rejects_non_object_yaml(tmp_path: Path) -> None:
     config_path = tmp_path / "context.yaml"
     config_path.write_text("- bad", encoding="utf-8")
+
+    with pytest.raises(IrisContextError):
+        load_context_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        """
+templates:
+  typo: templates/system.xml.j2
+system:
+  identity: 助手
+""",
+        """
+system:
+  identity: 助手
+memory:
+  enabled: true
+  typo: bad
+""",
+        """
+system:
+  identity: 助手
+slots:
+  - name: project_state
+    position: before_current_input
+    content: ok
+    typo: bad
+""",
+    ],
+)
+def test_load_context_config_rejects_unknown_nested_fields(
+    tmp_path: Path,
+    yaml_text: str,
+) -> None:
+    config_path = tmp_path / "context.yaml"
+    config_path.write_text(yaml_text.strip(), encoding="utf-8")
 
     with pytest.raises(IrisContextError):
         load_context_config(config_path)

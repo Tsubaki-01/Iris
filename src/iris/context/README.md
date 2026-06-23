@@ -58,7 +58,7 @@ output = ContextBuilder().build(
         agent_id="file-agent",
         system=SystemPromptSpec(inline="你是一个本地文件助手。"),
         memory=MemoryContextInput(
-            items=[MemoryContextItem(id="mem_1", source="sqlite", text="用户偏好简洁回答。")],
+            entries=[MemoryContextItem(id="mem_1", source="sqlite", text="用户偏好简洁回答。")],
             warnings=["记忆可能过期。"],
         ),
         environment_state={"cwd": "J:/repo"},
@@ -125,10 +125,9 @@ system:
 
 memory:
   enabled: true
-  max_chars: 4000
   warnings:
     - 记忆内容可能过期，必要时应重新验证。
-  items:
+  entries:
     - id: mem_1
       source: yaml
       text: 用户偏好简洁回答。
@@ -160,7 +159,7 @@ metadata:
 合并规则：
 
 - `system.template_path` 优先于 `templates.system`。
-- YAML 中的 `memory.items` 会排在运行态传入的 `memory_items` 前面。
+- YAML 中的 `memory.entries` 会排在运行态传入的 `memory_items` 前面。
 - YAML 中的 `environment_state` 会被运行态 `environment_state` 同名字段覆盖。
 - YAML 中的 `turn_constraints` 会排在运行态 `turn_constraints` 前面。
 - YAML 中的 `metadata` 会被运行态 `metadata` 同名字段覆盖。
@@ -191,12 +190,11 @@ class ContextSlot(BaseModel):
     order: int = 100
     attributes: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
-    budget_chars: int | None = None
 ```
 
 slot 是进入 XML 渲染的最小结构化片段。`name` 会成为 XML 标签名，`attributes` 会成为 XML 属性。标签名和属性名必须是安全 XML 名称，格式为字母或下划线开头，后接字母、数字、下划线、点或短横线。
 
-`enabled=False` 的 slot 会被构建器过滤。`budget_chars` 目前只对字符串内容做简单截断。
+`enabled=False` 的 slot 会被构建器过滤。
 
 ### `SystemPromptSpec`
 
@@ -221,7 +219,7 @@ class ContextTemplateSpec(BaseModel):
     before_current_input: str | Path | None = None
 ```
 
-用于为每个 context 位置指定可选 `.xml.j2` 模板。相对路径会基于 `ContextBuildInput.template_base_dir`、`workspace_root` 或当前工作目录解析。
+用于为每个 context 位置指定可选 `.xml.j2` 模板。模板路径必须是相对路径，并且不能包含 `..`。相对路径会基于 `ContextBuildInput.template_base_dir` 或 `workspace_root` 解析；直接构造 `ContextBuildInput` 时必须显式提供其中之一，`load_context_build_input()` 会默认使用 `context.yaml` 所在目录。
 
 ### `MemoryContextItem` 与 `MemoryContextInput`
 
@@ -237,13 +235,14 @@ class MemoryContextItem(BaseModel):
 ```python
 class MemoryContextInput(BaseModel):
     enabled: bool = True
-    items: list[MemoryContextItem] = Field(default_factory=list)
-    max_chars: int | None = None
+    entries: list[MemoryContextItem] = Field(default_factory=list)
     query_from_current_input: bool = False
     warnings: list[str] = Field(default_factory=list)
 ```
 
-本包不负责 memory store 检索，只消费调用方已经传入或 YAML 中声明的 `items`。`max_chars` 会在构建 memory slots 时限制记忆正文总字符数。
+本包不负责 memory store 检索，只消费调用方已经传入或 YAML 中声明的 `entries`。
+
+`iris.context` 不在 `MemoryContextInput` 或 `ContextSlot` 上提供局部预算字段。预算由 `ContextBuildInput.budget` 统一管理，默认 XML 与模板渲染都只能读取预算后的 context 数据。
 
 `warnings` 是传给模型看的上下文可信度提示，不是 Python warning。它适合表达“记忆可能过期”“来源不完整”“需要优先验证”等信息，会渲染为 `memory_warnings` slot。
 
@@ -346,7 +345,7 @@ before_current_input -> runtime.xml.j2 -> Msg.user(..., sender="context")
 
 ```xml
 <memory_context version="{{ version }}">
-{% for item in memory.items %}
+{% for item in memory.entries %}
   <memory id="{{ item.id }}" source="{{ item.source }}">
     {{ item.text }}
   </memory>
@@ -457,7 +456,7 @@ class ContextTemplateRenderer:
     def render_file(self, template_path: Path, context: dict[str, Any]) -> str: ...
 ```
 
-使用 Jinja2 渲染模板文件，启用 XML autoescape 与 `StrictUndefined`。模板不存在、路径不是文件或缺少 Jinja2 时抛出 `IrisContextError`。
+使用 Jinja2 渲染模板文件，启用 XML autoescape 与 `StrictUndefined`。模板不存在、路径不是文件、缺少 Jinja2 或模板渲染失败时抛出 `IrisContextError`。
 
 ## Slot 设计语义
 

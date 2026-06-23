@@ -40,10 +40,10 @@ class ContextXmlRenderer:
     def render_slot(self, slot: ContextSlot) -> str:
         """将单个 slot 渲染为 XML 元素。"""
         attributes = "".join(
-            f" {name}={quoteattr(str(value))}" for name, value in sorted(slot.attributes.items())
+            f" {name}={quoteattr(str(value))}"
+            for name, value in sorted(slot.attributes.items())
         )
-        content = _apply_budget(slot.content, slot.budget_chars)
-        inner = _render_value(content)
+        inner = _render_value(slot.content)
         if not inner:
             return f"<{slot.name}{attributes} />"
         return f"<{slot.name}{attributes}>{inner}</{slot.name}>"
@@ -63,7 +63,13 @@ class ContextTemplateRenderer:
         if not template_path.is_file():
             raise IrisContextError("context 模板路径不是文件", path=str(template_path))
         try:
-            from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+            from jinja2 import (
+                Environment,
+                FileSystemLoader,
+                StrictUndefined,
+                TemplateError,
+                select_autoescape,
+            )
         except ImportError as exc:
             raise IrisContextError("渲染 context 模板需要安装 Jinja2") from exc
         environment = Environment(
@@ -77,8 +83,15 @@ class ContextTemplateRenderer:
             trim_blocks=True,
             lstrip_blocks=True,
         )
-        template = environment.get_template(template_path.name)
-        return template.render(**context).strip()
+        try:
+            template = environment.get_template(template_path.name)
+            return template.render(**context).strip()
+        except (TemplateError, TypeError) as exc:
+            raise IrisContextError(
+                "context 模板渲染失败",
+                path=str(template_path),
+                error=str(exc),
+            ) from exc
 
 
 def _render_value(value: Any) -> str:
@@ -95,9 +108,9 @@ def _render_value(value: Any) -> str:
         for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
             rendered = _render_value(item)
             if rendered:
-                items.append(f'<item name={quoteattr(str(key))}>{rendered}</item>')
+                items.append(f"<item name={quoteattr(str(key))}>{rendered}</item>")
             else:
-                items.append(f'<item name={quoteattr(str(key))} />')
+                items.append(f"<item name={quoteattr(str(key))} />")
         return "\n" + "\n".join(_indent(item, spaces=2) for item in items) + "\n"
     if isinstance(value, list | tuple):
         items = []
@@ -109,14 +122,6 @@ def _render_value(value: Any) -> str:
                 items.append("<item />")
         return "\n" + "\n".join(_indent(item, spaces=2) for item in items) + "\n"
     return escape(str(value))
-
-
-def _apply_budget(value: Any, budget_chars: int | None) -> Any:
-    if budget_chars is None:
-        return value
-    if isinstance(value, str):
-        return value[:budget_chars]
-    return value
 
 
 def _indent(text: str, *, spaces: int) -> str:

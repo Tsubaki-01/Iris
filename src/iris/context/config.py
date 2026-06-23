@@ -74,7 +74,9 @@ class ContextYamlConfig(BaseModel):
     templates: ContextTemplateSpec = Field(default_factory=ContextTemplateSpec)
     system: SystemContentConfig
     memory: MemoryContextInput | None = None
-    before_current_input: BeforeCurrentInputConfig = Field(default_factory=BeforeCurrentInputConfig)
+    before_current_input: BeforeCurrentInputConfig = Field(
+        default_factory=BeforeCurrentInputConfig
+    )
     slots: list[ContextSlot] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -146,7 +148,9 @@ class ContextYamlConfig(BaseModel):
         if self.memory is None and memory_items is None:
             return None
         base = self.memory or MemoryContextInput()
-        return base.model_copy(update={"items": [*base.items, *(memory_items or [])]})
+        return base.model_copy(
+            update={"entries": [*base.entries, *(memory_items or [])]}
+        )
 
     def _merged_environment_state(
         self,
@@ -172,11 +176,15 @@ def load_context_config(path: str | Path) -> ContextYamlConfig:
     try:
         config_text = config_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise IrisContextError("context 配置文件读取失败", path=str(config_path)) from exc
+        raise IrisContextError(
+            "context 配置文件读取失败", path=str(config_path)
+        ) from exc
     try:
         raw_config = yaml.safe_load(config_text)
     except yaml.YAMLError as exc:
-        raise IrisContextError("context 配置 YAML 解析失败", path=str(config_path)) from exc
+        raise IrisContextError(
+            "context 配置 YAML 解析失败", path=str(config_path)
+        ) from exc
     if not isinstance(raw_config, dict):
         raise IrisContextError("context 配置顶层必须是对象", path=str(config_path))
     try:

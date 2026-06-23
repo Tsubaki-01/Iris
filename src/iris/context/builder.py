@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..exceptions import IrisContextError
 from ..message import Msg
 from .models import (
     ContextBuildInput,
@@ -17,6 +18,11 @@ from .models import (
 from .renderer import ContextTemplateRenderer, ContextXmlRenderer
 
 CONTEXT_SENDER = "context"
+POSITION_ORDER: dict[ContextPosition, int] = {
+    ContextPosition.SYSTEM: 0,
+    ContextPosition.MEMORY: 1,
+    ContextPosition.BEFORE_CURRENT_INPUT: 2,
+}
 
 
 class ContextBuilder:
@@ -35,7 +41,11 @@ class ContextBuilder:
         """构建 system、memory 和 current input 前置 context 消息。"""
         slots = _sort_slots(self._build_slots(input_data))
         slots_by_position = _group_slots(slots)
-        warnings = list(input_data.memory.warnings) if input_data.memory is not None else []
+        warnings = (
+            list(input_data.memory.warnings)
+            if input_data.memory is not None and input_data.memory.enabled
+            else []
+        )
 
         system_xml = self._render_position(
             ContextPosition.SYSTEM,
@@ -56,10 +66,14 @@ class ContextBuilder:
         return ContextBuildOutput(
             system_message=Msg.system(system_xml),
             memory_messages=(
-                [Msg.user(memory_xml, sender=CONTEXT_SENDER)] if memory_xml is not None else []
+                [Msg.user(memory_xml, sender=CONTEXT_SENDER)]
+                if memory_xml is not None
+                else []
             ),
             before_current_input_messages=(
-                [Msg.user(runtime_xml, sender=CONTEXT_SENDER)] if runtime_xml is not None else []
+                [Msg.user(runtime_xml, sender=CONTEXT_SENDER)]
+                if runtime_xml is not None
+                else []
             ),
             slots=slots,
             metadata=dict(input_data.metadata),
@@ -103,21 +117,13 @@ class ContextBuilder:
         if memory is None or not memory.enabled:
             return []
         slots: list[ContextSlot] = []
-        total_chars = 0
-        for index, item in enumerate(memory.items):
-            text = item.text
-            if memory.max_chars is not None:
-                remaining = memory.max_chars - total_chars
-                if remaining <= 0:
-                    break
-                text = text[:remaining]
-            total_chars += len(text)
+        for index, item in enumerate(memory.entries):
             attributes = _memory_attributes(item, index=index)
             slots.append(
                 ContextSlot(
                     name="memory",
                     position=ContextPosition.MEMORY,
-                    content=text,
+                    content=item.text,
                     order=10 + index,
                     attributes=attributes,
                 )
@@ -146,7 +152,9 @@ class ContextBuilder:
                 template_path,
                 self._template_context(input_data, slots),
             )
-        return self.xml_renderer.render_position(position, slots, version=input_data.version)
+        return self.xml_renderer.render_position(
+            position, slots, version=input_data.version
+        )
 
     def _render_optional_position(
         self,
@@ -179,8 +187,14 @@ class ContextBuilder:
             return None
         path = Path(raw_path)
         if path.is_absolute():
-            return path
-        base_dir = input_data.template_base_dir or input_data.workspace_root or Path.cwd()
+            raise IrisContextError("context 模板路径不能是绝对路径", path=str(path))
+        if ".." in path.parts:
+            raise IrisContextError("context 模板路径不能包含上级目录", path=str(path))
+        base_dir = input_data.template_base_dir or input_data.workspace_root
+        if base_dir is None:
+            raise IrisContextError(
+                "context 相对模板路径必须提供 template_base_dir 或 workspace_root"
+            )
         return (base_dir / path).resolve()
 
     def _template_context(
@@ -193,15 +207,17 @@ class ContextBuilder:
             "version": input_data.version,
             "agent_id": input_data.agent_id,
             "session_id": input_data.session_id,
-            "workspace_root": str(input_data.workspace_root) if input_data.workspace_root else "",
+            "workspace_root": (
+                str(input_data.workspace_root) if input_data.workspace_root else ""
+            ),
             "system": {
                 "inline": input_data.system.inline or "",
                 **input_data.system.variables,
             },
             "memory": {
                 "enabled": memory.enabled,
-                "items": [_memory_item_dict(item) for item in memory.items],
-                "warnings": list(memory.warnings),
+                "entries": [_memory_item_dict(item) for item in memory.entries],
+                "warnings": list(memory.warnings) if memory.enabled else [],
                 "query_from_current_input": memory.query_from_current_input,
             },
             "environment_state": dict(input_data.environment_state),
@@ -216,7 +232,9 @@ class ContextBuilder:
 
 
 def _sort_slots(slots: list[ContextSlot]) -> list[ContextSlot]:
-    return sorted(slots, key=lambda item: (item.position.value, item.order, item.name))
+    return sorted(
+        slots, key=lambda item: (POSITION_ORDER[item.position], item.order, item.name)
+    )
 
 
 def _group_slots(slots: list[ContextSlot]) -> dict[ContextPosition, list[ContextSlot]]:

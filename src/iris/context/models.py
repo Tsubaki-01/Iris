@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..exceptions import IrisContextError
 from ..message import Msg
@@ -33,7 +33,8 @@ class ContextSlot(BaseModel):
     order: int = 100
     attributes: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
-    budget_chars: int | None = None
+
+    model_config = ConfigDict(extra="forbid")
 
     @field_validator("name")
     @classmethod
@@ -50,13 +51,6 @@ class ContextSlot(BaseModel):
         for key in value:
             if not _XML_NAME_RE.fullmatch(key):
                 raise IrisContextError("context slot 属性名必须是安全的 XML 名称")
-        return value
-
-    @field_validator("budget_chars")
-    @classmethod
-    def _validate_budget(cls, value: int | None) -> int | None:
-        if value is not None and value <= 0:
-            raise IrisContextError("context slot budget_chars 必须为正数")
         return value
 
 
@@ -84,6 +78,8 @@ class ContextTemplateSpec(BaseModel):
     memory: str | Path | None = None
     before_current_input: str | Path | None = None
 
+    model_config = ConfigDict(extra="forbid")
+
 
 class MemoryContextItem(BaseModel):
     """一条可进入 context 渲染的召回记忆。"""
@@ -93,6 +89,8 @@ class MemoryContextItem(BaseModel):
     source: str = ""
     score: float | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
 
     @field_validator("text")
     @classmethod
@@ -106,17 +104,11 @@ class MemoryContextInput(BaseModel):
     """调用方传入的记忆上下文。"""
 
     enabled: bool = True
-    items: list[MemoryContextItem] = Field(default_factory=list)
-    max_chars: int | None = None
+    entries: list[MemoryContextItem] = Field(default_factory=list)
     query_from_current_input: bool = False
     warnings: list[str] = Field(default_factory=list)
 
-    @field_validator("max_chars")
-    @classmethod
-    def _validate_max_chars(cls, value: int | None) -> int | None:
-        if value is not None and value <= 0:
-            raise IrisContextError("memory max_chars 必须为正数")
-        return value
+    model_config = ConfigDict(extra="forbid")
 
 
 class ContextBuildInput(BaseModel):
