@@ -259,3 +259,5 @@ temp/
 # ==========================================
 out/
 coverage/
+/.worktrees/
+docs/superpowers/
