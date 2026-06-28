@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
 from ..exceptions import IrisContextError
 from .models import ContextSlot, _is_safe_xml_name
-
-_NUMERIC_CHARACTER_REFERENCE_RE = re.compile(
-    r"&#(?:(?P<hex>[xX][0-9A-Fa-f]+)|(?P<decimal>[0-9]+));"
-)
 
 
 class ContextXmlRenderer:
@@ -33,7 +28,7 @@ class ContextXmlRenderer:
     def render_slot(self, slot: ContextSlot) -> str:
         """将单个 slot 渲染为 XML 元素。"""
         attributes = "".join(
-            f" {name}={quoteattr(_validate_xml_text(str(value), location='attribute'))}"
+            f" {name}={quoteattr(str(value))}"
             for name, value in sorted(slot.attributes.items())
         )
         inner = _render_value(slot.content)
@@ -84,7 +79,6 @@ class ContextTemplateRenderer:
                 path=str(template_path),
                 error=str(exc),
             ) from exc
-        _validate_xml_text(rendered, location="template")
         return rendered
 
 
@@ -92,15 +86,15 @@ def _render_value(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return escape(_validate_xml_text(value, location="content"))
+        return escape(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int | float):
-        return _validate_xml_text(str(value), location="content")
+        return str(value)
     if isinstance(value, dict):
         items: list[str] = []
         for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
-            rendered_key = _validate_xml_text(str(key), location="attribute")
+            rendered_key = str(key)
             rendered = _render_value(item)
             if rendered:
                 items.append(f"<item name={quoteattr(rendered_key)}>{rendered}</item>")
@@ -116,39 +110,7 @@ def _render_value(value: Any) -> str:
             else:
                 items.append("<item />")
         return "\n" + "\n".join(_indent(item, spaces=2) for item in items) + "\n"
-    rendered = _validate_xml_text(str(value), location="content")
-    return escape(rendered)
-
-
-def _validate_xml_text(value: str, *, location: str) -> str:
-    for character in value:
-        _validate_xml_codepoint(ord(character), location=location)
-    if location != "template":
-        return value
-    for match in _NUMERIC_CHARACTER_REFERENCE_RE.finditer(value):
-        hexadecimal = match.group("hex")
-        codepoint = (
-            int(hexadecimal[1:], 16)
-            if hexadecimal is not None
-            else int(match.group("decimal"), 10)
-        )
-        _validate_xml_codepoint(codepoint, location=location)
-    return value
-
-
-def _validate_xml_codepoint(codepoint: int, *, location: str) -> None:
-    if (
-        codepoint in (0x09, 0x0A, 0x0D)
-        or 0x20 <= codepoint <= 0xD7FF
-        or 0xE000 <= codepoint <= 0xFFFD
-        or 0x10000 <= codepoint <= 0x10FFFF
-    ):
-        return
-    raise IrisContextError(
-        "context XML 包含非法字符",
-        codepoint=f"U+{codepoint:04X}",
-        location=location,
-    )
+    return escape(str(value))
 
 
 def _indent(text: str, *, spaces: int) -> str:

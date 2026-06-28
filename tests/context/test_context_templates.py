@@ -323,98 +323,85 @@ def test_template_runtime_error_uses_context_error(tmp_path: Path) -> None:
     assert isinstance(exc_info.value.__cause__, ZeroDivisionError)
 
 
-def test_template_rejects_invalid_fixed_character(tmp_path: Path) -> None:
+def test_template_preserves_fixed_control_character(tmp_path: Path) -> None:
     template = tmp_path / "system.xml.j2"
     template.write_text("<system_context>\x01</system_context>", encoding="utf-8")
 
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    template=template,
-                    slots=[ContextSlot(name="instructions", content="content")],
-                )
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                template=template,
+                slots=[ContextSlot(name="instructions", content="content")],
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == "U+0001"
-    assert exc_info.value.context["location"] == "template"
+    assert output.system.text == "<system_context>\x01</system_context>"
 
 
-def test_template_rejects_invalid_slot_character(tmp_path: Path) -> None:
+def test_template_preserves_slot_control_character(tmp_path: Path) -> None:
     template = tmp_path / "system.xml.j2"
     template.write_text(
         "<system_context>{{ slots[0].content }}</system_context>",
         encoding="utf-8",
     )
 
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    template=template,
-                    slots=[ContextSlot(name="instructions", content="a\x01b")],
-                )
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                template=template,
+                slots=[ContextSlot(name="instructions", content="a\x01b")],
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == "U+0001"
-    assert exc_info.value.context["location"] == "template"
+    assert output.system.text == "<system_context>a\x01b</system_context>"
 
 
 @pytest.mark.parametrize("reference", ["&#1;", "&#x1;", "&#X1;"])
-def test_template_rejects_invalid_numeric_character_reference(
+def test_template_preserves_invalid_numeric_character_reference_as_prompt_text(
     tmp_path: Path,
     reference: str,
 ) -> None:
     template = tmp_path / "system.xml.j2"
     template.write_text(reference, encoding="utf-8")
 
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    template=template,
-                    slots=[ContextSlot(name="instructions", content="content")],
-                )
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                template=template,
+                slots=[ContextSlot(name="instructions", content="content")],
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == "U+0001"
-    assert exc_info.value.context["location"] == "template"
+    assert output.system.text == reference
 
 
 @pytest.mark.parametrize(
-    ("reference", "codepoint"),
+    "reference",
     [
-        ("&#xD800;", "U+D800"),
-        ("&#x110000;", "U+110000"),
+        "&#xD800;",
+        "&#x110000;",
     ],
 )
-def test_template_rejects_out_of_range_numeric_character_reference(
+def test_template_preserves_out_of_range_numeric_character_reference_as_prompt_text(
     tmp_path: Path,
     reference: str,
-    codepoint: str,
 ) -> None:
     template = tmp_path / "system.xml.j2"
     template.write_text(reference, encoding="utf-8")
 
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    template=template,
-                    slots=[ContextSlot(name="instructions", content="content")],
-                )
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                template=template,
+                slots=[ContextSlot(name="instructions", content="content")],
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == codepoint
-    assert exc_info.value.context["location"] == "template"
+    assert output.system.text == reference
 
 
 @pytest.mark.parametrize(

@@ -161,40 +161,34 @@ def test_xml_renderer_rejects_unsafe_root_tag() -> None:
         )
 
 
-def test_default_xml_rejects_invalid_content_character() -> None:
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    slots=[ContextSlot(name="instructions", content="a\x01b")]
-                )
+def test_default_xml_preserves_control_character_in_content() -> None:
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                slots=[ContextSlot(name="instructions", content="a\x01b")]
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == "U+0001"
-    assert exc_info.value.context["location"] == "content"
+    assert "<instructions>a\x01b</instructions>" in output.system.text
 
 
-def test_default_xml_rejects_invalid_attribute_character() -> None:
-    with pytest.raises(IrisContextError) as exc_info:
-        ContextBuilder().build(
-            ContextBuildInput(
-                system=ContextSection(
-                    slots=[
-                        ContextSlot(
-                            name="instructions",
-                            content="content",
-                            attributes={"source": "local\x00remote"},
-                        )
-                    ]
-                )
+def test_default_xml_preserves_control_character_in_attribute() -> None:
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                slots=[
+                    ContextSlot(
+                        name="instructions",
+                        content="content",
+                        attributes={"source": "local\x00remote"},
+                    )
+                ]
             )
         )
+    )
 
-    assert exc_info.value.message == "context XML 包含非法字符"
-    assert exc_info.value.context["codepoint"] == "U+0000"
-    assert exc_info.value.context["location"] == "attribute"
+    assert 'source="local\x00remote"' in output.system.text
 
 
 def test_default_xml_allows_xml_whitespace_characters() -> None:

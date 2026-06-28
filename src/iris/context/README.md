@@ -179,7 +179,8 @@ class ContextSlot(BaseModel):
 | `None` | 空内容，外层元素使用自闭合形式 |
 | 其他对象 | `str(value)` 后进行 XML 转义 |
 
-文本和属性值都会进行 XML 转义；默认 XML 会拒绝 XML 1.0 不允许的字符。
+文本和属性值都会进行 XML 转义；默认 renderer 不过滤不可见控制字符。这里的标签
+用于组织 LLM 输入，不要求输出必须能被 XML parser 解析。
 嵌套容器递归使用相同规则。
 
 ### `ContextSection`
@@ -255,8 +256,8 @@ class ContextBuildOutput(BaseModel):
 ```
 
 模板环境启用 XML autoescape 和 `StrictUndefined`。模板不存在、路径不是文件、
-缺少 Jinja2、编码或运行时错误均使用 `IrisContextError`，模板最终输出也会拒绝
-XML 1.0 不允许的字符。如果某个 slot 无法进行 JSON 模式序列化，builder 也会
+缺少 Jinja2、编码或运行时错误均使用 `IrisContextError`，模板最终输出会作为
+普通 prompt 文本保留。如果某个 slot 无法进行 JSON 模式序列化，builder 也会
 抛出 `IrisContextError`，并附带 section、模板路径和底层错误。
 
 模板渲染使用数据副本；模板 renderer 对传入上下文的修改不会改变原 section

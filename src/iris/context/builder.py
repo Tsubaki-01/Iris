@@ -49,9 +49,7 @@ class ContextBuilder:
         return ContextBuildOutput(
             system=Msg.system(system_text),
             memory=(
-                Msg.user(memory_text, sender=CONTEXT_SENDER)
-                if memory_text is not None
-                else None
+                Msg.user(memory_text, sender=CONTEXT_SENDER) if memory_text is not None else None
             ),
             before_current_input=(
                 Msg.user(before_input_text, sender=CONTEXT_SENDER)
@@ -65,6 +63,7 @@ class ContextBuilder:
         section_name: SectionName,
         section: ContextSection | None,
     ) -> str | None:
+        """渲染一个可选的 context section"""
         if section is None:
             return None
         slots = _enabled_slots(section)
@@ -79,6 +78,7 @@ class ContextBuilder:
         *,
         slots: list[ContextSlot] | None = None,
     ) -> str:
+        """渲染一个 context section"""
         enabled_slots = slots if slots is not None else _enabled_slots(section)
         if section.template is not None:
             try:
