@@ -54,6 +54,23 @@ session:
   backend: sqlite
 ```
 
+结构化 context 模式使用独立 `context.yaml`：
+
+```yaml
+name: notes-agent
+model: openai/gpt-4o-mini
+context:
+  path: context.yaml
+tools:
+  builtin:
+    - file.read
+```
+
+`system` 和 `context` 必须二选一，不能同时配置。`load_agent_config()`
+只校验 `context.path` 字段并把相对路径按 `agent.yaml` 所在目录解析为绝对路径；
+它不会读取或校验该 context 文件。context 文件存在性、内容结构和模板路径由外层
+runtime 调用 `iris.context.load_context_build_input(config.context.path)` 时校验。
+
 `model` 推荐使用结构化对象。为了兼容简单配置，也可以写成 route string：
 
 ```yaml
@@ -68,10 +85,19 @@ model: openai/gpt-4o-mini
 
 - `name`: agent 名称，不能为空。
 - `model`: `ModelConfig`，也兼容 `provider/model` route string。
-- `system`: system prompt，不能为空。
+- `system`: 简单模式的 system prompt，和 `context` 互斥。
+- `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
+
+### `AgentContextConfig`
+
+结构化 context 配置声明：
+
+- `path`: 独立 `context.yaml` 文件路径。相对路径按 `agent.yaml` 所在目录解析。
+
+`AgentContextConfig` 只保存路径声明，不读取 context 文件。
 
 ### `ModelConfig`
 

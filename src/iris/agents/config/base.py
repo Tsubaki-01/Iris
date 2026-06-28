@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ...core import ModelRoute, parse_model_route
 from ...exceptions import IrisConfigError, IrisValidationError
@@ -117,13 +124,34 @@ class SessionConfig(BaseModel):
         return self
 
 
+class AgentContextConfig(BaseModel):
+    """Agent 引用的 context 配置声明。
+
+    Attributes:
+        path (Path): 独立 `context.yaml` 文件路径。
+    """
+
+    path: Path
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _validate_path(cls, value: Any) -> Any:
+        """校验 context 配置路径非空。"""
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("context.path 不能为空")
+        return value
+
+
 class AgentConfig(BaseModel):
     """Agent YAML 的稳定 Python 配置模型。
 
     Attributes:
         name (str): Agent 名称。
         model (ModelConfig): 模型配置。
-        system (str): System prompt。
+        system (str | None): 简单模式的 system prompt。
+        context (AgentContextConfig | None): 结构化 context 配置声明。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         session (SessionConfig): 会话配置。
@@ -131,12 +159,25 @@ class AgentConfig(BaseModel):
 
     name: str
     model: ModelConfig
-    system: str
+    system: str | None = None
+    context: AgentContextConfig | None = None
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_prompt_source_keys(cls, data: Any) -> Any:
+        """校验 system 和 context 配置键只能二选一。"""
+        if not isinstance(data, dict):
+            return data
+        has_system = "system" in data
+        has_context = "context" in data
+        if has_system == has_context:
+            raise ValueError("system 和 context 必须且只能配置一个")
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -156,11 +197,20 @@ class AgentConfig(BaseModel):
 
     @field_validator("name", "system")
     @classmethod
-    def _validate_required_text(cls, value: str) -> str:
-        """校验必需文本非空。"""
-        if not value.strip():
+    def _validate_text(cls, value: str | None) -> str | None:
+        """校验配置文本非空。"""
+        if value is not None and not value.strip():
             raise ValueError("字段不能为空")
         return value
+
+    @model_validator(mode="after")
+    def _validate_prompt_source(self) -> AgentConfig:
+        """校验 simple system 和 structured context 只能二选一。"""
+        has_system = self.system is not None
+        has_context = self.context is not None
+        if has_system == has_context:
+            raise ValueError("system 和 context 必须且只能配置一个")
+        return self
 
     def to_model_route(self) -> ModelRoute:
         """返回配置对应的模型路由。
@@ -199,13 +249,45 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     if not isinstance(raw_config, dict):
         raise IrisConfigError("Agent 配置顶层必须是对象", path=str(config_path))
 
+    normalized_config = _resolve_context_path(raw_config, config_path=config_path)
     try:
-        return AgentConfig.model_validate(raw_config)
+        return AgentConfig.model_validate(normalized_config)
     except ValidationError as exc:
         raise IrisConfigError("Agent 配置校验失败", path=str(config_path), error=str(exc)) from exc
 
 
+def _resolve_context_path(
+    raw_config: dict[Any, Any],
+    *,
+    config_path: Path,
+) -> dict[Any, Any]:
+    context = raw_config.get("context")
+    if not isinstance(context, dict):
+        return raw_config
+
+    raw_path = context.get("path")
+    if not isinstance(raw_path, str | Path):
+        return raw_config
+    if isinstance(raw_path, str) and not raw_path.strip():
+        return raw_config
+
+    context_path = Path(raw_path)
+    normalized_path = (
+        context_path
+        if context_path.is_absolute()
+        else (config_path.parent / context_path).resolve()
+    )
+    return {
+        **raw_config,
+        "context": {
+            **context,
+            "path": normalized_path,
+        },
+    }
+
+
 __all__ = [
+    "AgentContextConfig",
     "AgentConfig",
     "ModelConfig",
     "PermissionsConfig",

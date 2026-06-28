@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from iris.agents import AgentConfig, load_agent_config
+from iris.agents import AgentConfig, AgentContextConfig, load_agent_config
 from iris.core import ModelRoute
 from iris.exceptions import IrisConfigError
 
@@ -83,6 +83,49 @@ session:
     assert config.session.path == ".iris/session.db"
 
 
+def test_load_agent_config_accepts_context_path_without_system(
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = _write_yaml(
+        config_dir / "agent.yaml",
+        """
+name: context-agent
+model: openai/gpt-4o-mini
+context:
+  path: context.yaml
+""",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.system is None
+    assert config.context is not None
+    assert isinstance(config.context, AgentContextConfig)
+    assert config.context.path == (config_path.parent / "context.yaml").resolve()
+    assert config.context.path.is_absolute()
+
+
+def test_load_agent_config_does_not_check_context_path_exists(
+    tmp_path: Path,
+) -> None:
+    config_path = _write_yaml(
+        tmp_path / "agent.yaml",
+        """
+name: missing-context-agent
+model: openai/gpt-4o-mini
+context:
+  path: missing-context.yaml
+""",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.context is not None
+    assert not config.context.path.exists()
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -108,6 +151,48 @@ model: openai/gpt-4o-mini
 system: 你是一个本地助手。
 permissions:
   writes: maybe
+""",
+        """
+name: missing-prompt-source
+model: openai/gpt-4o-mini
+""",
+        """
+name: duplicate-prompt-source
+model: openai/gpt-4o-mini
+system: 你是一个本地助手。
+context:
+  path: context.yaml
+""",
+        """
+name: null-system-with-context
+model: openai/gpt-4o-mini
+system:
+context:
+  path: context.yaml
+""",
+        """
+name: null-context-with-system
+model: openai/gpt-4o-mini
+system: 你是一个本地助手。
+context:
+""",
+        """
+name: missing-context-path
+model: openai/gpt-4o-mini
+context: {}
+""",
+        """
+name: empty-context-path
+model: openai/gpt-4o-mini
+context:
+  path: ""
+""",
+        """
+name: unknown-context-field
+model: openai/gpt-4o-mini
+context:
+  path: context.yaml
+  inline: true
 """,
     ],
 )
