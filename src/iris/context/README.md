@@ -213,6 +213,13 @@ section = ContextSection(
 `memory` 或 `before_current_input` 缺失、为空，或者没有启用的 slot
 时，对应输出为 `None`。这种情况下即使配置的模板不存在，也不会尝试打开或渲染模板。
 
+长期记忆召回结果应先由 `iris.memory.MemoryService.build_context()` 转为
+`MemoryContextBundle`，再由外层 runtime 或调用方映射成 `ContextSlot`。
+XML 标签名仍由 `ContextSlot.name` 决定；推荐对召回片段使用固定
+`name="memory"`，并把 `category`、`kind`、`level` 等记忆语义放入
+`attributes`。`score`、`source` 等召回排序或实现细节不应默认进入
+prompt-facing XML。
+
 ### `ContextBuildInput`
 
 ```python

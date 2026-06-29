@@ -437,9 +437,13 @@ class MemoryContextFragment(BaseModel):
 
     item_id: str
     text: str
-    score: float = 0.0
+    category: MemoryCategory
+    kind: MemoryItemKind
+    level: MemoryLevel
+    reason: str = ""
+    confidence: float | None = None
+    importance: float | None = None
     warning: str
-    source: str = ""
     truncated: bool = False
 
 
