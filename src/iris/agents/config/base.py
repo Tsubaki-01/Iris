@@ -27,12 +27,30 @@ class ModelConfig(BaseModel):
         name (str): Provider 下的模型名，例如 `gpt-4o-mini`。
         api_style (str | None): 可选 API 风格。
         base_url (str | None): 可选 provider base URL。
+        temperature (float | None): 采样温度。
+        top_p (float | None): nucleus sampling 参数。
+        max_tokens (int | None): 最大输出 token 数。
+        tool_choice (str | dict[str, Any] | None): 工具选择策略。
+        response_format (dict[str, Any] | None): 结构化输出配置。
+        stream (bool): 是否请求流式响应。
+        timeout (float | None): 单次请求超时时间，单位秒。
+        provider_options (dict[str, Any]): 少量 provider 专属选项。
+        metadata (dict[str, Any]): 请求级元数据。
     """
 
     provider: str
     name: str
     api_style: str | None = None
     base_url: str | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    response_format: dict[str, Any] | None = None
+    stream: bool = False
+    timeout: float | None = None
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -51,6 +69,27 @@ class ModelConfig(BaseModel):
             ModelRoute: Provider 与模型名路由对象。
         """
         return ModelRoute(provider=self.provider, model=self.name)
+
+    def to_llm_request_options(self) -> dict[str, Any]:
+        """
+        转换为 `LLMRequest` 支持的请求级选项。
+        由于 `LLMRequest` 显式要求 `model` 字段，因此不包含 `provider` 和 `name`。
+        """
+        options = self.model_dump(
+            exclude={
+                "provider",
+                "name",
+                "api_style",
+                "base_url",
+            },
+            exclude_none=True,
+        )
+        provider_options = dict(self.provider_options)
+        if self.api_style is not None:
+            provider_options["api_style"] = self.api_style
+        if provider_options:
+            options["provider_options"] = provider_options
+        return options
 
 
 class PythonToolsConfig(BaseModel):

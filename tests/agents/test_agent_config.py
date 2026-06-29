@@ -47,6 +47,47 @@ session:
     assert config.session.backend == "sqlite"
 
 
+def test_load_agent_config_accepts_model_request_options(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "agent.yaml",
+        """
+name: tuned-agent
+model:
+  provider: openai
+  name: gpt-4o-mini
+  api_style: responses
+  temperature: 0.2
+  top_p: 0.9
+  max_tokens: 512
+  timeout: 30
+  provider_options:
+    reasoning_effort: low
+  metadata:
+    purpose: test
+system: 你是一个本地助手。
+""",
+    )
+
+    config = load_agent_config(config_path)
+
+    assert config.model.temperature == 0.2
+    assert config.model.top_p == 0.9
+    assert config.model.max_tokens == 512
+    assert config.model.timeout == 30
+    assert config.model.to_llm_request_options() == {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_tokens": 512,
+        "stream": False,
+        "timeout": 30.0,
+        "provider_options": {
+            "api_style": "responses",
+            "reasoning_effort": "low",
+        },
+        "metadata": {"purpose": "test"},
+    }
+
+
 def test_load_agent_config_accepts_route_string_model(tmp_path: Path) -> None:
     config_path = _write_yaml(
         tmp_path / "agent.yaml",
