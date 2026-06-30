@@ -19,6 +19,8 @@ from .exceptions import (
     # Provider
     IrisProviderError,
     IrisRateLimitExceededError,
+    # Session
+    IrisSessionError,
     # Template
     IrisTemplateError,
     IrisTemplateNotFoundError,
@@ -52,6 +54,7 @@ __all__ = [
     "IrisAgentError",
     "IrisAgentExecutionError",
     "IrisMemoryError",
+    "IrisSessionError",
     "IrisTemplateError",
     "IrisTemplateNotFoundError",
     "IrisTemplateRenderError",
