@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from iris.agents import load_agent_config
-from iris.exceptions import IrisExecutionError
+from iris.exceptions import IrisSessionError
 from iris.session import SQLiteSessionStore
 
 
@@ -32,7 +32,9 @@ def test_sqlite_session_store_appends_tool_events(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "session.db")
 
     store.append_tool_event("session-1", {"tool_name": "read_file", "status": "ok"})
-    store.append_tool_event("session-1", {"tool_name": "grep_search", "status": "error"})
+    store.append_tool_event(
+        "session-1", {"tool_name": "grep_search", "status": "error"}
+    )
 
     assert store.load_tool_events("session-1") == [
         {"tool_name": "read_file", "status": "ok"},
@@ -73,7 +75,7 @@ session:
 def test_sqlite_session_store_rejects_non_json_values(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "session.db")
 
-    with pytest.raises(IrisExecutionError):
+    with pytest.raises(IrisSessionError):
         store.save_messages("session-1", [{"bad": object()}])
 
 
@@ -81,5 +83,5 @@ def test_sqlite_session_store_wraps_directory_creation_errors(tmp_path: Path) ->
     parent_file = tmp_path / "not-a-directory"
     parent_file.write_text("occupied", encoding="utf-8")
 
-    with pytest.raises(IrisExecutionError):
+    with pytest.raises(IrisSessionError):
         SQLiteSessionStore(parent_file / "session.db")
