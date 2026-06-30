@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
-from ..exceptions import IrisExecutionError
+from ..exceptions import IrisSessionError
 
 
 class SQLiteSessionStore:
@@ -24,7 +24,9 @@ class SQLiteSessionStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise IrisExecutionError("SQLite session 目录创建失败", path=str(self.path)) from exc
+            raise IrisSessionError(
+                "SQLite session 目录创建失败", path=str(self.path)
+            ) from exc
         self._initialize_schema()
 
     def save_messages(self, session_id: str, messages: list[dict[str, object]]) -> None:
@@ -35,7 +37,7 @@ class SQLiteSessionStore:
             messages (list[dict[str, object]]): 可 JSON 序列化的消息列表。
 
         Raises:
-            IrisExecutionError: JSON 序列化或 SQLite 写入失败时抛出。
+            IrisSessionError: JSON 序列化或 SQLite 写入失败时抛出。
         """
         self._upsert_column(session_id, "messages_json", _dump_json(messages))
 
@@ -68,8 +70,7 @@ class SQLiteSessionStore:
         """创建 session 表。"""
         try:
             with sqlite3.connect(self.path) as connection:
-                connection.execute(
-                    """
+                connection.execute("""
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
                         messages_json TEXT NOT NULL DEFAULT '[]',
@@ -77,10 +78,11 @@ class SQLiteSessionStore:
                         tool_events_json TEXT NOT NULL DEFAULT '[]',
                         updated_at TEXT NOT NULL
                     )
-                    """
-                )
+                    """)
         except sqlite3.Error as exc:
-            raise IrisExecutionError("SQLite session 初始化失败", path=str(self.path)) from exc
+            raise IrisSessionError(
+                "SQLite session 初始化失败", path=str(self.path)
+            ) from exc
 
     def _upsert_column(self, session_id: str, column: str, value: str) -> None:
         """更新单个 JSON 字段。"""
@@ -96,7 +98,7 @@ class SQLiteSessionStore:
             with sqlite3.connect(self.path) as connection:
                 connection.execute(sql, (session_id, value, updated_at))
         except sqlite3.Error as exc:
-            raise IrisExecutionError(
+            raise IrisSessionError(
                 "SQLite session 写入失败",
                 path=str(self.path),
                 session_id=session_id,
@@ -111,7 +113,7 @@ class SQLiteSessionStore:
                     (session_id,),
                 ).fetchone()
         except sqlite3.Error as exc:
-            raise IrisExecutionError(
+            raise IrisSessionError(
                 "SQLite session 读取失败",
                 path=str(self.path),
                 session_id=session_id,
@@ -126,7 +128,7 @@ def _dump_json(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
     except TypeError as exc:
-        raise IrisExecutionError("Session 数据必须可 JSON 序列化") from exc
+        raise IrisSessionError("Session 数据必须可 JSON 序列化") from exc
 
 
 __all__ = ["SQLiteSessionStore"]
