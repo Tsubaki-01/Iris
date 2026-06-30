@@ -1,15 +1,31 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from ..runtime.models import RuntimeErrorSource
 
 
 class IrisError(Exception):
     """所有 Iris 特定错误的基类。"""
 
+    runtime_error_source: ClassVar[RuntimeErrorSource] = "runtime"
+    runtime_error_code: ClassVar[str] = "RUNTIME_ERROR"
+
     def __init__(self, message: str, **context: Any) -> None:
         super().__init__(message)
         self.message = message
         self.context = context
+
+    @property
+    def runtime_source(self) -> RuntimeErrorSource:
+        """返回 runtime 错误来源。"""
+        return self.runtime_error_source
+
+    @property
+    def runtime_code(self) -> str:
+        """返回 runtime 稳定错误码。"""
+        return self.runtime_error_code
 
     def __str__(self) -> str:
         if self.context:
@@ -24,6 +40,9 @@ class IrisError(Exception):
 class IrisConfigError(IrisError, ValueError):
     """配置出现问题时抛出，例如缺少必需的参数或值无效。"""
 
+    runtime_error_source = "config"
+    runtime_error_code = "CONFIG_ERROR"
+
 
 class IrisValidationError(IrisError):
     """输入或配置校验失败时抛出。"""
@@ -37,17 +56,34 @@ class IrisExecutionError(IrisError):
     """任务执行过程中发生异常时抛出。"""
 
 
+# ----- Session 领域 -----
+
+
+class IrisSessionError(IrisError):
+    """Session 存储和会话状态读写错误的基类。"""
+
+    runtime_error_source = "session"
+    runtime_error_code = "SESSION_ERROR"
+
+
 # ----- Context 领域 -----
 
 
 class IrisContextError(IrisError, ValueError):
     """Context System 相关错误的基类。"""
 
+    runtime_error_source = "context"
+    runtime_error_code = "CONTEXT_ERROR"
+
+
 # ----- 提供者 (Provider) 领域 -----
 
 
 class IrisProviderError(IrisError):
     """模型提供者和 LLM 集成错误的基类。"""
+
+    runtime_error_source = "provider"
+    runtime_error_code = "PROVIDER_ERROR"
 
 
 class IrisAPIConnectionError(IrisProviderError):
@@ -67,6 +103,9 @@ class IrisAuthenticationError(IrisProviderError):
 
 class IrisToolError(IrisError):
     """工具相关错误的基类。"""
+
+    runtime_error_source = "tool"
+    runtime_error_code = "PROTOCOL_ERROR"
 
 
 class IrisToolNotFoundError(IrisToolError):
@@ -112,6 +151,9 @@ class IrisAgentExecutionError(IrisAgentError):
 
 class IrisMemoryError(IrisError):
     """记忆子系统错误的基类。"""
+
+    runtime_error_source = "memory"
+    runtime_error_code = "MEMORY_ERROR"
 
 
 # ----- 模板 (Template) 领域 -----
