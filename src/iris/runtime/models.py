@@ -124,7 +124,7 @@ class RuntimeOptions(BaseModel):
         session_id (str): 本次调用使用的会话标识，默认使用 `"default"`。
         run_id (str): 本次调用的唯一运行标识，默认自动生成。
         include_tools (bool): 是否在 provider 请求中包含可用工具 schema。
-        request_options (dict[str, Any]): 透传给 `LLMRequest` 的请求级覆盖项。
+        request_options (dict[str, Any]): 透传给 `LLMRequest` 的请求级覆盖项， provider 专属选项。
         metadata (dict[str, Any]): 运行态追踪信息，不直接进入 prompt。
         memory_query (MemoryQuery | None): 显式触发 memory recall 的查询条件。
         memory_results (list[MemorySearchResult] | None): 调用方预先提供的 memory 结果。
