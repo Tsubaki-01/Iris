@@ -78,7 +78,9 @@ class ToolRegistry:
             IrisToolValidationError: 当名称、别名产生冲突或 on_conflict 不为 raise 时。
         """
         if on_conflict != "raise":
-            raise IrisToolValidationError("阶段 1 只支持 raise 冲突策略", on_conflict=on_conflict)
+            raise IrisToolValidationError(
+                "阶段 1 只支持 raise 冲突策略", on_conflict=on_conflict
+            )
         self._validate_available_name(tool.definition.name)
         for alias in tool.definition.aliases:
             self._validate_available_name(alias)
@@ -240,7 +242,9 @@ class ToolRegistry:
         if self._deferred_index is None:
             self._deferred_index = DeferredToolIndex()
             self._deferred_index.build(self._tools.values())
-        return self._deferred_index.search(query, include_groups=include_groups, limit=limit)
+        return self._deferred_index.search(
+            query, include_groups=include_groups, limit=limit
+        )
 
     # endregion
 
@@ -356,7 +360,10 @@ class ToolRegistryView:
             name = tool.definition.name
             if name in self.deny:
                 continue
-            if self.include_groups is not None and tool.definition.group not in self.include_groups:
+            if (
+                self.include_groups is not None
+                and tool.definition.group not in self.include_groups
+            ):
                 if name not in self.allow:
                     continue
             if tool.definition.deferred and name not in self.allow:

@@ -66,7 +66,9 @@ async def test_executor_maps_on_error_middleware_failure(tmp_path: Path) -> None
     registry = ToolRegistry()
     registry.register_function(fail, description="失败工具")
 
-    result = await ToolExecutor(registry, middleware=[BrokenErrorMiddleware()]).execute_one(
+    result = await ToolExecutor(
+        registry, middleware=[BrokenErrorMiddleware()]
+    ).execute_one(
         ToolUseBlock(id="call_1", name="fail", input={}),
         ToolExecutionContext(workspace_root=tmp_path),
     )
@@ -78,7 +80,9 @@ async def test_executor_maps_on_error_middleware_failure(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_executor_accepts_legacy_after_execute_only_middleware(tmp_path: Path) -> None:
+async def test_executor_accepts_legacy_after_execute_only_middleware(
+    tmp_path: Path,
+) -> None:
     class LegacyMiddleware:
         async def after_execute(
             self,

@@ -432,7 +432,9 @@ class MemoryService:
     #           Context & Helpers
     # ==========================================
     # region
-    def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
+    def build_context(
+        self, query: MemoryQuery, *, max_chars: int
+    ) -> MemoryContextBundle:
         """召回并构建结构化记忆上下文。
 
         包装 context_builder 以代理执行查询并返回限定字数的大文本。

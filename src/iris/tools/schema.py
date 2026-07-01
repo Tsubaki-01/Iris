@@ -72,7 +72,9 @@ class DocstringSchemaExtractor:
                     current_arg = arg_name.split(" ", 1)[0].strip()
                     info.args[current_arg] = description.strip()
                 elif current_arg:
-                    info.args[current_arg] = f"{info.args[current_arg]} {stripped}".strip()
+                    info.args[current_arg] = (
+                        f"{info.args[current_arg]} {stripped}".strip()
+                    )
                 continue
             if section == "returns":
                 info.returns = f"{info.returns} {stripped}".strip()
@@ -107,16 +109,23 @@ def schema_from_callable(
     for name, parameter in inspect.signature(func).parameters.items():
         if name in preset_kwargs:
             continue
-        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+        if parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
             continue
         if parameter.kind not in {
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         }:
-            raise IrisToolValidationError("工具函数只支持普通参数和关键字参数", parameter=name)
+            raise IrisToolValidationError(
+                "工具函数只支持普通参数和关键字参数", parameter=name
+            )
         annotation = type_hints.get(name, parameter.annotation)
         if annotation is inspect.Parameter.empty:
-            raise IrisToolValidationError("工具函数参数必须包含类型注解", parameter=name)
+            raise IrisToolValidationError(
+                "工具函数参数必须包含类型注解", parameter=name
+            )
         field_schema = _schema_for_annotation(annotation)
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
@@ -138,14 +147,23 @@ def callable_input_model(
     for name, parameter in inspect.signature(func).parameters.items():
         if name in preset_kwargs:
             continue
-        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}:
+        if parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
             continue
         annotation = type_hints.get(name, parameter.annotation)
         if annotation is inspect.Parameter.empty:
-            raise IrisToolValidationError("工具函数参数必须包含类型注解", parameter=name)
-        default = ... if parameter.default is inspect.Parameter.empty else parameter.default
+            raise IrisToolValidationError(
+                "工具函数参数必须包含类型注解", parameter=name
+            )
+        default = (
+            ... if parameter.default is inspect.Parameter.empty else parameter.default
+        )
         fields[name] = (annotation, Field(default=default))
-    return create_model(f"{func.__name__.title().replace('_', '')}ToolInput", **fields)  # ty:ignore[unresolved-attribute]
+    return create_model(
+        f"{func.__name__.title().replace('_', '')}ToolInput", **fields
+    )  # ty:ignore[unresolved-attribute]
 
 
 def to_openai_chat_tool_schema(definition: Any) -> dict[str, Any]:
@@ -234,4 +252,6 @@ def _type_hints(func: Callable[..., Any]) -> dict[str, Any]:
     try:
         return get_type_hints(func)
     except NameError as exc:
-        raise IrisToolValidationError("工具函数类型注解无法解析", error=str(exc)) from exc
+        raise IrisToolValidationError(
+            "工具函数类型注解无法解析", error=str(exc)
+        ) from exc

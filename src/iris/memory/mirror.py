@@ -205,7 +205,9 @@ class FileMemoryMirror:
                     path.write_text("", encoding="utf-8")
             self._ensure_recent_events_header()
         except OSError as exc:
-            raise IrisMemoryError("memory mirror 初始化失败", root=str(self.root)) from exc
+            raise IrisMemoryError(
+                "memory mirror 初始化失败", root=str(self.root)
+            ) from exc
 
     def mirror_item(self, item: MemoryItem) -> None:
         """将一个 active item 投影到对应 Markdown/JSON 文件。"""
@@ -221,7 +223,10 @@ class FileMemoryMirror:
             marker_type="item",
             scope=item.scope,
         )
-        if item.category == MemoryCategory.TASK and item.kind == MemoryItemKind.TASK_STATE:
+        if (
+            item.category == MemoryCategory.TASK
+            and item.kind == MemoryItemKind.TASK_STATE
+        ):
             self._upsert_task_state(item)
 
     def mirror_event(self, event: MemoryEvent) -> None:
@@ -263,19 +268,25 @@ class FileMemoryMirror:
             for event in events:
                 self.mirror_event(event)
         except OSError as exc:
-            raise IrisMemoryError("memory mirror 重建失败", root=str(self.root)) from exc
+            raise IrisMemoryError(
+                "memory mirror 重建失败", root=str(self.root)
+            ) from exc
 
     def _resolve_relative(self, relative_path: str) -> Path:
         """解析系统生成的相对路径，并拒绝逃逸 root。"""
         candidate = Path(relative_path)
         if candidate.is_absolute():
-            raise IrisMemoryError("memory mirror 路径必须是相对路径", path=relative_path)
+            raise IrisMemoryError(
+                "memory mirror 路径必须是相对路径", path=relative_path
+            )
         root = self.root.resolve(strict=False)
         resolved = (root / candidate).resolve(strict=False)
         try:
             resolved.relative_to(root)
         except ValueError as exc:
-            raise IrisMemoryError("memory mirror 路径不能逃逸 root", path=relative_path) from exc
+            raise IrisMemoryError(
+                "memory mirror 路径不能逃逸 root", path=relative_path
+            ) from exc
         return resolved
 
     def _ensure_recent_events_header(self) -> None:
@@ -368,7 +379,9 @@ class FileMemoryMirror:
             pattern = _block_pattern(marker_type, scope_hash, entity_id)
             generated = _wrap_block(marker_type, scope_hash, entity_id, block)
             if re.search(pattern, content, flags=re.DOTALL):
-                new_content = re.sub(pattern, lambda _: generated, content, flags=re.DOTALL)
+                new_content = re.sub(
+                    pattern, lambda _: generated, content, flags=re.DOTALL
+                )
             else:
                 prefix = content.rstrip()
                 new_content = f"{prefix}\n\n{generated}" if prefix else generated
@@ -395,7 +408,9 @@ class FileMemoryMirror:
         """只保留指定 scope 的最近 N 条事件投影。"""
         path = self._resolve_relative(RECENT_EVENTS_PATH)
         content = path.read_text(encoding="utf-8") if path.exists() else ""
-        matches = list(re.finditer(_scope_blocks_pattern("event", scope), content, re.DOTALL))
+        matches = list(
+            re.finditer(_scope_blocks_pattern("event", scope), content, re.DOTALL)
+        )
         overflow = len(matches) - RECENT_EVENTS_LIMIT
         if overflow <= 0:
             self._ensure_recent_events_header()
@@ -435,7 +450,9 @@ class FileMemoryMirror:
             )
             path.write_text(_dump_pretty_json(current), encoding="utf-8")
         except (OSError, TypeError) as exc:
-            raise IrisMemoryError("memory mirror task.json 写入失败", path=str(path)) from exc
+            raise IrisMemoryError(
+                "memory mirror task.json 写入失败", path=str(path)
+            ) from exc
 
     def _remove_task_states_for_scope(self, scope: MemoryScope) -> None:
         """删除 task.json 中属于当前 scope 的结构化投影。"""
@@ -450,7 +467,9 @@ class FileMemoryMirror:
             ]
             path.write_text(_dump_pretty_json(current), encoding="utf-8")
         except (OSError, TypeError) as exc:
-            raise IrisMemoryError("memory mirror task.json 重建失败", path=str(path)) from exc
+            raise IrisMemoryError(
+                "memory mirror task.json 重建失败", path=str(path)
+            ) from exc
 
 
 def _scope_summary(scope: MemoryScope) -> str:

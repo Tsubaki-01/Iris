@@ -74,9 +74,15 @@ class RuleMemoryExtractor:
                     default=MemoryLevel.SEMANTIC,
                 ),
                 text=episode.text,
-                confidence=_score_hint(episode.metadata, "memory_confidence", default=0.8),
-                importance=_score_hint(episode.metadata, "memory_importance", default=0.6),
-                reason=str(episode.metadata.get("memory_reason") or "rule extractor candidate"),
+                confidence=_score_hint(
+                    episode.metadata, "memory_confidence", default=0.8
+                ),
+                importance=_score_hint(
+                    episode.metadata, "memory_importance", default=0.6
+                ),
+                reason=str(
+                    episode.metadata.get("memory_reason") or "rule extractor candidate"
+                ),
                 metadata=dict(episode.metadata),
             )
         ]
@@ -140,10 +146,20 @@ class MemoryPolicy:
 
     def _score_decision(self, candidate: MemoryCandidate) -> PolicyDecision:
         """按置信度和重要性阈值判断候选。"""
-        if candidate.confidence is not None and candidate.confidence < self.min_confidence:
-            return PolicyDecision(False, "candidate confidence is below policy threshold")
-        if candidate.importance is not None and candidate.importance < self.min_importance:
-            return PolicyDecision(False, "candidate importance is below policy threshold")
+        if (
+            candidate.confidence is not None
+            and candidate.confidence < self.min_confidence
+        ):
+            return PolicyDecision(
+                False, "candidate confidence is below policy threshold"
+            )
+        if (
+            candidate.importance is not None
+            and candidate.importance < self.min_importance
+        ):
+            return PolicyDecision(
+                False, "candidate importance is below policy threshold"
+            )
         return PolicyDecision(True, "candidate satisfies policy thresholds")
 
 
@@ -219,7 +235,9 @@ class MemoryOrchestrator:
             promoted_items.append(item)
         return promoted_items
 
-    def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
+    def build_context(
+        self, query: MemoryQuery, *, max_chars: int
+    ) -> MemoryContextBundle:
         """复用 MemoryService 构建记忆上下文。"""
         return self.service.build_context(query, max_chars=max_chars)
 
@@ -256,6 +274,10 @@ def _enum_hint(  # noqa: UP047
 def _score_hint(metadata: dict[str, Any], key: str, *, default: float) -> float:
     """从 metadata 中读取 0..1 分数 hint。"""
     raw = metadata.get(key)
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and 0.0 <= raw <= 1.0:
+    if (
+        isinstance(raw, (int, float))
+        and not isinstance(raw, bool)
+        and 0.0 <= raw <= 1.0
+    ):
         return float(raw)
     return default

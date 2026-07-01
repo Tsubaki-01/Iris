@@ -21,7 +21,13 @@ from pydantic import BaseModel, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import TextBlock
-from ..base import BaseTool, ToolCapability, ToolDefinition, ToolExecutionContext, ToolResult
+from ..base import (
+    BaseTool,
+    ToolCapability,
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolResult,
+)
 from ..permissions import ReadFileState, WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
@@ -159,6 +165,7 @@ class WorkspaceFileService:
             workspace_policy (WorkspacePolicy | None): 路径访问策略。为 None 时使用默认策略。
         """
         self.workspace_policy = workspace_policy or WorkspacePolicy()
+
     # endregion
 
     # ==========================================
@@ -178,7 +185,9 @@ class WorkspaceFileService:
         Raises:
             IrisToolValidationError: 当路径越出 workspace 或策略拒绝访问时。
         """
-        return self.workspace_policy.resolve_path(path, workspace_root=context.workspace_root)
+        return self.workspace_policy.resolve_path(
+            path, workspace_root=context.workspace_root
+        )
 
     def ensure_read_state(self, context: ToolExecutionContext) -> ReadFileState:
         """获取或初始化文件读取状态。
@@ -223,6 +232,7 @@ class WorkspaceFileService:
         stat = path.stat()
         if record.mtime_ns != stat.st_mtime_ns or record.size_bytes != stat.st_size:
             raise IrisToolExecutionError("STALE_FILE_STATE: 文件已在读取后发生变化")
+
     # endregion
 
     # ==========================================
@@ -295,7 +305,9 @@ class WorkspaceFileService:
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
         with path.open("r", encoding="utf-8") as handle:
-            selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
+            selected = [
+                line.rstrip("\n") for line in islice(handle, offset, offset + limit)
+            ]
         self.record_read(path, context)
         return "\n".join(
             f"{index}: {line}" for index, line in enumerate(selected, start=offset + 1)
@@ -322,7 +334,9 @@ class WorkspaceFileService:
         workspace_root = context.workspace_root.resolve()
         return "\n".join(str(path.relative_to(workspace_root)) for path in paths)
 
-    def grep_search(self, params: GrepSearchInput, context: ToolExecutionContext) -> str:
+    def grep_search(
+        self, params: GrepSearchInput, context: ToolExecutionContext
+    ) -> str:
         """搜索 workspace 内文本内容。
 
         Args:
@@ -343,7 +357,9 @@ class WorkspaceFileService:
         try:
             regex = re.compile(params.pattern)
         except re.error as exc:
-            raise IrisToolValidationError("invalid regex pattern", pattern=params.pattern) from exc
+            raise IrisToolValidationError(
+                "invalid regex pattern", pattern=params.pattern
+            ) from exc
 
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []
@@ -410,9 +426,14 @@ class WorkspaceFileService:
             raise IrisToolExecutionError("MATCH_NOT_FOUND: 未找到 old_string")
         if count > 1:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
-        self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
+        self.atomic_write(
+            path, content.replace(params.old_string, params.new_string, 1)
+        )
         self.record_read(path, context)
-        return f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
+        return (
+            f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
+        )
+
     # endregion
 
 
@@ -465,6 +486,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
             group="file",
             max_result_chars=max_result_chars,
         )
+
     # endregion
 
     # ==========================================
@@ -507,6 +529,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
         """
         input_data = cast(InputT, self.input_type.model_validate(params))
         return await self._impl(input_data, context)
+
     # endregion
 
     # ==========================================
@@ -540,6 +563,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
             tool_name=self.name,
             content=[TextBlock(text=content)] if content else [],
         )
+
     # endregion
 
 
@@ -664,5 +688,7 @@ def register_file_tools(
     registry = registry or ToolRegistry()
     service = file_service or WorkspaceFileService()
     for tool_cls in FILE_TOOL_CLASSES:
-        registry.register(tool_cls(file_service=service, max_result_chars=max_result_chars))
+        registry.register(
+            tool_cls(file_service=service, max_result_chars=max_result_chars)
+        )
     return registry

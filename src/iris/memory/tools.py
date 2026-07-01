@@ -217,7 +217,9 @@ class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
                 )
             )
         results = _dedupe_results(results)[: params.limit]
-        return self._json_result({"results": [_result_payload(result) for result in results]})
+        return self._json_result(
+            {"results": [_result_payload(result) for result in results]}
+        )
 
 
 class MemoryListTool(MemoryTool[MemoryListToolInput]):
@@ -303,9 +305,13 @@ def access_policy_factory_from_scope_factory(
     return _factory
 
 
-def default_memory_access_policy_factory(config: MemoryConfig) -> MemoryAccessPolicyFactory:
+def default_memory_access_policy_factory(
+    config: MemoryConfig,
+) -> MemoryAccessPolicyFactory:
     """基于 memory config 构造默认记忆访问策略工厂。"""
-    return access_policy_factory_from_scope_factory(default_memory_scope_factory(config))
+    return access_policy_factory_from_scope_factory(
+        default_memory_scope_factory(config)
+    )
 
 
 def register_memory_tools(

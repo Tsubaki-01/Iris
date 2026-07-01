@@ -31,7 +31,9 @@ class ContextCaptureMiddleware:
 
 
 @pytest.mark.asyncio
-async def test_executor_runs_registered_function_and_returns_text_result(tmp_path: Path) -> None:
+async def test_executor_runs_registered_function_and_returns_text_result(
+    tmp_path: Path,
+) -> None:
     def greet(name: str) -> str:
         return f"你好，{name}"
 
@@ -142,7 +144,9 @@ async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_executor_uses_isolated_context_for_concurrent_read_batch(tmp_path: Path) -> None:
+async def test_executor_uses_isolated_context_for_concurrent_read_batch(
+    tmp_path: Path,
+) -> None:
     def echo(value: str) -> str:
         return value
 

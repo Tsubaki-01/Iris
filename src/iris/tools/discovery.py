@@ -69,9 +69,9 @@ class DeferredToolIndex:
     def __init__(self) -> None:
         """初始化空索引。"""
         self._definitions: list[ToolDefinition] = []
-        self._documents: list[
-            tuple[ToolDefinition, dict[str, float], float, str]
-        ] = []  # (definition, weighted_terms, weighted_document_length, haystack)
+        self._documents: list[tuple[ToolDefinition, dict[str, float], float, str]] = (
+            []
+        )  # (definition, weighted_terms, weighted_document_length, haystack)
 
     # endregion
 
@@ -85,14 +85,21 @@ class DeferredToolIndex:
         Args:
             tools (Iterable[BaseTool]): 注册表中的工具对象集合。
         """
-        self._definitions = [tool.definition for tool in tools if tool.definition.deferred]
+        self._definitions = [
+            tool.definition for tool in tools if tool.definition.deferred
+        ]
         self._documents = []
         for definition in self._definitions:
             weighted_terms = _weighted_terms(definition)
             document_length = sum(weighted_terms.values())
             if document_length > 0:
                 self._documents.append(
-                    (definition, weighted_terms, document_length, _search_text(definition))
+                    (
+                        definition,
+                        weighted_terms,
+                        document_length,
+                        _search_text(definition),
+                    )
                 )
 
     # endregion
@@ -139,7 +146,8 @@ class DeferredToolIndex:
         document_count = len(filtered_docs)
         average_length = sum(doc[2] for doc in filtered_docs) / document_count
         document_frequencies = {
-            term: sum(1 for doc in filtered_docs if term in doc[1]) for term in query_terms
+            term: sum(1 for doc in filtered_docs if term in doc[1])
+            for term in query_terms
         }
 
         # --- 3. 对所有筛选后的文档进行评分 ---
@@ -227,7 +235,11 @@ class ToolSearchTool(BaseTool):
                         "items": {"type": "string"},
                         "description": "可选工具组过滤。",
                     },
-                    "limit": {"type": "integer", "default": 10, "description": "最大返回数量。"},
+                    "limit": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "最大返回数量。",
+                    },
                 },
                 "required": ["query"],
             },
@@ -278,7 +290,9 @@ class ToolSearchTool(BaseTool):
         try:
             value = ToolSearchInput.model_validate(params)
         except ValueError as exc:
-            raise IrisToolValidationError("tool_search 参数校验失败", error=str(exc)) from exc
+            raise IrisToolValidationError(
+                "tool_search 参数校验失败", error=str(exc)
+            ) from exc
 
         if not value.query.strip():
             raise IrisToolValidationError("tool_search query 不能为空")
@@ -397,8 +411,12 @@ def _bm25_score(
         if term_frequency <= 0:
             continue
         document_frequency = document_frequencies.get(term, 0)
-        idf = math.log(1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5))
-        saturation = (term_frequency * (_BM25_K1 + 1)) / (term_frequency + _BM25_K1 * length_factor)
+        idf = math.log(
+            1 + (document_count - document_frequency + 0.5) / (document_frequency + 0.5)
+        )
+        saturation = (term_frequency * (_BM25_K1 + 1)) / (
+            term_frequency + _BM25_K1 * length_factor
+        )
         score += idf * saturation * query_weight
     return score
 
@@ -442,7 +460,9 @@ def _query_coverage_score(
     primary_terms = [term for term, weight in query_terms.items() if weight >= 1.0]
     if not primary_terms:
         return 0.0
-    matched = sum(1 for term in primary_terms if term in weighted_terms or term in haystack)
+    matched = sum(
+        1 for term in primary_terms if term in weighted_terms or term in haystack
+    )
     return _QUERY_COVERAGE_WEIGHT * (matched / len(primary_terms))
 
 
@@ -550,4 +570,6 @@ def _search_text(definition: ToolDefinition) -> str:
     """
     metadata = definition.metadata
     tags = " ".join(str(tag) for tag in metadata.get("tags", []))
-    return f"{definition.name} {definition.description} {definition.group} {tags}".lower()
+    return (
+        f"{definition.name} {definition.description} {definition.group} {tags}".lower()
+    )

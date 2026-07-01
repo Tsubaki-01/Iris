@@ -121,15 +121,21 @@ class ToolExecutor:
                         details=exc.context,
                     )
             params = tool.validate_input(tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            middleware_error = await self._run_before_call(tool, raw_params, execution_context)
+            raw_params = (
+                params.model_dump() if isinstance(params, BaseModel) else dict(params)
+            )
+            middleware_error = await self._run_before_call(
+                tool, raw_params, execution_context
+            )
             if middleware_error is not None:
                 self._record_breaker_result(tool.name, middleware_error)
                 return middleware_error
 
             # --- 2. 执行权限策略 ---
             try:
-                decision = self.permission_policy.check(tool, raw_params, execution_context)
+                decision = self.permission_policy.check(
+                    tool, raw_params, execution_context
+                )
             except Exception as exc:
                 result = self._error_result(tool_use, "PERMISSION_ERROR", str(exc))
                 self._record_breaker_result(tool.name, result)
@@ -169,7 +175,9 @@ class ToolExecutor:
                 normalized,
                 max_chars=tool.definition.max_result_chars,
             )
-            final_result = await self._run_after_call(tool, persisted, execution_context)
+            final_result = await self._run_after_call(
+                tool, persisted, execution_context
+            )
             final_result = final_result.model_copy(
                 update={
                     "tool_use_id": final_result.tool_use_id or tool_use.id,
@@ -179,7 +187,9 @@ class ToolExecutor:
             self._record_breaker_result(tool.name, final_result)
             return final_result
         except IrisToolNotFoundError:
-            return self._error_result(tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}")
+            return self._error_result(
+                tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}"
+            )
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
             if tool is not None:
@@ -187,7 +197,8 @@ class ToolExecutor:
             return result
         except IrisToolExecutionError as exc:
             allow_structured = tool is not None and (
-                tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
+                tool.definition.group == "file"
+                or exc.message.startswith("ARTIFACT_ERROR:")
             )
             code, message = _tool_error_code_and_message(
                 exc.message,
@@ -285,7 +296,8 @@ class ToolExecutor:
             list[ToolResult]: 生成的已完成数据流集。
         """
         tasks = (
-            self.execute_one(tool_use, context.model_copy(deep=True)) for tool_use in tool_uses
+            self.execute_one(tool_use, context.model_copy(deep=True))
+            for tool_use in tool_uses
         )
         return list(await asyncio.gather(*tasks))
 
@@ -303,8 +315,12 @@ class ToolExecutor:
         try:
             tool = self.registry.get(tool_use.name)
             params = tool.validate_input(tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            return tool.is_read_only(raw_params) and tool.is_concurrency_safe(raw_params)
+            raw_params = (
+                params.model_dump() if isinstance(params, BaseModel) else dict(params)
+            )
+            return tool.is_read_only(raw_params) and tool.is_concurrency_safe(
+                raw_params
+            )
         except (IrisToolNotFoundError, IrisToolValidationError, ValidationError):
             return False
 

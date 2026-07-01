@@ -41,7 +41,9 @@ def test_workspace_shared_scope_uses_stable_convention() -> None:
 
 
 def test_query_limit_is_positive_and_capped() -> None:
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
+    scope = MemoryScope(
+        workspace_id="workspace", agent_id="agent", collection="default"
+    )
 
     query = MemoryQuery(scope=scope, text="preference", limit=1000)
 
@@ -51,7 +53,9 @@ def test_query_limit_is_positive_and_capped() -> None:
 
 
 def test_write_input_rejects_blank_text_and_invalid_scores() -> None:
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
+    scope = MemoryScope(
+        workspace_id="workspace", agent_id="agent", collection="default"
+    )
 
     with pytest.raises(ValidationError):
         MemoryWriteInput(scope=scope, text=" ", reason="user asked to persist")

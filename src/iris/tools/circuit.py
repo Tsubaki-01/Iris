@@ -22,7 +22,9 @@ class CircuitBreakerState(BaseModel):
 class CircuitBreaker:
     """阻止持续失败的工具被反复调用。"""
 
-    def __init__(self, *, failure_threshold: int = 3, cooldown_seconds: float = 30.0) -> None:
+    def __init__(
+        self, *, failure_threshold: int = 3, cooldown_seconds: float = 30.0
+    ) -> None:
         """初始化熔断器。
 
         Args:
@@ -65,7 +67,9 @@ class CircuitBreaker:
         if not result.is_error:
             self.reset(tool_name)
             return
-        state = self._states.setdefault(tool_name, CircuitBreakerState(tool_name=tool_name))
+        state = self._states.setdefault(
+            tool_name, CircuitBreakerState(tool_name=tool_name)
+        )
         state.failure_count += 1
         state.last_error_code = result.error.code if result.error is not None else ""
         if state.failure_count >= self.failure_threshold:

@@ -61,9 +61,9 @@ def test_rule_extractor_creates_pending_candidate_without_l2_promotion(
     assert len(candidates) == 1
     assert candidates[0].status == MemoryCandidateStatus.PENDING
     assert service.list_items(scope) == []
-    assert service.list_candidates(scope, status=MemoryCandidateStatus.PENDING)[0].id == (
-        candidates[0].id
-    )
+    assert service.list_candidates(scope, status=MemoryCandidateStatus.PENDING)[
+        0
+    ].id == (candidates[0].id)
 
 
 def test_process_candidates_promotes_only_on_explicit_call(tmp_path: Path) -> None:
@@ -88,7 +88,9 @@ def test_process_candidates_promotes_only_on_explicit_call(tmp_path: Path) -> No
     assert items[0].kind.value == "preference"
     assert service.promoted_candidate_ids == [candidate.id]
     assert service.list_candidates(scope)[0].status == MemoryCandidateStatus.ACCEPTED
-    assert service.recall(MemoryQuery(scope=scope, text="简洁"))[0].item.id == items[0].id
+    assert (
+        service.recall(MemoryQuery(scope=scope, text="简洁"))[0].item.id == items[0].id
+    )
 
 
 def test_low_confidence_candidate_is_rejected_and_audited(tmp_path: Path) -> None:
@@ -148,4 +150,6 @@ class _SpyMemoryService(MemoryService):
 
 
 def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")
+    return MemoryScope(
+        workspace_id="workspace", agent_id=agent_id, collection="default"
+    )
