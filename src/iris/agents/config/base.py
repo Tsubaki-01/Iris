@@ -16,8 +16,8 @@ from pydantic import (
     model_validator,
 )
 
-from ...core import ModelRoute, parse_model_route
 from ...exceptions import IrisConfigError, IrisValidationError
+from ...providers import ModelRoute, parse_model_route
 
 
 class ModelConfig(BaseModel):
@@ -125,7 +125,9 @@ class ToolsConfig(BaseModel):
     def _reject_mixed_python_list(cls, data: Any) -> Any:
         """禁止 `tools.python` 混合列表。"""
         if isinstance(data, dict) and isinstance(data.get("python"), list):
-            raise ValueError("tools.python 必须使用 functions/registrars 结构，不能使用混合列表")
+            raise ValueError(
+                "tools.python 必须使用 functions/registrars 结构，不能使用混合列表"
+            )
         return data
 
 
@@ -289,15 +291,21 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     try:
         raw_config = yaml.safe_load(config_text)
     except yaml.YAMLError as exc:
-        raise IrisConfigError("Agent 配置 YAML 解析失败", path=str(config_path)) from exc
+        raise IrisConfigError(
+            "Agent 配置 YAML 解析失败", path=str(config_path)
+        ) from exc
 
     if not isinstance(raw_config, dict):
         raise IrisConfigError("Agent 配置顶层必须是对象", path=str(config_path))
 
     try:
-        return AgentConfig.model_validate(raw_config, context={"config_path": config_path})
+        return AgentConfig.model_validate(
+            raw_config, context={"config_path": config_path}
+        )
     except ValidationError as exc:
-        raise IrisConfigError("Agent 配置校验失败", path=str(config_path), error=str(exc)) from exc
+        raise IrisConfigError(
+            "Agent 配置校验失败", path=str(config_path), error=str(exc)
+        ) from exc
 
 
 __all__ = [
