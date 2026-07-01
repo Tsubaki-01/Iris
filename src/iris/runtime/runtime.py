@@ -31,6 +31,7 @@ from ..tools import (
     ToolExecutor,
     ToolRegistry,
     ToolRegistryView,
+    ToolResult,
 )
 from .assembler import RuntimeMessageAssembler
 from .memory import prepare_memory_context_input
@@ -40,6 +41,8 @@ from .models import (
     RuntimeOptions,
     RuntimeStatus,
     RuntimeTurnResult,
+    ToolBridgeResult,
+    ToolErrorPolicy,
 )
 from .tools import ToolBridge
 
@@ -261,6 +264,228 @@ class AgentRuntime:
             metadata=run_metadata,
         )
 
+    async def run_loop(
+        self,
+        user_input: str,
+        *,
+        options: RuntimeOptions | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> RuntimeTurnResult:
+        """执行有界 tool loop。
+
+        当前用户输入只进入第一步。后续步骤从 session history 重新装配请求，
+        因此上一轮保存的 tool result message 会自然进入下一次 provider 请求。
+
+        Args:
+            user_input (str): 当前用户输入内容。
+            options (RuntimeOptions | None): 本轮 session、run id、request 和 loop 选项。
+            metadata (Mapping[str, Any] | None): 调用方传入的追踪信息。
+
+        Returns:
+            RuntimeTurnResult: loop 的最终助手消息、工具结果和状态。
+        """
+        runtime_options = options or RuntimeOptions()
+        run_metadata = {**runtime_options.metadata, **dict(metadata or {})}
+        session_id = runtime_options.session_id
+        run_id = runtime_options.run_id
+        max_steps = runtime_options.loop.max_steps
+        all_tool_results: list[ToolResult] = []
+        all_tool_messages: list[Msg] = []
+        latest_assistant: Msg | None = None
+        latest_response: LLMResponse | None = None
+
+        for step_index in range(max_steps):
+            step_number = step_index + 1
+            current_input = Msg.user(user_input) if step_index == 0 else None
+            try:
+                history = _load_history(self.session_store, session_id)
+                context_input = prepare_memory_context_input(
+                    self.context_input,
+                    options=runtime_options,
+                    memory_service=self.memory_service,
+                    memory_context_builder=self.memory_context_builder,
+                )
+                context_output = self.context_builder.build(context_input)
+                request = self.assembler.build_request(
+                    agent_config=self.agent_config,
+                    context_output=context_output,
+                    history=history,
+                    current_input=current_input,
+                )
+                request = _apply_request_options(
+                    request,
+                    runtime_options.request_options,
+                )
+                request = _apply_tool_schemas(
+                    request,
+                    include_tools=runtime_options.include_tools,
+                    tool_view=self.tool_view,
+                    provider=self.agent_config.model.provider,
+                )
+                latest_response = await self.provider.complete(request)
+                latest_assistant = latest_response.to_msg()
+            except Exception as exc:
+                return _error_result(
+                    session_id=session_id,
+                    run_id=run_id,
+                    error=normalize_runtime_error(exc),
+                    assistant_message=latest_assistant,
+                    steps=step_number,
+                    metadata=run_metadata,
+                )
+
+            messages = [*history]
+            if current_input is not None:
+                messages.append(current_input)
+            messages.append(latest_assistant)
+
+            try:
+                self.session_store.save_messages(
+                    session_id,
+                    [message.model_dump(mode="json") for message in messages],
+                )
+
+                if not latest_assistant.has_tool_calls:
+                    self.session_store.save_run_metadata(
+                        session_id,
+                        _build_run_metadata(
+                            existing=self.session_store.load_run_metadata(session_id),
+                            session_id=session_id,
+                            run_id=run_id,
+                            status=RuntimeStatus.OK,
+                            provider=self.agent_config.model.provider,
+                            response=latest_response,
+                            message_count=len(messages),
+                            metadata=run_metadata,
+                            steps=step_number,
+                            tool_count=len(all_tool_results),
+                        ),
+                    )
+                    return RuntimeTurnResult(
+                        session_id=session_id,
+                        run_id=run_id,
+                        status=RuntimeStatus.OK,
+                        assistant_message=latest_assistant,
+                        tool_result_messages=all_tool_messages,
+                        tool_results=all_tool_results,
+                        steps=step_number,
+                        metadata=run_metadata,
+                    )
+
+                bridge_result = await self.tool_bridge.execute_once(
+                    assistant_message=latest_assistant,
+                    session_id=session_id,
+                    run_id=run_id,
+                    step_index=step_index,
+                    agent_id=self.agent_config.name,
+                    workspace_root=self.workspace_root,
+                    permission_mode=self.agent_config.permissions.writes,
+                    session_store=self.session_store,
+                    metadata=run_metadata,
+                )
+                messages.extend(bridge_result.messages)
+                self.session_store.save_messages(
+                    session_id,
+                    [message.model_dump(mode="json") for message in messages],
+                )
+            except Exception as exc:
+                return _error_result(
+                    session_id=session_id,
+                    run_id=run_id,
+                    error=normalize_runtime_error(exc),
+                    assistant_message=latest_assistant,
+                    steps=step_number,
+                    metadata=run_metadata,
+                )
+
+            all_tool_results.extend(bridge_result.results)
+            all_tool_messages.extend(bridge_result.messages)
+
+            if _should_stop_on_tool_error(runtime_options, bridge_result):
+                error = _tool_error_info(bridge_result)
+                try:
+                    self.session_store.save_run_metadata(
+                        session_id,
+                        _build_run_metadata(
+                            existing=self.session_store.load_run_metadata(session_id),
+                            session_id=session_id,
+                            run_id=run_id,
+                            status=RuntimeStatus.ERROR,
+                            provider=self.agent_config.model.provider,
+                            response=latest_response,
+                            message_count=len(messages),
+                            metadata=run_metadata,
+                            steps=step_number,
+                            tool_count=len(all_tool_results),
+                            error=error,
+                        ),
+                    )
+                except Exception as exc:
+                    return _error_result(
+                        session_id=session_id,
+                        run_id=run_id,
+                        error=normalize_runtime_error(exc),
+                        assistant_message=latest_assistant,
+                        steps=step_number,
+                        metadata=run_metadata,
+                    )
+                return RuntimeTurnResult(
+                    session_id=session_id,
+                    run_id=run_id,
+                    status=RuntimeStatus.ERROR,
+                    assistant_message=latest_assistant,
+                    tool_result_messages=all_tool_messages,
+                    tool_results=all_tool_results,
+                    steps=step_number,
+                    error=error,
+                    metadata=run_metadata,
+                )
+
+        error = RuntimeErrorInfo(
+            code="MAX_STEPS_REACHED",
+            message=f"已达到最大 loop 步数: {max_steps}",
+            source="runtime",
+            details={"max_steps": max_steps},
+        )
+        max_step_metadata = {**run_metadata, "max_steps": max_steps}
+        try:
+            self.session_store.save_run_metadata(
+                session_id,
+                _build_run_metadata(
+                    existing=self.session_store.load_run_metadata(session_id),
+                    session_id=session_id,
+                    run_id=run_id,
+                    status=RuntimeStatus.MAX_STEPS,
+                    provider=self.agent_config.model.provider,
+                    response=latest_response,
+                    message_count=len(self.session_store.load_messages(session_id)),
+                    metadata=max_step_metadata,
+                    steps=max_steps,
+                    tool_count=len(all_tool_results),
+                    error=error,
+                ),
+            )
+        except Exception as exc:
+            return _error_result(
+                session_id=session_id,
+                run_id=run_id,
+                error=normalize_runtime_error(exc),
+                assistant_message=latest_assistant,
+                steps=max_steps,
+                metadata=max_step_metadata,
+            )
+        return RuntimeTurnResult(
+            session_id=session_id,
+            run_id=run_id,
+            status=RuntimeStatus.MAX_STEPS,
+            assistant_message=latest_assistant,
+            tool_result_messages=all_tool_messages,
+            tool_results=all_tool_results,
+            steps=max_steps,
+            error=error,
+            metadata=max_step_metadata,
+        )
+
 
 def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
     """将 runtime 边界异常归一化为稳定错误信息。
@@ -337,9 +562,12 @@ def _build_run_metadata(
     run_id: str,
     status: RuntimeStatus,
     provider: str,
-    response: LLMResponse,
+    response: LLMResponse | None,
     message_count: int,
     metadata: Mapping[str, Any],
+    steps: int = 1,
+    tool_count: int = 0,
+    error: RuntimeErrorInfo | None = None,
 ) -> dict[str, object]:
     """构建 session 中保存的 run metadata。
 
@@ -351,15 +579,21 @@ def _build_run_metadata(
         "run_id": run_id,
         "status": status.value,
         "provider": cast(object, provider),
-        "model": cast(object, response.model),
-        "finish_reason": cast(object, response.finish_reason),
-        "input_tokens": response.input_tokens,
-        "output_tokens": response.output_tokens,
-        "total_tokens": response.total_tokens,
+        "model": cast(object, response.model if response is not None else ""),
+        "finish_reason": cast(
+            object,
+            response.finish_reason if response is not None else "",
+        ),
+        "input_tokens": response.input_tokens if response is not None else 0,
+        "output_tokens": response.output_tokens if response is not None else 0,
+        "total_tokens": response.total_tokens if response is not None else 0,
         "message_count": message_count,
-        "steps": 1,  # 目前单轮 runtime 只算一步，后续可以继续修改。
+        "steps": steps,
+        "tool_count": tool_count,
         **dict(metadata),
     }
+    if error is not None:
+        latest_run["error"] = error.model_dump(mode="json")
     runs = existing.get("runs", [])
     run_list = list(runs) if isinstance(runs, list) else []
     run_list.append(latest_run)
@@ -372,6 +606,7 @@ def _error_result(
     run_id: str,
     error: RuntimeErrorInfo,
     assistant_message: Msg | None = None,
+    steps: int = 1,
     metadata: Mapping[str, Any] | None = None,
 ) -> RuntimeTurnResult:
     """构造统一失败结果。"""
@@ -380,9 +615,36 @@ def _error_result(
         run_id=run_id,
         status=RuntimeStatus.ERROR,
         assistant_message=assistant_message,
-        steps=1,
+        steps=steps,
         error=error,
         metadata=dict(metadata or {}),
+    )
+
+
+def _should_stop_on_tool_error(
+    options: RuntimeOptions,
+    bridge_result: ToolBridgeResult,
+) -> bool:
+    """判断 loop 是否应在工具错误后停止。"""
+    return options.loop.tool_error_policy == ToolErrorPolicy.STOP and any(
+        result.is_error for result in bridge_result.results
+    )
+
+
+def _tool_error_info(bridge_result: ToolBridgeResult) -> RuntimeErrorInfo:
+    """从第一个工具错误构造 runtime 错误信息。"""
+    for result in bridge_result.results:
+        if result.is_error and result.error is not None:
+            return RuntimeErrorInfo(
+                code=result.error.code,
+                message=result.error.message,
+                source="tool",
+                details=result.error.details,
+            )
+    return RuntimeErrorInfo(
+        code="TOOL_ERROR",
+        message="工具执行失败",
+        source="tool",
     )
 
 
