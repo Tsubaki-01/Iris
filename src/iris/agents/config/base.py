@@ -11,6 +11,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -176,10 +177,15 @@ class AgentContextConfig(BaseModel):
 
     @field_validator("path", mode="before")
     @classmethod
-    def _validate_path(cls, value: Any) -> Any:
-        """校验 context 配置路径非空。"""
+    def _validate_path(cls, value: Any, info: ValidationInfo) -> Any:
+        """校验 context 配置路径非空，并将相对路径解析为绝对路径。"""
         if isinstance(value, str) and not value.strip():
             raise ValueError("context.path 不能为空")
+        config_path: Path | None = (info.context or {}).get("config_path")
+        if config_path is not None:
+            p = Path(value) if isinstance(value, str) else Path(value)
+            if not p.is_absolute():
+                return (config_path.parent / p).resolve()
         return value
 
 
@@ -288,41 +294,10 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     if not isinstance(raw_config, dict):
         raise IrisConfigError("Agent 配置顶层必须是对象", path=str(config_path))
 
-    normalized_config = _resolve_context_path(raw_config, config_path=config_path)
     try:
-        return AgentConfig.model_validate(normalized_config)
+        return AgentConfig.model_validate(raw_config, context={"config_path": config_path})
     except ValidationError as exc:
         raise IrisConfigError("Agent 配置校验失败", path=str(config_path), error=str(exc)) from exc
-
-
-def _resolve_context_path(
-    raw_config: dict[Any, Any],
-    *,
-    config_path: Path,
-) -> dict[Any, Any]:
-    context = raw_config.get("context")
-    if not isinstance(context, dict):
-        return raw_config
-
-    raw_path = context.get("path")
-    if not isinstance(raw_path, str | Path):
-        return raw_config
-    if isinstance(raw_path, str) and not raw_path.strip():
-        return raw_config
-
-    context_path = Path(raw_path)
-    normalized_path = (
-        context_path
-        if context_path.is_absolute()
-        else (config_path.parent / context_path).resolve()
-    )
-    return {
-        **raw_config,
-        "context": {
-            **context,
-            "path": normalized_path,
-        },
-    }
 
 
 __all__ = [
