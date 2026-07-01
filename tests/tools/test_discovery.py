@@ -79,7 +79,11 @@ def test_deferred_tool_search_uses_bm25_like_ranking() -> None:
     registry.register_function(vector_lookup)
     registry.register_function(file_search)
     index = DeferredToolIndex()
-    index.build(registry.view(allow={"alpha_dense", "vector_lookup", "file_search"}).active_tools)
+    index.build(
+        registry.view(
+            allow={"alpha_dense", "vector_lookup", "file_search"}
+        ).active_tools
+    )
 
     assert index.naive_search("dense")[0].name == "alpha_dense"
     assert index.search("vector search")[0].name == "vector_lookup"
@@ -97,6 +101,7 @@ def test_deferred_tool_search_supports_groups_limit_and_stable_sorting() -> None
     registry = ToolRegistry()
 
     for index in range(60):
+
         @tool(
             name=f"bulk_tool_{index:02d}",
             description="shared marker",
@@ -126,7 +131,10 @@ def test_deferred_tool_search_supports_groups_limit_and_stable_sorting() -> None
     assert [definition.name for definition in alpha_results] == ["alpha_tool"]
 
     stable_results = registry.search_deferred("stable")
-    assert [definition.name for definition in stable_results] == ["alpha_tool", "beta_tool"]
+    assert [definition.name for definition in stable_results] == [
+        "alpha_tool",
+        "beta_tool",
+    ]
 
 
 def test_registry_search_deferred_reuses_cached_index_until_registry_changes(
@@ -212,7 +220,10 @@ def test_deferred_tool_search_prefers_cjk_bigram_and_query_coverage() -> None:
 
     matches = registry.search_deferred("向量 检索")
 
-    assert [definition.name for definition in matches] == ["vector_lookup", "vector_index"]
+    assert [definition.name for definition in matches] == [
+        "vector_lookup",
+        "vector_index",
+    ]
 
 
 def test_deferred_tool_search_uses_low_weight_cjk_single_character_recall() -> None:

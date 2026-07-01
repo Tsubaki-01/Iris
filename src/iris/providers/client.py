@@ -91,7 +91,9 @@ class ProviderClient(BaseModel):
             False
         """
         if request.stream:
-            raise IrisProviderError("complete() 不支持 stream=True，请使用后续 stream() 接口")
+            raise IrisProviderError(
+                "complete() 不支持 stream=True，请使用后续 stream() 接口"
+            )
         payload = self.adapter.to_provider_request(request)
         raw_response = await self._send(request, payload)
         return self.adapter.from_provider_response(raw_response)
@@ -108,20 +110,26 @@ class ProviderClient(BaseModel):
         if self.http_client is not None:
             await self.http_client.aclose()
 
-    async def _send(self, request: LLMRequest, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _send(
+        self, request: LLMRequest, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         """发送 HTTP 请求并返回 JSON 字典。"""
         endpoint = self._endpoint_for(request)
         url = f"{self._base_url().rstrip('/')}{endpoint}"
         client = self._client_for_request(request)
         try:
-            response = await client.post(url, json=payload, headers=self._build_headers())
+            response = await client.post(
+                url, json=payload, headers=self._build_headers()
+            )
         except httpx.HTTPError as exc:
             raise IrisAPIConnectionError(
                 "连接 provider API 失败",
                 provider=self.adapter.provider,
             ) from exc
         if response.status_code >= 400:
-            raise self._map_http_error(response.status_code, self._response_body(response))
+            raise self._map_http_error(
+                response.status_code, self._response_body(response)
+            )
         body = response.json()
         return body if isinstance(body, dict) else {"data": body}
 
@@ -136,8 +144,12 @@ class ProviderClient(BaseModel):
     def _endpoint_for(self, request: LLMRequest) -> str:
         """根据 provider 与 API 风格选择 endpoint。"""
         if self.adapter.provider == "openai":
-            api_style = request.provider_options.get("api_style", self.adapter.default_api_style)
-            return "/v1/responses" if api_style == "responses" else "/v1/chat/completions"
+            api_style = request.provider_options.get(
+                "api_style", self.adapter.default_api_style
+            )
+            return (
+                "/v1/responses" if api_style == "responses" else "/v1/chat/completions"
+            )
         if self.adapter.provider == "anthropic":
             return "/v1/messages"
         raise IrisProviderError("不支持的 provider", provider=self.adapter.provider)
@@ -167,7 +179,9 @@ class ProviderClient(BaseModel):
                 status_code=status_code,
                 provider=self.adapter.provider,
             )
-        return IrisProviderError(message, status_code=status_code, provider=self.adapter.provider)
+        return IrisProviderError(
+            message, status_code=status_code, provider=self.adapter.provider
+        )
 
     def _response_body(self, response: httpx.Response) -> Any:
         """提取 HTTP 错误响应体。"""

@@ -129,14 +129,17 @@ class OpenAIMessageAdapter(ProviderAdapter):
         """转换单条 Iris 消息为 OpenAI 消息。"""
         if msg.tool_results:
             return [
-                self._format_tool_result(block, api_style=api_style) for block in msg.tool_results
+                self._format_tool_result(block, api_style=api_style)
+                for block in msg.tool_results
             ]
 
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
         if msg.sender and msg.role == Role.USER:
             item["name"] = msg.sender
         if msg.tool_calls:
-            item["tool_calls"] = [self._format_tool_call(block) for block in msg.tool_calls]
+            item["tool_calls"] = [
+                self._format_tool_call(block) for block in msg.tool_calls
+            ]
         return [item]
 
     def _format_tool_result(
@@ -165,11 +168,15 @@ class OpenAIMessageAdapter(ProviderAdapter):
             "type": "function",
             "function": {
                 "name": block.name,
-                "arguments": json.dumps(block.input, ensure_ascii=False, separators=(",", ":")),
+                "arguments": json.dumps(
+                    block.input, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         }
 
-    def _append_common_options(self, payload: dict[str, Any], request: LLMRequest) -> None:
+    def _append_common_options(
+        self, payload: dict[str, Any], request: LLMRequest
+    ) -> None:
         """追加 OpenAI Chat 与 Responses 共享的请求选项。"""
         option_names = (
             "temperature",
@@ -201,7 +208,9 @@ class OpenAIMessageAdapter(ProviderAdapter):
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0),
-            metadata=({"raw_object": response.get("object")} if response.get("object") else {}),
+            metadata=(
+                {"raw_object": response.get("object")} if response.get("object") else {}
+            ),
         )
 
     def _from_responses_response(self, response: Mapping[str, Any]) -> LLMResponse:
@@ -211,12 +220,16 @@ class OpenAIMessageAdapter(ProviderAdapter):
             provider=self.provider,
             id=str(response.get("id") or ""),
             model=str(response.get("model") or ""),
-            content=self._content_blocks_from_responses_output(response.get("output") or []),
+            content=self._content_blocks_from_responses_output(
+                response.get("output") or []
+            ),
             finish_reason=str(response.get("status") or ""),
             input_tokens=int(usage.get("input_tokens") or 0),
             output_tokens=int(usage.get("output_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0),
-            metadata=({"raw_object": response.get("object")} if response.get("object") else {}),
+            metadata=(
+                {"raw_object": response.get("object")} if response.get("object") else {}
+            ),
         )
 
     def _content_blocks_from_chat_message(

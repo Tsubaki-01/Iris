@@ -49,7 +49,9 @@ class ContextBuilder:
         return ContextBuildOutput(
             system=Msg.system(system_text),
             memory=(
-                Msg.user(memory_text, sender=CONTEXT_SENDER) if memory_text is not None else None
+                Msg.user(memory_text, sender=CONTEXT_SENDER)
+                if memory_text is not None
+                else None
             ),
             before_current_input=(
                 Msg.user(before_input_text, sender=CONTEXT_SENDER)

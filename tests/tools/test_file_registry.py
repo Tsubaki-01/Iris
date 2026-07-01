@@ -55,7 +55,8 @@ def test_register_file_tools_extends_existing_registry() -> None:
 
     assert returned is registry
     assert [
-        tool.definition.name for tool in registry.view(include_groups={"file"}).active_tools
+        tool.definition.name
+        for tool in registry.view(include_groups={"file"}).active_tools
     ] == [
         "read_file",
         "list_files",

@@ -142,7 +142,9 @@ class AnthropicMessageAdapter(ProviderAdapter):
                 )
         return content
 
-    def _append_common_options(self, payload: dict[str, Any], request: LLMRequest) -> None:
+    def _append_common_options(
+        self, payload: dict[str, Any], request: LLMRequest
+    ) -> None:
         """追加 Anthropic Messages API 支持的通用请求选项。"""
         option_names = ("temperature", "top_p", "max_tokens", "tool_choice")
         for name in option_names:

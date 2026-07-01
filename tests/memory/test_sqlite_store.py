@@ -50,7 +50,9 @@ def test_sqlite_store_searches_with_fallback_when_fts_disabled(tmp_path: Path) -
     assert [result.item.id for result in results] == [item.id]
 
 
-def test_sqlite_store_falls_back_when_fts_returns_no_unicode_matches(tmp_path: Path) -> None:
+def test_sqlite_store_falls_back_when_fts_returns_no_unicode_matches(
+    tmp_path: Path,
+) -> None:
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     scope = _scope()
     item = MemoryItem(scope=scope, text="用户喜欢简洁的技术回答")
@@ -68,7 +70,9 @@ def test_sqlite_store_falls_back_when_fts_returns_no_unicode_matches(tmp_path: P
     assert [result.item.id for result in results] == [item.id]
 
 
-def test_sqlite_store_delete_tombstones_and_hides_item_by_default(tmp_path: Path) -> None:
+def test_sqlite_store_delete_tombstones_and_hides_item_by_default(
+    tmp_path: Path,
+) -> None:
     store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
     scope = _scope()
     item = MemoryItem(scope=scope, text="需要被删除的记忆")
@@ -338,13 +342,17 @@ def test_sqlite_store_promote_candidate_rolls_back_on_failure(
 
     assert store.list_items(scope) == []
     assert store.list_candidates(scope)[0].status == MemoryCandidateStatus.PENDING
-    assert MemoryEventType.ADD not in {event.event_type for event in store.list_events(scope)}
+    assert MemoryEventType.ADD not in {
+        event.event_type for event in store.list_events(scope)
+    }
     assert MemoryEventType.CANDIDATE_ACCEPT not in {
         event.event_type for event in store.list_events(scope)
     }
 
 
-def test_sqlite_store_rejects_duplicate_candidate_id_across_scopes(tmp_path: Path) -> None:
+def test_sqlite_store_rejects_duplicate_candidate_id_across_scopes(
+    tmp_path: Path,
+) -> None:
     store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
     owner_scope = _scope(agent_id="agent-a")
     other_scope = _scope(agent_id="agent-b")
@@ -426,4 +434,6 @@ def test_sqlite_store_wraps_unserializable_metadata(tmp_path: Path) -> None:
 
 
 def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")
+    return MemoryScope(
+        workspace_id="workspace", agent_id=agent_id, collection="default"
+    )

@@ -20,7 +20,12 @@ from iris.memory import (
     register_memory_tools,
 )
 from iris.message import ToolUseBlock
-from iris.tools import ToolCapability, ToolExecutionContext, ToolExecutor, register_file_tools
+from iris.tools import (
+    ToolCapability,
+    ToolExecutionContext,
+    ToolExecutor,
+    register_file_tools,
+)
 
 
 def test_register_memory_tools_exposes_read_tools_only(tmp_path: Path) -> None:
@@ -32,7 +37,11 @@ def test_register_memory_tools_exposes_read_tools_only(tmp_path: Path) -> None:
 
     tools = registry.view(include_groups={"memory"}).active_tools
 
-    assert [tool.name for tool in tools] == ["memory_search", "memory_list", "memory_get"]
+    assert [tool.name for tool in tools] == [
+        "memory_search",
+        "memory_list",
+        "memory_get",
+    ]
     assert all(tool.definition.capabilities == {ToolCapability.READ} for tool in tools)
     assert "memory_remember" not in {tool.name for tool in tools}
     assert "memory_forget" not in {tool.name for tool in tools}
@@ -50,7 +59,8 @@ def test_register_memory_tools_extends_file_registry(tmp_path: Path) -> None:
 
     assert returned is registry
     assert [
-        tool.definition.name for tool in registry.view(include_groups={"file"}).active_tools
+        tool.definition.name
+        for tool in registry.view(include_groups={"file"}).active_tools
     ] == [
         "read_file",
         "list_files",
@@ -59,7 +69,8 @@ def test_register_memory_tools_extends_file_registry(tmp_path: Path) -> None:
         "edit_file",
     ]
     assert [
-        tool.definition.name for tool in registry.view(include_groups={"memory"}).active_tools
+        tool.definition.name
+        for tool in registry.view(include_groups={"memory"}).active_tools
     ] == [
         "memory_search",
         "memory_list",
@@ -154,10 +165,14 @@ async def test_memory_search_reads_only_policy_read_scopes(tmp_path: Path) -> No
         MemoryWriteInput(scope=own_scope, text="可读的 subagent scratch", reason="seed")
     )
     shared_item = service.remember(
-        MemoryWriteInput(scope=shared_scope, text="可读的 workspace shared", reason="seed")
+        MemoryWriteInput(
+            scope=shared_scope, text="可读的 workspace shared", reason="seed"
+        )
     )
     hidden_item = service.remember(
-        MemoryWriteInput(scope=hidden_scope, text="不可读的 parent memory", reason="seed")
+        MemoryWriteInput(
+            scope=hidden_scope, text="不可读的 parent memory", reason="seed"
+        )
     )
 
     result = await ToolExecutor(
@@ -222,7 +237,9 @@ async def test_memory_list_and_get_are_scope_isolated(tmp_path: Path) -> None:
             category=MemoryCategory.USER,
         )
     )
-    executor = ToolExecutor(register_memory_tools(service=service, scope_factory=scope_factory))
+    executor = ToolExecutor(
+        register_memory_tools(service=service, scope_factory=scope_factory)
+    )
 
     listed = await executor.execute_one(
         ToolUseBlock(id="list_1", name="memory_list", input={}),
@@ -299,7 +316,9 @@ async def test_memory_get_reads_policy_read_scopes(tmp_path: Path) -> None:
     shared_scope = _scope(agent_id="__workspace__", collection="shared")
     hidden_scope = _scope(agent_id="parent", collection="default")
     shared_item = service.remember(
-        MemoryWriteInput(scope=shared_scope, text="workspace shared note", reason="seed")
+        MemoryWriteInput(
+            scope=shared_scope, text="workspace shared note", reason="seed"
+        )
     )
     hidden_item = service.remember(
         MemoryWriteInput(scope=hidden_scope, text="parent hidden note", reason="seed")
@@ -412,7 +431,9 @@ def _scope(
     agent_id: str = "agent",
     collection: str = "default",
 ) -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection=collection)
+    return MemoryScope(
+        workspace_id="workspace", agent_id=agent_id, collection=collection
+    )
 
 
 def _policy_factory(

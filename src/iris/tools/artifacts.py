@@ -84,13 +84,15 @@ class ToolArtifactStore:
         try:
             root = self.root.resolve(strict=False)
             root.mkdir(parents=True, exist_ok=True)
-            artifact_path = (root / f"{_safe_path_segment(result.tool_use_id)}.txt").resolve(
-                strict=False
-            )
+            artifact_path = (
+                root / f"{_safe_path_segment(result.tool_use_id)}.txt"
+            ).resolve(strict=False)
             artifact_path.relative_to(root)
             artifact_path.write_text(content, encoding="utf-8")
         except (OSError, ValueError) as exc:
-            raise IrisToolExecutionError("ARTIFACT_ERROR: 写入工具 artifact 失败") from exc
+            raise IrisToolExecutionError(
+                "ARTIFACT_ERROR: 写入工具 artifact 失败"
+            ) from exc
 
         # --- 3. Replace memory text with preview ---
         preview = content[: self.preview_chars]

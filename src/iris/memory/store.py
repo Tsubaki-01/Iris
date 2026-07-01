@@ -24,7 +24,9 @@ from .models import (
 class MemoryStore(Protocol):
     """长期记忆权威存储契约。"""
 
-    def add_episode(self, episode: MemoryEpisode, *, event: MemoryEvent) -> MemoryEpisode:
+    def add_episode(
+        self, episode: MemoryEpisode, *, event: MemoryEvent
+    ) -> MemoryEpisode:
         """保存 L1 片段记忆和对应审计事件。"""
 
     def add_item(self, item: MemoryItem, *, event: MemoryEvent) -> MemoryItem:
@@ -40,7 +42,9 @@ class MemoryStore(Protocol):
     ) -> MemoryItem:
         """更新长期记忆条目并记录审计事件。"""
 
-    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> bool:
+    def delete_item(
+        self, item_id: str, scope: MemoryScope, *, event: MemoryEvent
+    ) -> bool:
         """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
 
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:

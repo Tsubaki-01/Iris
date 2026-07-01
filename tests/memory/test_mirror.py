@@ -90,7 +90,9 @@ def test_mirror_replaces_block_with_literal_backslashes(tmp_path: Path) -> None:
     item = service.remember(MemoryWriteInput(scope=scope, text=text, reason="seed"))
     mirror.mirror_item(item)
 
-    content = (tmp_path / ".iris" / "memory" / "User" / "user.md").read_text(encoding="utf-8")
+    content = (tmp_path / ".iris" / "memory" / "User" / "user.md").read_text(
+        encoding="utf-8"
+    )
     assert text in content
 
 
@@ -110,9 +112,9 @@ def test_remember_mirrors_add_event_summary(tmp_path: Path) -> None:
         )
     )
 
-    content = (tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md").read_text(
-        encoding="utf-8"
-    )
+    content = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md"
+    ).read_text(encoding="utf-8")
     assert item.id in content
     assert "event_type: add" in content
     assert f"item_id: {item.id}" in content
@@ -136,12 +138,12 @@ def test_session_items_do_not_mix_with_recent_events(tmp_path: Path) -> None:
         )
     )
 
-    session_items = (tmp_path / ".iris" / "memory" / "Sessions" / "session_items.md").read_text(
-        encoding="utf-8"
-    )
-    recent_events = (tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md").read_text(
-        encoding="utf-8"
-    )
+    session_items = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "session_items.md"
+    ).read_text(encoding="utf-8")
+    recent_events = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md"
+    ).read_text(encoding="utf-8")
     assert item.id in session_items
     assert "### Memory Item" in session_items
     assert "### Memory Item" not in recent_events
@@ -168,7 +170,9 @@ def test_task_state_updates_task_json(tmp_path: Path) -> None:
     )
 
     data = json.loads(
-        (tmp_path / ".iris" / "memory" / "Tasks" / "task.json").read_text(encoding="utf-8")
+        (tmp_path / ".iris" / "memory" / "Tasks" / "task.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert data["items"][0]["id"] == item.id
     assert data["items"][0]["metadata"] == {"stage": 2, "status": "in_progress"}
@@ -191,14 +195,16 @@ def test_observe_mirrors_recent_event_summary(tmp_path: Path) -> None:
         )
     )
 
-    content = (tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md").read_text(
-        encoding="utf-8"
-    )
+    content = (
+        tmp_path / ".iris" / "memory" / "Sessions" / "recent_events.md"
+    ).read_text(encoding="utf-8")
     assert episode.id in content
     assert "event_type: observe" in content
 
 
-def test_rebuild_from_store_is_deterministic_and_omits_deleted_items(tmp_path: Path) -> None:
+def test_rebuild_from_store_is_deterministic_and_omits_deleted_items(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / ".iris" / "memory"
     store = SQLiteMemoryStore(root / "memory.db", use_fts=False)
     mirror = FileMemoryMirror(root)
@@ -231,8 +237,12 @@ def test_rebuild_from_store_keeps_other_scope_mirror_blocks(tmp_path: Path) -> N
     service = MemoryService(store, mirror=mirror)
     scope_a = _scope(agent_id="agent-a")
     scope_b = _scope(agent_id="agent-b")
-    item_a = service.remember(MemoryWriteInput(scope=scope_a, text="agent-a 的记忆", reason="seed"))
-    item_b = service.remember(MemoryWriteInput(scope=scope_b, text="agent-b 的记忆", reason="seed"))
+    item_a = service.remember(
+        MemoryWriteInput(scope=scope_a, text="agent-a 的记忆", reason="seed")
+    )
+    item_b = service.remember(
+        MemoryWriteInput(scope=scope_b, text="agent-b 的记忆", reason="seed")
+    )
 
     service.forget(item_b.id, scope_b, reason="remove scope b")
 
@@ -259,7 +269,9 @@ def test_rebuild_from_store_keeps_other_scope_task_json_entries(tmp_path: Path) 
             kind=MemoryItemKind.TASK_STATE,
         )
     )
-    service.remember(MemoryWriteInput(scope=scope_b, text="agent-b 普通记忆", reason="seed"))
+    service.remember(
+        MemoryWriteInput(scope=scope_b, text="agent-b 普通记忆", reason="seed")
+    )
 
     mirror.rebuild_from_store(store, scope_b)
 
@@ -274,7 +286,9 @@ def test_rebuild_from_store_projects_all_active_items(tmp_path: Path) -> None:
     service = MemoryService(store, mirror=mirror)
     scope = _scope()
     items = [
-        service.remember(MemoryWriteInput(scope=scope, text=f"全量投影记忆 {index}", reason="seed"))
+        service.remember(
+            MemoryWriteInput(scope=scope, text=f"全量投影记忆 {index}", reason="seed")
+        )
         for index in range(101)
     ]
     (root / "User" / "user.md").write_text("", encoding="utf-8")
@@ -292,13 +306,17 @@ def test_recent_events_mirror_keeps_recent_limit_and_header(tmp_path: Path) -> N
     service = MemoryService(store, mirror=mirror)
     scope = _scope()
     items = [
-        service.remember(MemoryWriteInput(scope=scope, text=f"事件投影记忆 {index}", reason="seed"))
+        service.remember(
+            MemoryWriteInput(scope=scope, text=f"事件投影记忆 {index}", reason="seed")
+        )
         for index in range(105)
     ]
 
     content = (root / "Sessions" / "recent_events.md").read_text(encoding="utf-8")
     assert "recent projection" in content
-    assert "The complete audit logs shall be subject to SQLite memory_events." in content
+    assert (
+        "The complete audit logs shall be subject to SQLite memory_events." in content
+    )
     assert content.count("### Memory Event") == 100
     assert items[0].id not in content
     assert items[-1].id in content
@@ -311,7 +329,9 @@ def test_rebuild_from_store_reconstructs_recent_events(tmp_path: Path) -> None:
     service = MemoryService(store, mirror=mirror)
     scope = _scope()
 
-    item = service.remember(MemoryWriteInput(scope=scope, text="需要事件重建的记忆", reason="seed"))
+    item = service.remember(
+        MemoryWriteInput(scope=scope, text="需要事件重建的记忆", reason="seed")
+    )
     (root / "Sessions" / "recent_events.md").write_text("", encoding="utf-8")
 
     mirror.rebuild_from_store(store, scope)
@@ -327,7 +347,9 @@ def test_forget_rebuilds_active_mirror(tmp_path: Path) -> None:
     mirror = FileMemoryMirror(root)
     service = MemoryService(store, mirror=mirror)
     scope = _scope()
-    item = service.remember(MemoryWriteInput(scope=scope, text="临时记忆", reason="seed"))
+    item = service.remember(
+        MemoryWriteInput(scope=scope, text="临时记忆", reason="seed")
+    )
 
     service.forget(item.id, scope, reason="remove from mirror")
 
@@ -337,4 +359,6 @@ def test_forget_rebuilds_active_mirror(tmp_path: Path) -> None:
 
 
 def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")
+    return MemoryScope(
+        workspace_id="workspace", agent_id=agent_id, collection="default"
+    )

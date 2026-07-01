@@ -113,7 +113,9 @@ class ToolResultBlock(BaseModel):
                 extra[key] = item
         if extra:
             existing_extra = metadata.get("extra")
-            merged_extra = dict(existing_extra) if isinstance(existing_extra, dict) else {}
+            merged_extra = (
+                dict(existing_extra) if isinstance(existing_extra, dict) else {}
+            )
             merged_extra.update(extra)
             metadata["extra"] = merged_extra
         return metadata
@@ -340,7 +342,9 @@ class Conversation(BaseModel):
     @property
     def turn_count(self) -> int:
         """用户消息数量（即可视作会话轮数）。"""
-        return sum(1 for msg in self.messages if msg.role == Role.USER and not msg.tool_results)
+        return sum(
+            1 for msg in self.messages if msg.role == Role.USER and not msg.tool_results
+        )
 
     # ==========================================
     #                API 序列化

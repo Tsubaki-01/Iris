@@ -53,7 +53,9 @@ def _resolve_builtin_template(template_name: str) -> Path:
     """解析官方模板目录。"""
     template_dir = _BUILTIN_TEMPLATE_ROOT / template_name
     if not template_dir.is_dir():
-        available = sorted(path.name for path in _BUILTIN_TEMPLATE_ROOT.glob("*") if path.is_dir())
+        available = sorted(
+            path.name for path in _BUILTIN_TEMPLATE_ROOT.glob("*") if path.is_dir()
+        )
         raise IrisTemplateNotFoundError(
             "官方模板不存在",
             template=template_name,

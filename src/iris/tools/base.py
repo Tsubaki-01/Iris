@@ -23,7 +23,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from ..exceptions import IrisToolExecutionError, IrisToolValidationError
 from ..message import TextBlock
-from .schema import callable_input_model, schema_from_callable, schema_from_pydantic_model
+from .schema import (
+    callable_input_model,
+    schema_from_callable,
+    schema_from_pydantic_model,
+)
 
 # endregion
 
@@ -466,7 +470,10 @@ class BaseTool(ABC):
             has_risk = tool.is_destructive(args)
         """
         del params
-        return bool(self.definition.capabilities & {ToolCapability.WRITE, ToolCapability.EXECUTE})
+        return bool(
+            self.definition.capabilities
+            & {ToolCapability.WRITE, ToolCapability.EXECUTE}
+        )
 
     def is_concurrency_safe(self, params: dict[str, Any]) -> bool:
         """判断工具是否可并发执行。
@@ -579,8 +586,12 @@ class CallableTool(BaseTool):
         self.func = func
         self._input_model = input_model
         decorated_preset = getattr(func, "iris_tool_preset_kwargs", {})
-        self.preset_kwargs = dict(preset_kwargs if preset_kwargs is not None else decorated_preset)
-        tool_name = name or getattr(func, "iris_tool_name", None) or func.__name__  # ty:ignore[unresolved-attribute]
+        self.preset_kwargs = dict(
+            preset_kwargs if preset_kwargs is not None else decorated_preset
+        )
+        tool_name = (
+            name or getattr(func, "iris_tool_name", None) or func.__name__
+        )  # ty:ignore[unresolved-attribute]
         tool_description = (
             description
             or getattr(func, "iris_tool_description", None)
@@ -592,14 +603,22 @@ class CallableTool(BaseTool):
             if capabilities is not None
             else getattr(func, "iris_tool_capabilities", set())
         )
-        tool_group = getattr(func, "iris_tool_group", group) if group == "core" else group
+        tool_group = (
+            getattr(func, "iris_tool_group", group) if group == "core" else group
+        )
         tool_deferred = deferred or bool(getattr(func, "iris_tool_deferred", False))
         tool_examples = (
-            examples if examples is not None else getattr(func, "iris_tool_examples", [])
+            examples
+            if examples is not None
+            else getattr(func, "iris_tool_examples", [])
         )
         tool_tags = tags if tags is not None else getattr(func, "iris_tool_tags", [])
-        tool_version = version if version is not None else getattr(func, "iris_tool_version", None)
-        tool_deprecated = deprecated or bool(getattr(func, "iris_tool_deprecated", False))
+        tool_version = (
+            version if version is not None else getattr(func, "iris_tool_version", None)
+        )
+        tool_deprecated = deprecated or bool(
+            getattr(func, "iris_tool_deprecated", False)
+        )
         tool_deprecation_message = (
             deprecation_message
             if deprecation_message is not None
@@ -616,7 +635,9 @@ class CallableTool(BaseTool):
             if name_ in input_schema.get("required", []):
                 input_schema["required"].remove(name_)
         self._generated_model = (
-            input_model if input_model is not None else callable_input_model(func, preset_names)
+            input_model
+            if input_model is not None
+            else callable_input_model(func, preset_names)
         )
         self.definition = ToolDefinition(
             name=tool_name,
@@ -677,12 +698,16 @@ class CallableTool(BaseTool):
         """
         overlap = set(params) & set(self.preset_kwargs)
         if overlap:
-            raise IrisToolValidationError("工具参数不能覆盖预设参数", params=sorted(overlap))
+            raise IrisToolValidationError(
+                "工具参数不能覆盖预设参数", params=sorted(overlap)
+            )
         validation_params = {**params, **self.preset_kwargs}
         try:
             return self._generated_model.model_validate(validation_params)
         except ValidationError as exc:
-            raise IrisToolValidationError("工具参数校验失败", errors=exc.errors()) from exc
+            raise IrisToolValidationError(
+                "工具参数校验失败", errors=exc.errors()
+            ) from exc
 
     # endregion
 
@@ -726,7 +751,9 @@ class CallableTool(BaseTool):
         except Exception as exc:
             raise IrisToolExecutionError(str(exc), tool_name=self.name) from exc
         result = self._normalize_result(value)
-        result.stats.setdefault("elapsed_ms", round((time.perf_counter() - start) * 1000, 3))
+        result.stats.setdefault(
+            "elapsed_ms", round((time.perf_counter() - start) * 1000, 3)
+        )
         return result
 
     def _normalize_result(self, value: Any) -> ToolResult:

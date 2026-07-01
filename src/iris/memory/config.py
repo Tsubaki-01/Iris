@@ -133,8 +133,12 @@ class MemoryConfig(BaseModel):
     scope: MemoryScopeConfig = Field(default_factory=MemoryScopeConfig)
     search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
     mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
-    write_policy: MemoryWritePolicyConfig = Field(default_factory=MemoryWritePolicyConfig)
-    orchestrator: MemoryOrchestratorConfig = Field(default_factory=MemoryOrchestratorConfig)
+    write_policy: MemoryWritePolicyConfig = Field(
+        default_factory=MemoryWritePolicyConfig
+    )
+    orchestrator: MemoryOrchestratorConfig = Field(
+        default_factory=MemoryOrchestratorConfig
+    )
 
 
 def build_memory_service_from_config(

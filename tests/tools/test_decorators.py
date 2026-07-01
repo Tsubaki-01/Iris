@@ -21,7 +21,9 @@ def test_enhanced_tool_decorator_metadata_is_preserved() -> None:
     registry = ToolRegistry()
     registered = registry.register_function(lookup)
 
-    assert registered.definition.input_schema["properties"] == {"query": {"type": "string"}}
+    assert registered.definition.input_schema["properties"] == {
+        "query": {"type": "string"}
+    }
     assert registered.definition.metadata == {
         "examples": [{"input": {"query": "iris"}, "output": "ok"}],
         "tags": ["search", "legacy"],
