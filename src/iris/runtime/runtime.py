@@ -2,7 +2,7 @@
 
 本模块从 session history、context 和当前用户输入构造一次 `LLMRequest`，
 调用注入的 provider，并把 assistant 回复写回 session。
-memory 只支持显式 opt-in 注入；工具执行和 bounded loop 留给后续阶段组合。
+memory 只支持显式 opt-in 注入；工具执行只做一次 bridge，bounded loop 留给后续阶段组合。
 
 Example:
     runtime = AgentRuntime(
@@ -41,6 +41,7 @@ from .models import (
     RuntimeStatus,
     RuntimeTurnResult,
 )
+from .tools import ToolBridge
 
 # endregion
 
@@ -136,6 +137,10 @@ class AgentRuntime:
             self.tool_registry,
             permission_policy=self.permission_policy,
         )
+        self.tool_bridge = ToolBridge(
+            tool_view=self.tool_view,
+            tool_executor=self.tool_executor,
+        )
         self.memory_service = memory_service
         self.memory_context_builder = memory_context_builder or MemoryContextBuilder()
 
@@ -179,6 +184,12 @@ class AgentRuntime:
                 current_input=current_input,
             )
             request = _apply_request_options(request, runtime_options.request_options)
+            request = _apply_tool_schemas(
+                request,
+                include_tools=runtime_options.include_tools,
+                tool_view=self.tool_view,
+                provider=self.agent_config.model.provider,
+            )
         except Exception as exc:
             return _error_result(
                 session_id=session_id,
@@ -219,6 +230,17 @@ class AgentRuntime:
                     metadata=run_metadata,
                 ),
             )
+            bridge_result = await self.tool_bridge.execute_once(
+                assistant_message=assistant_message,
+                session_id=session_id,
+                run_id=run_id,
+                step_index=0,
+                agent_id=self.agent_config.name,
+                workspace_root=self.workspace_root,
+                permission_mode=self.agent_config.permissions.writes,
+                session_store=self.session_store,
+                metadata=run_metadata,
+            )
         except Exception as exc:
             return _error_result(
                 session_id=session_id,
@@ -233,6 +255,8 @@ class AgentRuntime:
             run_id=run_id,
             status=RuntimeStatus.OK,
             assistant_message=assistant_message,
+            tool_result_messages=bridge_result.messages,
+            tool_results=bridge_result.results,
             steps=1,
             metadata=run_metadata,
         )
@@ -286,6 +310,24 @@ def _apply_request_options(
                 **dict(provider_options),
             }
     return request.model_copy(update=update)
+
+
+def _apply_tool_schemas(
+    request: LLMRequest,
+    *,
+    include_tools: bool,
+    tool_view: ToolRegistryView,
+    provider: str,
+) -> LLMRequest:
+    """按当前活动工具视图挂载 provider 请求工具 schema。"""
+    if not include_tools:
+        return request
+    api_style = request.provider_options.get("api_style")
+    tools = tool_view.active_schemas(
+        provider=provider,
+        api_style=api_style if isinstance(api_style, str) else None,
+    )
+    return request.model_copy(update={"tools": tools})
 
 
 def _build_run_metadata(
