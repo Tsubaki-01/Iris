@@ -2,7 +2,7 @@
 
 本模块从 session history、context 和当前用户输入构造一次 `LLMRequest`，
 调用注入的 provider，并把 assistant 回复写回 session。
-这里刻意不接入 memory、工具执行或 bounded loop，避免单轮链路承担后续阶段职责。
+memory 只支持显式 opt-in 注入；工具执行和 bounded loop 留给后续阶段组合。
 
 Example:
     runtime = AgentRuntime(
@@ -33,6 +33,7 @@ from ..tools import (
     ToolRegistryView,
 )
 from .assembler import RuntimeMessageAssembler
+from .memory import prepare_memory_context_input
 from .models import (
     RuntimeErrorInfo,
     RuntimeErrorSource,
@@ -44,7 +45,7 @@ from .models import (
 # endregion
 
 if TYPE_CHECKING:
-    from ..memory import MemoryService
+    from ..memory import MemoryContextBuilder, MemoryService
 
 
 class RuntimeProvider(Protocol):
@@ -100,6 +101,7 @@ class AgentRuntime:
         workspace_root: Path | None = None,
         permission_policy: PermissionPolicy | None = None,
         memory_service: MemoryService | None = None,
+        memory_context_builder: MemoryContextBuilder | None = None,
     ) -> None:
         """创建单轮 runtime。
 
@@ -116,7 +118,10 @@ class AgentRuntime:
             workspace_root (Path | None): 工具执行时使用的 workspace 根路径。
             permission_policy (PermissionPolicy | None): 工具权限策略。
             memory_service (MemoryService | None): 显式 memory 阶段复用的可选服务。
+            memory_context_builder (MemoryContextBuilder | None): 显式 memory 结果裁剪器。
         """
+        from ..memory import MemoryContextBuilder
+
         self.agent_config = agent_config
         self.context_input = context_input
         self.provider = provider
@@ -132,6 +137,7 @@ class AgentRuntime:
             permission_policy=self.permission_policy,
         )
         self.memory_service = memory_service
+        self.memory_context_builder = memory_context_builder or MemoryContextBuilder()
 
     async def run_turn(
         self,
@@ -158,7 +164,13 @@ class AgentRuntime:
         # --- 1. Build request ---
         try:
             history = _load_history(self.session_store, session_id)
-            context_output = self.context_builder.build(self.context_input)
+            context_input = prepare_memory_context_input(
+                self.context_input,
+                options=runtime_options,
+                memory_service=self.memory_service,
+                memory_context_builder=self.memory_context_builder,
+            )
+            context_output = self.context_builder.build(context_input)
             current_input = Msg.user(user_input)
             request = self.assembler.build_request(
                 agent_config=self.agent_config,
@@ -249,7 +261,9 @@ def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
     """从 session 读取历史消息并恢复为 `Msg`。"""
-    return [Msg.from_dict(message) for message in session_store.load_messages(session_id)]
+    return [
+        Msg.from_dict(message) for message in session_store.load_messages(session_id)
+    ]
 
 
 def _apply_request_options(
