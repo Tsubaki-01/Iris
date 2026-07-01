@@ -17,13 +17,21 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol, cast
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
 from ..exceptions import IrisError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..session import InMemorySessionStore, SessionStore
+from ..tools import (
+    DefaultPermissionPolicy,
+    PermissionPolicy,
+    ToolExecutor,
+    ToolRegistry,
+    ToolRegistryView,
+)
 from .assembler import RuntimeMessageAssembler
 from .models import (
     RuntimeErrorInfo,
@@ -34,6 +42,9 @@ from .models import (
 )
 
 # endregion
+
+if TYPE_CHECKING:
+    from ..memory import MemoryService
 
 
 class RuntimeProvider(Protocol):
@@ -65,14 +76,6 @@ class AgentRuntime:
     provider 调用和 session 存储仍由各自组件承担。这样单轮 runtime 可先稳定下来，
     后续 memory、工具桥和 loop 可以在同一边界上继续组合。
 
-    Attributes:
-        agent_config (AgentConfig): 已校验的 Agent 配置。
-        context_input (ContextBuildInput): 本轮使用的 context 输入定义。
-        provider (RuntimeProvider): 注入的 provider 实现。
-        session_store (SessionStore): 会话历史和 run metadata 存储。
-        context_builder (ContextBuilder): Context 构建器。
-        assembler (RuntimeMessageAssembler): Provider 请求装配器。
-
     Example:
         runtime = AgentRuntime(
             agent_config=config,
@@ -91,6 +94,12 @@ class AgentRuntime:
         session_store: SessionStore | None = None,
         context_builder: ContextBuilder | None = None,
         assembler: RuntimeMessageAssembler | None = None,
+        tool_registry: ToolRegistry | None = None,
+        tool_view: ToolRegistryView | None = None,
+        tool_executor: ToolExecutor | None = None,
+        workspace_root: Path | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        memory_service: MemoryService | None = None,
     ) -> None:
         """创建单轮 runtime。
 
@@ -101,6 +110,12 @@ class AgentRuntime:
             session_store (SessionStore | None): 可选会话存储；默认使用内存 store。
             context_builder (ContextBuilder | None): 可选 context 构建器，便于测试注入。
             assembler (RuntimeMessageAssembler | None): 可选消息装配器，便于测试注入。
+            tool_registry (ToolRegistry | None): 可选工具注册表，供后续工具桥阶段复用。
+            tool_view (ToolRegistryView | None): 可选工具视图，默认由注册表创建。
+            tool_executor (ToolExecutor | None): 可选工具执行器，默认使用同一注册表和权限策略。
+            workspace_root (Path | None): 工具执行时使用的 workspace 根路径。
+            permission_policy (PermissionPolicy | None): 工具权限策略。
+            memory_service (MemoryService | None): 显式 memory 阶段复用的可选服务。
         """
         self.agent_config = agent_config
         self.context_input = context_input
@@ -108,6 +123,15 @@ class AgentRuntime:
         self.session_store = session_store or InMemorySessionStore()
         self.context_builder = context_builder or ContextBuilder()
         self.assembler = assembler or RuntimeMessageAssembler()
+        self.tool_registry = tool_registry or ToolRegistry()
+        self.tool_view = tool_view or self.tool_registry.view()
+        self.workspace_root = (workspace_root or Path.cwd()).resolve()
+        self.permission_policy = permission_policy or DefaultPermissionPolicy()
+        self.tool_executor = tool_executor or ToolExecutor(
+            self.tool_registry,
+            permission_policy=self.permission_policy,
+        )
+        self.memory_service = memory_service
 
     async def run_turn(
         self,
