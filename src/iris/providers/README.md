@@ -68,3 +68,12 @@ Provider 真实 HTTP 调用层的实体。只负责传输、Endpoint 推导、He
     发起非流式的 HTTP 模型请求。包含完整的报错映射流程。不支持 `stream=True`。
 - **`async def close() -> None`**
     安全释放内部的 `httpx.AsyncClient` 连接池。
+
+### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
+Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。
+
+- `ModelRoute`: 保存 `provider` 与 provider 内部模型名。
+- `parse_model_route(model: str) -> ModelRoute`: 解析 `openai/gpt-4o` 这类路由字符串。
+- `create_provider_client(...) -> ProviderClient`: 根据 provider 选择 adapter，解析 API key，并构造 `ProviderClient`。
+
+Factory 只做 provider client 装配；Adapter 仍负责 payload 转换，`ProviderClient` 仍负责 HTTP 传输。新代码应从 `iris.providers` 导入这些对象。

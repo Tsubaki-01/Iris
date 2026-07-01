@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from iris.agents import AgentConfig, AgentContextConfig, load_agent_config
-from iris.core import ModelRoute
 from iris.exceptions import IrisConfigError
+from iris.providers import ModelRoute
 
 
 def _write_yaml(path: Path, content: str) -> Path:

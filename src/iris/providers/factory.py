@@ -1,8 +1,7 @@
-"""LLM provider client 工厂。
+"""Provider client 工厂。
 
-本模块负责解析高层模型配置字符串，并按 provider 创建对应的
-`ProviderClient`。Adapter 仍只做格式转换，`ProviderClient` 仍只负责
-HTTP 传输，本模块只承担高层装配职责。
+本模块负责解析高层模型路由，并按 provider 创建对应的 `ProviderClient`。
+Adapter 仍只做格式转换，`ProviderClient` 仍只负责 HTTP 传输。
 
 Example:
     >>> route = parse_model_route("openai/gpt-4o")
@@ -21,12 +20,10 @@ from pydantic import BaseModel, ConfigDict
 
 from ..config import get_config, is_config_initialized
 from ..exceptions import IrisConfigError, IrisProviderError, IrisValidationError
-from ..providers import (
-    AnthropicMessageAdapter,
-    OpenAIMessageAdapter,
-    ProviderAdapter,
-    ProviderClient,
-)
+from .adapter import ProviderAdapter
+from .anthropic import AnthropicMessageAdapter
+from .client import ProviderClient
+from .openai import OpenAIMessageAdapter
 
 # endregion
 

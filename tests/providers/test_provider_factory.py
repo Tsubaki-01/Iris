@@ -4,7 +4,6 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 import iris
-import iris.core
 from iris.exceptions import IrisConfigError, IrisProviderError, IrisValidationError
 from iris.message import LLMRequest, Msg
 from iris.providers import (
@@ -16,10 +15,10 @@ from iris.providers import (
 
 
 @pytest.fixture(autouse=True)
-def isolate_factory_config(
+def isolate_provider_factory_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[None, None, None]:
-    """隔离 factory 测试使用的环境变量与全局配置。"""
+    """隔离 provider factory 测试使用的环境变量与全局配置。"""
     for name in (
         "IRIS_OPENAI_API_KEY",
         "IRIS_ANTHROPIC_API_KEY",
@@ -37,12 +36,6 @@ def test_model_route_is_frozen_pydantic_model() -> None:
     assert isinstance(route, BaseModel)
     with pytest.raises(ValidationError):
         route.model = "gpt-4o-mini"
-
-
-def test_core_does_not_export_provider_factory() -> None:
-    assert not hasattr(iris.core, "ModelRoute")
-    assert not hasattr(iris.core, "create_provider_client")
-    assert not hasattr(iris.core, "parse_model_route")
 
 
 def test_parse_model_route_strips_provider_prefix() -> None:
