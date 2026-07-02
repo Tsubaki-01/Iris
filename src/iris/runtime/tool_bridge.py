@@ -42,6 +42,7 @@ class ToolBridge:
         """
         self.tool_view = tool_view
         self.tool_executor = tool_executor
+        self._read_states: dict[str, Any] = {}
 
     async def execute_once(
         self,
@@ -95,10 +96,13 @@ class ToolBridge:
                 agent_id=agent_id,
                 permission_mode=permission_mode,
                 metadata=dict(metadata or {}),
+                read_state=self._read_states.get(session_id),
             )
             active_results = await self.tool_executor.execute_many(
                 active_calls, context
             )
+            if context.read_state is not None:
+                self._read_states[session_id] = context.read_state
             _merge_active_results(result_slots, active_results)
 
         results = [cast(ToolResult, result) for result in result_slots]

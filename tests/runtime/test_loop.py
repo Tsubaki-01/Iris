@@ -16,7 +16,12 @@ from iris.runtime.models import (
     ToolErrorPolicy,
 )
 from iris.session import InMemorySessionStore
-from iris.tools import ToolExecutor, ToolRegistry
+from iris.tools import (
+    DefaultPermissionPolicy,
+    ToolExecutor,
+    ToolRegistry,
+    register_file_tools,
+)
 
 
 def _agent_config() -> AgentConfig:
@@ -152,6 +157,73 @@ async def test_run_loop_feeds_tool_result_to_next_provider_request_once(
     assert [tool_result.model_content for tool_result in result.tool_results] == [
         "echo:Iris"
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_preserves_file_read_state_between_steps(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello old\n", encoding="utf-8")
+    registry = register_file_tools()
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="fake",
+                model="gpt-4o-mini",
+                content=[
+                    ToolUseBlock(
+                        id="read_1",
+                        name="read_file",
+                        input={"file_path": "notes.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                provider="fake",
+                model="gpt-4o-mini",
+                content=[
+                    ToolUseBlock(
+                        id="edit_1",
+                        name="edit_file",
+                        input={
+                            "file_path": "notes.txt",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            _assistant_text_response("完成"),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=AgentConfig(
+            name="runtime-agent",
+            model={"provider": "openai", "name": "gpt-4o-mini"},
+            system="你是本地助手。",
+            permissions={"workspace": ".", "writes": "allow"},
+        ),
+        context_input=_context_input(),
+        provider=provider,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(
+            registry,
+            permission_policy=DefaultPermissionPolicy(allow_writes=True),
+        ),
+        workspace_root=tmp_path,
+    )
+
+    result = await runtime.run_loop(
+        "编辑文件",
+        options=RuntimeOptions(loop=BoundedLoopOptions(max_steps=3)),
+    )
+
+    assert result.status == RuntimeStatus.OK
+    assert path.read_text(encoding="utf-8") == "hello new\n"
 
 
 @pytest.mark.asyncio

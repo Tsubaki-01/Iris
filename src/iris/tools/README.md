@@ -134,6 +134,8 @@ executor = ToolExecutor(
 
 执行顺序是：设置 context → 查 registry → circuit breaker `before_call` → 输入校验 → middleware `before_call` → 权限检查 → `tool.arun()` → middleware `on_error` 或 `after_call`/`after_execute` → artifact 处理 → circuit breaker 记录结果。
 
+文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
+
 ## 文件工具
 
 文件工具位于 `iris.tools.builtin.file`，也从 `iris.tools` 顶层导出输入模型、`FileTool`、`WorkspaceFileService`、`FILE_TOOL_CLASSES` 和 `register_file_tools()`。
