@@ -1,4 +1,4 @@
-from iris.message import Conversation, LLMRequest, Msg, ToolUseBlock
+from iris.message import Conversation, LLMRequest, Msg, TextBlock, ToolUseBlock
 from iris.providers import AnthropicMessageAdapter, OpenAIMessageAdapter
 
 
@@ -47,6 +47,41 @@ def test_openai_responses_adapter_formats_tool_result_as_function_call_output() 
 
     assert OpenAIMessageAdapter().to_provider_request(request)["input"] == [
         {"type": "function_call_output", "call_id": "call_1", "output": "完成"}
+    ]
+
+
+def test_openai_responses_adapter_formats_assistant_tool_call_as_function_call_item() -> (
+    None
+):
+    request = LLMRequest(
+        model="gpt-4o",
+        messages=[
+            Msg.user("你好"),
+            Msg.assistant(
+                [
+                    TextBlock(text="需要工具"),
+                    ToolUseBlock(
+                        id="call_1",
+                        name="echo",
+                        input={"value": "Iris"},
+                    ),
+                ]
+            ),
+            Msg.tool_result(tool_use_id="call_1", content="echo:Iris"),
+        ],
+        provider_options={"api_style": "responses"},
+    )
+
+    assert OpenAIMessageAdapter().to_provider_request(request)["input"] == [
+        {"role": "user", "content": "你好", "name": "user"},
+        {"role": "assistant", "content": "需要工具"},
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "echo",
+            "arguments": '{"value":"Iris"}',
+        },
+        {"type": "function_call_output", "call_id": "call_1", "output": "echo:Iris"},
     ]
 
 

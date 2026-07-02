@@ -127,6 +127,8 @@ class OpenAIMessageAdapter(ProviderAdapter):
         api_style: Literal["chat", "responses"],
     ) -> list[dict[str, Any]]:
         """转换单条 Iris 消息为 OpenAI 消息。"""
+        if api_style == "responses":
+            return self._format_responses_message(msg)
         if msg.tool_results:
             return [
                 self._format_tool_result(block, api_style=api_style)
@@ -141,6 +143,36 @@ class OpenAIMessageAdapter(ProviderAdapter):
                 self._format_tool_call(block) for block in msg.tool_calls
             ]
         return [item]
+
+    def _format_responses_message(self, msg: Msg) -> list[dict[str, Any]]:
+        """转换单条 Iris 消息为 OpenAI Responses input item。"""
+        if msg.tool_results:
+            return [
+                self._format_tool_result(block, api_style="responses")
+                for block in msg.tool_results
+            ]
+
+        items: list[dict[str, Any]] = []
+        text = msg.text
+        if text:
+            item: dict[str, Any] = {"role": msg.role.value, "content": text}
+            if msg.sender and msg.role == Role.USER:
+                item["name"] = msg.sender
+            items.append(item)
+        for block in msg.tool_calls:
+            items.append(self._format_responses_tool_call(block))
+        return items
+
+    def _format_responses_tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
+        """转换工具调用块为 OpenAI Responses function_call item。"""
+        return {
+            "type": "function_call",
+            "call_id": block.id,
+            "name": block.name,
+            "arguments": json.dumps(
+                block.input, ensure_ascii=False, separators=(",", ":")
+            ),
+        }
 
     def _format_tool_result(
         self,
