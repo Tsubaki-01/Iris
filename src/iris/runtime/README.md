@@ -105,7 +105,8 @@ context:
 运行时编排器，负责构建 context、组装 `LLMRequest`、调用 provider、执行工具桥接并写入
 session。
 
-- `run_turn()`：执行一次 provider call，可执行一次工具桥接，但不会再次调用 provider。
+- `run_turn()`：执行一次 provider call，可执行一次工具桥接；工具结果会写回 session
+  history，但不会再次调用 provider。
 - `run_loop()`：执行有界 tool loop。第一步追加当前用户输入，后续步骤从 session history
   重新组装请求。
 
@@ -160,7 +161,8 @@ runtime 对外返回的结果模型，包含：
 ### `AgentRuntime.run_turn(user_input, *, options=None, metadata=None)`
 
 执行一次 provider 调用并保存当前用户输入与 assistant 回复。若 assistant 返回工具调用，
-runtime 会执行一次工具桥接并返回工具结果，但不会把工具结果再次发送给 provider。
+runtime 会执行一次工具桥接，把工具结果消息写回 session history 并返回工具结果，但不会
+把工具结果再次发送给 provider。
 
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 

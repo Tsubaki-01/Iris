@@ -284,6 +284,19 @@ async def test_run_turn_bridges_tool_calls_without_second_provider_call(
         "echo:Iris"
     ]
     assert result.tool_result_messages[0].tool_results[0].content == "echo:Iris"
+    saved_messages = store.load_messages("default")
+    assert [message["role"] for message in saved_messages] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    tool_result_content = saved_messages[2]["content"]
+    assert isinstance(tool_result_content, list)
+    assert tool_result_content[0]["type"] == "tool_result"
+    assert tool_result_content[0]["tool_use_id"] == "call_1"
+    assert tool_result_content[0]["content"] == "echo:Iris"
+    metadata = store.load_run_metadata("default")
+    assert metadata["latest_run"]["message_count"] == len(saved_messages)
     assert store.load_tool_events("default")[0]["tool_call_id"] == "call_1"
 
 

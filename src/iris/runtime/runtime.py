@@ -232,6 +232,12 @@ class AgentRuntime:
                 metadata=run_metadata,
                 tools_enabled=runtime_options.include_tools,
             )
+            if bridge_result.messages:
+                messages.extend(bridge_result.messages)
+                self.session_store.save_messages(
+                    session_id,
+                    [message.model_dump(mode="json") for message in messages],
+                )
             self.session_store.save_run_metadata(
                 session_id,
                 _build_run_metadata(
