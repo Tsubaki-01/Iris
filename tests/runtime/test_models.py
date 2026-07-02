@@ -30,9 +30,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -51,7 +49,7 @@ def test_runtime_options_defaults_are_stable_and_isolated() -> None:
     assert first.memory_results is None
     assert first.memory_max_chars == 4000
     assert first.loop == BoundedLoopOptions()
-    assert first.loop.max_steps == 4
+    assert first.loop.max_steps == 20
     assert first.loop.tool_error_policy == ToolErrorPolicy.RETURN_TO_MODEL
 
     first.request_options["temperature"] = 0.2
