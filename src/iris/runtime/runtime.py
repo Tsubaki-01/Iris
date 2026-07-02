@@ -220,6 +220,18 @@ class AgentRuntime:
                 session_id,
                 [message.model_dump(mode="json") for message in messages],
             )
+            bridge_result = await self.tool_bridge.execute_once(
+                assistant_message=assistant_message,
+                session_id=session_id,
+                run_id=run_id,
+                step_index=0,
+                agent_id=self.agent_config.name,
+                workspace_root=self.workspace_root,
+                permission_mode=self.agent_config.permissions.writes,
+                session_store=self.session_store,
+                metadata=run_metadata,
+                tools_enabled=runtime_options.include_tools,
+            )
             self.session_store.save_run_metadata(
                 session_id,
                 _build_run_metadata(
@@ -231,24 +243,32 @@ class AgentRuntime:
                     response=response,
                     message_count=len(messages),
                     metadata=run_metadata,
+                    tool_count=len(bridge_result.results),
                 ),
             )
-            bridge_result = await self.tool_bridge.execute_once(
-                assistant_message=assistant_message,
-                session_id=session_id,
-                run_id=run_id,
-                step_index=0,
-                agent_id=self.agent_config.name,
-                workspace_root=self.workspace_root,
-                permission_mode=self.agent_config.permissions.writes,
-                session_store=self.session_store,
-                metadata=run_metadata,
-            )
         except Exception as exc:
+            error = normalize_runtime_error(exc)
+            try:
+                self.session_store.save_run_metadata(
+                    session_id,
+                    _build_run_metadata(
+                        existing=self.session_store.load_run_metadata(session_id),
+                        session_id=session_id,
+                        run_id=run_id,
+                        status=RuntimeStatus.ERROR,
+                        provider=self.agent_config.model.provider,
+                        response=response,
+                        message_count=len(messages),
+                        metadata=run_metadata,
+                        error=error,
+                    ),
+                )
+            except Exception:
+                pass
             return _error_result(
                 session_id=session_id,
                 run_id=run_id,
-                error=normalize_runtime_error(exc),
+                error=error,
                 assistant_message=assistant_message,
                 metadata=run_metadata,
             )
@@ -382,6 +402,7 @@ class AgentRuntime:
                     permission_mode=self.agent_config.permissions.writes,
                     session_store=self.session_store,
                     metadata=run_metadata,
+                    tools_enabled=runtime_options.include_tools,
                 )
                 messages.extend(bridge_result.messages)
                 self.session_store.save_messages(
@@ -510,7 +531,9 @@ def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
     """从 session 读取历史消息并恢复为 `Msg`。"""
-    return [Msg.from_dict(message) for message in session_store.load_messages(session_id)]
+    return [
+        Msg.from_dict(message) for message in session_store.load_messages(session_id)
+    ]
 
 
 def _apply_request_options(
@@ -588,7 +611,7 @@ def _build_run_metadata(
         "message_count": message_count,
         "steps": steps,
         "tool_count": tool_count,
-        **dict(metadata),
+        "metadata": dict(metadata),
     }
     if error is not None:
         latest_run["error"] = error.model_dump(mode="json")

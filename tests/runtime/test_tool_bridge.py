@@ -10,7 +10,7 @@ from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisSessionError, IrisToolExecutionError
 from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime, ToolBridge
-from iris.runtime.models import RuntimeStatus
+from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
 from iris.tools import (
     ToolExecutionContext,
@@ -288,6 +288,43 @@ async def test_run_turn_bridges_tool_calls_without_second_provider_call(
 
 
 @pytest.mark.asyncio
+async def test_run_turn_rejects_tool_call_when_tools_disabled(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def echo(value: str) -> str:
+        calls.append(value)
+        return f"echo:{value}"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    store = InMemorySessionStore()
+    provider = FakeProvider([_assistant_tool_response()])
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        session_store=store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=tmp_path,
+    )
+
+    result = await runtime.run_turn(
+        "当前问题",
+        options=RuntimeOptions(include_tools=False),
+    )
+
+    assert provider.requests[0].tools == []
+    assert calls == []
+    assert result.tool_results[0].is_error is True
+    assert result.tool_results[0].error is not None
+    assert result.tool_results[0].error.code == "TOOL_NOT_ALLOWED"
+
+
+@pytest.mark.asyncio
 async def test_run_turn_normalizes_tool_event_append_failure(
     tmp_path: Path,
 ) -> None:
@@ -316,6 +353,9 @@ async def test_run_turn_normalizes_tool_event_append_failure(
     assert result.error.source == "session"
     assert result.assistant_message is not None
     assert len(provider.requests) == 1
+    metadata = runtime.session_store.load_run_metadata("default")
+    assert metadata["latest_run"]["status"] == "error"
+    assert metadata["latest_run"]["error"]["code"] == "SESSION_ERROR"
 
 
 class RecordingExecutor(ToolExecutor):

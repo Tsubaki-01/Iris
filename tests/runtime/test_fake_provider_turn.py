@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fakes import FakeProvider
 
@@ -134,7 +136,34 @@ async def test_run_turn_calls_fake_provider_once_and_saves_assistant_message() -
     assert latest_run["output_tokens"] == 7
     assert latest_run["total_tokens"] == 18
     assert latest_run["message_count"] == 3
-    assert latest_run["trace_id"] == "trace-1"
+    assert latest_run["metadata"] == {"trace_id": "trace-1"}
+
+
+@pytest.mark.asyncio
+async def test_run_metadata_keeps_user_metadata_nested(tmp_path: Path) -> None:
+    store = InMemorySessionStore()
+    provider = FakeProvider([_assistant_response("ok")])
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        session_store=store,
+        workspace_root=tmp_path,
+    )
+
+    result = await runtime.run_turn(
+        "你好",
+        metadata={"status": "fake", "message_count": 0, "trace_id": "trace-1"},
+    )
+
+    latest_run = store.load_run_metadata(result.session_id)["latest_run"]
+    assert latest_run["status"] == "ok"
+    assert latest_run["message_count"] != 0
+    assert latest_run["metadata"] == {
+        "status": "fake",
+        "message_count": 0,
+        "trace_id": "trace-1",
+    }
 
 
 @pytest.mark.asyncio
