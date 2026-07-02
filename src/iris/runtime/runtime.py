@@ -44,7 +44,7 @@ from .models import (
     ToolBridgeResult,
     ToolErrorPolicy,
 )
-from .tools import ToolBridge
+from .tool_bridge import ToolBridge
 
 # endregion
 
