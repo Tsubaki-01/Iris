@@ -78,7 +78,16 @@ class RuntimeTurnInput(BaseModel):
 
 
 class ToolBridgeResult(BaseModel):
-    """一次工具桥接阶段的结果快照。"""
+    """一次工具桥接阶段的结果快照。
+
+    `ToolBridge` 会同时生成面向程序、模型和 session 的三份视图，调用方按使用场景
+    选择对应字段，而不需要重新转换工具结果。
+
+    Attributes:
+        results (list[ToolResult]): 程序侧可读取的结构化工具执行结果。
+        messages (list[Msg]): 可回灌给模型的 tool result 消息。
+        events (list[dict[str, Any]]): 已写入 session store 的 JSON-safe 工具事件快照。
+    """
 
     results: list[ToolResult] = Field(default_factory=list)
     messages: list[Msg] = Field(default_factory=list)
