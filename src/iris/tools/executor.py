@@ -28,7 +28,7 @@ from ..message import ToolUseBlock
 from .artifacts import ToolArtifactStore
 from .base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
 from .circuit import CircuitBreaker
-from .permissions import DefaultPermissionPolicy, PermissionPolicy
+from .permissions import DefaultPermissionPolicy, PermissionPolicy, ReadFileState
 from .registry import ToolRegistry
 
 # endregion
@@ -295,11 +295,20 @@ class ToolExecutor:
         Returns:
             list[ToolResult]: 生成的已完成数据流集。
         """
+        if context.read_state is None and self._has_file_tool(tool_uses):
+            context.read_state = ReadFileState()
         tasks = (
-            self.execute_one(tool_use, context.model_copy(deep=True))
+            self.execute_one(tool_use, _copy_context_for_parallel_call(context))
             for tool_use in tool_uses
         )
         return list(await asyncio.gather(*tasks))
+
+    def _has_file_tool(self, tool_uses: list[ToolUseBlock]) -> bool:
+        """判断批次中是否包含内置文件工具。"""
+        return any(
+            self.registry.get(tool_use.name).definition.group == "file"
+            for tool_use in tool_uses
+        )
 
     def _is_read_only_concurrency_safe(self, tool_use: ToolUseBlock) -> bool:
         """判断工具调用是否可进入只读并发批次。
@@ -468,3 +477,12 @@ async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
 def _tool_use_from_context(context: ToolExecutionContext) -> ToolUseBlock:
     """用上下文构造错误结果所需的工具调用占位。"""
     return ToolUseBlock(id=context.call_id, name=context.tool_name, input={})
+
+
+def _copy_context_for_parallel_call(
+    context: ToolExecutionContext,
+) -> ToolExecutionContext:
+    """复制并发调用上下文，同时共享文件读取状态。"""
+    child_context = context.model_copy(deep=True)
+    child_context.read_state = context.read_state
+    return child_context

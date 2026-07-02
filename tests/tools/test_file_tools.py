@@ -194,6 +194,36 @@ async def test_read_then_edit_works_without_preseeded_read_state(
 
 
 @pytest.mark.asyncio
+async def test_execute_many_read_then_edit_shares_read_state(tmp_path: Path) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("hello old\n", encoding="utf-8")
+    executor = _file_executor(allow_writes=True)
+
+    results = await executor.execute_many(
+        [
+            ToolUseBlock(
+                id="read_1",
+                name="read_file",
+                input={"file_path": "notes.txt"},
+            ),
+            ToolUseBlock(
+                id="edit_1",
+                name="edit_file",
+                input={
+                    "file_path": "notes.txt",
+                    "old_string": "old",
+                    "new_string": "new",
+                },
+            ),
+        ],
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert [result.is_error for result in results] == [False, False]
+    assert path.read_text(encoding="utf-8") == "hello new\n"
+
+
+@pytest.mark.asyncio
 async def test_edit_file_refuses_stale_read_state(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("old", encoding="utf-8")
