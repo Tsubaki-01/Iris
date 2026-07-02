@@ -55,6 +55,7 @@ class ToolBridge:
         permission_mode: str,
         session_store: SessionStore,
         metadata: Mapping[str, Any] | None,
+        tools_enabled: bool = True,
     ) -> ToolBridgeResult:
         """执行助手消息中的工具调用并追加 session 工具事件。
 
@@ -68,6 +69,7 @@ class ToolBridge:
             permission_mode (str): 工具权限模式。
             session_store (SessionStore): 工具事件写入目标。
             metadata (Mapping[str, Any] | None): 运行态追踪元数据。
+            tools_enabled (bool): 本轮是否允许执行工具调用。
 
         Returns:
             ToolBridgeResult: 工具结果、模型回灌消息和事件快照。
@@ -76,7 +78,7 @@ class ToolBridge:
         if not tool_calls:
             return ToolBridgeResult()
 
-        active_names = _active_tool_names(self.tool_view)
+        active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
         active_calls: list[ToolUseBlock] = []
         result_slots: list[ToolResult | None] = []
         for call in tool_calls:
