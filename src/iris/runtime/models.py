@@ -51,7 +51,7 @@ class ToolErrorPolicy(StrEnum):
 class BoundedLoopOptions(BaseModel):
     """有界 loop 的基础控制参数。"""
 
-    max_steps: int = Field(default=4, gt=0)
+    max_steps: int = Field(default=20, gt=0)
     tool_error_policy: ToolErrorPolicy = ToolErrorPolicy.RETURN_TO_MODEL
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
