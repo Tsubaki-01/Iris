@@ -510,9 +510,7 @@ def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
     """从 session 读取历史消息并恢复为 `Msg`。"""
-    return [
-        Msg.from_dict(message) for message in session_store.load_messages(session_id)
-    ]
+    return [Msg.from_dict(message) for message in session_store.load_messages(session_id)]
 
 
 def _apply_request_options(
@@ -632,7 +630,10 @@ def _should_stop_on_tool_error(
 
 
 def _tool_error_info(bridge_result: ToolBridgeResult) -> RuntimeErrorInfo:
-    """从第一个工具错误构造 runtime 错误信息。"""
+    """从第一个工具错误构造 runtime 错误信息。
+
+    并行执行时不一定是调用顺序上的第一个失败
+    """
     for result in bridge_result.results:
         if result.is_error and result.error is not None:
             return RuntimeErrorInfo(
