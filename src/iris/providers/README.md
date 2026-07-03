@@ -1,21 +1,20 @@
 # iris.providers
 
-`iris.providers` 是 Iris 框架的底层模型 API 交互模块。该模块将厂商格式转换（Adapter）与 HTTP 网络请求封装（Client）解耦，并将内部的统一数据结构请求发送至对应的 LLM 厂商并解析返回内容。该设计避免了模型定义的重复边界与直接与协议的强耦合。
+`iris.providers` 是 Iris 框架的底层模型 API 交互模块。该模块将内部的统一数据结构请求通过 LiteLLM Chat Completion bridge 发送至对应的 LLM 厂商，并将返回内容解析为 Iris 的标准响应模型。Adapter 仍作为公开的格式转换工具保留，但 `ProviderClient` 的 active path 不再依赖 adapter 发送 HTTP 请求。
 
 ## Quick Start
 
-以下示例展示了如何使用 `ProviderClient` 配置 `OpenAIMessageAdapter` 发送 `LLMRequest`：
+以下示例展示了如何使用 `ProviderClient` 发送 `LLMRequest`：
 
 ```python
 import asyncio
 from iris.message import Msg
 from iris.message.llm import LLMRequest
-from iris.providers import OpenAIMessageAdapter, ProviderClient
+from iris.providers import ProviderClient
 
 async def main():
-    # 1. 实例化所需要的厂商 Adapter 与 Client
-    adapter = OpenAIMessageAdapter()
-    client = ProviderClient(adapter=adapter, api_key="your-api-key")
+    # 1. 实例化所需要的 Provider Client
+    client = ProviderClient(provider="openai", api_key="your-api-key")
 
     try:
         # 2. 构造通用的 LLMRequest（模型定义位于 iris.message.llm 中）
@@ -25,7 +24,7 @@ async def main():
         response = await client.complete(request)
         print(response.to_msg().text)
     finally:
-        # 4. 释放 HTTP 客户端资源
+        # 4. 保持兼容的资源释放入口
         await client.close()
 
 if __name__ == "__main__":
@@ -57,24 +56,25 @@ Provider 数据格式适配器的抽象基类。只做纯数据格式层面的�
 - 默认 `provider` = `"anthropic"`
 
 ### `class ProviderClient`
-Provider 真实 HTTP 调用层的实体。只负责传输、Endpoint 推导、Headers 注入、重试和网络层/服务端的错误处理及映射（映射为 `IrisProviderError` 等自定义异常）。
+Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换为 LiteLLM chat kwargs，并把 LiteLLM 响应和错误映射回 `LLMResponse` 与 `IrisProviderError` 等 Iris 自定义异常。
 
 - **构造参数:**
-  - `adapter: ProviderAdapter`: 指定使用哪种协议格式的适配器。
+  - `provider: str`: Provider 名称，目前 factory 白名单为 `"openai"`、`"anthropic"`、`"deepseek"`。
   - `api_key: str`: 厂商鉴权所需的 API Key。
   - `base_url: str | None = None`: 覆盖原本的 Base URL。
   - `timeout: float | None = None`: 请求超时时间。
+  - `headers: dict[str, str]`: 透传给 LiteLLM 的额外 headers。
 
 - **`async def complete(request: LLMRequest) -> LLMResponse`**
-    发起非流式的 HTTP 模型请求。包含完整的报错映射流程。不支持 `stream=True`。
+    发起非流式 Chat Completion 请求。包含完整的报错映射流程。不支持 `stream=True` 与 Responses API 风格。
 - **`async def close() -> None`**
-    安全释放内部的 `httpx.AsyncClient` 连接池。
+    兼容 no-op 资源释放入口。
 
 ### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
 Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。
 
 - `ModelRoute`: 保存 `provider` 与 provider 内部模型名。
 - `parse_model_route(model: str) -> ModelRoute`: 解析 `openai/gpt-4o` 这类路由字符串。
-- `create_provider_client(...) -> ProviderClient`: 根据 provider 选择 adapter，解析 API key，并构造 `ProviderClient`。
+- `create_provider_client(...) -> ProviderClient`: 校验显式 provider 白名单，解析 API key，并构造 `ProviderClient(provider=...)`。
 
-Factory 只做 provider client 装配；Adapter 仍负责 payload 转换，`ProviderClient` 仍负责 HTTP 传输。新代码应从 `iris.providers` 导入这些对象。
+Factory 只做 provider client 装配；新代码应从 `iris.providers` 导入这些对象。

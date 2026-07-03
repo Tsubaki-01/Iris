@@ -23,6 +23,7 @@ def isolate_factory_config(
     for name in (
         "IRIS_OPENAI_API_KEY",
         "IRIS_ANTHROPIC_API_KEY",
+        "IRIS_DEEPSEEK_API_KEY",
         "IRIS_UNKNOWN_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -68,13 +69,16 @@ def test_parse_model_route_rejects_invalid_model_strings(model: str) -> None:
     [
         ("openai/gpt-4o", "openai"),
         ("anthropic/claude-sonnet-4-5", "anthropic"),
+        ("deepseek/deepseek-chat", "deepseek"),
     ],
 )
-def test_create_provider_client_selects_adapter(model: str, provider: str) -> None:
+def test_create_provider_client_selects_supported_provider(
+    model: str, provider: str
+) -> None:
     client = create_provider_client(model, api_key="test-key")
 
     assert isinstance(client, ProviderClient)
-    assert client.adapter.provider == provider
+    assert client.provider == provider
     assert client.api_key == "test-key"
 
 
@@ -103,11 +107,23 @@ def test_create_provider_client_reads_provider_specific_env(
     assert client.api_key == "provider-key"
 
 
+def test_create_provider_client_reads_deepseek_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("IRIS_DEEPSEEK_API_KEY", "deepseek-key")
+
+    client = create_provider_client("deepseek/deepseek-chat")
+
+    assert client.provider == "deepseek"
+    assert client.api_key == "deepseek-key"
+
+
 def test_create_provider_client_falls_back_to_initialized_config() -> None:
     iris.init_config(api_key="generic-key")
 
-    client = create_provider_client("openai/gpt-4o")
+    client = create_provider_client("deepseek/deepseek-chat")
 
+    assert client.provider == "deepseek"
     assert client.api_key == "generic-key"
 
 
@@ -124,3 +140,8 @@ def test_create_provider_client_accepts_model_route_for_request_model() -> None:
 
     assert client.adapter.provider == "openai"
     assert request.model == "gpt-4o"
+
+
+def test_create_provider_client_rejects_removed_http_client_keyword() -> None:
+    with pytest.raises(TypeError):
+        create_provider_client("openai/gpt-4o", api_key="test-key", http_client=None)
