@@ -48,8 +48,8 @@ Provider 数据格式适配器的抽象基类。只做纯数据格式层面的�
 ### `class OpenAIMessageAdapter(ProviderAdapter)`
 用于对接 OpenAI API 的适配器实现。
 - 默认 `provider` = `"openai"`
-- 默认 `default_api_style` = `"chat"` （Chat Completions API）。支持通过 `provider_options["api_style"] = "responses"` 切换风格。
-- Responses 风格下，assistant 工具调用历史会格式化为 `function_call` input item，工具结果格式化为 `function_call_output`；Chat 风格仍使用 `tool_calls` 和 `tool` message。
+- 默认 `default_api_style` = `"chat"` （Chat Completions API）。
+- 内部仍保留 Responses 格式转换 helper，便于后续阶段复用；当前 `ProviderClient.complete()` active path 不支持 `provider_options["api_style"] = "responses"`。
 
 ### `class AnthropicMessageAdapter(ProviderAdapter)`
 用于对接 Anthropic Messages API 的适配器实现。自动将 system prompt 扁平化作为顶层字段发送。
@@ -69,6 +69,9 @@ Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换�
     发起非流式 Chat Completion 请求。包含完整的报错映射流程。不支持 `stream=True` 与 Responses API 风格。
 - **`async def close() -> None`**
     兼容 no-op 资源释放入口。
+
+`http_client` 注入已经从 active API 删除；测试和 SDK 调用方应通过 monkeypatch
+`litellm.acompletion()` 或注入 runtime provider 边界来替代旧的 HTTP client 注入。
 
 ### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
 Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。
