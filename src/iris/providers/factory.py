@@ -1,7 +1,7 @@
 """Provider client 工厂。
 
-本模块负责解析高层模型路由，并按 provider 创建对应的 `ProviderClient`。
-Adapter 仍只做格式转换，`ProviderClient` 仍只负责 HTTP 传输。
+本模块负责解析高层模型路由，并按显式 provider 白名单创建对应的
+`ProviderClient`。
 
 Example:
     >>> route = parse_model_route("openai/gpt-4o")
@@ -13,25 +13,17 @@ Example:
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 
-import httpx
 from pydantic import BaseModel, ConfigDict
 
 from ..config import get_config, is_config_initialized
 from ..exceptions import IrisConfigError, IrisProviderError, IrisValidationError
-from .adapter import ProviderAdapter
-from .anthropic import AnthropicMessageAdapter
 from .client import ProviderClient
-from .openai import OpenAIMessageAdapter
 
 # endregion
 
 
-_ADAPTER_REGISTRY: dict[str, Callable[[], ProviderAdapter]] = {
-    "openai": OpenAIMessageAdapter,
-    "anthropic": AnthropicMessageAdapter,
-}
+SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "deepseek"})
 
 
 class ModelRoute(BaseModel):
@@ -80,7 +72,6 @@ def create_provider_client(
     api_key: str | None = None,
     base_url: str | None = None,
     timeout: float | None = None,
-    http_client: httpx.AsyncClient | None = None,
     headers: dict[str, str] | None = None,
 ) -> ProviderClient:
     """根据模型路由创建 provider client。
@@ -90,38 +81,34 @@ def create_provider_client(
         api_key (str | None): 显式 API key，优先级最高。
         base_url (str | None): 自定义 provider base URL。
         timeout (float | None): 请求超时时间，单位秒。
-        http_client (httpx.AsyncClient | None): 可注入的 HTTP client。
         headers (dict[str, str] | None): 追加或覆盖的 HTTP headers。
 
     Returns:
-        ProviderClient: 已注入对应 adapter 和 API key 的 provider client。
+        ProviderClient: 已注入 provider 和 API key 的 provider client。
 
     Raises:
         IrisProviderError: provider 尚未注册时抛出。
         IrisConfigError: 无法解析 API key 时抛出。
 
     Example:
-        >>> create_provider_client("openai/gpt-4o", api_key="test").adapter.provider
+        >>> create_provider_client("openai/gpt-4o", api_key="test").provider
         'openai'
     """
     route = model if isinstance(model, ModelRoute) else parse_model_route(model)
-    adapter_factory = _adapter_factory_for(route.provider)
+    _ensure_supported_provider(route.provider)
     return ProviderClient(
-        adapter=adapter_factory(),
+        provider=route.provider,
         api_key=_resolve_api_key(route.provider, api_key),
         base_url=base_url,
         timeout=timeout,
-        http_client=http_client,
         headers=headers or {},
     )
 
 
-def _adapter_factory_for(provider: str) -> Callable[[], ProviderAdapter]:
-    """返回 provider 对应的 adapter 工厂。"""
-    try:
-        return _ADAPTER_REGISTRY[provider]
-    except KeyError as exc:
-        raise IrisProviderError("不支持的 provider", provider=provider) from exc
+def _ensure_supported_provider(provider: str) -> None:
+    """确认 provider 在当前显式白名单中。"""
+    if provider not in SUPPORTED_PROVIDERS:
+        raise IrisProviderError("不支持的 provider", provider=provider)
 
 
 def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str:
