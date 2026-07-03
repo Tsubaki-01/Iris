@@ -1,6 +1,6 @@
-import httpx
+from typing import Any
+
 import pytest
-from httpx import Headers
 
 from iris.exceptions import (
     IrisAPIConnectionError,
@@ -9,160 +9,133 @@ from iris.exceptions import (
     IrisRateLimitExceededError,
 )
 from iris.message import LLMRequest, Msg
-from iris.providers import AnthropicMessageAdapter, OpenAIMessageAdapter, ProviderClient
+from iris.providers import OpenAIMessageAdapter, ProviderClient
 
 
-def test_provider_client_does_not_expose_unimplemented_retry_field() -> None:
+def test_provider_client_exposes_litellm_active_fields_only() -> None:
     assert "max_retries" not in ProviderClient.model_fields
+    assert "http_client" not in ProviderClient.model_fields
+    assert "provider" in ProviderClient.model_fields
 
 
 @pytest.mark.asyncio
-async def test_provider_client_posts_openai_chat_payload_to_default_endpoint() -> None:
-    seen_url = ""
-    seen_headers = Headers()
+async def test_provider_client_calls_litellm_with_openai_chat_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal seen_headers, seen_url
-        seen_url = str(request.url)
-        seen_headers = request.headers
-        return httpx.Response(
-            200,
-            json={
-                "id": "chatcmpl_1",
-                "model": "gpt-4o",
-                "choices": [{"message": {"content": "你好"}, "finish_reason": "stop"}],
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 2,
-                    "total_tokens": 3,
-                },
+    seen_kwargs: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+        seen_kwargs.update(kwargs)
+        return {
+            "id": "chatcmpl_1",
+            "model": "gpt-4o",
+            "object": "chat.completion",
+            "choices": [{"message": {"content": "你好"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3,
             },
-        )
+        }
 
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
     client = ProviderClient(
-        adapter=OpenAIMessageAdapter(),
+        provider="openai",
         api_key="test-key",
-        http_client=http_client,
+        base_url="https://example.test/v1",
+        timeout=30,
+        headers={"x-trace-id": "trace-1"},
     )
 
     response = await client.complete(
-        LLMRequest(model="gpt-4o", messages=[Msg.user("你好")])
-    )
-
-    assert seen_url == "https://api.openai.com/v1/chat/completions"
-    assert seen_headers["authorization"] == "Bearer test-key"
-    assert response.to_msg().text == "你好"
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_provider_client_uses_openai_responses_endpoint_when_requested() -> None:
-    seen: dict[str, str] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        return httpx.Response(
-            200,
-            json={
-                "id": "resp_1",
-                "model": "gpt-4o",
-                "output": [
-                    {
-                        "type": "message",
-                        "content": [{"type": "output_text", "text": "好"}],
-                    }
-                ],
-                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-            },
-        )
-
-    client = ProviderClient(
-        adapter=OpenAIMessageAdapter(),
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-
-    await client.complete(
         LLMRequest(
             model="gpt-4o",
-            messages=[Msg.user("你好")],
-            provider_options={"api_style": "responses"},
-        )
-    )
-
-    assert seen["url"] == "https://api.openai.com/v1/responses"
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_provider_client_posts_anthropic_payload_to_messages_endpoint() -> None:
-    seen_url = ""
-    seen_headers = Headers()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal seen_headers, seen_url
-        seen_url = str(request.url)
-        seen_headers = request.headers
-        return httpx.Response(
-            200,
-            json={
-                "id": "msg_1",
-                "model": "claude-sonnet-4-5",
-                "content": [{"type": "text", "text": "你好"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 2},
+            messages=[Msg.system("规则"), Msg.user("你好")],
+            temperature=0,
+            top_p=0,
+            max_tokens=12,
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_choice="auto",
+            response_format={"type": "json_object"},
+            timeout=5,
+            provider_options={
+                "api_style": "chat",
+                "reasoning_effort": "low",
+                "ignored_option": "ignored",
             },
         )
-
-    client = ProviderClient(
-        adapter=AnthropicMessageAdapter(),
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
 
-    response = await client.complete(
-        LLMRequest(model="claude-sonnet-4-5", messages=[Msg.user("你好")])
-    )
-
-    assert seen_url == "https://api.anthropic.com/v1/messages"
-    assert seen_headers["x-api-key"] == "test-key"
-    assert seen_headers["anthropic-version"] == "2023-06-01"
+    assert seen_kwargs == {
+        "model": "openai/gpt-4o",
+        "messages": [
+            {"role": "system", "content": "规则"},
+            {"role": "user", "content": "你好", "name": "user"},
+        ],
+        "api_key": "test-key",
+        "base_url": "https://example.test/v1",
+        "extra_headers": {"x-trace-id": "trace-1"},
+        "temperature": 0,
+        "top_p": 0,
+        "max_tokens": 12,
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+        "tool_choice": "auto",
+        "response_format": {"type": "json_object"},
+        "timeout": 5,
+        "reasoning_effort": "low",
+    }
+    assert response.provider == "openai"
+    assert response.id == "chatcmpl_1"
     assert response.to_msg().text == "你好"
-    await client.close()
+    assert response.input_tokens == 1
+    assert response.output_tokens == 2
+    assert response.total_tokens == 3
 
 
 @pytest.mark.asyncio
-async def test_provider_client_keeps_custom_anthropic_version_header() -> None:
-    seen_headers = Headers()
+async def test_provider_client_does_not_double_prefix_litellm_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal seen_headers
-        seen_headers = request.headers
-        return httpx.Response(
-            200,
-            json={
-                "id": "msg_1",
-                "model": "claude-sonnet-4-5",
-                "content": [{"type": "text", "text": "你好"}],
-                "stop_reason": "end_turn",
-                "usage": {"input_tokens": 1, "output_tokens": 2},
-            },
-        )
+    seen_model = ""
 
-    client = ProviderClient(
-        adapter=AnthropicMessageAdapter(),
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-        headers={"anthropic-version": "2024-01-01"},
-    )
+    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+        nonlocal seen_model
+        seen_model = str(kwargs["model"])
+        return {"choices": [{"message": {"content": "你好"}}]}
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    client = ProviderClient(provider="openai", api_key="test-key")
 
     await client.complete(
-        LLMRequest(model="claude-sonnet-4-5", messages=[Msg.user("你好")])
+        LLMRequest(model="openai/gpt-4o", messages=[Msg.user("你好")])
     )
 
-    assert seen_headers["anthropic-version"] == "2024-01-01"
-    await client.close()
+    assert seen_model == "openai/gpt-4o"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_style", ["responses", "unknown"])
+async def test_provider_client_rejects_non_chat_api_style(api_style: str) -> None:
+    client = ProviderClient(provider="openai", api_key="test-key")
+
+    with pytest.raises(IrisProviderError, match=api_style):
+        await client.complete(
+            LLMRequest(
+                model="gpt-4o",
+                messages=[Msg.user("你好")],
+                provider_options={"api_style": api_style},
+            )
+        )
+
+
+class _FakeStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__("失败")
+        self.status_code = status_code
 
 
 @pytest.mark.asyncio
@@ -171,51 +144,65 @@ async def test_provider_client_keeps_custom_anthropic_version_header() -> None:
     [
         (401, IrisAuthenticationError),
         (403, IrisAuthenticationError),
+        (408, IrisAPIConnectionError),
         (429, IrisRateLimitExceededError),
         (500, IrisProviderError),
     ],
 )
-async def test_provider_client_maps_http_errors(
+async def test_provider_client_maps_litellm_status_errors(
+    monkeypatch: pytest.MonkeyPatch,
     status_code: int,
     expected_error: type[Exception],
 ) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, json={"error": {"message": "失败"}})
+    import iris.providers.client as provider_client
 
-    client = ProviderClient(
-        adapter=OpenAIMessageAdapter(),
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
+    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+        raise _FakeStatusError(status_code)
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    client = ProviderClient(provider="openai", api_key="test-key")
 
     with pytest.raises(expected_error):
         await client.complete(LLMRequest(model="gpt-4o", messages=[Msg.user("你好")]))
 
-    await client.close()
-
 
 @pytest.mark.asyncio
-async def test_provider_client_maps_connection_errors() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("无法连接", request=request)
+async def test_provider_client_maps_litellm_connection_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
 
-    client = ProviderClient(
-        adapter=OpenAIMessageAdapter(),
-        api_key="test-key",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
+    class APIConnectionError(Exception):
+        pass
+
+    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+        raise APIConnectionError("无法连接")
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    client = ProviderClient(provider="openai", api_key="test-key")
 
     with pytest.raises(IrisAPIConnectionError):
         await client.complete(LLMRequest(model="gpt-4o", messages=[Msg.user("你好")]))
 
-    await client.close()
-
 
 @pytest.mark.asyncio
 async def test_provider_client_rejects_streaming_in_complete() -> None:
-    client = ProviderClient(adapter=OpenAIMessageAdapter(), api_key="test-key")
+    client = ProviderClient(provider="openai", api_key="test-key")
 
     with pytest.raises(IrisProviderError, match="stream"):
         await client.complete(LLMRequest(model="gpt-4o", stream=True))
 
-    await client.close()
+
+@pytest.mark.asyncio
+async def test_provider_client_close_is_noop() -> None:
+    client = ProviderClient(provider="openai", api_key="test-key")
+
+    assert await client.close() is None
+
+
+def test_provider_client_keeps_adapter_compatibility_without_model_field() -> None:
+    client = ProviderClient(adapter=OpenAIMessageAdapter(), api_key="test-key")
+
+    assert "adapter" not in ProviderClient.model_fields
+    assert client.provider == "openai"
+    assert client.adapter.provider == "openai"
