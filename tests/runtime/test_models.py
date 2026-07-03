@@ -30,7 +30,9 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
+        )
     )
 
 

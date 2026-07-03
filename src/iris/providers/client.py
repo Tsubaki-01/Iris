@@ -50,7 +50,7 @@ class ProviderClient(BaseModel):
 
     Example:
         >>> client = ProviderClient(provider="openai", api_key="test")
-        >>> client.adapter.provider
+        >>> client.provider
         'openai'
     """
 
