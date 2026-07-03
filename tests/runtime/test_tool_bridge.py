@@ -28,6 +28,14 @@ def _agent_config() -> AgentConfig:
     )
 
 
+def _anthropic_agent_config() -> AgentConfig:
+    return AgentConfig(
+        name="runtime-agent",
+        model={"provider": "anthropic", "name": "claude-sonnet-4-5"},
+        system="你是本地助手。",
+    )
+
+
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
         system=ContextSection(
@@ -298,6 +306,35 @@ async def test_run_turn_bridges_tool_calls_without_second_provider_call(
     metadata = store.load_run_metadata("default")
     assert metadata["latest_run"]["message_count"] == len(saved_messages)
     assert store.load_tool_events("default")[0]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_uses_openai_chat_tool_schema_for_anthropic_config(
+    tmp_path: Path,
+) -> None:
+    def echo(value: str) -> str:
+        return f"echo:{value}"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    provider = FakeProvider([_assistant_tool_response()])
+    runtime = AgentRuntime(
+        agent_config=_anthropic_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=tmp_path,
+    )
+
+    result = await runtime.run_turn("当前问题")
+
+    assert result.status == RuntimeStatus.OK
+    tool_schema = provider.requests[0].tools[0]
+    assert tool_schema["type"] == "function"
+    assert tool_schema["function"]["name"] == "echo"
+    assert "input_schema" not in tool_schema
 
 
 @pytest.mark.asyncio

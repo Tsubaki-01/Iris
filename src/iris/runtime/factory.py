@@ -13,8 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import httpx
-
 from ..agents import AgentConfig, build_tool_registry, load_agent_config
 from ..context import (
     ContextBuildInput,
@@ -51,7 +49,6 @@ class RuntimeFactory:
         memory_service: MemoryService | None = None,
         session_store: SessionStore | None = None,
         api_key: str | None = None,
-        http_client: httpx.AsyncClient | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
 
@@ -61,7 +58,6 @@ class RuntimeFactory:
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
             session_store (SessionStore | None): 可选 session store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
-            http_client (httpx.AsyncClient | None): 创建真实 provider client 时复用的 HTTP client。
 
         Returns:
             AgentRuntime: 已装配但尚未调用 provider 的 runtime 实例。
@@ -75,7 +71,6 @@ class RuntimeFactory:
             memory_service=memory_service,
             session_store=session_store,
             api_key=api_key,
-            http_client=http_client,
         )
 
     @classmethod
@@ -88,7 +83,6 @@ class RuntimeFactory:
         memory_service: MemoryService | None = None,
         session_store: SessionStore | None = None,
         api_key: str | None = None,
-        http_client: httpx.AsyncClient | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
 
@@ -99,7 +93,6 @@ class RuntimeFactory:
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
             session_store (SessionStore | None): 可选 session store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
-            http_client (httpx.AsyncClient | None): 创建真实 provider client 时复用的 HTTP client。
 
         Returns:
             AgentRuntime: 已装配的 runtime 实例。
@@ -124,7 +117,6 @@ class RuntimeFactory:
             api_key=api_key,
             base_url=config.model.base_url,
             timeout=config.model.timeout,
-            http_client=http_client,
         )
         workspace_root = _resolve_relative_to_base(
             config.permissions.workspace,

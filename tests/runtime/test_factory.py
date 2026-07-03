@@ -208,6 +208,21 @@ def test_injected_memory_service_is_kept_for_later_memory_stage(tmp_path: Path) 
     assert runtime.memory_service is memory_service
 
 
+def test_from_config_rejects_removed_http_client_keyword() -> None:
+    config = AgentConfig(
+        name="sdk-agent",
+        model={"provider": "openai", "name": "gpt-4o-mini"},
+        system="你是本地助手。",
+    )
+
+    with pytest.raises(TypeError):
+        RuntimeFactory.from_config(
+            config,
+            provider=FakeProvider([_assistant_response()]),
+            http_client=None,
+        )
+
+
 def test_from_config_without_config_path_resolves_workspace_relative_to_cwd(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

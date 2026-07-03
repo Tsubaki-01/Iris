@@ -51,8 +51,8 @@ asyncio.run(main())
 ```
 
 `RuntimeFactory.from_config_path()` 默认创建真实 provider client。OpenAI 配置会读取
-`IRIS_OPENAI_API_KEY`，也可以通过 `api_key=` 显式传入。测试时可通过
-`provider=` 注入 fake provider。
+`IRIS_OPENAI_API_KEY`，DeepSeek 配置会读取 `IRIS_DEEPSEEK_API_KEY`；也可以通过
+`api_key=` 显式传入。测试时可通过 `provider=` 注入 fake provider。
 
 ## 配置示例
 
@@ -61,7 +61,6 @@ name: file-agent
 model:
   provider: openai
   name: gpt-4o-mini
-  api_style: responses
   temperature: 0.2
 
 system: |
@@ -146,13 +145,15 @@ runtime 对外返回的结果模型，包含：
 5. 写入 `SessionStore.append_tool_event()`。
 
 工具参数校验、权限策略、artifact、middleware 和具体业务逻辑仍由 `iris.tools` 负责。
+runtime 当前通过 LiteLLM Chat Completion 调用 provider，因此挂载到 `LLMRequest.tools`
+的活动工具 schema 始终使用 OpenAI Chat 工具格式。
 
 ## API
 
 ### `RuntimeFactory.from_config_path(path, ...)`
 
 读取 `agent.yaml` 并创建 runtime。可选注入 `provider`、`session_store`、
-`memory_service`、`api_key` 和 `http_client`。
+`memory_service` 和 `api_key`。
 
 ### `RuntimeFactory.from_config(config, ...)`
 
