@@ -572,13 +572,12 @@ def _apply_tool_schemas(
     tool_view: ToolRegistryView,
     provider: str,
 ) -> LLMRequest:
-    """按当前活动工具视图挂载 provider 请求工具 schema。"""
+    """按当前活动工具视图挂载 LiteLLM Chat 工具 schema。"""
     if not include_tools:
         return request
-    api_style = request.provider_options.get("api_style")
     tools = tool_view.active_schemas(
-        provider=provider,
-        api_style=api_style if isinstance(api_style, str) else None,
+        provider="openai",
+        api_style="chat",
     )
     return request.model_copy(update={"tools": tools})
 
