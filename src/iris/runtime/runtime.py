@@ -132,7 +132,10 @@ class AgentRuntime:
         self.session_store = session_store or InMemorySessionStore()
         self.context_builder = context_builder or ContextBuilder()
         self.assembler = assembler or RuntimeMessageAssembler()
-        self.tool_registry = tool_registry or ToolRegistry()
+        base_registry = tool_registry
+        if base_registry is None and tool_view is not None:
+            base_registry = tool_view.registry
+        self.tool_registry = base_registry or ToolRegistry()
         self.tool_view = tool_view or self.tool_registry.view()
         self.workspace_root = (workspace_root or Path.cwd()).resolve()
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
@@ -537,9 +540,7 @@ def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
     """从 session 读取历史消息并恢复为 `Msg`。"""
-    return [
-        Msg.from_dict(message) for message in session_store.load_messages(session_id)
-    ]
+    return [Msg.from_dict(message) for message in session_store.load_messages(session_id)]
 
 
 def _apply_request_options(

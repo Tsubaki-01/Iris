@@ -98,9 +98,7 @@ class ToolBridge:
                 metadata=dict(metadata or {}),
                 read_state=self._read_states.get(session_id),
             )
-            active_results = await self.tool_executor.execute_many(
-                active_calls, context
-            )
+            active_results = await self.tool_executor.execute_many(active_calls, context)
             if context.read_state is not None:
                 self._read_states[session_id] = context.read_state
             _merge_active_results(result_slots, active_results)
@@ -124,8 +122,12 @@ class ToolBridge:
 
 
 def _active_tool_names(tool_view: ToolRegistryView) -> set[str]:
-    """从活动工具视图推导本轮允许调用的工具名。"""
-    return {tool.definition.name for tool in tool_view.active_tools}
+    """从活动工具视图推导本轮允许调用的工具名（含别名）。"""
+    names: set[str] = set()
+    for tool in tool_view.active_tools:
+        names.add(tool.definition.name)
+        names.update(tool.definition.aliases)
+    return names
 
 
 def _not_allowed_result(call: ToolUseBlock) -> ToolResult:
@@ -182,9 +184,7 @@ def _to_tool_event(
 ) -> dict[str, object]:
     """构造 JSON-safe session 工具事件。"""
     error = result.error.model_dump(mode="json") if result.error is not None else None
-    artifact = (
-        result.artifact.model_dump(mode="json") if result.artifact is not None else None
-    )
+    artifact = result.artifact.model_dump(mode="json") if result.artifact is not None else None
     event: dict[str, object] = {
         "type": "tool_result",
         "tool_call_id": result.tool_use_id,
