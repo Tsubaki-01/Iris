@@ -1,10 +1,11 @@
 # Provider API Wrapper
 
-Iris 的 provider 调用链分为六层：
+Iris 的 provider 调用链以 provider-neutral 模型为边界，当前 active path 通过
+LiteLLM Chat Completion 执行：
 
 ```text
-Conversation -> LLMRequest -> ProviderAdapter -> ProviderClient -> 厂商 API
-厂商 API -> ProviderClient -> ProviderAdapter -> LLMResponse -> Msg -> Conversation
+Conversation -> LLMRequest -> ProviderClient -> litellm.acompletion()
+litellm.acompletion() -> ProviderClient -> LLMResponse -> Msg -> Conversation
 ```
 
 ## 核心边界
@@ -12,42 +13,63 @@ Conversation -> LLMRequest -> ProviderAdapter -> ProviderClient -> 厂商 API
 - `Msg` 是 Iris 内部最小消息单元，只表达 role、content、sender、timestamp、metadata。
 - `Conversation` 管理有序消息历史，并通过 `to_llm_request()` 构建一次模型调用。
 - `LLMRequest` 表达一次调用的 model、messages、tools、采样参数和 provider 选项。
-- `ProviderAdapter` 只做格式转换，不读取 API key，不发 HTTP。
-- `ProviderClient` 负责 HTTP 调用、鉴权 header、endpoint 选择和 provider 错误映射。
+- `ProviderClient` 是 Iris 对 LiteLLM Chat Completion 的薄封装，负责构造
+  `litellm.acompletion()` kwargs、传入 API key/base URL/headers，并把响应和错误映射回
+  Iris 类型。
 - `LLMResponse` 是 provider-neutral 响应，通过 `to_msg()` 回到 Iris 内部消息系统。
+- `ProviderAdapter`、`OpenAIMessageAdapter` 和 `AnthropicMessageAdapter` 仍作为公开的
+  格式转换 helper 保留，但不再是 `ProviderClient.complete()` 的 active 调用链路。
 
-## OpenAI 默认策略
+## Provider 白名单
 
-Iris 默认使用 OpenAI Chat Completions。`Conversation` 不直接生成 OpenAI
-payload，而是先生成 provider-neutral 的 `LLMRequest`：
+当前 factory 只显式支持以下 provider：
+
+- `openai`
+- `anthropic`
+- `deepseek`
+
+`create_provider_client("provider/model")` 会校验 provider 白名单，按以下优先级解析
+API key：
+
+1. 显式 `api_key=...`
+2. `IRIS_{PROVIDER}_API_KEY`，例如 `IRIS_DEEPSEEK_API_KEY`
+3. `iris.init_config(api_key=...)` 中的通用 key
+
+`http_client` 注入已从 active API 删除。生产路径不再暴露可注入的 `httpx.AsyncClient`。
+
+## Chat Completion 策略
+
+Iris 当前只支持 LiteLLM Chat Completion active path。`ProviderClient.complete()` 会把
+Iris 消息格式化成 OpenAI Chat messages 形状，并调用：
 
 ```python
-request = conversation.to_llm_request("gpt-4o")
-payload = OpenAIMessageAdapter().to_provider_request(request)
-```
-
-这会生成 `/v1/chat/completions` payload。该选择是为了贴合 Iris 当前
-`Conversation.messages` / `Msg.role` 架构，并与 Anthropic Messages API 保持接近。
-
-如需使用 OpenAI Responses API，显式指定：
-
-```python
-request = conversation.to_llm_request(
-    "gpt-4o",
-    provider_options={"api_style": "responses"},
+await litellm.acompletion(
+    model="openai/gpt-4o",
+    messages=[{"role": "user", "content": "你好", "name": "user"}],
+    api_key="...",
 )
-payload = OpenAIMessageAdapter().to_provider_request(request)
 ```
 
-Responses API 的差异限制在 `OpenAIMessageAdapter` 和 `ProviderClient` 内，上层业务代码不应直接依赖 provider raw payload。
+工具 schema 也统一使用 OpenAI Chat 形状，即使配置的 provider 是 Anthropic 或 DeepSeek。
+这是 LiteLLM chat bridge 的 runtime 边界，不改变 `LLMRequest.tools` 的公共字段类型。
+
+## Responses 暂不支持
+
+本阶段不支持 OpenAI Responses API active path。调用方如果在
+`LLMRequest.provider_options` 中传入 `api_style="responses"`，`ProviderClient.complete()`
+会抛出 `IrisProviderError`。
+
+`OpenAIMessageAdapter` 内部仍保留 Responses 格式转换 helper，便于后续阶段复用；它不是
+当前 runtime/provider client 的受支持调用路径。
 
 ## 错误映射
 
-`ProviderClient.complete()` 将 HTTP 层错误映射为 Iris 自定义异常：
+`ProviderClient.complete()` 将 LiteLLM 或 provider 风格错误映射为 Iris 自定义异常：
 
 - `401` / `403` -> `IrisAuthenticationError`
+- `408`、连接错误或 timeout -> `IrisAPIConnectionError`
 - `429` -> `IrisRateLimitExceededError`
-- `5xx` -> `IrisProviderError`
-- 连接错误或 timeout -> `IrisAPIConnectionError`
+- 其他 provider 错误 -> `IrisProviderError`
 
-`complete()` 仅支持非流式调用。传入 `stream=True` 会抛出 `IrisProviderError`，streaming 将在后续单独设计。
+`complete()` 仅支持非流式调用。传入 `stream=True` 会抛出 `IrisProviderError`，streaming
+将在后续单独设计。

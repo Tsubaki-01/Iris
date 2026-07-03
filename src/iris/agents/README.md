@@ -37,7 +37,6 @@ model:
   name: gpt-4o-mini
   temperature: 0.2
   max_tokens: 512
-  api_style: responses
 system: |
   你是一个本地笔记助手。
 tools:
@@ -112,7 +111,8 @@ model: openai/gpt-4o-mini
 - `temperature`、`top_p`、`max_tokens`、`tool_choice`、`response_format`、`stream`、
   `timeout`、`provider_options`、`metadata`: 可选请求级参数，会由 runtime 透传给
   `LLMRequest`。
-- `api_style`: 可选 API 风格；runtime 会把它合并进 `LLMRequest.provider_options`。
+- `api_style`: 兼容字段，会合并进 `LLMRequest.provider_options`；当前 runtime/provider
+  active path 仅支持 LiteLLM Chat Completion，`api_style: responses` 会在调用阶段被拒绝。
 
 调用 `to_model_route()` 可转换为 core/providers 层使用的 `ModelRoute`。
 调用 `to_llm_request_options()` 可得到 `LLMRequest` 支持的请求级参数；`provider`、
