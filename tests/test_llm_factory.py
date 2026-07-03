@@ -138,7 +138,7 @@ def test_create_provider_client_accepts_model_route_for_request_model() -> None:
     client = create_provider_client(route, api_key="test-key")
     request = LLMRequest(model=route.model, messages=[Msg.user("你好")])
 
-    assert client.adapter.provider == "openai"
+    assert client.provider == "openai"
     assert request.model == "gpt-4o"
 
 
