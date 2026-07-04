@@ -15,7 +15,7 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Self
 
 import litellm
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,6 +32,8 @@ from .anthropic import AnthropicMessageAdapter
 from .openai import OpenAIMessageAdapter
 
 # endregion
+
+SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "deepseek"})
 
 
 class ProviderClient(BaseModel):
@@ -60,7 +62,7 @@ class ProviderClient(BaseModel):
     timeout: float | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="ignore")
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     @model_validator(mode="before")
     @classmethod
@@ -69,10 +71,17 @@ class ProviderClient(BaseModel):
         if not isinstance(data, dict):
             return data
         normalized = dict(data)
-        adapter = normalized.get("adapter")
+        adapter = normalized.pop("adapter", None)
         if "provider" not in normalized and isinstance(adapter, ProviderAdapter):
             normalized["provider"] = adapter.provider
         return normalized
+
+    @model_validator(mode="after")
+    def _validate_supported_provider(self) -> Self:
+        """确认 provider 在当前显式白名单中。"""
+        if self.provider not in SUPPORTED_PROVIDERS:
+            raise IrisProviderError("不支持的 provider", provider=self.provider)
+        return self
 
     @property
     def adapter(self) -> ProviderAdapter:
