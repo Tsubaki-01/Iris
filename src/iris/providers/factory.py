@@ -18,12 +18,9 @@ from pydantic import BaseModel, ConfigDict
 
 from ..config import get_config, is_config_initialized
 from ..exceptions import IrisConfigError, IrisProviderError, IrisValidationError
-from .client import ProviderClient
+from .client import SUPPORTED_PROVIDERS, ProviderClient
 
 # endregion
-
-
-SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "deepseek"})
 
 
 class ModelRoute(BaseModel):

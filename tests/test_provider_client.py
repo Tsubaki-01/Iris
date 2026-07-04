@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from iris.exceptions import (
     IrisAPIConnectionError,
@@ -16,6 +17,16 @@ def test_provider_client_exposes_litellm_active_fields_only() -> None:
     assert "max_retries" not in ProviderClient.model_fields
     assert "http_client" not in ProviderClient.model_fields
     assert "provider" in ProviderClient.model_fields
+
+
+def test_provider_client_rejects_unsupported_provider() -> None:
+    with pytest.raises(IrisProviderError):
+        ProviderClient(provider="groq", api_key="test-key")
+
+
+def test_provider_client_rejects_removed_http_client_keyword() -> None:
+    with pytest.raises(ValidationError):
+        ProviderClient(provider="openai", api_key="test-key", http_client=None)
 
 
 @pytest.mark.asyncio

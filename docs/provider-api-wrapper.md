@@ -22,20 +22,21 @@ litellm.acompletion() -> ProviderClient -> LLMResponse -> Msg -> Conversation
 
 ## Provider 白名单
 
-当前 factory 只显式支持以下 provider：
+当前 `ProviderClient` 和 factory 只显式支持以下 provider：
 
 - `openai`
 - `anthropic`
 - `deepseek`
 
-`create_provider_client("provider/model")` 会校验 provider 白名单，按以下优先级解析
-API key：
+`ProviderClient(provider=...)` 会校验 provider 白名单；`create_provider_client("provider/model")`
+会复用同一份白名单，并按以下优先级解析 API key：
 
 1. 显式 `api_key=...`
 2. `IRIS_{PROVIDER}_API_KEY`，例如 `IRIS_DEEPSEEK_API_KEY`
 3. `iris.init_config(api_key=...)` 中的通用 key
 
-`http_client` 注入已从 active API 删除。生产路径不再暴露可注入的 `httpx.AsyncClient`。
+`http_client` 注入已从 active API 删除。生产路径不再暴露可注入的 `httpx.AsyncClient`，
+直接传入 `http_client=` 或其他未知构造参数会被拒绝。
 
 ## Chat Completion 策略
 

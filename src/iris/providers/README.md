@@ -59,7 +59,7 @@ Provider 数据格式适配器的抽象基类。只做纯数据格式层面的�
 Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换为 LiteLLM chat kwargs，并把 LiteLLM 响应和错误映射回 `LLMResponse` 与 `IrisProviderError` 等 Iris 自定义异常。
 
 - **构造参数:**
-  - `provider: str`: Provider 名称，目前 factory 白名单为 `"openai"`、`"anthropic"`、`"deepseek"`。
+  - `provider: str`: Provider 名称，目前 `ProviderClient` / factory 白名单为 `"openai"`、`"anthropic"`、`"deepseek"`。
   - `api_key: str`: 厂商鉴权所需的 API Key。
   - `base_url: str | None = None`: 覆盖原本的 Base URL。
   - `timeout: float | None = None`: 请求超时时间。
@@ -72,6 +72,10 @@ Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换�
 
 `http_client` 注入已经从 active API 删除；测试和 SDK 调用方应通过 monkeypatch
 `litellm.acompletion()` 或注入 runtime provider 边界来替代旧的 HTTP client 注入。
+构造器会拒绝未知参数，避免旧的 `http_client=` 被静默忽略。
+
+`adapter=` 构造输入仅用于迁移期兼容 OpenAI / Anthropic 旧调用方式，并会在构造时转换为
+`provider`。它不参与 active 调用链路，也不为 DeepSeek 提供格式适配器。
 
 ### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
 Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。
