@@ -5,6 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 import iris
 import iris.core
+from iris.config import ProviderConfig
 from iris.exceptions import IrisConfigError, IrisProviderError, IrisValidationError
 from iris.message import LLMRequest, Msg
 from iris.providers import (
@@ -21,10 +22,11 @@ def isolate_factory_config(
 ) -> Generator[None, None, None]:
     """隔离 factory 测试使用的环境变量与全局配置。"""
     for name in (
-        "IRIS_OPENAI_API_KEY",
-        "IRIS_ANTHROPIC_API_KEY",
-        "IRIS_DEEPSEEK_API_KEY",
-        "IRIS_UNKNOWN_API_KEY",
+        "IRIS_PROVIDER_API_KEYS__OPENAI",
+        "IRIS_PROVIDER_API_KEYS__ANTHROPIC",
+        "IRIS_PROVIDER_API_KEYS__DEEPSEEK",
+        "IRIS_PROVIDER_API_KEYS__UNKNOWN",
+        "IRIS_PROVIDER_API_KEYS__SILICONFLOW",
     ):
         monkeypatch.delenv(name, raising=False)
     iris.reset()
@@ -90,32 +92,38 @@ def test_create_provider_client_rejects_unknown_provider() -> None:
 def test_create_provider_client_prefers_explicit_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("IRIS_OPENAI_API_KEY", "env-key")
+    monkeypatch.setenv("IRIS_PROVIDER_API_KEYS__OPENAI", "env-key")
+    iris.init_config(provider_api_keys={"openai": "config-key"})
 
     client = create_provider_client("openai/gpt-4o", api_key="explicit-key")
 
     assert client.api_key == "explicit-key"
 
 
-def test_create_provider_client_reads_provider_specific_env(
+def test_create_provider_client_reads_provider_specific_key_from_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("IRIS_OPENAI_API_KEY", "provider-key")
+    monkeypatch.setenv("IRIS_PROVIDER_API_KEYS__OPENAI", "provider-key")
+    iris.init_config()
 
     client = create_provider_client("openai/gpt-4o")
 
     assert client.api_key == "provider-key"
 
 
-def test_create_provider_client_reads_deepseek_env_key(
+def test_create_provider_client_does_not_read_os_environ_after_config_init(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("IRIS_DEEPSEEK_API_KEY", "deepseek-key")
+    iris.init_config(
+        api_key="generic-key",
+        provider_api_keys={"deepseek": "config-provider-key"},
+    )
+    monkeypatch.setenv("IRIS_PROVIDER_API_KEYS__DEEPSEEK", "env-key")
 
     client = create_provider_client("deepseek/deepseek-chat")
 
     assert client.provider == "deepseek"
-    assert client.api_key == "deepseek-key"
+    assert client.api_key == "config-provider-key"
 
 
 def test_create_provider_client_falls_back_to_initialized_config() -> None:
@@ -125,6 +133,92 @@ def test_create_provider_client_falls_back_to_initialized_config() -> None:
 
     assert client.provider == "deepseek"
     assert client.api_key == "generic-key"
+
+
+def test_create_provider_client_allows_explicit_key_without_config_secret() -> None:
+    iris.init_config(
+        providers={
+            "siliconflow": ProviderConfig(
+                litellm_provider="openai",
+                base_url="https://api.siliconflow.cn/v1",
+            )
+        }
+    )
+
+    client = create_provider_client(
+        "siliconflow/deepseek-ai/DeepSeek-V3",
+        api_key="explicit-key",
+    )
+
+    assert client.api_key == "explicit-key"
+
+
+def test_create_provider_client_preserves_builtin_litellm_provider_on_override() -> (
+    None
+):
+    iris.init_config(
+        provider_api_keys={"deepseek": "deepseek-key"},
+        providers={
+            "deepseek": ProviderConfig(base_url="https://api.deepseek.example/v1")
+        },
+    )
+
+    client = create_provider_client("deepseek/deepseek-chat")
+
+    assert client.litellm_provider == "deepseek"
+    assert client.base_url == "https://api.deepseek.example/v1"
+
+
+def test_create_provider_client_ignores_blank_generic_api_key() -> None:
+    iris.init_config(api_key="   ")
+
+    with pytest.raises(IrisConfigError):
+        create_provider_client("openai/gpt-4o")
+
+
+def test_create_provider_client_uses_registered_custom_provider() -> None:
+    iris.init_config(
+        provider_api_keys={"siliconflow": "siliconflow-key"},
+        providers={
+            "siliconflow": ProviderConfig(
+                litellm_provider="openai",
+                base_url="https://api.siliconflow.cn/v1",
+            )
+        },
+    )
+
+    client = create_provider_client("siliconflow/deepseek-ai/DeepSeek-V3")
+
+    assert client.provider == "siliconflow"
+    assert client.litellm_provider == "openai"
+    assert client.api_key == "siliconflow-key"
+    assert client.base_url == "https://api.siliconflow.cn/v1"
+
+
+def test_create_provider_client_requires_custom_provider_base_url() -> None:
+    iris.init_config(provider_api_keys={"siliconflow": "siliconflow-key"})
+
+    with pytest.raises(IrisProviderError):
+        create_provider_client("siliconflow/deepseek-ai/DeepSeek-V3")
+
+
+def test_create_provider_client_prefers_explicit_base_url() -> None:
+    iris.init_config(
+        provider_api_keys={"siliconflow": "siliconflow-key"},
+        providers={
+            "siliconflow": ProviderConfig(
+                litellm_provider="openai",
+                base_url="https://api.siliconflow.cn/v1",
+            )
+        },
+    )
+
+    client = create_provider_client(
+        "siliconflow/deepseek-ai/DeepSeek-V3",
+        base_url="https://proxy.example.test/v1",
+    )
+
+    assert client.base_url == "https://proxy.example.test/v1"
 
 
 def test_create_provider_client_requires_api_key() -> None:
