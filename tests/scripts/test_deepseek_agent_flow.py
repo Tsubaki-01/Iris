@@ -2,13 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import logging
+import inspect
+from collections.abc import Generator
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
+import iris
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
+
+
+@pytest.fixture(autouse=True)
+def reset_config_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[None, None, None]:
+    """隔离脚本测试中的全局配置状态。"""
+    for name in (
+        "IRIS_API_KEY",
+        "IRIS_PROVIDER_API_KEYS__DEEPSEEK",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    iris.reset()
+    yield
+    iris.reset()
 
 
 class FakeProvider:
@@ -24,7 +41,9 @@ class FakeProvider:
 
 
 def _load_demo_module() -> ModuleType:
-    module_path = Path(__file__).resolve().parents[2] / "scripts" / "deepseek_agent_flow.py"
+    module_path = (
+        Path(__file__).resolve().parents[2] / "scripts" / "deepseek_agent_flow.py"
+    )
     spec = importlib.util.spec_from_file_location("deepseek_agent_flow", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -33,23 +52,44 @@ def _load_demo_module() -> ModuleType:
     return module
 
 
-def test_load_local_env_reads_deepseek_key_without_overriding(
+def test_init_local_config_loads_api_key_without_overriding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_demo_module()
     env_file = tmp_path / ".env.local"
     env_file.write_text(
-        "IRIS_DEEPSEEK_API_KEY=local-key\nIRIS_OTHER=value\n",
+        "IRIS_API_KEY=local-key\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("IRIS_DEEPSEEK_API_KEY", "existing-key")
-    monkeypatch.delenv("IRIS_OTHER", raising=False)
+    monkeypatch.delenv("IRIS_PROVIDER_API_KEYS__DEEPSEEK", raising=False)
+    monkeypatch.setenv("IRIS_API_KEY", "existing-key")
 
-    loaded = module.load_local_env(tmp_path)
+    initialized = module.init_local_config(tmp_path)
 
-    assert loaded == {"IRIS_OTHER": "value"}
+    assert initialized is True
     assert module.resolve_api_key() == "existing-key"
+    assert iris.get_config().api_key == "existing-key"
+
+
+def test_init_local_config_loads_provider_key_from_env_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_demo_module()
+    env_file = tmp_path / ".env.local"
+    env_file.write_text(
+        "IRIS_PROVIDER_API_KEYS__DEEPSEEK=deepseek-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("IRIS_API_KEY", raising=False)
+    monkeypatch.delenv("IRIS_PROVIDER_API_KEYS__DEEPSEEK", raising=False)
+
+    initialized = module.init_local_config(tmp_path)
+
+    assert initialized is True
+    assert module.resolve_api_key() == "deepseek-key"
+    assert iris.get_config().provider_api_keys["deepseek"] == "deepseek-key"
 
 
 def test_deepseek_runtime_flow_uses_tool_loop_with_injected_provider(
@@ -85,7 +125,6 @@ def test_deepseek_runtime_flow_uses_tool_loop_with_injected_provider(
     report = asyncio.run(
         module.run_runtime_tool_loop(
             agent_path=agent_path,
-            api_key="test-key",
             expected_token=expected_token,
             provider=provider,
         )
@@ -133,14 +172,17 @@ def test_deepseek_runtime_flow_logs_important_data_nodes(tmp_path: Path) -> None
     asyncio.run(
         module.run_runtime_tool_loop(
             agent_path=agent_path,
-            api_key="test-key",
             expected_token=expected_token,
             provider=provider,
         )
     )
-    for handler in module.LOGGER.handlers:
-        if isinstance(handler, logging.FileHandler):
-            handler.flush()
+    complete_result = module.logger.complete()
+    if inspect.isawaitable(complete_result):
+
+        async def wait_for_logs() -> None:
+            await complete_result
+
+        asyncio.run(wait_for_logs())
 
     content = (log_dir / "runtime.log").read_text(encoding="utf-8")
 
@@ -150,3 +192,21 @@ def test_deepseek_runtime_flow_logs_important_data_nodes(tmp_path: Path) -> None
     assert "status=ok" in content
     assert "tool_result_count=1" in content
     assert "expected_token_found=True" in content
+
+
+def test_setup_flow_logging_uses_iris_log_setup_logger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_demo_module()
+    log_dir = tmp_path / "logs"
+    calls: list[Path] = []
+
+    def fake_setup_logger(log_dir: Path) -> None:
+        calls.append(log_dir)
+
+    monkeypatch.setattr(module, "setup_logger", fake_setup_logger)
+
+    module.setup_flow_logging(log_dir)
+
+    assert calls == [log_dir]
