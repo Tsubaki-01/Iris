@@ -120,7 +120,6 @@ name: mock-file-agent
 model:
   provider: openai
   name: gpt-4o-mini
-  api_style: responses
 system: |
   你是 Iris 示例助手。需要读取文件时使用 read_file。
 tools:

@@ -27,9 +27,7 @@ from ..exceptions import (
     IrisRateLimitExceededError,
 )
 from ..message.llm import LLMRequest, LLMResponse
-from .adapter import ProviderAdapter
-from .anthropic import AnthropicMessageAdapter
-from .openai import OpenAIMessageAdapter
+from .openai import OpenAIChatMapper
 
 # endregion
 
@@ -40,8 +38,7 @@ class ProviderClient(BaseModel):
     """Provider Chat Completion 调用层。
 
     Client 只负责将 Iris 的 provider-neutral 请求转换成 LiteLLM chat kwargs，
-    并把响应和异常映射回 Iris 边界。`adapter` 构造参数仅作为旧 factory 的
-    兼容输入，不再是 active model field。
+    并把响应和异常映射回 Iris 边界。
 
     Attributes:
         provider (str): Provider 名称，例如 `"openai"` 或 `"anthropic"`。
@@ -64,33 +61,12 @@ class ProviderClient(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_provider_from_legacy_adapter(cls, data: Any) -> Any:
-        """从旧 `adapter=` 构造输入派生 provider。"""
-        if not isinstance(data, dict):
-            return data
-        normalized = dict(data)
-        adapter = normalized.pop("adapter", None)
-        if "provider" not in normalized and isinstance(adapter, ProviderAdapter):
-            normalized["provider"] = adapter.provider
-        return normalized
-
     @model_validator(mode="after")
     def _validate_supported_provider(self) -> Self:
         """确认 provider 在当前显式白名单中。"""
         if self.provider not in SUPPORTED_PROVIDERS:
             raise IrisProviderError("不支持的 provider", provider=self.provider)
         return self
-
-    @property
-    def adapter(self) -> ProviderAdapter:
-        """返回当前 provider 的兼容格式适配器。"""
-        if self.provider == "openai":
-            return OpenAIMessageAdapter()
-        if self.provider == "anthropic":
-            return AnthropicMessageAdapter()
-        raise IrisProviderError("不支持的 provider", provider=self.provider)
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """发送非流式 Chat Completion 请求并返回标准响应。
@@ -124,17 +100,6 @@ class ProviderClient(BaseModel):
             raise self._map_litellm_error(exc) from exc
         return self._from_litellm_response(response)
 
-    async def close(self) -> None:
-        """释放 client 资源。
-
-        LiteLLM 路径不持有 Iris 自己创建的 HTTP client，因此这里保持为
-        兼容 no-op。
-
-        Returns:
-            None: 无需释放资源。
-        """
-        return None
-
     def _validate_api_style(self, request: LLMRequest) -> None:
         """拒绝本阶段不支持的非 Chat API 风格。"""
         api_style = request.provider_options.get("api_style", "chat")
@@ -149,9 +114,8 @@ class ProviderClient(BaseModel):
         """将 Iris 请求转换为 LiteLLM `acompletion` kwargs。"""
         kwargs: dict[str, Any] = {
             "model": self._litellm_model(request.model),
-            "messages": OpenAIMessageAdapter().format_messages(
+            "messages": OpenAIChatMapper().format_messages(
                 request.messages,
-                api_style="chat",
             ),
             "api_key": self.api_key,
         }
@@ -199,7 +163,7 @@ class ProviderClient(BaseModel):
             provider=self.provider,
             id=str(self._get(data, "id", "") or ""),
             model=str(self._get(data, "model", "") or ""),
-            content=OpenAIMessageAdapter()._content_blocks_from_chat_message(
+            content=OpenAIChatMapper().content_blocks_from_chat_message(
                 self._as_mapping(message)
             ),
             finish_reason=str(self._get(choice, "finish_reason", "") or ""),

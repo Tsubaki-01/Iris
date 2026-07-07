@@ -17,8 +17,6 @@ litellm.acompletion() -> ProviderClient -> LLMResponse -> Msg -> Conversation
   `litellm.acompletion()` kwargs、传入 API key/base URL/headers，并把响应和错误映射回
   Iris 类型。
 - `LLMResponse` 是 provider-neutral 响应，通过 `to_msg()` 回到 Iris 内部消息系统。
-- `ProviderAdapter`、`OpenAIMessageAdapter` 和 `AnthropicMessageAdapter` 仍作为公开的
-  格式转换 helper 保留，但不再是 `ProviderClient.complete()` 的 active 调用链路。
 
 ## Provider 白名单
 
@@ -59,9 +57,6 @@ await litellm.acompletion(
 本阶段不支持 OpenAI Responses API active path。调用方如果在
 `LLMRequest.provider_options` 中传入 `api_style="responses"`，`ProviderClient.complete()`
 会抛出 `IrisProviderError`。
-
-`OpenAIMessageAdapter` 内部仍保留 Responses 格式转换 helper，便于后续阶段复用；它不是
-当前 runtime/provider client 的受支持调用路径。
 
 ## 错误映射
 

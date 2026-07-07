@@ -197,8 +197,6 @@ async def run_provider_smoke(
     except Exception:
         LOGGER.exception("deepseek.provider.error route=deepseek/%s", model)
         raise
-    finally:
-        await client.close()
 
     text = response.to_msg().text.strip()
     LOGGER.info(
@@ -260,7 +258,9 @@ async def run_runtime_tool_loop(
         ),
     )
 
-    final_text = result.assistant_message.text.strip() if result.assistant_message else ""
+    final_text = (
+        result.assistant_message.text.strip() if result.assistant_message else ""
+    )
     expected_token_found = expected_token in final_text
     tool_result_count = len(result.tool_results)
     LOGGER.info(
@@ -277,7 +277,9 @@ async def run_runtime_tool_loop(
         result.error.code if result.error else "",
     )
     return {
-        "ok": result.status.value == "ok" and tool_result_count > 0 and expected_token_found,
+        "ok": result.status.value == "ok"
+        and tool_result_count > 0
+        and expected_token_found,
         "status": result.status.value,
         "steps": result.steps,
         "provider_request_count": _provider_request_count(provider),
@@ -323,7 +325,9 @@ async def run_deepseek_flow(
     }
 
 
-def print_intro(console: Console, *, api_key: str, work_dir: Path, log_dir: Path) -> None:
+def print_intro(
+    console: Console, *, api_key: str, work_dir: Path, log_dir: Path
+) -> None:
     """打印验证输入提示。"""
     console.print(
         Panel.fit(

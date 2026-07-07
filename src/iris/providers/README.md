@@ -1,6 +1,6 @@
 # iris.providers
 
-`iris.providers` 是 Iris 框架的底层模型 API 交互模块。该模块将内部的统一数据结构请求通过 LiteLLM Chat Completion bridge 发送至对应的 LLM 厂商，并将返回内容解析为 Iris 的标准响应模型。Adapter 仍作为公开的格式转换工具保留，但 `ProviderClient` 的 active path 不再依赖 adapter 发送 HTTP 请求。
+`iris.providers` 是 Iris 框架的底层模型 API 交互模块。该模块将内部的统一数据结构请求通过 LiteLLM Chat Completion bridge 发送至对应的 LLM 厂商，并将返回内容解析为 Iris 的标准响应模型。
 
 ## Quick Start
 
@@ -16,16 +16,12 @@ async def main():
     # 1. 实例化所需要的 Provider Client
     client = ProviderClient(provider="openai", api_key="your-api-key")
 
-    try:
-        # 2. 构造通用的 LLMRequest（模型定义位于 iris.message.llm 中）
-        request = LLMRequest(model="gpt-4o", messages=[Msg.user("你好")])
+    # 2. 构造通用的 LLMRequest（模型定义位于 iris.message.llm 中）
+    request = LLMRequest(model="gpt-4o", messages=[Msg.user("你好")])
 
-        # 3. 发送请求并获取 LLMResponse
-        response = await client.complete(request)
-        print(response.to_msg().text)
-    finally:
-        # 4. 保持兼容的资源释放入口
-        await client.close()
+    # 3. 发送请求并获取 LLMResponse
+    response = await client.complete(request)
+    print(response.to_msg().text)
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -36,24 +32,6 @@ if __name__ == "__main__":
 - **Provider 隔离原则**: 该包下的所有类仅处理通信层与协议内容构造。LLM 的公共模型（如 `LLMRequest` 和 `LLMResponse`）与消息类型（如 `Msg`, `Role`, `TextBlock`）均由外部 `iris.message.llm` 输入和构造，不在此模块定义。
 
 ## API
-
-### `class ProviderAdapter`
-Provider 数据格式适配器的抽象基类。只做纯数据格式层面的转换。
-
-- `provider: str`: 目标 Provider 的名称标志。
-- `default_api_style: str | None`: 默认的目标 API 风格区分标志。
-- `to_provider_request(request: LLMRequest) -> dict[str, Any]`: 将通用的 `LLMRequest` 转换为当前 Provider 要求的 Payload 格式。
-- `from_provider_response(response: Mapping[str, Any]) -> LLMResponse`: 将 Provider 返回的 JSON Dictionary 反序列化并转换为标准的 `LLMResponse`。
-
-### `class OpenAIMessageAdapter(ProviderAdapter)`
-用于对接 OpenAI API 的适配器实现。
-- 默认 `provider` = `"openai"`
-- 默认 `default_api_style` = `"chat"` （Chat Completions API）。
-- 内部仍保留 Responses 格式转换 helper，便于后续阶段复用；当前 `ProviderClient.complete()` active path 不支持 `provider_options["api_style"] = "responses"`。
-
-### `class AnthropicMessageAdapter(ProviderAdapter)`
-用于对接 Anthropic Messages API 的适配器实现。自动将 system prompt 扁平化作为顶层字段发送。
-- 默认 `provider` = `"anthropic"`
 
 ### `class ProviderClient`
 Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换为 LiteLLM chat kwargs，并把 LiteLLM 响应和错误映射回 `LLMResponse` 与 `IrisProviderError` 等 Iris 自定义异常。
@@ -67,15 +45,10 @@ Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换�
 
 - **`async def complete(request: LLMRequest) -> LLMResponse`**
     发起非流式 Chat Completion 请求。包含完整的报错映射流程。不支持 `stream=True` 与 Responses API 风格。
-- **`async def close() -> None`**
-    兼容 no-op 资源释放入口。
 
-`http_client` 注入已经从 active API 删除；测试和 SDK 调用方应通过 monkeypatch
-`litellm.acompletion()` 或注入 runtime provider 边界来替代旧的 HTTP client 注入。
-构造器会拒绝未知参数，避免旧的 `http_client=` 被静默忽略。
-
-`adapter=` 构造输入仅用于迁移期兼容 OpenAI / Anthropic 旧调用方式，并会在构造时转换为
-`provider`。它不参与 active 调用链路，也不为 DeepSeek 提供格式适配器。
+`ProviderClient` 不暴露可注入的 HTTP client；测试和 SDK 调用方应通过 monkeypatch
+`litellm.acompletion()` 或注入 runtime provider 边界来控制调用行为。
+构造器会拒绝未知参数，避免不受支持的输入被静默忽略。
 
 ### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
 Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。

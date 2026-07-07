@@ -10,7 +10,7 @@ from iris.exceptions import (
     IrisRateLimitExceededError,
 )
 from iris.message import LLMRequest, Msg
-from iris.providers import OpenAIMessageAdapter, ProviderClient
+from iris.providers import ProviderClient
 
 
 def test_provider_client_exposes_litellm_active_fields_only() -> None:
@@ -27,6 +27,18 @@ def test_provider_client_rejects_unsupported_provider() -> None:
 def test_provider_client_rejects_removed_http_client_keyword() -> None:
     with pytest.raises(ValidationError):
         ProviderClient(provider="openai", api_key="test-key", http_client=None)
+
+
+def test_provider_client_rejects_removed_adapter_keyword() -> None:
+    with pytest.raises(ValidationError):
+        ProviderClient(provider="openai", api_key="test-key", adapter=object())
+
+
+def test_provider_client_does_not_expose_adapter_or_close_compatibility() -> None:
+    client = ProviderClient(provider="openai", api_key="test-key")
+
+    assert not hasattr(client, "adapter")
+    assert not hasattr(client, "close")
 
 
 @pytest.mark.asyncio
@@ -202,18 +214,3 @@ async def test_provider_client_rejects_streaming_in_complete() -> None:
 
     with pytest.raises(IrisProviderError, match="stream"):
         await client.complete(LLMRequest(model="gpt-4o", stream=True))
-
-
-@pytest.mark.asyncio
-async def test_provider_client_close_is_noop() -> None:
-    client = ProviderClient(provider="openai", api_key="test-key")
-
-    assert await client.close() is None
-
-
-def test_provider_client_keeps_adapter_compatibility_without_model_field() -> None:
-    client = ProviderClient(adapter=OpenAIMessageAdapter(), api_key="test-key")
-
-    assert "adapter" not in ProviderClient.model_fields
-    assert client.provider == "openai"
-    assert client.adapter.provider == "openai"
