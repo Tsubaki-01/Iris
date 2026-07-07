@@ -50,9 +50,31 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`RuntimeFactory.from_config_path()` 默认创建真实 provider client。OpenAI 配置会读取
-`IRIS_OPENAI_API_KEY`，DeepSeek 配置会读取 `IRIS_DEEPSEEK_API_KEY`；也可以通过
-`api_key=` 显式传入。测试时可通过 `provider=` 注入 fake provider。
+`RuntimeFactory.from_config_path()` 默认创建真实 provider client。环境变量和 `.env` 文件
+由 `iris.config.init_config()` 解析；`IRIS_PROVIDER_API_KEYS__OPENAI` 这类 nested env 会进入
+`Config.provider_api_keys`，provider factory 只消费已解析的配置。也可以通过 `api_key=`
+显式传入，测试时可通过 `provider=` 注入 fake provider。
+
+OpenAI-compatible 中转站需要在进程配置中注册 provider：
+
+```env
+IRIS_PROVIDER_API_KEYS__SILICONFLOW=sk-xxx
+IRIS_PROVIDERS__SILICONFLOW__LITELLM_PROVIDER=openai
+IRIS_PROVIDERS__SILICONFLOW__BASE_URL=https://api.siliconflow.cn/v1
+```
+
+`agent.yaml` 只声明使用哪个 Iris provider id 和模型名：
+
+```yaml
+model:
+  provider: siliconflow
+  name: deepseek-ai/DeepSeek-V3
+```
+
+在这个配置中，`siliconflow` 只作为 Iris provider id 参与本地 registry / API key
+查找。`litellm_provider=openai` 让 LiteLLM 走 OpenAI Chat Completions adapter，并把
+`base_url` 指向中转站；中转站收到的请求体不包含 `provider` 字段，`model` 会是
+`deepseek-ai/DeepSeek-V3`。
 
 ## 配置示例
 

@@ -18,20 +18,38 @@ litellm.acompletion() -> ProviderClient -> LLMResponse -> Msg -> Conversation
   Iris 类型。
 - `LLMResponse` 是 provider-neutral 响应，通过 `to_msg()` 回到 Iris 内部消息系统。
 
-## Provider 白名单
+## Provider 注册表
 
-当前 `ProviderClient` 和 factory 只显式支持以下 provider：
+当前 provider registry 包含以下内置 provider：
 
 - `openai`
 - `anthropic`
 - `deepseek`
 
-`ProviderClient(provider=...)` 会校验 provider 白名单；`create_provider_client("provider/model")`
-会复用同一份白名单，并按以下优先级解析 API key：
+用户也可以通过 `Config.providers` 注册 OpenAI-compatible 中转站等自定义 provider。
+自定义 provider 必须至少声明 `base_url`；只配置 key 不会注册 provider。
+
+`create_provider_client("provider/model")` 会先查 provider registry，并按以下优先级解析
+API key：
 
 1. 显式 `api_key=...`
-2. `IRIS_{PROVIDER}_API_KEY`，例如 `IRIS_DEEPSEEK_API_KEY`
+2. `Config.provider_api_keys[provider]`，例如
+   `IRIS_PROVIDER_API_KEYS__DEEPSEEK`
 3. `iris.init_config(api_key=...)` 中的通用 key
+
+OpenAI-compatible 中转站示例：
+
+```env
+IRIS_PROVIDER_API_KEYS__SILICONFLOW=sk-xxx
+IRIS_PROVIDERS__SILICONFLOW__LITELLM_PROVIDER=openai
+IRIS_PROVIDERS__SILICONFLOW__BASE_URL=https://api.siliconflow.cn/v1
+```
+
+```yaml
+model:
+  provider: siliconflow
+  name: deepseek-ai/DeepSeek-V3
+```
 
 `http_client` 注入已从 active API 删除。生产路径不再暴露可注入的 `httpx.AsyncClient`，
 直接传入 `http_client=` 或其他未知构造参数会被拒绝。
