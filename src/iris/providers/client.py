@@ -15,10 +15,10 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Self
+from typing import Any
 
 import litellm
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..exceptions import (
     IrisAPIConnectionError,
@@ -31,8 +31,6 @@ from .openai import OpenAIChatMapper
 
 # endregion
 
-SUPPORTED_PROVIDERS = frozenset({"openai", "anthropic", "deepseek"})
-
 
 class ProviderClient(BaseModel):
     """Provider Chat Completion 调用层。
@@ -42,6 +40,7 @@ class ProviderClient(BaseModel):
 
     Attributes:
         provider (str): Provider 名称，例如 `"openai"` 或 `"anthropic"`。
+        litellm_provider (str | None): 实际传给 LiteLLM 的 provider 名称。
         api_key (str): Provider API key。
         base_url (str | None): 自定义 provider base URL。
         timeout (float | None): 默认请求超时时间，单位秒。
@@ -54,19 +53,13 @@ class ProviderClient(BaseModel):
     """
 
     provider: str
+    litellm_provider: str | None = None
     api_key: str
     base_url: str | None = None
     timeout: float | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
-    @model_validator(mode="after")
-    def _validate_supported_provider(self) -> Self:
-        """确认 provider 在当前显式白名单中。"""
-        if self.provider not in SUPPORTED_PROVIDERS:
-            raise IrisProviderError("不支持的 provider", provider=self.provider)
-        return self
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """发送非流式 Chat Completion 请求并返回标准响应。
@@ -147,9 +140,10 @@ class ProviderClient(BaseModel):
 
     def _litellm_model(self, model: str) -> str:
         """返回 LiteLLM 需要的 provider/model 模型名。"""
-        if "/" in model:
+        provider = self.litellm_provider or self.provider
+        if model.split("/", 1)[0] == provider:
             return model
-        return f"{self.provider}/{model}"
+        return f"{provider}/{model}"
 
     def _from_litellm_response(self, response: Any) -> LLMResponse:
         """将 LiteLLM Chat Completion 响应转换为 Iris 标准响应。"""

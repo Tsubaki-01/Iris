@@ -17,11 +17,18 @@ def test_provider_client_exposes_litellm_active_fields_only() -> None:
     assert "max_retries" not in ProviderClient.model_fields
     assert "http_client" not in ProviderClient.model_fields
     assert "provider" in ProviderClient.model_fields
+    assert "litellm_provider" in ProviderClient.model_fields
 
 
-def test_provider_client_rejects_unsupported_provider() -> None:
-    with pytest.raises(IrisProviderError):
-        ProviderClient(provider="groq", api_key="test-key")
+def test_provider_client_accepts_custom_provider_with_litellm_provider() -> None:
+    client = ProviderClient(
+        provider="siliconflow",
+        litellm_provider="openai",
+        api_key="test-key",
+    )
+
+    assert client.provider == "siliconflow"
+    assert client.litellm_provider == "openai"
 
 
 def test_provider_client_rejects_removed_http_client_keyword() -> None:
@@ -138,6 +145,33 @@ async def test_provider_client_does_not_double_prefix_litellm_model(
     )
 
     assert seen_model == "openai/gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_provider_client_uses_litellm_provider_for_model_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
+
+    seen_model = ""
+
+    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
+        nonlocal seen_model
+        seen_model = str(kwargs["model"])
+        return {"choices": [{"message": {"content": "你好"}}]}
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    client = ProviderClient(
+        provider="siliconflow",
+        litellm_provider="openai",
+        api_key="test-key",
+    )
+
+    await client.complete(
+        LLMRequest(model="deepseek-ai/DeepSeek-V3", messages=[Msg.user("你好")])
+    )
+
+    assert seen_model == "openai/deepseek-ai/DeepSeek-V3"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 """Provider client 工厂。
 
-本模块负责解析高层模型路由，并按显式 provider 白名单创建对应的
-`ProviderClient`。
+本模块负责解析高层模型路由，并按内置 provider 与 `Config.providers`
+组成的注册表创建对应的 `ProviderClient`。
 
 Example:
     >>> route = parse_model_route("openai/gpt-4o")
@@ -12,15 +12,15 @@ Example:
 # region imports
 from __future__ import annotations
 
-import os
-
 from pydantic import BaseModel, ConfigDict
 
-from ..config import get_config, is_config_initialized
+from ..config import ProviderConfig, get_config, is_config_initialized
 from ..exceptions import IrisConfigError, IrisProviderError, IrisValidationError
-from .client import SUPPORTED_PROVIDERS, ProviderClient
+from .client import ProviderClient
 
 # endregion
+
+BUILTIN_PROVIDER_IDS = frozenset({"openai", "anthropic", "deepseek"})
 
 
 class ModelRoute(BaseModel):
@@ -92,20 +92,64 @@ def create_provider_client(
         'openai'
     """
     route = model if isinstance(model, ModelRoute) else parse_model_route(model)
-    _ensure_supported_provider(route.provider)
+    provider_config = _resolve_provider_config(route.provider)
     return ProviderClient(
         provider=route.provider,
+        litellm_provider=provider_config.litellm_provider,
         api_key=_resolve_api_key(route.provider, api_key),
-        base_url=base_url,
+        base_url=base_url or provider_config.base_url,
         timeout=timeout,
-        headers=headers or {},
+        headers={**provider_config.headers, **(headers or {})},
     )
 
 
-def _ensure_supported_provider(provider: str) -> None:
-    """确认 provider 在当前显式白名单中。"""
-    if provider not in SUPPORTED_PROVIDERS:
-        raise IrisProviderError("不支持的 provider", provider=provider)
+def _resolve_provider_config(provider: str) -> ProviderConfig:
+    """从内置和用户声明的注册表中解析 provider 配置。"""
+    provider_config = _provider_registry().get(provider)
+    if provider_config is None:
+        raise IrisProviderError("未注册 provider", provider=provider)
+    return provider_config
+
+
+def _provider_registry() -> dict[str, ProviderConfig]:
+    """返回当前可用 provider 注册表。
+
+    内置服务商默认配置 + 用户自定义配置合并，支持自定义第三方服务商。"""
+    registry = {
+        provider: ProviderConfig(litellm_provider=provider) for provider in BUILTIN_PROVIDER_IDS
+    }
+    if not is_config_initialized():
+        return registry
+
+    for provider, provider_config in get_config().providers.items():
+        if provider in BUILTIN_PROVIDER_IDS:
+            registry[provider] = _merge_builtin_provider_config(
+                provider,
+                provider_config,
+            )
+        elif provider_config.base_url:
+            registry[provider] = provider_config
+    return registry
+
+
+def _merge_builtin_provider_config(
+    provider: str,
+    override: ProviderConfig,
+) -> ProviderConfig:
+    """合并内置 provider 默认配置与用户非 secret override。
+
+    如果用户显式配置了 litellm_provider，尊重用户配置。
+    如果用户没显式配置，只是 ProviderConfig 自带默认 "openai"，那内置 provider 继续用自己的 provider
+    """
+    litellm_provider = (
+        override.litellm_provider if "litellm_provider" in override.model_fields_set else provider
+    )
+    return ProviderConfig(
+        litellm_provider=litellm_provider,
+        base_url=override.base_url,
+        api_style=override.api_style,
+        headers=override.headers,
+    )
 
 
 def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str:
@@ -113,17 +157,20 @@ def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str:
     if explicit_api_key:
         return explicit_api_key
 
-    env_var = f"IRIS_{provider.upper()}_API_KEY"
-    env_api_key = os.getenv(env_var)
-    if env_api_key:
-        return env_api_key
-
     if is_config_initialized():
-        config_api_key = get_config().api_key
-        if config_api_key:
-            return config_api_key
+        config = get_config()
+        provider_api_key = config.provider_api_keys.get(provider)
+        if provider_api_key:
+            return provider_api_key
+        if config.api_key:
+            return config.api_key
 
-    raise IrisConfigError("缺少 provider API key", provider=provider, env_var=env_var)
+    raise IrisConfigError("缺少 provider API key", provider=provider)
 
 
-__all__ = ["ModelRoute", "create_provider_client", "parse_model_route"]
+__all__ = [
+    "BUILTIN_PROVIDER_IDS",
+    "ModelRoute",
+    "create_provider_client",
+    "parse_model_route",
+]
