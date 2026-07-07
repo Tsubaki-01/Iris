@@ -2,10 +2,11 @@
 
 该模块定义了一个不可变的运行时配置对象，并提供进程级单例生命周期
 （`init_config`、`get_config`、`reset`）。配置优先级为：显式关键字参数
-> 环境变量 > 字段默认值。
+> 环境变量 > `.env` 文件 > 字段默认值。
 
 默认不会加载 `.env` 文件（`env_file=None`）。
 如有需要，可在调用`init_config` 时传入 `env_file`。
+Provider API key 使用 `IRIS_PROVIDER_API_KEYS__{PROVIDER}` 这类 nested env。
 
 示例:
     import iris
@@ -18,9 +19,9 @@
 from __future__ import annotations
 
 # region imports
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .exceptions import IrisConfigError
@@ -32,6 +33,27 @@ from .exceptions import IrisConfigError
 # 配置模型
 # ============================================================
 # region Config
+class ProviderConfig(BaseModel):
+    """单个 provider 的非 secret 运行配置。
+
+    Attributes:
+        litellm_provider (str): 传给 LiteLLM 的 provider 名称。
+        base_url (str | None): OpenAI-compatible 中转站的 endpoint。
+        api_style (Literal["chat"]): 当前仅支持 Chat Completion。
+        headers (dict[str, str]): 透传给 provider 的额外 headers。
+    """
+
+    litellm_provider: str = Field(default="openai", description="LiteLLM provider")
+    base_url: str | None = Field(default=None, description="Provider base URL")
+    api_style: Literal["chat"] = Field(default="chat", description="API 风格")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Provider 默认 HTTP headers",
+    )
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
 class Config(BaseSettings):
     """从多种来源解析得到的不可变应用配置。
 
@@ -44,6 +66,7 @@ class Config(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="IRIS_",
+        env_nested_delimiter="__",
         env_file=None,  # 默认不加载 dotenv
         case_sensitive=False,  # 同时接受 IRIS_API_KEY 和 IRIS_api_key。
         extra="forbid",  # 未知关键字参数直接报错。
@@ -54,7 +77,14 @@ class Config(BaseSettings):
     api_key: str | None = Field(
         default=None,
         description="API 密钥",
-        json_schema_extra={"required_runtime": True},
+    )
+    provider_api_keys: dict[str, str] = Field(
+        default_factory=dict,
+        description="按 provider 名称归一化后的 API key",
+    )
+    providers: dict[str, ProviderConfig] = Field(
+        default_factory=dict,
+        description="按 provider 名称声明的非 secret 运行配置",
     )
 
     # --- 可选字段 ---
@@ -67,23 +97,20 @@ class Config(BaseSettings):
 
     # --- 字段检验 ---
     def model_post_init(self, __context: Any) -> None:
-        """校验必需配置。"""
-        prefix = self.model_config.get("env_prefix", "")
-        missing = []
-
-        for field_name, field in type(self).model_fields.items():
-            extra = field.json_schema_extra or {}
-            if not extra.get("required_runtime", False):
-                continue
-
-            value = getattr(self, field_name)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                missing.append(f"{prefix}{field_name.upper()}")
-
-        if missing:
-            raise IrisConfigError(
-                "缺少必需配置：\n" + "\n".join(f"  - {m}" for m in missing)
-            )
+        """归一化配置字段。"""
+        api_key = self.api_key.strip() if self.api_key else None
+        object.__setattr__(self, "api_key", api_key or None)
+        provider_api_keys = {
+            provider.lower(): api_key.strip()
+            for provider, api_key in self.provider_api_keys.items()
+            if api_key and api_key.strip()
+        }
+        object.__setattr__(self, "provider_api_keys", provider_api_keys)
+        object.__setattr__(
+            self,
+            "providers",
+            {provider.lower(): config for provider, config in self.providers.items()},
+        )
 
 
 # endregion
@@ -119,11 +146,16 @@ def init_config(*, env_file: str | None = None, **kwargs: Any) -> Config:
     if _config is not None:
         raise IrisConfigError("配置已初始化；请勿重复调用 init_config()。")
 
+    _validate_explicit_kwargs(kwargs)
     if env_file is None:
         _config = Config(**kwargs)
     else:
         # 构造短生命周期子类注入 env_file，避免依赖私有构造参数。
-        base = {k: v for k, v in Config.model_config.items() if k != "env_file"}
+        base = {
+            k: v
+            for k, v in Config.model_config.items()
+            if k not in {"env_file", "extra"}
+        }
         runtime_settings_cls = type(
             "RuntimeConfig",
             (Config,),
@@ -131,12 +163,23 @@ def init_config(*, env_file: str | None = None, **kwargs: Any) -> Config:
                 "model_config": SettingsConfigDict(
                     **base,
                     env_file=env_file,
+                    extra="ignore",
                 )
             },
         )
 
         _config = runtime_settings_cls(**kwargs)
     return _config
+
+
+def _validate_explicit_kwargs(kwargs: dict[str, Any]) -> None:
+    """在读取 env_file 前校验显式传入字段名。"""
+    unknown_fields = sorted(set(kwargs) - set(Config.model_fields))
+    if unknown_fields:
+        raise IrisConfigError(
+            "未知配置字段：" + ", ".join(unknown_fields),
+            fields=unknown_fields,
+        )
 
 
 def get_config() -> Config:
