@@ -1,7 +1,8 @@
 """使用 DeepSeek 验证 Iris 当前 provider 与 runtime 全流程。
 
-脚本会读取本地 `.env.local` / `.env` 中的 `IRIS_DEEPSEEK_API_KEY`，创建临时
-`agent.yaml` 和 workspace 文件，然后依次验证：
+脚本会通过 Iris 集中配置读取本地 `.env.local` / `.env` 中的
+`IRIS_PROVIDER_API_KEYS__DEEPSEEK` 或 `IRIS_API_KEY`，创建临时 `agent.yaml` 和
+workspace 文件，然后依次验证：
 
 1. provider factory 是否能创建 DeepSeek client 并完成一次直接模型调用。
 2. runtime 是否能从 YAML 装配 Agent、挂载 `file.read` 工具、完成有界 tool loop。
@@ -14,13 +15,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from pydantic import ValidationError
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -31,46 +31,66 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from iris.config import get_config, init_config, is_config_initialized  # noqa: E402
+from iris.exceptions import IrisConfigError  # noqa: E402
+from iris.log import logger, setup_logger  # noqa: E402
 from iris.message import LLMRequest, Msg  # noqa: E402
 from iris.providers import create_provider_client  # noqa: E402
 from iris.runtime import RuntimeProvider  # noqa: E402
 from iris.runtime.factory import RuntimeFactory  # noqa: E402
 from iris.runtime.models import BoundedLoopOptions, RuntimeOptions  # noqa: E402
 
-DEEPSEEK_ENV_VAR = "IRIS_DEEPSEEK_API_KEY"
+API_KEY_ENV_VAR = "IRIS_PROVIDER_API_KEYS__DEEPSEEK / IRIS_API_KEY"
+LOCAL_ENV_FILES = (".env.local", ".env")
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_PROVIDER_ROUTE = f"deepseek/{DEFAULT_MODEL}"
-LOGGER = logging.getLogger("iris.scripts.deepseek_agent_flow")
-_LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-_FLOW_LOG_HANDLERS: list[logging.Handler] = []
 
 
-def load_local_env(base_dir: Path = ROOT) -> dict[str, str]:
-    """从本地 env 文件加载缺失的环境变量。
+def init_local_config(base_dir: Path = ROOT) -> bool:
+    """通过 Iris 集中配置初始化脚本运行配置。
 
     Args:
         base_dir: 仓库根目录或测试用目录。
 
     Returns:
-        本次实际写入 `os.environ` 的键值对。
+        配置初始化成功则为 True，缺少必需配置则为 False。
     """
-    loaded: dict[str, str] = {}
-    for file_name in (".env.local", ".env"):
-        env_path = base_dir / file_name
-        if not env_path.exists():
-            continue
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            key, value = _parse_env_line(line)
-            if key is None or key in os.environ:
-                continue
-            os.environ[key] = value
-            loaded[key] = value
-    return loaded
+    if is_config_initialized():
+        return True
+
+    for env_path in _local_env_paths(base_dir):
+        if _try_init_config(env_path):
+            return True
+    return _try_init_config(None)
 
 
 def resolve_api_key() -> str | None:
-    """解析 DeepSeek API key。"""
-    return os.getenv(DEEPSEEK_ENV_VAR)
+    """解析当前配置中 DeepSeek 可用的 API key。"""
+    if not is_config_initialized():
+        return None
+    config = get_config()
+    return config.provider_api_keys.get("deepseek") or config.api_key
+
+
+def _local_env_paths(base_dir: Path) -> list[Path]:
+    """返回按优先级存在的本地 env 文件路径。"""
+    return [
+        base_dir / file_name
+        for file_name in LOCAL_ENV_FILES
+        if (base_dir / file_name).exists()
+    ]
+
+
+def _try_init_config(env_path: Path | None) -> bool:
+    """尝试用指定 env 文件初始化 Iris 配置。"""
+    try:
+        if env_path is None:
+            init_config()
+        else:
+            init_config(env_file=str(env_path))
+    except (IrisConfigError, ValidationError):
+        return False
+    return True
 
 
 def mask_secret(value: str | None) -> str:
@@ -88,29 +108,8 @@ def setup_flow_logging(log_dir: Path) -> None:
     Args:
         log_dir: 日志输出目录。
     """
-    _remove_flow_log_handlers()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    LOGGER.setLevel(logging.INFO)
-    LOGGER.propagate = False
-
-    runtime_handler = logging.FileHandler(
-        log_dir / "runtime.log",
-        encoding="utf-8",
-    )
-    runtime_handler.setLevel(logging.INFO)
-    runtime_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-
-    error_handler = logging.FileHandler(
-        log_dir / "error.log",
-        encoding="utf-8",
-    )
-    error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-
-    LOGGER.addHandler(runtime_handler)
-    LOGGER.addHandler(error_handler)
-    _FLOW_LOG_HANDLERS.extend([runtime_handler, error_handler])
-    LOGGER.info("deepseek.logging.configured log_dir=%s", log_dir)
+    setup_logger(log_dir)
+    logger.info("deepseek.logging.configured log_dir={}", log_dir)
 
 
 def prepare_runtime_workspace(base_dir: Path) -> tuple[Path, str]:
@@ -155,8 +154,8 @@ session:
 """.strip(),
         encoding="utf-8",
     )
-    LOGGER.info(
-        "deepseek.workspace.prepared agent_path=%s workspace=%s expected_token=%s",
+    logger.info(
+        "deepseek.workspace.prepared agent_path={} workspace={} expected_token={}",
         agent_path,
         workspace,
         expected_token,
@@ -166,20 +165,18 @@ session:
 
 async def run_provider_smoke(
     *,
-    api_key: str,
     model: str = DEFAULT_MODEL,
 ) -> dict[str, Any]:
     """验证 provider factory 与 DeepSeek 直接调用。
 
     Args:
-        api_key: DeepSeek API key。
         model: DeepSeek 模型名。
 
     Returns:
         JSON-safe 诊断信息。
     """
-    LOGGER.info("deepseek.provider.start route=deepseek/%s", model)
-    client = create_provider_client(f"deepseek/{model}", api_key=api_key, timeout=60)
+    logger.info("deepseek.provider.start route=deepseek/{}", model)
+    client = create_provider_client(f"deepseek/{model}", timeout=60)
     try:
         response = await client.complete(
             LLMRequest(
@@ -195,12 +192,12 @@ async def run_provider_smoke(
             )
         )
     except Exception:
-        LOGGER.exception("deepseek.provider.error route=deepseek/%s", model)
+        logger.exception("deepseek.provider.error route=deepseek/{}", model)
         raise
 
     text = response.to_msg().text.strip()
-    LOGGER.info(
-        "deepseek.provider.finish provider=%s model=%s total_tokens=%s output=%s",
+    logger.info(
+        "deepseek.provider.finish provider={} model={} total_tokens={} output={}",
         response.provider,
         response.model or model,
         response.total_tokens,
@@ -220,7 +217,6 @@ async def run_provider_smoke(
 async def run_runtime_tool_loop(
     *,
     agent_path: Path,
-    api_key: str,
     expected_token: str,
     provider: RuntimeProvider | None = None,
 ) -> dict[str, Any]:
@@ -228,22 +224,20 @@ async def run_runtime_tool_loop(
 
     Args:
         agent_path: 验证用 `agent.yaml`。
-        api_key: DeepSeek API key。
         expected_token: 需要从文件工具读回的验证码。
         provider: 测试时可注入的 provider；不传则创建真实 DeepSeek client。
 
     Returns:
         JSON-safe 诊断信息。
     """
-    LOGGER.info(
-        "deepseek.runtime.start agent_path=%s expected_token=%s injected_provider=%s",
+    logger.info(
+        "deepseek.runtime.start agent_path={} expected_token={} injected_provider={}",
         agent_path,
         expected_token,
         provider is not None,
     )
     runtime = RuntimeFactory.from_config_path(
         agent_path,
-        api_key=api_key,
         provider=provider,
     )
     result = await runtime.run_loop(
@@ -263,10 +257,10 @@ async def run_runtime_tool_loop(
     )
     expected_token_found = expected_token in final_text
     tool_result_count = len(result.tool_results)
-    LOGGER.info(
+    logger.info(
         (
-            "deepseek.runtime.finish status=%s steps=%s provider_request_count=%s "
-            "tool_result_count=%s expected_token_found=%s final_text=%s error_code=%s"
+            "deepseek.runtime.finish status={} steps={} provider_request_count={} "
+            "tool_result_count={} expected_token_found={} final_text={} error_code={}"
         ),
         result.status.value,
         result.steps,
@@ -294,24 +288,23 @@ async def run_runtime_tool_loop(
 async def run_deepseek_flow(
     *,
     work_dir: Path,
-    api_key: str,
 ) -> dict[str, Any]:
     """执行完整 DeepSeek 验证流程。"""
-    LOGGER.info(
-        "deepseek.flow.start work_dir=%s route=%s api_key=%s",
+    api_key = resolve_api_key()
+    logger.info(
+        "deepseek.flow.start work_dir={} route={} api_key={}",
         work_dir,
         DEFAULT_PROVIDER_ROUTE,
         mask_secret(api_key),
     )
     agent_path, expected_token = prepare_runtime_workspace(work_dir)
-    provider_report = await run_provider_smoke(api_key=api_key)
+    provider_report = await run_provider_smoke()
     runtime_report = await run_runtime_tool_loop(
         agent_path=agent_path,
-        api_key=api_key,
         expected_token=expected_token,
     )
-    LOGGER.info(
-        "deepseek.flow.finish ok=%s provider_ok=%s runtime_ok=%s",
+    logger.info(
+        "deepseek.flow.finish ok={} provider_ok={} runtime_ok={}",
         provider_report["ok"] and runtime_report["ok"],
         provider_report["ok"],
         runtime_report["ok"],
@@ -335,7 +328,7 @@ def print_intro(
                 [
                     "[bold]输入配置[/bold]",
                     f"provider route: [cyan]{DEFAULT_PROVIDER_ROUTE}[/cyan]",
-                    f"env var: [cyan]{DEEPSEEK_ENV_VAR}[/cyan]",
+                    f"env var: [cyan]{API_KEY_ENV_VAR}[/cyan]",
                     f"api key: [cyan]{mask_secret(api_key)}[/cyan]",
                     f"work dir: [cyan]{work_dir}[/cyan]",
                     f"log dir: [cyan]{log_dir}[/cyan]",
@@ -402,14 +395,14 @@ async def amain(argv: list[str] | None = None) -> int:
     _configure_output_encoding()
     args = parse_args(argv)
     console = Console()
-    load_local_env(ROOT)
+    init_local_config(ROOT)
     api_key = resolve_api_key()
     if api_key is None:
         console.print(
             Panel(
                 (
-                    f"缺少 {DEEPSEEK_ENV_VAR}。请写入 .env.local，或在当前 shell "
-                    f"设置 {DEEPSEEK_ENV_VAR} 后重试。"
+                    f"缺少 {API_KEY_ENV_VAR}。请写入 .env.local，或在当前 shell "
+                    f"设置 {API_KEY_ENV_VAR} 后重试。"
                 ),
                 title="配置缺失",
                 border_style="red",
@@ -422,14 +415,14 @@ async def amain(argv: list[str] | None = None) -> int:
         log_dir = args.work_dir / "logs"
         setup_flow_logging(log_dir)
         print_intro(console, api_key=api_key, work_dir=args.work_dir, log_dir=log_dir)
-        report = await run_deepseek_flow(work_dir=args.work_dir, api_key=api_key)
+        report = await run_deepseek_flow(work_dir=args.work_dir)
     else:
         with TemporaryDirectory(prefix="iris-deepseek-flow-") as tmp_dir:
             work_dir = Path(tmp_dir)
             log_dir = work_dir / "logs"
             setup_flow_logging(log_dir)
             print_intro(console, api_key=api_key, work_dir=work_dir, log_dir=log_dir)
-            report = await run_deepseek_flow(work_dir=work_dir, api_key=api_key)
+            report = await run_deepseek_flow(work_dir=work_dir)
 
     print_report(console, report)
     return 0 if report["ok"] else 1
@@ -438,27 +431,6 @@ async def amain(argv: list[str] | None = None) -> int:
 def main() -> None:
     """同步脚本入口。"""
     raise SystemExit(asyncio.run(amain()))
-
-
-def _parse_env_line(line: str) -> tuple[str | None, str]:
-    """解析一行 `.env` 文本。"""
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or "=" not in stripped:
-        return None, ""
-    key, value = stripped.split("=", 1)
-    key = key.strip()
-    value = value.strip().strip('"').strip("'")
-    if not key:
-        return None, ""
-    return key, value
-
-
-def _remove_flow_log_handlers() -> None:
-    """移除脚本此前添加的日志 handler。"""
-    while _FLOW_LOG_HANDLERS:
-        handler = _FLOW_LOG_HANDLERS.pop()
-        LOGGER.removeHandler(handler)
-        handler.close()
 
 
 def _provider_request_count(provider: RuntimeProvider | None) -> int | str:
