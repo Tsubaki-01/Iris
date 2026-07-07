@@ -5,8 +5,11 @@ from pathlib import Path
 import pytest
 from fakes import FakeProvider
 
+import iris
 from iris.agents import AgentConfig
+from iris.config import ProviderConfig
 from iris.message import LLMResponse, TextBlock
+from iris.providers import ProviderClient
 from iris.runtime import AgentRuntime, RuntimeFactory
 from iris.runtime.models import RuntimeStatus
 from iris.session import InMemorySessionStore, SQLiteSessionStore
@@ -271,3 +274,38 @@ def test_permissions_allow_maps_to_writable_policy(tmp_path: Path) -> None:
 
     assert write_tool.definition.capabilities <= {ToolCapability.WRITE}
     assert decision.allowed is True
+
+
+def test_from_config_uses_registered_custom_provider(tmp_path: Path) -> None:
+    iris.reset()
+    try:
+        iris.init_config(
+            provider_api_keys={"siliconflow": "siliconflow-key"},
+            providers={
+                "siliconflow": ProviderConfig(
+                    litellm_provider="openai",
+                    base_url="https://api.siliconflow.cn/v1",
+                )
+            },
+        )
+        config = AgentConfig(
+            name="custom-provider-agent",
+            model={
+                "provider": "siliconflow",
+                "name": "deepseek-ai/DeepSeek-V3",
+            },
+            system="你是本地助手。",
+        )
+
+        runtime = RuntimeFactory.from_config(
+            config,
+            config_path=tmp_path / "agent.yaml",
+        )
+
+        assert isinstance(runtime.provider, ProviderClient)
+        assert runtime.provider.provider == "siliconflow"
+        assert runtime.provider.litellm_provider == "openai"
+        assert runtime.provider.api_key == "siliconflow-key"
+        assert runtime.provider.base_url == "https://api.siliconflow.cn/v1"
+    finally:
+        iris.reset()
