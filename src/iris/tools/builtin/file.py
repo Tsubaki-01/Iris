@@ -44,11 +44,13 @@ class ReadFileInput(BaseModel):
         file_path (str): 相对 workspace 根目录的文本文件路径。
         offset (int | None): 起始行偏移量，从 0 开始。默认为 None。
         limit (int | None): 最多读取的行数，最大 1000。默认为 None。
+        with_line_numbers (bool): 是否返回带 `L0001 |` 前缀的行号视图。
     """
 
     file_path: str
     offset: int | None = None
     limit: int | None = None
+    with_line_numbers: bool = False
 
     @field_validator("offset", "limit")
     @classmethod
@@ -292,7 +294,7 @@ class WorkspaceFileService:
             context (ToolExecutionContext): 当前工具执行上下文。
 
         Returns:
-            str: 带 1 基行号前缀的文本内容。
+            str: 默认返回原始文本片段；请求行号时返回带 `L0001 |` 前缀的文本内容。
 
         Raises:
             IrisToolExecutionError: 当路径不存在或不是普通文件时。
@@ -309,9 +311,12 @@ class WorkspaceFileService:
                 line.rstrip("\n") for line in islice(handle, offset, offset + limit)
             ]
         self.record_read(path, context)
-        return "\n".join(
-            f"{index}: {line}" for index, line in enumerate(selected, start=offset + 1)
-        )
+        if params.with_line_numbers:
+            return "\n".join(
+                f"L{index:04d} | {line}"
+                for index, line in enumerate(selected, start=offset + 1)
+            )
+        return "\n".join(selected)
 
     def list_files(self, params: ListFilesInput, context: ToolExecutionContext) -> str:
         """列出 workspace 内文件。
@@ -571,7 +576,7 @@ class ReadFileTool(FileTool[ReadFileInput]):
     """读取 workspace 文本文件的工具。"""
 
     name: ClassVar[str] = "read_file"
-    description: ClassVar[str] = "读取 workspace 内文本文件"
+    description: ClassVar[str] = "读取 workspace 内文本文件；需要定位或编辑时可请求行号"
     input_type: type[ReadFileInput] = ReadFileInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
 

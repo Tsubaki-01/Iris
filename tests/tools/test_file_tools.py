@@ -37,8 +37,32 @@ async def test_read_file_inside_workspace_updates_read_state(tmp_path: Path) -> 
 
     resolved = path.resolve()
     assert result.is_error is False
-    assert "1: alpha" in result.model_content
-    assert "2: beta" in result.model_content
+    assert result.model_content == "alpha\nbeta"
+    assert "1: alpha" not in result.model_content
+    assert "L0001 | alpha" not in result.model_content
+    assert str(resolved) in context.read_state.files
+
+
+@pytest.mark.asyncio
+async def test_read_file_can_include_line_numbers_when_requested(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "notes.txt"
+    path.write_text("alpha\nbeta\n", encoding="utf-8")
+    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
+
+    result = await _file_executor().execute_one(
+        ToolUseBlock(
+            id="call_1",
+            name="read_file",
+            input={"file_path": "notes.txt", "with_line_numbers": True},
+        ),
+        context,
+    )
+
+    resolved = path.resolve()
+    assert result.is_error is False
+    assert result.model_content == "L0001 | alpha\nL0002 | beta"
     assert str(resolved) in context.read_state.files
 
 
@@ -53,7 +77,7 @@ async def test_read_file_accepts_absolute_path_inside_workspace(tmp_path: Path) 
     )
 
     assert result.is_error is False
-    assert "1: alpha" in result.model_content
+    assert result.model_content == "alpha"
 
 
 @pytest.mark.asyncio
