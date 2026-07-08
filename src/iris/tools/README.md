@@ -158,7 +158,7 @@ executor = ToolExecutor(
 
 | 工具名 | 输入模型 | 能力 | 行为 |
 | --- | --- | --- | --- |
-| `read_file` | `ReadFileInput` | `READ` | 读取 workspace 内文本文件，返回 1 基行号，并记录 `ReadFileState` |
+| `read_file` | `ReadFileInput` | `READ` | 读取 workspace 内文本文件，默认返回原文；`with_line_numbers=true` 时返回 `L0001 |` 行号视图；并记录 `ReadFileState` |
 | `list_files` | `ListFilesInput` | `READ` | 列出 workspace 内普通文件路径 |
 | `grep_search` | `GrepSearchInput` | `READ` | 用 Python 正则搜索 workspace 内 UTF-8 文本文件，跳过 `.iris` 和二进制解码失败文件 |
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
