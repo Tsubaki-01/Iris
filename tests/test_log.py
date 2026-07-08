@@ -28,7 +28,7 @@ def test_setup_logger_with_log_dir_creates_file_sinks(tmp_path: Path) -> None:
     assert log_dir.is_dir()
 
 
-def test_setup_logger_does_not_remove_external_sink() -> None:
+def test_setup_logger_removes_external_sink() -> None:
     from iris.log import setup_logger
 
     messages: list[str] = []
@@ -43,4 +43,4 @@ def test_setup_logger_does_not_remove_external_sink() -> None:
         except ValueError:
             pass
 
-    assert "external-check\n" in messages
+    assert messages == []
