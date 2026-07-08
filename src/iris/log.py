@@ -45,8 +45,9 @@ _SINK_IDS: list[int] = []
 def setup_logger(log_dir: str | Path | None = None) -> None:
     """配置 Loguru 日志系统。
 
-    默认只配置控制台输出。传入 `log_dir` 时，额外配置两个文件日志输出端，
-    分别设置不同的日志保留周期。
+    每次调用都会重置现有 Loguru sink，并只保留本函数注册的输出端。默认只配置
+    控制台输出。传入 `log_dir` 时，额外配置两个文件日志输出端，分别设置不同的
+    日志保留周期。
 
     Args:
         log_dir (str | Path | None): 日志文件的目标目录。为 `None` 时不创建
@@ -55,7 +56,8 @@ def setup_logger(log_dir: str | Path | None = None) -> None:
     Example:
         >>> setup_logger("./iris_log")
     """
-    _remove_managed_sinks()
+    logger.remove()
+    _SINK_IDS.clear()
 
     _SINK_IDS.append(
         logger.add(
@@ -97,13 +99,3 @@ def setup_logger(log_dir: str | Path | None = None) -> None:
             diagnose=True,
         )
     )
-
-
-def _remove_managed_sinks() -> None:
-    """移除本模块通过 `setup_logger` 添加的 sink。"""
-    while _SINK_IDS:
-        sink_id = _SINK_IDS.pop()
-        try:
-            logger.remove(sink_id)
-        except ValueError:
-            continue
