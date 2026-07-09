@@ -74,7 +74,7 @@ def create_provider_client(
     """根据模型路由创建 provider client。
 
     Args:
-        model (str | ModelRoute): 模型路由字符串或已解析的路由对象。
+        model (str | ModelRoute): 模型路由字符串或已解析的路由对象，格式为provider/model。
         api_key (str | None): 显式 API key，优先级最高。
         base_url (str | None): 自定义 provider base URL。
         timeout (float | None): 请求超时时间，单位秒。
