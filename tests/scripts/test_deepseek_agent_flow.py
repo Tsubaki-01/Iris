@@ -15,6 +15,13 @@ import pytest
 import iris
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 
+LIVE_DEEPSEEK_GATE_SCENARIOS = (
+    "provider_smoke_live",
+    "runtime_read_loop_live",
+    "builtin_file_tools_live",
+    "file_not_read_recovery_live",
+)
+
 
 @pytest.fixture(autouse=True)
 def reset_config_state(
@@ -951,10 +958,23 @@ def test_legacy_script_reexports_public_entrypoints() -> None:
     assert callable(module.write_report)
 
 
+def test_live_deepseek_gate_covers_runtime_and_tool_paths() -> None:
+    expected = {
+        "provider_smoke_live",
+        "runtime_read_loop_live",
+        "builtin_file_tools_live",
+        "file_not_read_recovery_live",
+    }
+
+    assert expected.issubset(set(LIVE_DEEPSEEK_GATE_SCENARIOS))
+
+
 @pytest.mark.live_deepseek
+@pytest.mark.parametrize("scenario", LIVE_DEEPSEEK_GATE_SCENARIOS)
 def test_live_deepseek_script_runs_selected_scenario(
     tmp_path: Path,
     pytestconfig: pytest.Config,
+    scenario: str,
 ) -> None:
     """显式启用时，通过真实 DeepSeek API 跑脚本入口。"""
     if not pytestconfig.getoption("--run-live-deepseek"):
@@ -971,7 +991,7 @@ def test_live_deepseek_script_runs_selected_scenario(
             sys.executable,
             str(script_path),
             "--scenario",
-            "provider_smoke_live",
+            scenario,
             "--work-dir",
             str(tmp_path),
         ],
@@ -983,5 +1003,5 @@ def test_live_deepseek_script_runs_selected_scenario(
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert report["ok"] is True
-    assert report["scenarios"][0]["name"] == "provider_smoke_live"
+    assert report["scenarios"][0]["name"] == scenario
     assert report["scenarios"][0]["api_calls"] >= 1
