@@ -9,7 +9,16 @@ from iris.exceptions import IrisConfigError
 
 
 @pytest.fixture(autouse=True)
-def reset_config_state() -> Generator[None, None, None]:
+def reset_config_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    for name in (
+        "IRIS_API_KEY",
+        "IRIS_PROVIDER_API_KEYS__DEEPSEEK",
+        "IRIS_PROVIDER_API_KEYS__OPENAI",
+        "IRIS_PROVIDER_API_KEYS__SILICONFLOW",
+        "IRIS_PROVIDERS__SILICONFLOW__LITELLM_PROVIDER",
+        "IRIS_PROVIDERS__SILICONFLOW__BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
     iris.reset()
     yield
     iris.reset()

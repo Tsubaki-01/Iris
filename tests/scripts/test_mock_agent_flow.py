@@ -26,7 +26,7 @@ def test_mock_agent_flow_reports_runtime_capabilities(tmp_path: Path) -> None:
     loop = report["scenarios"]["tool_loop"]
     assert loop["status"] == "ok"
     assert loop["provider_request_count"] == 2
-    assert loop["tool_results"] == ["1: Iris 是一个本地优先 Agent Kit。"]
+    assert loop["tool_results"] == ["Iris 是一个本地优先 Agent Kit。"]
     assert loop["second_request_has_tool_result"] is True
     assert loop["latest_run"]["status"] == "ok"
     assert loop["latest_run"]["tool_count"] == 1
