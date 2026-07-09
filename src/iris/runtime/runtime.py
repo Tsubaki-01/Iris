@@ -549,8 +549,7 @@ def _apply_request_options(
 ) -> LLMRequest:
     """应用本轮请求覆盖项。
 
-    `provider_options` 使用浅合并，保留 Agent model 配置里的 provider 选项，同时允许
-    `RuntimeOptions.request_options` 覆盖或补充单次调用字段。
+    provider_options 字段采用合并策略，其余的进行补充或覆盖。
     """
     if not request_options:
         return request
