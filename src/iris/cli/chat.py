@@ -104,6 +104,30 @@ def run_chat_loop(
     input_func: Callable[[str], str] | None = None,
 ) -> int:
     """执行可测试的 chat 输入循环。"""
+    import asyncio
+
+    return asyncio.run(
+        _run_chat_loop_async(
+            runtime=runtime,
+            agent_config=agent_config,
+            options=options,
+            trace_store=trace_store,
+            renderer=renderer,
+            input_func=input_func,
+        )
+    )
+
+
+async def _run_chat_loop_async(
+    *,
+    runtime: AgentRuntime,
+    agent_config: AgentConfig,
+    options: ChatOptions,
+    trace_store: ChatTraceStore,
+    renderer: ChatRenderer,
+    input_func: Callable[[str], str] | None = None,
+) -> int:
+    """在单个 event loop 中执行 chat 输入循环。"""
     del agent_config
     read_input = input_func or builtins.input
     trace_mode = options.trace_mode
@@ -131,7 +155,7 @@ def run_chat_loop(
         turn_index += 1
         trace_store.start_turn(turn_index)
         renderer.render_user_turn(turn_index, user_input)
-        result = _run_loop_sync(runtime, user_input, options)
+        result = await _run_loop_async(runtime, user_input, options)
         steps = trace_store.steps_for_turn(turn_index)
         if trace_mode == "compact":
             renderer.render_trace_compact(steps)
@@ -153,23 +177,19 @@ def _load_configured_agent(options: ChatOptions) -> AgentConfig:
     return load_agent_config(options.config_path)
 
 
-def _run_loop_sync(
+async def _run_loop_async(
     runtime: AgentRuntime,
     user_input: str,
     options: ChatOptions,
 ) -> RuntimeTurnResult:
-    """同步调用 runtime.run_loop，便于隔离 asyncio.run。"""
-    import asyncio
-
-    return asyncio.run(
-        runtime.run_loop(
-            user_input,
-            options=RuntimeOptions(
-                session_id=options.session_id,
-                include_tools=options.include_tools,
-                loop=BoundedLoopOptions(max_steps=options.max_steps),
-            ),
-        )
+    """调用 runtime.run_loop 并复用 chat 进程的 event loop。"""
+    return await runtime.run_loop(
+        user_input,
+        options=RuntimeOptions(
+            session_id=options.session_id,
+            include_tools=options.include_tools,
+            loop=BoundedLoopOptions(max_steps=options.max_steps),
+        ),
     )
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.console import Console
@@ -12,6 +14,7 @@ from iris.cli.trace import ChatTraceStore, TracingRuntimeProvider
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.message import LLMResponse, TextBlock
 from iris.runtime import AgentRuntime
+from iris.runtime.models import RuntimeStatus, RuntimeTurnResult
 from iris.session import InMemorySessionStore
 
 
@@ -126,6 +129,48 @@ def test_chat_loop_handles_slash_commands_without_provider_calls() -> None:
     output = console.export_text()
     assert "HELP" in output
     assert "trace 已切换为 full" in output
+
+
+def test_chat_loop_reuses_event_loop_across_turns() -> None:
+    class LoopRecordingRuntime:
+        """记录每轮调用所在的 event loop。"""
+
+        def __init__(self) -> None:
+            self.loop_ids: list[int] = []
+
+        async def run_loop(
+            self,
+            user_input: str,
+            *,
+            options: Any = None,
+        ) -> RuntimeTurnResult:
+            """返回空结果并记录当前 event loop。"""
+            del user_input, options
+            self.loop_ids.append(id(asyncio.get_running_loop()))
+            return RuntimeTurnResult(
+                session_id="demo",
+                run_id="run-1",
+                status=RuntimeStatus.OK,
+                steps=1,
+            )
+
+    trace_store = ChatTraceStore()
+    renderer, _ = _renderer()
+    runtime = LoopRecordingRuntime()
+    inputs = iter(["第一轮", "第二轮", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=trace_store,
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert len(runtime.loop_ids) == 2
+    assert runtime.loop_ids[0] == runtime.loop_ids[1]
 
 
 def test_chat_options_validate_trace_mode() -> None:

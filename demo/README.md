@@ -15,17 +15,29 @@ session，然后交给 `iris chat` 启动多轮交互。
 
 ## 运行前提
 
-在仓库根目录运行命令，并确保当前环境可以读取 DeepSeek API key：
+在仓库根目录运行命令，并确保当前环境可以读取 DeepSeek API key。Bash / Git Bash /
+WSL 使用：
 
 ```bash
 export IRIS_PROVIDER_API_KEYS__DEEPSEEK=sk-xxx
 ```
 
+PowerShell 使用：
+
+```powershell
+$env:IRIS_PROVIDER_API_KEYS__DEEPSEEK = "sk-xxx"
+```
+
 也可以把 key 写入 `.env` 或 `.env.local`，再通过 `--env-file` 显式传给 CLI。
+文件内容示例：
+
+```dotenv
+IRIS_PROVIDER_API_KEYS__DEEPSEEK=sk-xxx
+```
 
 ## 启动
 
-在仓库根目录执行：
+在仓库根目录执行。Bash / Git Bash / WSL 使用：
 
 ```bash
 uv run iris chat demo/agent.yaml \
@@ -34,13 +46,32 @@ uv run iris chat demo/agent.yaml \
   --trace-file demo/trace.jsonl
 ```
 
-如果使用单独的 env 文件：
+PowerShell 使用反引号续行：
+
+```powershell
+uv run iris chat demo/agent.yaml `
+  --session-id demo `
+  --trace compact `
+  --trace-file demo/trace.jsonl
+```
+
+如果使用单独的 env 文件，Bash / Git Bash / WSL 使用：
 
 ```bash
 uv run iris chat demo/agent.yaml \
   --env-file .env.local \
   --session-id demo \
   --trace compact \
+  --trace-file demo/trace.jsonl
+```
+
+PowerShell 使用：
+
+```powershell
+uv run iris chat demo/agent.yaml `
+  --env-file .env.local `
+  --session-id demo `
+  --trace compact `
   --trace-file demo/trace.jsonl
 ```
 
