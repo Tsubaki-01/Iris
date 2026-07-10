@@ -15,6 +15,16 @@ dependencies = [
     "rich>=15.0.0",
 ]
 
+[project.scripts]
+iris = "iris.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.package-data]
 iris = ["templates/builtin/*/*"]
 
