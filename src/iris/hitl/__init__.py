@@ -1,5 +1,6 @@
 """Human-in-the-loop 领域模型、协议和服务。"""
 
+from .memory import InMemoryInteractionStore
 from .models import (
     HumanInteraction,
     HumanInteractionRequest,
@@ -21,6 +22,7 @@ __all__ = [
     "HumanInteractionRequest",
     "HumanInteractionResponse",
     "HumanInteractionService",
+    "InMemoryInteractionStore",
     "InteractionKind",
     "InteractionResumePhase",
     "InteractionStatus",

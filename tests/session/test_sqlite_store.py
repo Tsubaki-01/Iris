@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -32,9 +33,7 @@ def test_sqlite_session_store_appends_tool_events(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "session.db")
 
     store.append_tool_event("session-1", {"tool_name": "read_file", "status": "ok"})
-    store.append_tool_event(
-        "session-1", {"tool_name": "grep_search", "status": "error"}
-    )
+    store.append_tool_event("session-1", {"tool_name": "grep_search", "status": "error"})
 
     assert store.load_tool_events("session-1") == [
         {"tool_name": "read_file", "status": "ok"},
@@ -85,3 +84,33 @@ def test_sqlite_session_store_wraps_directory_creation_errors(tmp_path: Path) ->
 
     with pytest.raises(IrisSessionError):
         SQLiteSessionStore(parent_file / "session.db")
+
+
+def test_sqlite_session_store_auto_upgrades_sessions_only_database(tmp_path: Path) -> None:
+    path = tmp_path / "session.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                messages_json TEXT NOT NULL DEFAULT '[]',
+                run_metadata_json TEXT NOT NULL DEFAULT '{}',
+                tool_events_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    SQLiteSessionStore(path)
+
+    with sqlite3.connect(path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+    assert "human_interactions" in tables
+    assert "idx_human_interactions_active_session" in indexes
