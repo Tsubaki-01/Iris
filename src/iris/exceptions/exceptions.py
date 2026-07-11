@@ -66,6 +66,52 @@ class IrisSessionError(IrisError):
     runtime_error_code = "SESSION_ERROR"
 
 
+# ----- Human-in-the-loop 领域 -----
+
+
+class IrisHITLError(IrisError):
+    """人工交互生命周期和恢复协议错误的基类。"""
+
+    runtime_error_source = "runtime"
+    runtime_error_code = "HITL_ERROR"
+
+
+class HITLStoreUnavailableError(IrisHITLError):
+    runtime_error_code = "HITL_STORE_UNAVAILABLE"
+
+
+class HITLNotFoundError(IrisHITLError):
+    runtime_error_code = "HITL_NOT_FOUND"
+
+
+class HITLResponseRequiredError(IrisHITLError):
+    runtime_error_code = "HITL_RESPONSE_REQUIRED"
+
+
+class HITLResponseMismatchError(IrisHITLError):
+    runtime_error_code = "HITL_RESPONSE_MISMATCH"
+
+
+class HITLConflictError(IrisHITLError):
+    runtime_error_code = "HITL_CONFLICT"
+
+
+class HITLCheckpointInvalidError(IrisHITLError):
+    runtime_error_code = "HITL_CHECKPOINT_INVALID"
+
+
+class HITLResumeMismatchError(IrisHITLError):
+    runtime_error_code = "HITL_RESUME_MISMATCH"
+
+
+class HITLAlreadyConsumedError(IrisHITLError):
+    runtime_error_code = "HITL_ALREADY_CONSUMED"
+
+
+class HITLExecutionOutcomeUnknownError(IrisHITLError):
+    runtime_error_code = "HITL_EXECUTION_OUTCOME_UNKNOWN"
+
+
 # ----- Context 领域 -----
 
 
