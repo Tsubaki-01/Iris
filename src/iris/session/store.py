@@ -23,6 +23,14 @@ class SessionStore(Protocol):
     def append_tool_event(self, session_id: str, event: dict[str, object]) -> None:
         """追加工具调用或结果摘要。"""
 
+    def append_tool_event_once(
+        self,
+        session_id: str,
+        event_id: str,
+        event: dict[str, object],
+    ) -> None:
+        """按稳定 event ID 幂等追加工具结果事件。"""
+
     def load_tool_events(self, session_id: str) -> list[dict[str, object]]:
         """读取工具调用或结果摘要列表。"""
 
