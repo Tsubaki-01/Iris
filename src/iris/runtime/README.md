@@ -203,6 +203,8 @@ runtime 会执行一次工具桥接，把工具结果消息写回 session histor
 `HITL_EXECUTION_OUTCOME_UNKNOWN` fail-closed，已准备或已提交结果则通过稳定 event ID
 幂等提交，不会重放工具调用。`run_turn()` 恢复当前工具批次但不会额外调用 provider；
 `run_loop()` 恢复后会将结果回灌 provider，并在下一 gate 或 loop 终态返回。
+checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate 前尚未执行的工具会按原始
+顺序补齐；恢复后的普通工具结果同样写入 session，并继续遵守 `tool_error_policy`。
 
 Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝
 重放，`result_ready` 重试消息/event 提交，`result_committed` 从安全边界继续。

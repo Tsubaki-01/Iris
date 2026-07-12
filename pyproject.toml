@@ -39,7 +39,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "tests/runtime"]
+addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
 target-version = "py312"
