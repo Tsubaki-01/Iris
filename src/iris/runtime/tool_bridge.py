@@ -16,6 +16,7 @@ from ..exceptions import IrisToolExecutionError
 from ..message import Msg, ToolUseBlock
 from ..session import SessionStore
 from ..tools import (
+    ToolBatchPlan,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
@@ -43,6 +44,35 @@ class ToolBridge:
         self.tool_view = tool_view
         self.tool_executor = tool_executor
         self._read_states: dict[str, Any] = {}
+
+    def preflight_once(
+        self,
+        *,
+        assistant_message: Msg,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        tools_enabled: bool = True,
+    ) -> ToolBatchPlan:
+        """无副作用预检当前 assistant 消息中的所有活动工具调用。"""
+        active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
+        active_calls = [call for call in assistant_message.tool_calls if call.name in active_names]
+        context = ToolExecutionContext(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            agent_id=agent_id,
+            permission_mode=permission_mode,
+            metadata={**dict(metadata or {}), "run_id": run_id},
+            read_state=self._read_states.get(session_id),
+        )
+        return self.tool_executor.prepare_many(active_calls, context)
+
+    def read_state(self, session_id: str) -> Any | None:
+        """返回 session 当前保存的文件读取状态。"""
+        return self._read_states.get(session_id)
 
     async def execute_once(
         self,

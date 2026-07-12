@@ -8,6 +8,7 @@ from fakes import FakeProvider
 import iris
 from iris.agents import AgentConfig
 from iris.config import ProviderConfig
+from iris.hitl import InMemoryInteractionStore
 from iris.message import LLMResponse, TextBlock
 from iris.providers import ProviderClient
 from iris.runtime import AgentRuntime, RuntimeFactory
@@ -143,6 +144,7 @@ session:
     )
 
     assert isinstance(runtime.session_store, InMemorySessionStore)
+    assert isinstance(runtime.interaction_store, InMemoryInteractionStore)
     assert not (tmp_path / ".iris").exists()
 
 
@@ -169,6 +171,7 @@ session:
     )
 
     assert isinstance(runtime.session_store, SQLiteSessionStore)
+    assert runtime.interaction_store is runtime.session_store
     assert runtime.session_store.path == config_dir / "data" / "session.db"
     assert runtime.session_store.path.exists()
 
@@ -191,6 +194,40 @@ def test_injected_session_store_takes_priority(tmp_path: Path) -> None:
 
     assert runtime.session_store is injected_store
     assert not (tmp_path / "should-not-exist.db").exists()
+
+
+def test_injected_interaction_store_takes_priority() -> None:
+    config = AgentConfig(
+        name="sdk-agent",
+        model={"provider": "openai", "name": "gpt-4o-mini"},
+        system="你是本地助手。",
+    )
+    interaction_store = InMemoryInteractionStore()
+
+    runtime = RuntimeFactory.from_config(
+        config,
+        provider=FakeProvider([_assistant_response()]),
+        interaction_store=interaction_store,
+    )
+
+    assert runtime.interaction_store is interaction_store
+
+
+def test_backend_none_uses_in_memory_interaction_store_without_config_path() -> None:
+    config = AgentConfig(
+        name="memory-agent",
+        model={"provider": "openai", "name": "gpt-4o-mini"},
+        system="你是本地助手。",
+        session={"backend": "none"},
+    )
+
+    runtime = RuntimeFactory.from_config(
+        config,
+        provider=FakeProvider([_assistant_response()]),
+    )
+
+    assert isinstance(runtime.session_store, InMemorySessionStore)
+    assert isinstance(runtime.interaction_store, InMemoryInteractionStore)
 
 
 def test_injected_memory_service_is_kept_for_later_memory_stage(tmp_path: Path) -> None:

@@ -22,7 +22,16 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
-from ..exceptions import IrisError
+from ..exceptions import HITLCheckpointInvalidError, IrisError
+from ..hitl import (
+    HumanInteraction,
+    HumanInteractionService,
+    InMemoryInteractionStore,
+    InteractionStore,
+    PermissionInteractionRequest,
+    QuestionInteractionRequest,
+    make_call_fingerprint,
+)
 from ..message import LLMRequest, LLMResponse, Msg
 from ..session import InMemorySessionStore, SessionStore
 from ..tools import (
@@ -36,9 +45,12 @@ from ..tools import (
 from .assembler import RuntimeMessageAssembler
 from .memory import prepare_memory_context_input
 from .models import (
+    ProviderResponseSnapshot,
     RuntimeErrorInfo,
     RuntimeErrorSource,
+    RuntimeHITLCheckpoint,
     RuntimeOptions,
+    RuntimeOptionsSnapshot,
     RuntimeStatus,
     RuntimeTurnResult,
     ToolBridgeResult,
@@ -104,6 +116,8 @@ class AgentRuntime:
         tool_executor: ToolExecutor | None = None,
         workspace_root: Path | None = None,
         permission_policy: PermissionPolicy | None = None,
+        interaction_store: InteractionStore | None = None,
+        interaction_service: HumanInteractionService | None = None,
         memory_service: MemoryService | None = None,
         memory_context_builder: MemoryContextBuilder | None = None,
     ) -> None:
@@ -121,6 +135,8 @@ class AgentRuntime:
             tool_executor (ToolExecutor | None): 可选工具执行器，默认使用同一注册表和权限策略。
             workspace_root (Path | None): 工具执行时使用的 workspace 根路径。
             permission_policy (PermissionPolicy | None): 工具权限策略。
+            interaction_store (InteractionStore | None): 人工交互的持久化存储。
+            interaction_service (HumanInteractionService | None): 人工交互生命周期服务。
             memory_service (MemoryService | None): 显式 memory 阶段复用的可选服务。
             memory_context_builder (MemoryContextBuilder | None): 显式 memory 结果裁剪器。
         """
@@ -147,8 +163,88 @@ class AgentRuntime:
             tool_view=self.tool_view,
             tool_executor=self.tool_executor,
         )
+        self.interaction_store = interaction_store or InMemoryInteractionStore()
+        self.interaction_service = interaction_service or HumanInteractionService(
+            self.interaction_store
+        )
         self.memory_service = memory_service
         self.memory_context_builder = memory_context_builder or MemoryContextBuilder()
+
+    def _create_waiting_interaction(
+        self,
+        *,
+        run_mode: str,
+        assistant_message: Msg,
+        response: LLMResponse,
+        runtime_options: RuntimeOptions,
+        metadata: Mapping[str, Any],
+        step_index: int,
+        all_tool_results: list[ToolResult],
+    ) -> HumanInteraction | None:
+        """预检工具批次，并在第一处人工 gate 创建持久化 interaction。"""
+        plan = self.tool_bridge.preflight_once(
+            assistant_message=assistant_message,
+            session_id=runtime_options.session_id,
+            run_id=runtime_options.run_id,
+            agent_id=self.agent_config.name,
+            workspace_root=self.workspace_root,
+            permission_mode=self.agent_config.permissions.writes,
+            metadata=metadata,
+            tools_enabled=runtime_options.include_tools,
+        )
+        gate = plan.first_human_gate
+        if gate is None or gate.human_request is None:
+            return None
+
+        tool_call_index = assistant_message.tool_calls.index(gate.tool_use)
+        checkpoint = _build_hitl_checkpoint(
+            run_mode=cast("str", run_mode),
+            agent_name=self.agent_config.name,
+            runtime_options=runtime_options,
+            assistant_message=assistant_message,
+            response=response,
+            step_index=step_index,
+            next_tool_index=tool_call_index,
+            batch_results=[
+                call.preflight_result.model_dump(mode="json")
+                for call in plan.calls
+                if call.preflight_result is not None
+            ],
+            all_tool_results=all_tool_results,
+            read_state=self.tool_bridge.read_state(runtime_options.session_id),
+            call_fingerprint=_call_fingerprint(
+                request=gate.human_request,
+                session_id=runtime_options.session_id,
+                run_id=runtime_options.run_id,
+                tool_name=gate.tool_use.name,
+                arguments=gate.validated_params,
+                workspace_root=self.workspace_root,
+            ),
+        )
+        request = gate.human_request
+        if isinstance(request, PermissionInteractionRequest):
+            return self.interaction_service.create_permission(
+                session_id=runtime_options.session_id,
+                run_id=runtime_options.run_id,
+                step_index=step_index,
+                tool_call_id=request.tool_call_id,
+                tool_name=request.tool_name,
+                arguments=request.arguments,
+                reason=request.reason,
+                workspace_root=request.workspace_root,
+                checkpoint=checkpoint,
+            )
+        if isinstance(request, QuestionInteractionRequest):
+            return self.interaction_service.create_question(
+                session_id=runtime_options.session_id,
+                run_id=runtime_options.run_id,
+                step_index=step_index,
+                tool_call_id=request.tool_call_id,
+                question=request.question,
+                options=request.options,
+                checkpoint=checkpoint,
+            )
+        raise HITLCheckpointInvalidError("未知的 HITL interaction 请求")
 
     async def run_turn(
         self,
@@ -223,6 +319,40 @@ class AgentRuntime:
                 session_id,
                 [message.model_dump(mode="json") for message in messages],
             )
+            pending_interaction = self._create_waiting_interaction(
+                run_mode="turn",
+                assistant_message=assistant_message,
+                response=response,
+                runtime_options=runtime_options,
+                metadata=run_metadata,
+                step_index=0,
+                all_tool_results=[],
+            )
+            if pending_interaction is not None:
+                self.session_store.save_run_metadata(
+                    session_id,
+                    _build_run_metadata(
+                        existing=self.session_store.load_run_metadata(session_id),
+                        session_id=session_id,
+                        run_id=run_id,
+                        status=RuntimeStatus.WAITING_HUMAN,
+                        provider=self.agent_config.model.provider,
+                        response=response,
+                        message_count=len(messages),
+                        metadata=run_metadata,
+                        waiting_human=True,
+                        interaction_id=pending_interaction.interaction_id,
+                    ),
+                )
+                return RuntimeTurnResult(
+                    session_id=session_id,
+                    run_id=run_id,
+                    status=RuntimeStatus.WAITING_HUMAN,
+                    assistant_message=assistant_message,
+                    steps=1,
+                    pending_interaction=pending_interaction,
+                    metadata=run_metadata,
+                )
             bridge_result = await self.tool_bridge.execute_once(
                 assistant_message=assistant_message,
                 session_id=session_id,
@@ -401,6 +531,45 @@ class AgentRuntime:
                         metadata=run_metadata,
                     )
 
+                pending_interaction = self._create_waiting_interaction(
+                    run_mode="loop",
+                    assistant_message=latest_assistant,
+                    response=latest_response,
+                    runtime_options=runtime_options,
+                    metadata=run_metadata,
+                    step_index=step_index,
+                    all_tool_results=all_tool_results,
+                )
+                if pending_interaction is not None:
+                    self.session_store.save_run_metadata(
+                        session_id,
+                        _build_run_metadata(
+                            existing=self.session_store.load_run_metadata(session_id),
+                            session_id=session_id,
+                            run_id=run_id,
+                            status=RuntimeStatus.WAITING_HUMAN,
+                            provider=self.agent_config.model.provider,
+                            response=latest_response,
+                            message_count=len(messages),
+                            metadata=run_metadata,
+                            steps=step_number,
+                            tool_count=len(all_tool_results),
+                            waiting_human=True,
+                            interaction_id=pending_interaction.interaction_id,
+                        ),
+                    )
+                    return RuntimeTurnResult(
+                        session_id=session_id,
+                        run_id=run_id,
+                        status=RuntimeStatus.WAITING_HUMAN,
+                        assistant_message=latest_assistant,
+                        tool_result_messages=all_tool_messages,
+                        tool_results=all_tool_results,
+                        steps=step_number,
+                        pending_interaction=pending_interaction,
+                        metadata=run_metadata,
+                    )
+
                 bridge_result = await self.tool_bridge.execute_once(
                     assistant_message=latest_assistant,
                     session_id=session_id,
@@ -517,6 +686,94 @@ class AgentRuntime:
         )
 
 
+def _build_hitl_checkpoint(
+    *,
+    run_mode: str,
+    agent_name: str,
+    runtime_options: RuntimeOptions,
+    assistant_message: Msg,
+    response: LLMResponse,
+    step_index: int,
+    next_tool_index: int,
+    batch_results: list[dict[str, Any]],
+    all_tool_results: list[ToolResult],
+    read_state: Any | None,
+    call_fingerprint: str,
+) -> dict[str, Any]:
+    """构造并验证等待恢复所需的 JSON-safe checkpoint。"""
+    import json
+
+    try:
+        read_state_json: Any | None = None
+        if read_state is not None:
+            read_state_json = (
+                read_state.model_dump(mode="json")
+                if hasattr(read_state, "model_dump")
+                else read_state
+            )
+        checkpoint = RuntimeHITLCheckpoint(
+            run_mode=run_mode,
+            agent_name=agent_name,
+            session_id=runtime_options.session_id,
+            run_id=runtime_options.run_id,
+            step_index=step_index,
+            runtime_options=RuntimeOptionsSnapshot(options=runtime_options.model_dump(mode="json")),
+            assistant_message={
+                "role": "assistant",
+                "content": [block.model_dump(mode="json") for block in response.content],
+                "metadata": {
+                    "provider": response.provider,
+                    "id": response.id,
+                    "model": response.model,
+                    "finish_reason": response.finish_reason,
+                },
+            },
+            provider_response=ProviderResponseSnapshot(
+                provider=response.provider,
+                response_id=response.id,
+                model=response.model,
+                content=[block.model_dump(mode="json") for block in response.content],
+                finish_reason=response.finish_reason,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                total_tokens=response.total_tokens,
+                reasoning=response.reasoning,
+            ),
+            tool_calls=[call.model_dump(mode="json") for call in assistant_message.tool_calls],
+            next_tool_index=next_tool_index,
+            batch_results=batch_results,
+            all_tool_results=[result.model_dump(mode="json") for result in all_tool_results],
+            read_state=read_state_json,
+            call_fingerprint=call_fingerprint,
+        ).model_dump(mode="json")
+        json.dumps(checkpoint, allow_nan=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise HITLCheckpointInvalidError("HITL checkpoint 必须是 JSON-safe 数据") from exc
+    return checkpoint
+
+
+def _call_fingerprint(
+    *,
+    request: PermissionInteractionRequest | QuestionInteractionRequest,
+    session_id: str,
+    run_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    workspace_root: Path,
+) -> str:
+    """返回权限请求原有或问题请求派生的调用指纹。"""
+    if isinstance(request, PermissionInteractionRequest):
+        return request.call_fingerprint
+    return make_call_fingerprint(
+        session_id=session_id,
+        run_id=run_id,
+        tool_call_id=request.tool_call_id,
+        tool_name=tool_name,
+        arguments=arguments,
+        workspace_root=str(workspace_root),
+    )
+
+
 def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
     """将 runtime 边界异常归一化为稳定错误信息。
 
@@ -594,6 +851,8 @@ def _build_run_metadata(
     steps: int = 1,
     tool_count: int = 0,
     error: RuntimeErrorInfo | None = None,
+    waiting_human: bool = False,
+    interaction_id: str | None = None,
 ) -> dict[str, object]:
     """构建 session 中保存的 run metadata。
 
@@ -620,6 +879,10 @@ def _build_run_metadata(
     }
     if error is not None:
         latest_run["error"] = error.model_dump(mode="json")
+    if waiting_human:
+        latest_run["waiting_human"] = True
+    if interaction_id is not None:
+        latest_run["interaction_id"] = interaction_id
     runs = existing.get("runs", [])
     run_list = list(runs) if isinstance(runs, list) else []
     run_list.append(latest_run)
