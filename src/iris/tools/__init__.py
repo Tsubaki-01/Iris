@@ -26,11 +26,12 @@ from .builtin import (
 from .circuit import CircuitBreaker, CircuitBreakerState
 from .decorators import tool
 from .discovery import DeferredToolIndex, ToolSearchInput, ToolSearchTool
-from .executor import ToolExecutor
+from .executor import PreparedToolCall, ToolBatchPlan, ToolExecutor
 from .middleware import ToolMiddleware
 from .permissions import (
     DefaultPermissionPolicy,
     PermissionDecision,
+    PermissionEffect,
     PermissionPolicy,
     ReadFileRecord,
     ReadFileState,
@@ -62,11 +63,13 @@ __all__ = [
     "GrepSearchInput",
     "ListFilesInput",
     "PermissionDecision",
+    "PermissionEffect",
     "PermissionPolicy",
     "ReadFileInput",
     "ReadFileRecord",
     "ReadFileState",
     "ToolArtifact",
+    "ToolBatchPlan",
     "ToolArtifactStore",
     "ToolCapability",
     "ToolDefinition",
@@ -74,6 +77,7 @@ __all__ = [
     "ToolExecutionContext",
     "ToolExecutionMode",
     "ToolExecutor",
+    "PreparedToolCall",
     "ToolMiddleware",
     "ToolRegistry",
     "ToolRegistryView",

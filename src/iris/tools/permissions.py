@@ -2,30 +2,50 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, model_validator
 
 from ..exceptions import IrisToolValidationError
 from .base import BaseTool, ToolCapability, ToolExecutionContext
 
 
+class PermissionEffect(StrEnum):
+    """权限策略的三态裁决。"""
+
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_HUMAN = "require_human"
+
+
 class PermissionDecision(BaseModel):
     """权限策略裁决结果。"""
 
-    allowed: bool
+    effect: PermissionEffect
     reason: str = ""
-    require_confirmation: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("reason")
-    @classmethod
-    def _validate_reason(cls, value: str, info: Any) -> str:
-        """拒绝时要求提供原因。"""
-        if info.data.get("allowed") is False and not value:
+    @model_validator(mode="after")
+    def _validate_reason(self) -> PermissionDecision:
+        """拒绝或需要人工确认时要求提供原因。"""
+        if (
+            self.effect in {PermissionEffect.DENY, PermissionEffect.REQUIRE_HUMAN}
+            and not self.reason.strip()
+        ):
             raise ValueError("权限拒绝必须包含原因")
-        return value
+        return self
+
+    @property
+    def allowed(self) -> bool:
+        """兼容旧调用方的 allow 判断。"""
+        return self.effect is PermissionEffect.ALLOW
+
+    @property
+    def require_confirmation(self) -> bool:
+        """兼容旧调用方的人工确认判断。"""
+        return self.effect is PermissionEffect.REQUIRE_HUMAN
 
 
 class ReadFileRecord(BaseModel):
@@ -103,11 +123,18 @@ class DefaultPermissionPolicy(PermissionPolicy):
         self,
         *,
         workspace_policy: WorkspacePolicy | None = None,
-        allow_writes: bool = False,
+        write_mode: Literal["confirm", "allow", "deny"] = "confirm",
+        allow_writes: bool | None = None,
     ) -> None:
         """初始化默认策略。"""
+        if allow_writes is not None:
+            compatibility_mode = "allow" if allow_writes else "confirm"
+            if write_mode != "confirm" and write_mode != compatibility_mode:
+                raise IrisToolValidationError("write_mode 与 allow_writes 配置冲突")
+            write_mode = compatibility_mode
         self.workspace_policy = workspace_policy or WorkspacePolicy()
-        self.allow_writes = allow_writes
+        self.write_mode = write_mode
+        self.allow_writes = write_mode == "allow"
 
     def check(
         self,
@@ -115,19 +142,24 @@ class DefaultPermissionPolicy(PermissionPolicy):
         params: dict[str, Any],
         context: ToolExecutionContext,
     ) -> PermissionDecision:
-        """只读默认允许，写入默认需要后续 CLI 确认 UX。"""
+        """只读允许，写入依 write_mode，其他高风险能力需要人工确认。"""
         del context
         if tool.definition.capabilities <= {ToolCapability.READ}:
-            return PermissionDecision(allowed=True)
-        if self.allow_writes and tool.definition.capabilities <= {
+            return PermissionDecision(effect=PermissionEffect.ALLOW)
+        if tool.definition.capabilities <= {
             ToolCapability.READ,
             ToolCapability.WRITE,
         }:
-            return PermissionDecision(allowed=True)
-        # TODO(cli-confirmation-ux): 后续接入 CLI 用户确认流程。
+            if self.write_mode == "allow":
+                return PermissionDecision(effect=PermissionEffect.ALLOW)
+            if self.write_mode == "deny":
+                return PermissionDecision(
+                    effect=PermissionEffect.DENY,
+                    reason="工具写入权限被策略拒绝",
+                    metadata={"tool": tool.name, "params": params},
+                )
         return PermissionDecision(
-            allowed=False,
-            reason="TODO(cli-confirmation-ux): 工具调用需要用户确认",
-            require_confirmation=True,
+            effect=PermissionEffect.REQUIRE_HUMAN,
+            reason="工具调用需要用户确认",
             metadata={"tool": tool.name, "params": params},
         )

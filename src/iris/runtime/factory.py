@@ -101,9 +101,7 @@ class RuntimeFactory:
         context_input = _build_context_input(config, base_dir=base_dir)
         tool_registry = build_tool_registry(config.tools)
         tool_view = tool_registry.view()
-        permission_policy = DefaultPermissionPolicy(
-            allow_writes=config.permissions.writes == "allow"
-        )
+        permission_policy = DefaultPermissionPolicy(write_mode=config.permissions.writes)
         tool_executor = ToolExecutor(
             tool_registry,
             permission_policy=permission_policy,
@@ -167,9 +165,7 @@ def _build_session_store(config: AgentConfig, *, base_dir: Path) -> SessionStore
     if config.session.backend == "none":
         return InMemorySessionStore()
     session_path = config.session.path or ".iris/session.db"
-    return SQLiteSessionStore(
-        _resolve_relative_to_base(session_path, base_dir=base_dir)
-    )
+    return SQLiteSessionStore(_resolve_relative_to_base(session_path, base_dir=base_dir))
 
 
 def _resolve_relative_to_base(path: str | Path, *, base_dir: Path) -> Path:
