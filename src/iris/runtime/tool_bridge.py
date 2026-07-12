@@ -16,6 +16,7 @@ from ..exceptions import IrisToolExecutionError
 from ..message import Msg, ToolUseBlock
 from ..session import SessionStore
 from ..tools import (
+    ReadFileState,
     ToolBatchPlan,
     ToolErrorInfo,
     ToolExecutionContext,
@@ -73,6 +74,12 @@ class ToolBridge:
     def read_state(self, session_id: str) -> Any | None:
         """返回 session 当前保存的文件读取状态。"""
         return self._read_states.get(session_id)
+
+    def restore_read_state(self, session_id: str, state: dict[str, Any] | None) -> None:
+        """从 checkpoint 恢复 session 的文件读取状态。"""
+        if state is None:
+            return
+        self._read_states[session_id] = ReadFileState.model_validate(state)
 
     async def execute_once(
         self,
