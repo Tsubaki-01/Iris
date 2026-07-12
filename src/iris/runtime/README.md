@@ -19,6 +19,8 @@ flowchart LR
     Runtime --> Bridge["ToolBridge"]
     Bridge --> Executor["ToolExecutor"]
     Runtime --> Session["SessionStore"]
+    Runtime --> HITL["HumanInteractionService"]
+    HITL --> InteractionStore["InteractionStore"]
 ```
 
 ## 快速入门
@@ -130,6 +132,8 @@ session。
   history，但不会再次调用 provider。
 - `run_loop()`：执行有界 tool loop。第一步追加当前用户输入，后续步骤从 session history
   重新组装请求。
+- 两个入口都会先预检完整工具批次。遇到第一个权限确认或 `human.ask` 时，runtime 会保存
+  checkpoint 与 interaction，并返回等待状态；该批次不会执行任何工具。
 
 ### `RuntimeOptions`
 
@@ -149,12 +153,14 @@ session。
 
 runtime 对外返回的结果模型，包含：
 
-- `status`: `ok`、`error` 或 `max_steps`。
+- `status`: `ok`、`error`、`max_steps` 或 `waiting_human`。
 - `assistant_message`: 最终 assistant 消息。
 - `tool_results`: 程序侧可读取的结构化工具结果。
 - `tool_result_messages`: 可回灌给模型的 tool result 消息。
 - `steps`: 实际完成的 provider 调用步数。
 - `error`: 失败时的结构化错误信息。
+- `pending_interaction`: 仅 `waiting_human` 时存在的持久化人工请求；它不会伪装成
+  provider-visible 的 user/tool 消息。
 
 ### `ToolBridge`
 
@@ -175,7 +181,9 @@ runtime 当前通过 LiteLLM Chat Completion 调用 provider，因此挂载到 `
 ### `RuntimeFactory.from_config_path(path, ...)`
 
 读取 `agent.yaml` 并创建 runtime。可选注入 `provider`、`session_store`、
-`memory_service` 和 `api_key`。
+`interaction_store`、`memory_service` 和 `api_key`。SQLite session 默认同时作为
+interaction store；无 session 后端或自定义 session store 未传 interaction store 时，使用
+非持久化的 `InMemoryInteractionStore`。
 
 ### `RuntimeFactory.from_config(config, ...)`
 
@@ -185,12 +193,14 @@ runtime 当前通过 LiteLLM Chat Completion 调用 provider，因此挂载到 `
 
 执行一次 provider 调用并保存当前用户输入与 assistant 回复。若 assistant 返回工具调用，
 runtime 会执行一次工具桥接，把工具结果消息写回 session history 并返回工具结果，但不会
-把工具结果再次发送给 provider。
+把工具结果再次发送给 provider。若预检遇到人工 gate，则先持久化 interaction/checkpoint，
+返回 `RuntimeStatus.WAITING_HUMAN`；本阶段不提供 resume。
 
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 
 执行有界工具循环。assistant 没有工具调用时返回 `RuntimeStatus.OK`；如果每一步都继续
-产生工具调用，达到 `RuntimeOptions.loop.max_steps` 后返回 `RuntimeStatus.MAX_STEPS`。
+产生工具调用，达到 `RuntimeOptions.loop.max_steps` 后返回 `RuntimeStatus.MAX_STEPS`。人工
+gate 同样返回 `RuntimeStatus.WAITING_HUMAN`，并保留已完成步骤的工具结果。
 
 ## 与 agent 配置的关系
 
@@ -202,6 +212,8 @@ runtime 会执行一次工具桥接，把工具结果消息写回 session histor
 - `tools`: 通过 `build_tool_registry()` 构建工具注册表。
 - `permissions`: 解析 workspace，并创建工具权限策略。
 - `session`: 创建 `InMemorySessionStore` 或 `SQLiteSessionStore`。
+- `interaction_store`: SQLite session 时复用同一个 `SQLiteSessionStore`；其它默认装配为
+  `InMemoryInteractionStore`，用于保存 `human.ask` 与权限确认请求。
 
 ## 显式 memory
 
@@ -221,6 +233,9 @@ runtime 会通过 `SessionStore` 保存三类数据：
 - messages：history、current input、assistant message 和 tool result messages。
 - run metadata：最近一次运行摘要和历史 runs 列表。
 - tool events：每次工具结果的 JSON-safe 事件快照。
+
+人工等待时 session metadata 会附加 `waiting_human=true` 和 `interaction_id`；interaction
+及其 JSON-safe runtime checkpoint 由 interaction store 保存。
 
 默认 `session.backend: none` 使用 `InMemorySessionStore`。配置
 `session.backend: sqlite` 后，`RuntimeFactory` 会创建 `SQLiteSessionStore`。

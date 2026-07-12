@@ -10,9 +10,10 @@ import uuid
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..context import ContextBuildOutput
+from ..hitl import HumanInteraction
 from ..memory import MemoryQuery, MemorySearchResult
 from ..message import Conversation, LLMRequest, Msg
 from ..tools import ToolResult
@@ -39,6 +40,7 @@ class RuntimeStatus(StrEnum):
     OK = "ok"
     ERROR = "error"
     MAX_STEPS = "max_steps"
+    WAITING_HUMAN = "waiting_human"
 
 
 class ToolErrorPolicy(StrEnum):
@@ -64,6 +66,53 @@ class RuntimeErrorInfo(BaseModel):
     message: str = Field(min_length=1)
     source: RuntimeErrorSource
     details: dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProviderResponseSnapshot(BaseModel):
+    """可持久化的 provider 响应最小快照。"""
+
+    provider: str
+    response_id: str = ""
+    model: str = ""
+    content: list[dict[str, Any]] = Field(default_factory=list)
+    finish_reason: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    reasoning: str = ""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RuntimeOptionsSnapshot(BaseModel):
+    """HITL 恢复所需的调用级选项快照。"""
+
+    options: dict[str, Any]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RuntimeHITLCheckpoint(BaseModel):
+    """第一次人工等待前保存的 runtime 恢复快照。"""
+
+    checkpoint_version: Literal[1] = 1
+    run_mode: Literal["turn", "loop"]
+    agent_name: str
+    session_id: str
+    run_id: str
+    step_index: int = Field(ge=0)
+    runtime_options: RuntimeOptionsSnapshot
+    assistant_message: dict[str, Any]
+    provider_response: ProviderResponseSnapshot
+    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    next_tool_index: int = Field(ge=0)
+    batch_results: list[dict[str, Any]] = Field(default_factory=list)
+    all_tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    read_state: dict[str, Any] | None = None
+    pending_result: dict[str, Any] | None = None
+    call_fingerprint: str
 
     model_config = ConfigDict(extra="forbid")
 
@@ -166,6 +215,7 @@ class RuntimeTurnResult(BaseModel):
         tool_results (list[ToolResult]): 程序侧可读取的结构化工具执行结果。
         steps (int): 本次运行实际完成的 provider 调用步数。
         error (RuntimeErrorInfo | None): 失败时返回的归一化错误信息。
+        pending_interaction (HumanInteraction | None): 等待人工响应时返回的持久化请求。
         metadata (dict[str, Any]): 运行摘要、追踪字段或调试附加信息。
     """
 
@@ -177,16 +227,27 @@ class RuntimeTurnResult(BaseModel):
     tool_results: list[ToolResult] = Field(default_factory=list)
     steps: int = Field(default=1, gt=0)
     error: RuntimeErrorInfo | None = None
+    pending_interaction: HumanInteraction | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
+    @model_validator(mode="after")
+    def _validate_pending_interaction(self) -> RuntimeTurnResult:
+        """确保 pending interaction 只随等待状态返回。"""
+        if (self.status is RuntimeStatus.WAITING_HUMAN) != (self.pending_interaction is not None):
+            raise ValueError("waiting_human 状态必须且只能包含 pending_interaction")
+        return self
+
 
 __all__ = [
     "BoundedLoopOptions",
+    "ProviderResponseSnapshot",
     "Runstate",
     "RuntimeErrorInfo",
+    "RuntimeHITLCheckpoint",
     "RuntimeOptions",
+    "RuntimeOptionsSnapshot",
     "RuntimeStatus",
     "RuntimeTurnInput",
     "RuntimeTurnResult",

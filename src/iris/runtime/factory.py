@@ -20,6 +20,7 @@ from ..context import (
     ContextSlot,
     load_context_build_input,
 )
+from ..hitl import HumanInteractionService, InMemoryInteractionStore, InteractionStore
 from ..providers import create_provider_client
 from ..session import InMemorySessionStore, SessionStore, SQLiteSessionStore
 from ..tools import DefaultPermissionPolicy, ToolExecutor
@@ -48,6 +49,7 @@ class RuntimeFactory:
         provider: RuntimeProvider | None = None,
         memory_service: MemoryService | None = None,
         session_store: SessionStore | None = None,
+        interaction_store: InteractionStore | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
@@ -57,6 +59,7 @@ class RuntimeFactory:
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
             session_store (SessionStore | None): 可选 session store 注入。
+            interaction_store (InteractionStore | None): 可选 HITL interaction store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -70,6 +73,7 @@ class RuntimeFactory:
             provider=provider,
             memory_service=memory_service,
             session_store=session_store,
+            interaction_store=interaction_store,
             api_key=api_key,
         )
 
@@ -82,6 +86,7 @@ class RuntimeFactory:
         provider: RuntimeProvider | None = None,
         memory_service: MemoryService | None = None,
         session_store: SessionStore | None = None,
+        interaction_store: InteractionStore | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
@@ -92,6 +97,7 @@ class RuntimeFactory:
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
             session_store (SessionStore | None): 可选 session store 注入。
+            interaction_store (InteractionStore | None): 可选 HITL interaction store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -109,6 +115,11 @@ class RuntimeFactory:
         resolved_session_store = session_store or _build_session_store(
             config,
             base_dir=base_dir,
+        )
+        resolved_interaction_store = interaction_store or (
+            resolved_session_store
+            if isinstance(resolved_session_store, SQLiteSessionStore)
+            else InMemoryInteractionStore()
         )
         resolved_provider = provider or create_provider_client(
             config.to_model_route(),
@@ -131,6 +142,8 @@ class RuntimeFactory:
             tool_executor=tool_executor,
             workspace_root=workspace_root,
             permission_policy=permission_policy,
+            interaction_store=resolved_interaction_store,
+            interaction_service=HumanInteractionService(resolved_interaction_store),
             memory_service=memory_service,
         )
 
