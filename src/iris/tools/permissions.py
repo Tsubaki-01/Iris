@@ -128,7 +128,9 @@ class DefaultPermissionPolicy(PermissionPolicy):
     ) -> None:
         """初始化默认策略。"""
         if allow_writes is not None:
-            compatibility_mode = "allow" if allow_writes else "confirm"
+            compatibility_mode: Literal["allow", "confirm"] = (
+                "allow" if allow_writes else "confirm"
+            )
             if write_mode != "confirm" and write_mode != compatibility_mode:
                 raise IrisToolValidationError("write_mode 与 allow_writes 配置冲突")
             write_mode = compatibility_mode

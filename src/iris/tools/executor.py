@@ -24,7 +24,12 @@ from ..exceptions import (
     IrisToolNotFoundError,
     IrisToolValidationError,
 )
-from ..hitl.models import PermissionInteractionRequest, make_call_fingerprint
+from ..hitl.models import (
+    HumanInteractionRequest,
+    PermissionInteractionRequest,
+    QuestionInteractionRequest,
+    make_call_fingerprint,
+)
 from ..message import ToolUseBlock
 from .artifacts import ToolArtifactStore
 from .base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
@@ -46,7 +51,7 @@ class PreparedToolCall(BaseModel):
     tool: BaseTool | None = None
     validated_params: dict[str, Any] = Field(default_factory=dict)
     permission: PermissionDecision | None = None
-    human_request: PermissionInteractionRequest | None = None
+    human_request: HumanInteractionRequest | None = None
     preflight_result: ToolResult | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -285,10 +290,8 @@ class ToolExecutor:
                 params = tool.validate_input(tool_use.input)
                 raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
                 decision = self.permission_policy.check(tool, raw_params, context)
-                human_request = (
-                    _permission_request(tool_use, tool, raw_params, decision, context)
-                    if decision.effect is PermissionEffect.REQUIRE_HUMAN
-                    else None
+                human_request = _human_interaction_request(
+                    tool_use, tool, raw_params, decision, context
                 )
                 calls.append(
                     PreparedToolCall(
@@ -336,6 +339,12 @@ class ToolExecutor:
         """重新验证当前权限后执行一条预检调用。"""
         if prepared.preflight_result is not None:
             return prepared.preflight_result
+        if isinstance(prepared.human_request, QuestionInteractionRequest):
+            return self._error_result(
+                prepared.tool_use,
+                "HITL_REQUIRED",
+                "human interaction 必须由 runtime 处理",
+            )
         try:
             tool = self.registry.get(prepared.tool_use.name)
             params = tool.validate_input(prepared.tool_use.input)
@@ -604,13 +613,20 @@ def _copy_context_for_parallel_call(
     return child_context
 
 
-def _permission_request(
+def _human_interaction_request(
     tool_use: ToolUseBlock,
     tool: BaseTool,
     params: dict[str, Any],
     decision: PermissionDecision,
     context: ToolExecutionContext,
-) -> PermissionInteractionRequest:
+) -> HumanInteractionRequest | None:
+    if tool.definition.group == "human":
+        builder = getattr(tool, "build_interaction_request", None)
+        if callable(builder):
+            return builder(tool_call_id=tool_use.id, params=params)
+        return None
+    if decision.effect is not PermissionEffect.REQUIRE_HUMAN:
+        return None
     run_id = str(context.metadata.get("run_id", ""))
     workspace_root = str(context.workspace_root.resolve())
     return PermissionInteractionRequest(

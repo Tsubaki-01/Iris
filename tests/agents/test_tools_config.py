@@ -30,6 +30,12 @@ def test_build_tool_registry_only_registers_requested_builtin_tools() -> None:
         registry.get("write_file")
 
 
+def test_build_tool_registry_registers_human_ask_builtin() -> None:
+    registry = build_tool_registry(ToolsConfig(builtin=["human.ask"]))
+
+    assert registry.get("ask_question").definition.name == "ask_question"
+
+
 def test_build_tool_registry_rejects_unknown_builtin_tool() -> None:
     with pytest.raises(IrisConfigError, match="file.unknown"):
         build_tool_registry(ToolsConfig(builtin=["file.unknown"]))

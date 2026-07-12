@@ -7,7 +7,9 @@ from importlib import import_module
 from typing import Any
 
 from ...exceptions import IrisConfigError
+from ...hitl.tools import AskQuestionTool
 from ...tools import ToolRegistry, WorkspaceFileService
+from ...tools.base import BaseTool
 from ...tools.builtin.file import (
     EditFileTool,
     GrepSearchTool,
@@ -17,12 +19,19 @@ from ...tools.builtin.file import (
 )
 from .base import ToolsConfig
 
-_BUILTIN_TOOL_CLASSES = {
-    "file.read": ReadFileTool,
-    "file.list": ListFilesTool,
-    "file.grep": GrepSearchTool,
-    "file.write": WriteFileTool,
-    "file.edit": EditFileTool,
+_FileToolFactory = Callable[[WorkspaceFileService], BaseTool]
+_ToolFactory = Callable[[], BaseTool]
+
+_BUILTIN_FILE_TOOL_FACTORIES: dict[str, _FileToolFactory] = {
+    "file.read": lambda service: ReadFileTool(file_service=service),
+    "file.list": lambda service: ListFilesTool(file_service=service),
+    "file.grep": lambda service: GrepSearchTool(file_service=service),
+    "file.write": lambda service: WriteFileTool(file_service=service),
+    "file.edit": lambda service: EditFileTool(file_service=service),
+}
+
+_BUILTIN_HUMAN_TOOL_FACTORIES: dict[str, _ToolFactory] = {
+    "human.ask": AskQuestionTool,
 }
 
 
@@ -58,10 +67,16 @@ def _register_builtin_tools(registry: ToolRegistry, names: list[str]) -> None:
     """注册 YAML 声明的内置工具。"""
     file_service = WorkspaceFileService()
     for name in names:
-        tool_cls = _BUILTIN_TOOL_CLASSES.get(name)
-        if tool_cls is None:
-            raise IrisConfigError("未知内置工具", tool=name)
-        registry.register(tool_cls(file_service=file_service))
+        if name.startswith("file."):
+            factory = _BUILTIN_FILE_TOOL_FACTORIES.get(name)
+            if factory is None:
+                raise IrisConfigError("未知内置工具", tool=name)
+            registry.register(factory(file_service))
+        else:
+            human_factory = _BUILTIN_HUMAN_TOOL_FACTORIES.get(name)
+            if human_factory is None:
+                raise IrisConfigError("未知内置工具", tool=name)
+            registry.register(human_factory())
 
 
 def _import_ref(ref: str) -> Callable[..., Any]:
