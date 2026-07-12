@@ -194,7 +194,14 @@ interaction store；无 session 后端或自定义 session store 未传 interact
 执行一次 provider 调用并保存当前用户输入与 assistant 回复。若 assistant 返回工具调用，
 runtime 会执行一次工具桥接，把工具结果消息写回 session history 并返回工具结果，但不会
 把工具结果再次发送给 provider。若预检遇到人工 gate，则先持久化 interaction/checkpoint，
-返回 `RuntimeStatus.WAITING_HUMAN`；本阶段不提供 resume。
+返回 `RuntimeStatus.WAITING_HUMAN`。
+
+### `AgentRuntime.resume(interaction_id, response=None)`
+
+恢复已等待的 interaction。权限批准只覆盖对应 tool call；拒绝回灌
+`USER_REJECTED`，问题回答回灌 answer 文本。已领取但未保存结果的 interaction 会以
+`HITL_EXECUTION_OUTCOME_UNKNOWN` fail-closed，已准备或已提交结果则通过稳定 event ID
+幂等提交，不会重放工具调用。
 
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 
