@@ -207,7 +207,6 @@ class AgentRuntime:
         if gate is None or gate.human_request is None:
             return None
 
-        tool_call_index = assistant_message.tool_calls.index(gate.tool_use)
         checkpoint = _build_hitl_checkpoint(
             run_mode=cast("str", run_mode),
             agent_name=self.agent_config.name,
@@ -215,12 +214,8 @@ class AgentRuntime:
             assistant_message=assistant_message,
             response=response,
             step_index=step_index,
-            next_tool_index=tool_call_index,
-            batch_results=[
-                call.preflight_result.model_dump(mode="json")
-                for call in plan.calls
-                if call.preflight_result is not None
-            ],
+            next_tool_index=0,
+            batch_results=[],
             all_tool_results=all_tool_results,
             read_state=self.tool_bridge.read_state(runtime_options.session_id),
             call_fingerprint=_call_fingerprint(
@@ -271,11 +266,6 @@ class AgentRuntime:
                 interaction = self.interaction_service.resolve(interaction_id, response)
             elif interaction.status is InteractionStatus.RESOLVED and response is not None:
                 interaction = self.interaction_service.resolve(interaction_id, response)
-            if interaction.status is InteractionStatus.CONSUMED:
-                if interaction.resume_phase is InteractionResumePhase.CLAIMED:
-                    raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
-                return await self._commit_ready_interaction(interaction)
-
             checkpoint = interaction.checkpoint
             if checkpoint.get("checkpoint_version") != 1:
                 raise HITLCheckpointInvalidError("不支持的 HITL checkpoint 版本")
@@ -310,7 +300,43 @@ class AgentRuntime:
                 raise HITLCheckpointInvalidError("HITL checkpoint 工具调用不再需要人工确认")
             if interaction.request != prepared.human_request:
                 raise HITLCheckpointInvalidError("HITL interaction 请求与当前工具定义不匹配")
+            expected_fingerprint = _call_fingerprint(
+                request=prepared.human_request,
+                session_id=interaction.session_id,
+                run_id=interaction.run_id,
+                tool_name=prepared.tool_use.name,
+                arguments=prepared.validated_params,
+                workspace_root=self.workspace_root,
+            )
+            if checkpoint.get("call_fingerprint") != expected_fingerprint:
+                raise HITLCheckpointInvalidError("HITL checkpoint 调用指纹与当前 runtime 不匹配")
+            if interaction.status is InteractionStatus.CONSUMED:
+                if interaction.resume_phase is InteractionResumePhase.CLAIMED:
+                    raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
+                committed = await self._commit_ready_interaction(interaction)
+                if checkpoint.get("continuation_complete") is True:
+                    return committed
+                return await self._resume_batch(
+                    committed=committed,
+                    interaction=interaction,
+                    checkpoint=checkpoint,
+                    options=options,
+                    plan=plan,
+                    next_index=int(checkpoint["next_tool_index"]),
+                )
+
             self.interaction_service.claim(interaction_id, checkpoint)
+            current_index = plan.calls.index(prepared)
+            next_index = int(checkpoint["next_tool_index"])
+            if next_index > current_index:
+                raise HITLCheckpointInvalidError("HITL checkpoint 工具游标越过当前 gate")
+            prefix_results = await self._execute_resumed_range(
+                plan=plan,
+                start_index=next_index,
+                end_index=current_index,
+                options=options,
+                interaction=interaction,
+            )
             if isinstance(interaction.response, PermissionInteractionResponse):
                 if interaction.response.decision == "approve":
                     result = await self.tool_executor.execute_prepared(
@@ -334,21 +360,30 @@ class AgentRuntime:
                     content=[TextBlock(text=interaction.response.answer)],
                 )
             ready_checkpoint = dict(checkpoint)
-            ready_checkpoint["pending_result"] = result.model_dump(mode="json")
+            batch_results = [*prefix_results, result]
+            all_tool_results = [
+                *[ToolResult.model_validate(item) for item in checkpoint["all_tool_results"]],
+                *batch_results,
+            ]
+            ready_checkpoint.update(
+                pending_result=result.model_dump(mode="json"),
+                next_tool_index=current_index + 1,
+                batch_results=[item.model_dump(mode="json") for item in batch_results],
+                all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
+            )
             interaction = self.interaction_service.update_consumed(
                 interaction_id,
                 InteractionResumePhase.RESULT_READY,
                 ready_checkpoint,
             )
             committed = await self._commit_ready_interaction(interaction)
-            current_index = int(checkpoint["next_tool_index"])
             return await self._resume_batch(
                 committed=committed,
                 interaction=interaction,
-                checkpoint=checkpoint,
+                checkpoint=ready_checkpoint,
                 options=options,
                 plan=plan,
-                current_index=current_index,
+                next_index=current_index + 1,
             )
         except Exception as exc:
             loaded_interaction = self.interaction_store.load_interaction(interaction_id)
@@ -368,13 +403,22 @@ class AgentRuntime:
         checkpoint: dict[str, Any],
         options: RuntimeOptions,
         plan: Any,
-        current_index: int,
+        next_index: int,
     ) -> RuntimeTurnResult:
-        """执行当前 gate 后的同批调用，直至下一个 gate 或批次结束。"""
+        """从下一条未完成调用继续同批工具，直至下一个 gate 或批次结束。"""
         results = list(committed.tool_results)
         messages = list(committed.tool_result_messages)
-        for index, prepared in enumerate(plan.calls[current_index + 1 :], start=current_index + 1):
+        batch_results = [ToolResult.model_validate(item) for item in checkpoint["batch_results"]]
+        for index, prepared in enumerate(plan.calls[next_index:], start=next_index):
             if prepared.human_request is not None:
+                checkpoint = self._update_resume_checkpoint(
+                    interaction=interaction,
+                    checkpoint=checkpoint,
+                    next_tool_index=index,
+                    batch_results=batch_results,
+                    all_tool_results=results,
+                    continuation_complete=True,
+                )
                 pending = self._create_followup_interaction(
                     interaction=interaction,
                     checkpoint=checkpoint,
@@ -401,12 +445,87 @@ class AgentRuntime:
             )
             results.append(result)
             messages.append(message)
+            batch_results.append(result)
+            checkpoint = self._update_resume_checkpoint(
+                interaction=interaction,
+                checkpoint=checkpoint,
+                next_tool_index=index + 1,
+                batch_results=batch_results,
+                all_tool_results=results,
+            )
         completed = committed.model_copy(
             update={"tool_results": results, "tool_result_messages": messages}
         )
         if checkpoint.get("run_mode") == "loop":
-            return await self._continue_resumed_loop(completed, options)
+            completed = await self._continue_resumed_loop(completed, options)
+        self._update_resume_checkpoint(
+            interaction=interaction,
+            checkpoint=checkpoint,
+            next_tool_index=len(plan.calls),
+            batch_results=batch_results,
+            all_tool_results=results,
+            continuation_complete=True,
+        )
         return completed
+
+    async def _execute_resumed_range(
+        self,
+        *,
+        plan: Any,
+        start_index: int,
+        end_index: int,
+        options: RuntimeOptions,
+        interaction: HumanInteraction,
+    ) -> list[ToolResult]:
+        """执行当前 gate 之前尚未完成的工具调用。"""
+        results: list[ToolResult] = []
+        for prepared in plan.calls[start_index:end_index]:
+            if prepared.human_request is not None:
+                raise HITLCheckpointInvalidError("HITL checkpoint 跳过了未处理的人工 gate")
+            result = prepared.preflight_result
+            if result is None:
+                result = await self.tool_executor.execute_prepared(
+                    prepared,
+                    self._tool_context(options),
+                )
+            self._append_resumed_result(
+                result=result,
+                session_id=interaction.session_id,
+                run_id=interaction.run_id,
+                step_index=interaction.step_index,
+            )
+            results.append(result)
+        return results
+
+    def _update_resume_checkpoint(
+        self,
+        *,
+        interaction: HumanInteraction,
+        checkpoint: dict[str, Any],
+        next_tool_index: int,
+        batch_results: list[ToolResult],
+        all_tool_results: list[ToolResult],
+        continuation_complete: bool = False,
+    ) -> dict[str, Any]:
+        """保存当前批次的安全恢复游标。"""
+        updated = dict(checkpoint)
+        updated.update(
+            next_tool_index=next_tool_index,
+            batch_results=[item.model_dump(mode="json") for item in batch_results],
+            all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
+            read_state=(
+                state.model_dump(mode="json")
+                if (state := self.tool_bridge.read_state(interaction.session_id)) is not None
+                else None
+            ),
+            continuation_complete=continuation_complete,
+        )
+        self.interaction_service.update_consumed(
+            interaction.interaction_id,
+            InteractionResumePhase.RESULT_COMMITTED,
+            updated,
+        )
+        return updated
 
     def _create_followup_interaction(
         self,
@@ -427,6 +546,7 @@ class AgentRuntime:
             batch_results=[result.model_dump(mode="json") for result in results],
             all_tool_results=[result.model_dump(mode="json") for result in results],
             pending_result=None,
+            continuation_complete=False,
             read_state=read_state.model_dump(mode="json") if read_state is not None else None,
             call_fingerprint=_call_fingerprint(
                 request=request,
@@ -571,6 +691,12 @@ class AgentRuntime:
                 metadata=options.metadata,
                 tools_enabled=options.include_tools,
             )
+            if bridge.messages:
+                history.extend(bridge.messages)
+                self.session_store.save_messages(
+                    committed.session_id,
+                    [item.model_dump(mode="json") for item in history],
+                )
             continued = committed.model_copy(
                 update={
                     "assistant_message": assistant,
@@ -579,6 +705,18 @@ class AgentRuntime:
                     "steps": committed.steps + 1,
                 }
             )
+            if _should_stop_on_tool_error(options, bridge):
+                return RuntimeTurnResult(
+                    session_id=continued.session_id,
+                    run_id=continued.run_id,
+                    status=RuntimeStatus.ERROR,
+                    assistant_message=assistant,
+                    tool_results=continued.tool_results,
+                    tool_result_messages=continued.tool_result_messages,
+                    steps=continued.steps,
+                    error=_tool_error_info(bridge),
+                    metadata=continued.metadata,
+                )
             if continued.steps >= options.loop.max_steps:
                 return RuntimeTurnResult(
                     session_id=continued.session_id,
@@ -610,15 +748,13 @@ class AgentRuntime:
         if not isinstance(raw_result, dict):
             raise HITLExecutionOutcomeUnknownError("HITL 已消费 interaction 缺少待提交结果")
         result = ToolResult.model_validate(raw_result)
-        message = Msg.tool_result(
-            tool_use_id=result.tool_use_id,
-            content=result.model_content,
-            is_error=result.is_error,
-            name=result.tool_name,
-            metadata=result.to_block_metadata(),
-        )
+        message = _tool_result_message(result)
         messages = _load_history(self.session_store, interaction.session_id)
-        if not messages or messages[-1] != message:
+        if not any(
+            block.tool_use_id == result.tool_use_id
+            for existing in messages
+            for block in existing.tool_results
+        ):
             messages.append(message)
             self.session_store.save_messages(
                 interaction.session_id, [item.model_dump(mode="json") for item in messages]
@@ -645,12 +781,17 @@ class AgentRuntime:
                 InteractionResumePhase.RESULT_COMMITTED,
                 checkpoint,
             )
+        all_tool_results = [
+            ToolResult.model_validate(item) for item in checkpoint.get("all_tool_results", [])
+        ]
+        if not any(item.tool_use_id == result.tool_use_id for item in all_tool_results):
+            all_tool_results.append(result)
         return RuntimeTurnResult(
             session_id=interaction.session_id,
             run_id=interaction.run_id,
             status=RuntimeStatus.OK,
-            tool_result_messages=[message],
-            tool_results=[result],
+            tool_result_messages=[_tool_result_message(item) for item in all_tool_results],
+            tool_results=all_tool_results,
             steps=interaction.step_index + 1,
         )
 
@@ -1179,6 +1320,17 @@ def _call_fingerprint(
         tool_name=tool_name,
         arguments=arguments,
         workspace_root=str(workspace_root),
+    )
+
+
+def _tool_result_message(result: ToolResult) -> Msg:
+    """将结构化工具结果转换为 provider-neutral 消息。"""
+    return Msg.tool_result(
+        tool_use_id=result.tool_use_id,
+        content=result.model_content,
+        is_error=result.is_error,
+        name=result.tool_name,
+        metadata=result.to_block_metadata(),
     )
 
 

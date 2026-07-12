@@ -113,6 +113,7 @@ class RuntimeHITLCheckpoint(BaseModel):
     read_state: dict[str, Any] | None = None
     pending_result: dict[str, Any] | None = None
     call_fingerprint: str
+    continuation_complete: bool = False
 
     model_config = ConfigDict(extra="forbid")
 

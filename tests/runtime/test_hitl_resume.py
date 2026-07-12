@@ -13,9 +13,14 @@ from iris.hitl import (
     QuestionInteractionResponse,
 )
 from iris.hitl.tools import AskQuestionTool
-from iris.message import LLMResponse, TextBlock, ToolUseBlock
+from iris.message import LLMResponse, Role, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
-from iris.runtime.models import RuntimeOptions, RuntimeStatus
+from iris.runtime.models import (
+    BoundedLoopOptions,
+    RuntimeOptions,
+    RuntimeStatus,
+    ToolErrorPolicy,
+)
 from iris.session import InMemorySessionStore
 from iris.tools import (
     DefaultPermissionPolicy,
@@ -279,3 +284,264 @@ async def test_resume_result_committed_is_idempotent() -> None:
 
     assert retried.status is RuntimeStatus.OK
     assert len(store.load_tool_events("default")) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_executes_calls_before_gate_in_original_order() -> None:
+    executed: list[str] = []
+
+    def read_probe() -> str:
+        executed.append("read")
+        return "read"
+
+    registry = ToolRegistry()
+    registry.register_function(
+        read_probe,
+        description="记录只读调用",
+        capabilities={ToolCapability.READ},
+    )
+    registry.register(AskQuestionTool())
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                LLMResponse(
+                    provider="fake",
+                    content=[
+                        ToolUseBlock(id="read", name="read_probe", input={}),
+                        ToolUseBlock(
+                            id="question",
+                            name="ask_question",
+                            input={"question": "继续？"},
+                        ),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+
+    resumed = await runtime.resume(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert resumed.status is RuntimeStatus.OK
+    assert executed == ["read"]
+    assert [result.tool_use_id for result in resumed.tool_results] == ["read", "question"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_loop_persists_tool_result_for_next_provider_request() -> None:
+    def echo(value: str) -> str:
+        return f"echo:{value}"
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    registry.register_function(echo, description="回显")
+    provider = FakeProvider(
+        [
+            _tool_response(
+                ToolUseBlock(id="question", name="ask_question", input={"question": "继续？"})
+            ),
+            _tool_response(
+                ToolUseBlock(id="echo", name="echo", input={"value": "Iris"})
+            ),
+            LLMResponse(
+                provider="fake",
+                content=[TextBlock(text="完成")],
+                finish_reason="stop",
+            ),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_loop("开始")
+    assert waiting.pending_interaction is not None
+
+    resumed = await runtime.resume(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert resumed.status is RuntimeStatus.OK
+    assert len(provider.requests) == 3
+    tool_messages = [
+        message for message in provider.requests[2].messages if message.role is Role.USER
+    ]
+    assert tool_messages[-1].tool_results[0].content == "echo:Iris"
+
+
+@pytest.mark.asyncio
+async def test_result_committed_resume_continues_remaining_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+
+    def echo() -> str:
+        executed.append("echo")
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    registry.register_function(echo, description="回显")
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                LLMResponse(
+                    provider="fake",
+                    content=[
+                        ToolUseBlock(
+                            id="question",
+                            name="ask_question",
+                            input={"question": "继续？"},
+                        ),
+                        ToolUseBlock(id="echo", name="echo", input={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    interaction_id = waiting.pending_interaction.interaction_id
+    resume_batch = runtime._resume_batch
+
+    async def simulate_crash(**_: object) -> object:
+        raise RuntimeError("提交结果后崩溃")
+
+    monkeypatch.setattr(runtime, "_resume_batch", simulate_crash)
+    interrupted = await runtime.resume(
+        interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+    assert interrupted.status is RuntimeStatus.ERROR
+    assert executed == []
+    monkeypatch.setattr(runtime, "_resume_batch", resume_batch)
+
+    recovered = await runtime.resume(interaction_id)
+
+    assert recovered.status is RuntimeStatus.OK
+    assert executed == ["echo"]
+    message_count = len(runtime.session_store.load_messages("default"))
+
+    retried = await runtime.resume(interaction_id)
+
+    assert retried.status is RuntimeStatus.OK
+    assert executed == ["echo"]
+    assert len(runtime.session_store.load_messages("default")) == message_count
+
+
+@pytest.mark.asyncio
+async def test_resumed_loop_honors_stop_tool_error_policy() -> None:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    provider = FakeProvider(
+        [
+            _tool_response(
+                ToolUseBlock(id="question", name="ask_question", input={"question": "继续？"})
+            ),
+            _tool_response(ToolUseBlock(id="missing", name="missing", input={})),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_loop(
+        "开始",
+        options=RuntimeOptions(
+            loop=BoundedLoopOptions(tool_error_policy=ToolErrorPolicy.STOP),
+        ),
+    )
+    assert waiting.pending_interaction is not None
+
+    resumed = await runtime.resume(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert resumed.status is RuntimeStatus.ERROR
+    assert resumed.error is not None
+    assert resumed.error.code == "TOOL_NOT_ALLOWED"
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_question_checkpoint_from_another_workspace() -> None:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    interaction_store = InMemoryInteractionStore()
+    first_workspace = Path.cwd()
+    second_workspace = Path.cwd() / "src"
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                _tool_response(
+                    ToolUseBlock(
+                        id="question",
+                        name="ask_question",
+                        input={"question": "继续？"},
+                    )
+                )
+            ]
+        ),
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=first_workspace,
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    restarted = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider([]),
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=second_workspace,
+    )
+
+    resumed = await restarted.resume(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert resumed.status is RuntimeStatus.ERROR
+    assert resumed.error is not None
+    assert resumed.error.code == "HITL_CHECKPOINT_INVALID"
