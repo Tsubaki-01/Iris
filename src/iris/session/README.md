@@ -40,6 +40,7 @@ events = store.load_tool_events("default")
 - `save_run_metadata(session_id, metadata)`
 - `load_run_metadata(session_id)`
 - `append_tool_event(session_id, event)`
+- `append_tool_event_once(session_id, event_id, event)`
 - `load_tool_events(session_id)`
 
 ### `InMemorySessionStore`
@@ -56,12 +57,17 @@ events = store.load_tool_events("default")
 - `messages` 存为 JSON 字符串。
 - `run_metadata` 存为 JSON 字符串。
 - `tool_events` 存为 JSON 字符串数组。
+- `human_interactions` 独立保存 HITL interaction、响应和 checkpoint，不混入普通消息或事件。
 
 读取时再把 JSON 字符串转换回 Python 对象。不存在的 session 会返回空值：
 
 - messages: `[]`
 - run metadata: `{}`
 - tool events: `[]`
+
+`append_tool_event_once()` 会按 `(session_id, event_id)` 幂等追加工具事件：相同 JSON
+payload 是 no-op，使用同一 event ID 的不同 payload 会抛出 `IrisSessionError`。普通
+`append_tool_event()` 保持非幂等行为。
 
 ## 与 agent 配置的关系
 

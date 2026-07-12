@@ -201,7 +201,11 @@ runtime 会执行一次工具桥接，把工具结果消息写回 session histor
 恢复已等待的 interaction。权限批准只覆盖对应 tool call；拒绝回灌
 `USER_REJECTED`，问题回答回灌 answer 文本。已领取但未保存结果的 interaction 会以
 `HITL_EXECUTION_OUTCOME_UNKNOWN` fail-closed，已准备或已提交结果则通过稳定 event ID
-幂等提交，不会重放工具调用。
+幂等提交，不会重放工具调用。`run_turn()` 恢复当前工具批次但不会额外调用 provider；
+`run_loop()` 恢复后会将结果回灌 provider，并在下一 gate 或 loop 终态返回。
+
+Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝
+重放，`result_ready` 重试消息/event 提交，`result_committed` 从安全边界继续。
 
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 

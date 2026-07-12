@@ -351,10 +351,12 @@ class AgentRuntime:
                 current_index=current_index,
             )
         except Exception as exc:
-            interaction = self.interaction_store.load_interaction(interaction_id)
+            loaded_interaction = self.interaction_store.load_interaction(interaction_id)
             return _error_result(
-                session_id=interaction.session_id if interaction is not None else "default",
-                run_id=interaction.run_id if interaction is not None else "resume",
+                session_id=loaded_interaction.session_id
+                if loaded_interaction is not None
+                else "default",
+                run_id=loaded_interaction.run_id if loaded_interaction is not None else "resume",
                 error=normalize_runtime_error(exc),
             )
 
@@ -418,17 +420,14 @@ class AgentRuntime:
         """为批次中下一处人工 gate 创建独立 interaction。"""
         request = prepared.human_request
         assert request is not None
+        read_state = self.tool_bridge.read_state(interaction.session_id)
         next_checkpoint = dict(checkpoint)
         next_checkpoint.update(
             next_tool_index=next_index,
             batch_results=[result.model_dump(mode="json") for result in results],
             all_tool_results=[result.model_dump(mode="json") for result in results],
             pending_result=None,
-            read_state=(
-                self.tool_bridge.read_state(interaction.session_id).model_dump(mode="json")
-                if self.tool_bridge.read_state(interaction.session_id) is not None
-                else None
-            ),
+            read_state=read_state.model_dump(mode="json") if read_state is not None else None,
             call_fingerprint=_call_fingerprint(
                 request=request,
                 session_id=interaction.session_id,
