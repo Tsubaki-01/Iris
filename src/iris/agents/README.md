@@ -44,6 +44,7 @@ tools:
     - file.read
     - file.list
     - file.grep
+    - human.ask
   python:
     functions:
       - my_project.tools:search_notes
@@ -128,6 +129,10 @@ model: openai/gpt-4o-mini
 - `file.grep`
 - `file.write`
 - `file.edit`
+- `human.ask`
+
+`human.ask` 向模型暴露的工具名是 `ask_question`。它只声明人工问题；实际呈现问题、
+收集回答与调用 `AgentRuntime.resume()` 仍由 runtime 和宿主 adapter 完成。
 
 `tools.python` 必须使用结构化对象，不支持混合列表：
 

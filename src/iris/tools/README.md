@@ -131,6 +131,10 @@ executor = ToolExecutor(
 
 - `execute_one(tool_use, context)`: 执行单个 `ToolUseBlock`，始终返回 `ToolResult`，常见错误码包括 `NOT_FOUND`、`VALIDATION_ERROR`、`PERMISSION_ERROR`、`EXECUTION_ERROR`、`MIDDLEWARE_ERROR`、`CIRCUIT_OPEN`。
 - `execute_many(tool_uses, context)`: 连续只读且并发安全的调用会并发执行；遇到写入或非并发安全工具时按顺序执行。
+- `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
+  `PreparedToolCall`；不会运行 middleware、circuit breaker、artifact 或工具本体。
+- `execute_prepared(prepared, context, approved_tool_call_id=None)`: 重新校验当前状态后执行
+  一条预检调用，供 runtime 的 HITL 恢复路径使用。
 
 执行顺序是：设置 context → 查 registry → circuit breaker `before_call` → 输入校验 → middleware `before_call` → 权限检查 → `tool.arun()` → middleware `on_error` 或 `after_call`/`after_execute` → artifact 处理 → circuit breaker 记录结果。
 
@@ -213,9 +217,11 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 ### 权限
 
-- `PermissionDecision(allowed, reason="", require_confirmation=False, metadata={})`: 权限裁决结果；拒绝时必须有 `reason`。
+- `PermissionEffect`: `ALLOW`、`DENY`、`REQUIRE_HUMAN` 三态权限裁决。
+- `PermissionDecision(effect, reason="", metadata={})`: 权限裁决结果；拒绝或等待人工时必须有 `reason`。
 - `PermissionPolicy.check(tool, params, context)`: 权限策略接口。
-- `DefaultPermissionPolicy(allow_writes=False)`: 只读工具默认允许；写入工具默认拒绝并返回 `require_confirmation=True`；`allow_writes=True` 时允许只包含 `READ`/`WRITE` 能力的工具。
+- `DefaultPermissionPolicy(write_mode="confirm"|"allow"|"deny")`: 只读工具允许；写工具按
+  配置等待人工、直接允许或直接拒绝。
 - `WorkspacePolicy`: 路径边界策略，用于文件工具。
 - `ReadFileState` / `ReadFileRecord`: 文件读后写入的乐观锁状态。
 
@@ -241,6 +247,9 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 - `before_call(tool_name)`: 熔断打开且未过冷却期时抛出工具执行错误，executor 映射为 `CIRCUIT_OPEN`。
 - `after_result(tool_name, result)`: 成功时 reset，错误时增加失败计数，达到阈值后打开熔断。
 - `reset(tool_name)`: 清除指定工具状态。
+
+人工批准只覆盖对应的 tool call ID，且不能绕过当前 `DENY`、输入 schema、workspace 边界或
+文件 stale-read 检查；恢复执行会重新校验这些条件。
 
 ## Deferred discovery / tool_search
 
