@@ -78,7 +78,7 @@ class InMemoryInteractionStore:
             interaction,
             status=InteractionStatus.RESOLVED,
             response=response,
-            resolved_at=datetime.now(UTC),
+            resolved_at=datetime.now(),
             version=interaction.version + 1,
         )
         self._interactions[interaction_id] = updated
@@ -106,7 +106,7 @@ class InMemoryInteractionStore:
             status=InteractionStatus.CONSUMED,
             resume_phase=InteractionResumePhase.CLAIMED,
             checkpoint=checkpoint,
-            consumed_at=datetime.now(UTC),
+            consumed_at=datetime.now(),
             version=interaction.version + 1,
         )
         self._interactions[interaction_id] = updated

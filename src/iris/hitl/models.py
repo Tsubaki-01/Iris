@@ -48,7 +48,7 @@ def _new_interaction_id() -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now()
 
 
 def _validate_json_safe(value: Any, *, field_name: str) -> Any:

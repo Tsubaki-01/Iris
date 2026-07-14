@@ -182,7 +182,7 @@ class SQLiteSessionStore:
     ) -> HumanInteraction:
         """以单事务 compare-and-set 写入人工响应。"""
         response_json = _dump_json(response.model_dump(mode="json"))
-        resolved_at = datetime.now(UTC).isoformat()
+        resolved_at = datetime.now().isoformat()
         try:
             with sqlite3.connect(self.path) as connection:
                 connection.row_factory = sqlite3.Row
@@ -220,7 +220,7 @@ class SQLiteSessionStore:
     ) -> HumanInteraction:
         """以单事务 compare-and-set 领取已响应 interaction。"""
         checkpoint_json = _dump_json(checkpoint)
-        consumed_at = datetime.now(UTC).isoformat()
+        consumed_at = datetime.now().isoformat()
         try:
             with sqlite3.connect(self.path) as connection:
                 connection.row_factory = sqlite3.Row
