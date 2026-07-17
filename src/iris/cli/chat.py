@@ -14,6 +14,7 @@ from ..exceptions import HITLCheckpointInvalidError
 from ..hitl import (
     HumanInteraction,
     InteractionKind,
+    InteractionStatus,
     PermissionInteractionRequest,
     PermissionInteractionResponse,
     QuestionInteractionRequest,
@@ -141,6 +142,33 @@ async def _run_chat_loop_async(
     read_input = input_func or builtins.input
     trace_mode = options.trace_mode
     turn_index = 0
+    trace_store.start_turn(turn_index)
+    try:
+        recovered = await _recover_session_if_needed(
+            runtime,
+            session_id=options.session_id,
+            input_func=read_input,
+            renderer=renderer,
+        )
+    except KeyboardInterrupt:
+        renderer.render_warning("人工交互已中断，interaction 保持 pending。")
+        return 130
+    except EOFError:
+        return 0
+    except Exception as exc:
+        renderer.render_error(exc)
+        return 1
+    if recovered is not None:
+        _render_turn_result(
+            recovered,
+            turn_index=turn_index,
+            trace_mode=trace_mode,
+            trace_store=trace_store,
+            renderer=renderer,
+        )
+        if recovered.status is RuntimeStatus.ERROR:
+            return 1
+
     while True:
         try:
             user_input = read_input("iris> ")
@@ -179,16 +207,13 @@ async def _run_chat_loop_async(
                 return 130
             except EOFError:
                 return 0
-        steps = trace_store.steps_for_turn(turn_index)
-        if trace_mode == "compact":
-            renderer.render_trace_compact(steps)
-        elif trace_mode == "full":
-            renderer.render_trace_full(steps)
-        for warning in trace_store.warnings:
-            renderer.render_warning(warning)
-        trace_store.warnings.clear()
-        renderer.render_tool_results(result)
-        renderer.render_assistant(result)
+        _render_turn_result(
+            result,
+            turn_index=turn_index,
+            trace_mode=trace_mode,
+            trace_store=trace_store,
+            renderer=renderer,
+        )
         if resumed and result.status is RuntimeStatus.ERROR:
             return 1
 
@@ -252,6 +277,55 @@ async def _resume_until_terminal(
         )
         result = await runtime.resume(interaction.interaction_id, response)
     return result
+
+
+async def _recover_session_if_needed(
+    runtime: AgentRuntime,
+    *,
+    session_id: str,
+    input_func: Callable[[str], str],
+    renderer: ChatRenderer,
+) -> RuntimeTurnResult | None:
+    """在读取普通输入前恢复当前 session 的 active HITL run。"""
+    interaction = runtime.load_resumable_interaction(session_id)
+    if interaction is None:
+        return None
+    renderer.render_recovery_notice(interaction)
+    response = None
+    if interaction.status is InteractionStatus.PENDING:
+        response = _collect_interaction_response(
+            interaction,
+            input_func=input_func,
+            renderer=renderer,
+        )
+    result = await runtime.resume(interaction.interaction_id, response)
+    return await _resume_until_terminal(
+        runtime,
+        result,
+        input_func=input_func,
+        renderer=renderer,
+    )
+
+
+def _render_turn_result(
+    result: RuntimeTurnResult,
+    *,
+    turn_index: int,
+    trace_mode: TraceMode,
+    trace_store: ChatTraceStore,
+    renderer: ChatRenderer,
+) -> None:
+    """按既有顺序渲染一次 terminal runtime 结果。"""
+    steps = trace_store.steps_for_turn(turn_index)
+    if trace_mode == "compact":
+        renderer.render_trace_compact(steps)
+    elif trace_mode == "full":
+        renderer.render_trace_full(steps)
+    for warning in trace_store.warnings:
+        renderer.render_warning(warning)
+    trace_store.warnings.clear()
+    renderer.render_tool_results(result)
+    renderer.render_assistant(result)
 
 
 def _load_configured_agent(options: ChatOptions) -> AgentConfig:

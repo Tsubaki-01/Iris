@@ -16,6 +16,7 @@ from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.hitl import (
     HumanInteraction,
     InteractionKind,
+    InteractionStatus,
     PermissionInteractionRequest,
     PermissionInteractionResponse,
     QuestionInteractionRequest,
@@ -49,12 +50,20 @@ class SequenceRuntime:
         self,
         initial: RuntimeTurnResult,
         resumed: list[RuntimeTurnResult],
+        *,
+        resumable: HumanInteraction | None = None,
     ) -> None:
         self.initial = initial
         self.resumed = resumed
+        self.resumable = resumable
         self.run_inputs: list[str] = []
         self.resume_calls: list[tuple[str, object | None]] = []
         self.loop_ids: list[int] = []
+        self.recovery_sessions: list[str] = []
+
+    def load_resumable_interaction(self, session_id: str) -> HumanInteraction | None:
+        self.recovery_sessions.append(session_id)
+        return self.resumable
 
     async def run_loop(
         self,
@@ -588,6 +597,83 @@ def test_chat_loop_real_runtime_rejects_permission_without_side_effect() -> None
     assert "USER_REJECTED" in console.export_text()
 
 
+def test_chat_loop_recovers_resolved_interaction_before_first_user_input() -> None:
+    resolved = _question_interaction().model_copy(
+        update={
+            "status": InteractionStatus.RESOLVED,
+            "response": QuestionInteractionResponse(answer="测试"),
+        }
+    )
+    runtime = SequenceRuntime(
+        _terminal_result("未调用"),
+        [_terminal_result("恢复完成")],
+        resumable=resolved,
+    )
+    renderer, console = _renderer()
+    inputs = iter(["/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert runtime.recovery_sessions == ["demo"]
+    assert runtime.run_inputs == []
+    assert runtime.resume_calls == [(resolved.interaction_id, None)]
+    output = console.export_text()
+    assert "RECOVERY" in output
+    assert "QUESTION" not in output
+    assert "恢复完成" in output
+
+
+def test_chat_loop_startup_recovery_error_exits_without_user_input() -> None:
+    claimed = _question_interaction().model_copy(
+        update={
+            "status": InteractionStatus.CONSUMED,
+            "response": QuestionInteractionResponse(answer="测试"),
+        }
+    )
+    runtime = SequenceRuntime(
+        _terminal_result("未调用"),
+        [
+            RuntimeTurnResult(
+                session_id="demo",
+                run_id="run-1",
+                status=RuntimeStatus.ERROR,
+                error=RuntimeErrorInfo(
+                    code="HITL_EXECUTION_OUTCOME_UNKNOWN",
+                    message="工具执行结果未知",
+                    source="runtime",
+                ),
+            )
+        ],
+        resumable=claimed,
+    )
+    renderer, console = _renderer()
+
+    def fail_on_input(prompt: str) -> str:
+        raise AssertionError(f"不应读取普通输入: {prompt}")
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=fail_on_input,
+    )
+
+    assert code == 1
+    assert runtime.run_inputs == []
+    assert runtime.resume_calls == [(claimed.interaction_id, None)]
+    assert "HITL_EXECUTION_OUTCOME_UNKNOWN" in console.export_text()
+
+
 def test_chat_loop_reuses_session_and_renders_trace() -> None:
     trace_store = ChatTraceStore()
     renderer, console = _renderer()
@@ -646,6 +732,10 @@ def test_chat_loop_reuses_event_loop_across_turns() -> None:
 
         def __init__(self) -> None:
             self.loop_ids: list[int] = []
+
+        def load_resumable_interaction(self, session_id: str) -> None:
+            del session_id
+            return None
 
         async def run_loop(
             self,
