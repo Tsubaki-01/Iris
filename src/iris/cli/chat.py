@@ -21,7 +21,7 @@ from ..hitl import (
 )
 from ..providers import create_provider_client
 from ..runtime import AgentRuntime, RuntimeFactory
-from ..runtime.models import BoundedLoopOptions, RuntimeOptions, RuntimeTurnResult
+from ..runtime.models import BoundedLoopOptions, RuntimeOptions, RuntimeStatus, RuntimeTurnResult
 from .render import ChatRenderer
 from .trace import ChatTraceStore, TracingRuntimeProvider
 
@@ -165,6 +165,20 @@ async def _run_chat_loop_async(
         trace_store.start_turn(turn_index)
         renderer.render_user_turn(turn_index, user_input)
         result = await _run_loop_async(runtime, user_input, options)
+        resumed = result.status is RuntimeStatus.WAITING_HUMAN
+        if resumed:
+            try:
+                result = await _resume_until_terminal(
+                    runtime,
+                    result,
+                    input_func=read_input,
+                    renderer=renderer,
+                )
+            except KeyboardInterrupt:
+                renderer.render_warning("人工交互已中断，interaction 保持 pending。")
+                return 130
+            except EOFError:
+                return 0
         steps = trace_store.steps_for_turn(turn_index)
         if trace_mode == "compact":
             renderer.render_trace_compact(steps)
@@ -175,6 +189,8 @@ async def _run_chat_loop_async(
         trace_store.warnings.clear()
         renderer.render_tool_results(result)
         renderer.render_assistant(result)
+        if resumed and result.status is RuntimeStatus.ERROR:
+            return 1
 
 
 def _collect_interaction_response(
@@ -215,6 +231,27 @@ def _collect_interaction_response(
             return QuestionInteractionResponse(answer=answer)
 
     raise HITLCheckpointInvalidError("interaction kind/request 不匹配")
+
+
+async def _resume_until_terminal(
+    runtime: AgentRuntime,
+    result: RuntimeTurnResult,
+    *,
+    input_func: Callable[[str], str],
+    renderer: ChatRenderer,
+) -> RuntimeTurnResult:
+    """依次处理当前 run 的人工 gate，直到 runtime 返回终态。"""
+    while result.status is RuntimeStatus.WAITING_HUMAN:
+        interaction = result.pending_interaction
+        if interaction is None:
+            raise HITLCheckpointInvalidError("waiting_human 结果缺少 pending interaction")
+        response = _collect_interaction_response(
+            interaction,
+            input_func=input_func,
+            renderer=renderer,
+        )
+        result = await runtime.resume(interaction.interaction_id, response)
+    return result
 
 
 def _load_configured_agent(options: ChatOptions) -> AgentConfig:
