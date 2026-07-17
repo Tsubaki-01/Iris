@@ -21,10 +21,12 @@ from iris.hitl import (
     QuestionInteractionRequest,
     QuestionInteractionResponse,
 )
-from iris.message import LLMResponse, TextBlock
+from iris.hitl.tools import AskQuestionTool
+from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
-from iris.runtime.models import RuntimeStatus, RuntimeTurnResult
+from iris.runtime.models import RuntimeErrorInfo, RuntimeStatus, RuntimeTurnResult
 from iris.session import InMemorySessionStore
+from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutor, ToolRegistry
 
 
 class FakeProvider:
@@ -32,11 +34,47 @@ class FakeProvider:
 
     def __init__(self, responses: list[LLMResponse]) -> None:
         self.responses = responses
+        self.requests: list[LLMRequest] = []
 
-    async def complete(self, request):  # type: ignore[no-untyped-def]
+    async def complete(self, request: LLMRequest) -> LLMResponse:
         """返回下一条响应。"""
-        del request
+        self.requests.append(request)
         return self.responses.pop(0)
+
+
+class SequenceRuntime:
+    """按顺序返回 waiting/resume 结果并记录调用上下文。"""
+
+    def __init__(
+        self,
+        initial: RuntimeTurnResult,
+        resumed: list[RuntimeTurnResult],
+    ) -> None:
+        self.initial = initial
+        self.resumed = resumed
+        self.run_inputs: list[str] = []
+        self.resume_calls: list[tuple[str, object | None]] = []
+        self.loop_ids: list[int] = []
+
+    async def run_loop(
+        self,
+        user_input: str,
+        *,
+        options: Any = None,
+    ) -> RuntimeTurnResult:
+        del options
+        self.run_inputs.append(user_input)
+        self.loop_ids.append(id(asyncio.get_running_loop()))
+        return self.initial
+
+    async def resume(
+        self,
+        interaction_id: str,
+        response: object | None = None,
+    ) -> RuntimeTurnResult:
+        self.resume_calls.append((interaction_id, response))
+        self.loop_ids.append(id(asyncio.get_running_loop()))
+        return self.resumed.pop(0)
 
 
 def _agent_config() -> AgentConfig:
@@ -120,6 +158,34 @@ def _question_interaction() -> HumanInteraction:
         kind=InteractionKind.QUESTION,
         request=request,
         checkpoint={},
+    )
+
+
+def _waiting_result(interaction: HumanInteraction) -> RuntimeTurnResult:
+    tool_name = (
+        interaction.request.tool_name
+        if isinstance(interaction.request, PermissionInteractionRequest)
+        else "ask_question"
+    )
+    return RuntimeTurnResult(
+        session_id=interaction.session_id,
+        run_id=interaction.run_id,
+        status=RuntimeStatus.WAITING_HUMAN,
+        assistant_message=Msg.assistant(
+            [ToolUseBlock(id=interaction.tool_call_id, name=tool_name, input={})]
+        ),
+        steps=1,
+        pending_interaction=interaction,
+    )
+
+
+def _terminal_result(text: str = "完成") -> RuntimeTurnResult:
+    return RuntimeTurnResult(
+        session_id="demo",
+        run_id="run-1",
+        status=RuntimeStatus.OK,
+        assistant_message=Msg.assistant(text),
+        steps=2,
     )
 
 
@@ -252,6 +318,274 @@ def test_collect_interaction_response_propagates_terminal_interrupt(
             input_func=raise_terminal_error,
             renderer=renderer,
         )
+
+
+def test_chat_loop_resumes_multiple_gates_in_order_on_one_event_loop() -> None:
+    permission = _permission_interaction()
+    question = _question_interaction()
+    runtime = SequenceRuntime(
+        _waiting_result(permission),
+        [_waiting_result(question), _terminal_result("多 gate 完成")],
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "y", "1", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert runtime.run_inputs == ["开始"]
+    assert [interaction_id for interaction_id, _ in runtime.resume_calls] == [
+        permission.interaction_id,
+        question.interaction_id,
+    ]
+    assert isinstance(runtime.resume_calls[0][1], PermissionInteractionResponse)
+    assert isinstance(runtime.resume_calls[1][1], QuestionInteractionResponse)
+    assert len(set(runtime.loop_ids)) == 1
+    output = console.export_text()
+    assert "多 gate 完成" in output
+    assert output.count("ASSISTANT") == 1
+
+
+def test_chat_loop_invalid_interaction_input_does_not_resume_early() -> None:
+    permission = _permission_interaction()
+    runtime = SequenceRuntime(
+        _waiting_result(permission),
+        [_terminal_result()],
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "later", "yes", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert len(runtime.resume_calls) == 1
+    assert "y/yes/n/no" in console.export_text()
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_code"),
+    [(KeyboardInterrupt, 130), (EOFError, 0)],
+)
+def test_chat_loop_interaction_interrupt_preserves_pending(
+    error_type: type[BaseException],
+    expected_code: int,
+) -> None:
+    permission = _permission_interaction()
+    runtime = SequenceRuntime(_waiting_result(permission), [])
+    renderer, console = _renderer()
+    input_calls = 0
+
+    def read_input(prompt: str) -> str:
+        nonlocal input_calls
+        del prompt
+        input_calls += 1
+        if input_calls == 1:
+            return "开始"
+        raise error_type
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=read_input,
+    )
+
+    assert code == expected_code
+    assert runtime.resume_calls == []
+    output = console.export_text()
+    assert permission.interaction_id in output
+    assert "ASSISTANT" not in output
+    if error_type is KeyboardInterrupt:
+        assert "interaction 保持 pending" in output
+
+
+def test_chat_loop_resume_error_exits_without_reading_next_turn() -> None:
+    permission = _permission_interaction()
+    runtime = SequenceRuntime(
+        _waiting_result(permission),
+        [
+            RuntimeTurnResult(
+                session_id="demo",
+                run_id="run-1",
+                status=RuntimeStatus.ERROR,
+                steps=1,
+                error=RuntimeErrorInfo(
+                    code="RESUME_FAILED",
+                    message="恢复失败",
+                    source="runtime",
+                ),
+            )
+        ],
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "y", "/exit"])
+    input_calls = 0
+
+    def read_input(prompt: str) -> str:
+        nonlocal input_calls
+        del prompt
+        input_calls += 1
+        return next(inputs)
+
+    code = run_chat_loop(
+        runtime=runtime,  # type: ignore[arg-type]
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=ChatTraceStore(),
+        renderer=renderer,
+        input_func=read_input,
+    )
+
+    assert code == 1
+    assert input_calls == 2
+    assert len(runtime.resume_calls) == 1
+    assert "RESUME_FAILED" in console.export_text()
+
+
+def test_chat_loop_real_runtime_handles_permission_question_and_trace_once() -> None:
+    writes: list[str] = []
+
+    def write_probe() -> str:
+        writes.append("write")
+        return "written"
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write_probe,
+        description="写入探针",
+        capabilities={ToolCapability.WRITE},
+    )
+    registry.register(AskQuestionTool())
+    trace_store = ChatTraceStore()
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="fake",
+                content=[
+                    TextBlock(text="需要人工处理"),
+                    ToolUseBlock(id="write", name="write_probe", input={}),
+                    ToolUseBlock(
+                        id="question",
+                        name="ask_question",
+                        input={"question": "请选择部署环境", "options": ["测试", "生产"]},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            _response("全部完成"),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=TracingRuntimeProvider(provider, trace_store),
+        session_store=InMemorySessionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(
+            registry,
+            permission_policy=DefaultPermissionPolicy(write_mode="confirm"),
+        ),
+        workspace_root=Path.cwd(),
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "y", "1", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=trace_store,
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert writes == ["write"]
+    assert len(provider.requests) == 2
+    answer_contents = [
+        block.content for message in provider.requests[1].messages for block in message.tool_results
+    ]
+    assert "测试" in answer_contents
+    assert len(trace_store.steps_for_turn(1)) == 2
+    output = console.export_text()
+    assert "PERMISSION" in output
+    assert "QUESTION" in output
+    assert "全部完成" in output
+    assert output.count("REQUEST 1.1") == 1
+    assert output.count("REQUEST 1.2") == 1
+    assert output.count("ASSISTANT") == 1
+
+
+def test_chat_loop_real_runtime_rejects_permission_without_side_effect() -> None:
+    writes: list[str] = []
+
+    def write_probe() -> str:
+        writes.append("write")
+        return "written"
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write_probe,
+        description="写入探针",
+        capabilities={ToolCapability.WRITE},
+    )
+    trace_store = ChatTraceStore()
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="fake",
+                content=[ToolUseBlock(id="write", name="write_probe", input={})],
+                finish_reason="tool_calls",
+            ),
+            _response("拒绝后继续"),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=TracingRuntimeProvider(provider, trace_store),
+        session_store=InMemorySessionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(
+            registry,
+            permission_policy=DefaultPermissionPolicy(write_mode="confirm"),
+        ),
+        workspace_root=Path.cwd(),
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=trace_store,
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    assert writes == []
+    assert len(provider.requests) == 2
+    assert "USER_REJECTED" in console.export_text()
 
 
 def test_chat_loop_reuses_session_and_renders_trace() -> None:

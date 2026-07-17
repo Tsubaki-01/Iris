@@ -18,7 +18,7 @@ from ..hitl import (
     PermissionInteractionRequest,
     QuestionInteractionRequest,
 )
-from ..runtime.models import RuntimeErrorInfo, RuntimeTurnResult
+from ..runtime.models import RuntimeErrorInfo, RuntimeStatus, RuntimeTurnResult
 from ..tools import ToolResult
 from .trace import TraceStep
 
@@ -169,6 +169,8 @@ class ChatRenderer:
 
     def render_assistant(self, result: RuntimeTurnResult) -> None:
         """渲染助手最终回复或 runtime 状态。"""
+        if result.status is RuntimeStatus.WAITING_HUMAN:
+            return
         if result.error is not None:
             self.render_error(result.error)
         if result.assistant_message is None:
