@@ -7,11 +7,20 @@ from typing import Any
 import pytest
 from rich.console import Console
 
+import iris.cli.chat as chat_module
 from iris.agents import AgentConfig
 from iris.cli.chat import ChatOptions, run_chat_loop
 from iris.cli.render import ChatRenderer
 from iris.cli.trace import ChatTraceStore, TracingRuntimeProvider
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
+from iris.hitl import (
+    HumanInteraction,
+    InteractionKind,
+    PermissionInteractionRequest,
+    PermissionInteractionResponse,
+    QuestionInteractionRequest,
+    QuestionInteractionResponse,
+)
 from iris.message import LLMResponse, TextBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeStatus, RuntimeTurnResult
@@ -40,9 +49,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="保持简洁")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="保持简洁")])
     )
 
 
@@ -77,6 +84,176 @@ def _renderer() -> tuple[ChatRenderer, Console]:
     return ChatRenderer(console), console
 
 
+def _permission_interaction() -> HumanInteraction:
+    request = PermissionInteractionRequest(
+        tool_call_id="call_write",
+        tool_name="write_file",
+        arguments={"path": "notes.md"},
+        reason="工具需要写入工作区",
+        workspace_root=str(Path.cwd()),
+        call_fingerprint="a" * 64,
+    )
+    return HumanInteraction(
+        interaction_id="int_11111111111111111111111111111111",
+        session_id="demo",
+        run_id="run-1",
+        step_index=0,
+        tool_call_id=request.tool_call_id,
+        kind=InteractionKind.PERMISSION,
+        request=request,
+        checkpoint={},
+    )
+
+
+def _question_interaction() -> HumanInteraction:
+    request = QuestionInteractionRequest(
+        tool_call_id="call_question",
+        question="请选择部署环境",
+        options=["测试", "生产"],
+    )
+    return HumanInteraction(
+        interaction_id="int_22222222222222222222222222222222",
+        session_id="demo",
+        run_id="run-1",
+        step_index=0,
+        tool_call_id=request.tool_call_id,
+        kind=InteractionKind.QUESTION,
+        request=request,
+        checkpoint={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("y", "approve"),
+        ("yes", "approve"),
+        ("", "reject"),
+        ("n", "reject"),
+        ("no", "reject"),
+    ],
+)
+def test_collect_permission_response_maps_supported_tokens(
+    token: str,
+    expected: str,
+) -> None:
+    renderer, _ = _renderer()
+
+    response = chat_module._collect_interaction_response(
+        _permission_interaction(),
+        input_func=lambda prompt: token,
+        renderer=renderer,
+    )
+
+    assert isinstance(response, PermissionInteractionResponse)
+    assert response.decision == expected
+
+
+def test_collect_permission_response_reprompts_invalid_token() -> None:
+    renderer, console = _renderer()
+    inputs = iter(["later", "yes"])
+    prompts: list[str] = []
+
+    def read_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return next(inputs)
+
+    response = chat_module._collect_interaction_response(
+        _permission_interaction(),
+        input_func=read_input,
+        renderer=renderer,
+    )
+
+    assert isinstance(response, PermissionInteractionResponse)
+    assert response.decision == "approve"
+    assert len(prompts) == 2
+    output = console.export_text()
+    assert "y/yes/n/no" in output
+    assert output.count(_permission_interaction().interaction_id) == 1
+
+
+@pytest.mark.parametrize(("token", "expected"), [("1", "测试"), ("2", "生产")])
+def test_collect_question_response_maps_numbered_option(
+    token: str,
+    expected: str,
+) -> None:
+    renderer, _ = _renderer()
+
+    response = chat_module._collect_interaction_response(
+        _question_interaction(),
+        input_func=lambda prompt: token,
+        renderer=renderer,
+    )
+
+    assert isinstance(response, QuestionInteractionResponse)
+    assert response.answer == expected
+
+
+def test_collect_question_response_reprompts_out_of_range_number() -> None:
+    renderer, console = _renderer()
+    inputs = iter(["3", "2"])
+
+    response = chat_module._collect_interaction_response(
+        _question_interaction(),
+        input_func=lambda prompt: next(inputs),
+        renderer=renderer,
+    )
+
+    assert isinstance(response, QuestionInteractionResponse)
+    assert response.answer == "生产"
+    output = console.export_text()
+    assert "选项编号" in output
+    assert output.count(_question_interaction().interaction_id) == 1
+
+
+def test_collect_question_response_accepts_trimmed_free_text() -> None:
+    renderer, _ = _renderer()
+
+    response = chat_module._collect_interaction_response(
+        _question_interaction(),
+        input_func=lambda prompt: "  灰度环境  ",
+        renderer=renderer,
+    )
+
+    assert isinstance(response, QuestionInteractionResponse)
+    assert response.answer == "灰度环境"
+
+
+def test_collect_question_response_reprompts_blank_answer() -> None:
+    renderer, console = _renderer()
+    inputs = iter(["   ", "测试"])
+
+    response = chat_module._collect_interaction_response(
+        _question_interaction(),
+        input_func=lambda prompt: next(inputs),
+        renderer=renderer,
+    )
+
+    assert isinstance(response, QuestionInteractionResponse)
+    assert response.answer == "测试"
+    output = console.export_text()
+    assert "回答不能为空" in output
+    assert output.count(_question_interaction().interaction_id) == 1
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, EOFError])
+def test_collect_interaction_response_propagates_terminal_interrupt(
+    error_type: type[BaseException],
+) -> None:
+    renderer, _ = _renderer()
+
+    def raise_terminal_error(prompt: str) -> str:
+        del prompt
+        raise error_type
+
+    with pytest.raises(error_type):
+        chat_module._collect_interaction_response(
+            _permission_interaction(),
+            input_func=raise_terminal_error,
+            renderer=renderer,
+        )
+
+
 def test_chat_loop_reuses_session_and_renders_trace() -> None:
     trace_store = ChatTraceStore()
     renderer, console = _renderer()
@@ -98,9 +275,7 @@ def test_chat_loop_reuses_session_and_renders_trace() -> None:
     assert len(second_steps) == 1
     assert first_steps[0].request.messages[-1].text == "第一轮"
     assert any(message.text == "第一轮" for message in second_steps[0].request.messages)
-    assert any(
-        message.text == "第一答复" for message in second_steps[0].request.messages
-    )
+    assert any(message.text == "第一答复" for message in second_steps[0].request.messages)
 
     output = console.export_text()
     assert "USER #1" in output

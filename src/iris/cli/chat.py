@@ -10,6 +10,15 @@ from typing import Literal
 
 from ..agents import AgentConfig, load_agent_config
 from ..config import init_config, is_config_initialized
+from ..exceptions import HITLCheckpointInvalidError
+from ..hitl import (
+    HumanInteraction,
+    InteractionKind,
+    PermissionInteractionRequest,
+    PermissionInteractionResponse,
+    QuestionInteractionRequest,
+    QuestionInteractionResponse,
+)
 from ..providers import create_provider_client
 from ..runtime import AgentRuntime, RuntimeFactory
 from ..runtime.models import BoundedLoopOptions, RuntimeOptions, RuntimeTurnResult
@@ -168,12 +177,50 @@ async def _run_chat_loop_async(
         renderer.render_assistant(result)
 
 
+def _collect_interaction_response(
+    interaction: HumanInteraction,
+    *,
+    input_func: Callable[[str], str],
+    renderer: ChatRenderer,
+) -> PermissionInteractionResponse | QuestionInteractionResponse:
+    """渲染人工请求并把终端输入映射为现有 typed response。"""
+    request = interaction.request
+    if interaction.kind is InteractionKind.PERMISSION and isinstance(
+        request, PermissionInteractionRequest
+    ):
+        renderer.render_permission_interaction(interaction)
+        while True:
+            token = input_func("批准该调用？ [y/N] ").strip().lower()
+            if token in {"y", "yes"}:
+                return PermissionInteractionResponse(decision="approve")
+            if token in {"", "n", "no"}:
+                return PermissionInteractionResponse(decision="reject")
+            renderer.render_warning("请输入 y/yes/n/no；空输入默认拒绝。")
+
+    if interaction.kind is InteractionKind.QUESTION and isinstance(
+        request, QuestionInteractionRequest
+    ):
+        renderer.render_question_interaction(interaction)
+        while True:
+            answer = input_func("回答> ").strip()
+            if not answer:
+                renderer.render_warning("回答不能为空，请重新输入。")
+                continue
+            if request.options and answer.isdecimal():
+                option_index = int(answer) - 1
+                if 0 <= option_index < len(request.options):
+                    return QuestionInteractionResponse(answer=request.options[option_index])
+                renderer.render_warning("请输入有效的选项编号，或输入自由文本。")
+                continue
+            return QuestionInteractionResponse(answer=answer)
+
+    raise HITLCheckpointInvalidError("interaction kind/request 不匹配")
+
+
 def _load_configured_agent(options: ChatOptions) -> AgentConfig:
     """初始化全局配置并读取 agent YAML。"""
     if not is_config_initialized():
-        init_config(
-            env_file=str(options.env_file) if options.env_file is not None else None
-        )
+        init_config(env_file=str(options.env_file) if options.env_file is not None else None)
     return load_agent_config(options.config_path)
 
 

@@ -11,6 +11,13 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from ..agents import AgentConfig
+from ..exceptions import HITLCheckpointInvalidError
+from ..hitl import (
+    HumanInteraction,
+    InteractionKind,
+    PermissionInteractionRequest,
+    QuestionInteractionRequest,
+)
 from ..runtime.models import RuntimeErrorInfo, RuntimeTurnResult
 from ..tools import ToolResult
 from .trace import TraceStep
@@ -56,9 +63,54 @@ class ChatRenderer:
 
     def render_user_turn(self, turn_index: int, text: str) -> None:
         """渲染用户输入。"""
-        self.console.print(
-            Panel(text, title=f"USER #{turn_index}", border_style="blue")
+        self.console.print(Panel(text, title=f"USER #{turn_index}", border_style="blue"))
+
+    def render_permission_interaction(self, interaction: HumanInteraction) -> None:
+        """渲染一次精确工具调用的权限确认。"""
+        request = interaction.request
+        if interaction.kind is not InteractionKind.PERMISSION or not isinstance(
+            request, PermissionInteractionRequest
+        ):
+            raise HITLCheckpointInvalidError("permission interaction kind/request 不匹配")
+        arguments = json.dumps(request.arguments, ensure_ascii=False, indent=2)
+        body = (
+            f"interaction_id: {interaction.interaction_id}\n"
+            f"tool_name: {request.tool_name}\n"
+            f"arguments:\n{arguments}\n"
+            f"reason: {request.reason}\n"
+            f"workspace_root: {request.workspace_root}\n"
+            "本次批准只适用于该调用。"
         )
+        self.console.print(Panel(body, title="PERMISSION [y/N]", border_style="yellow"))
+
+    def render_question_interaction(self, interaction: HumanInteraction) -> None:
+        """渲染人工问题及可选答案。"""
+        request = interaction.request
+        if interaction.kind is not InteractionKind.QUESTION or not isinstance(
+            request, QuestionInteractionRequest
+        ):
+            raise HITLCheckpointInvalidError("question interaction kind/request 不匹配")
+        options = "\n".join(
+            f"{index}. {option}" for index, option in enumerate(request.options, start=1)
+        )
+        option_block = f"{options}\n" if options else ""
+        body = (
+            f"interaction_id: {interaction.interaction_id}\n"
+            f"question: {request.question}\n"
+            f"{option_block}"
+            "也可输入自由文本。"
+        )
+        self.console.print(Panel(body, title="QUESTION", border_style="yellow"))
+
+    def render_recovery_notice(self, interaction: HumanInteraction) -> None:
+        """渲染 startup recovery 提示。"""
+        body = (
+            "正在恢复未完成的人工交互。\n"
+            f"interaction_id: {interaction.interaction_id}\n"
+            f"kind: {interaction.kind.value}\n"
+            f"status: {interaction.status.value}"
+        )
+        self.console.print(Panel(body, title="RECOVERY", border_style="yellow"))
 
     def render_trace_compact(self, steps: list[TraceStep]) -> None:
         """渲染简洁 trace 表。"""
