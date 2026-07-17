@@ -209,6 +209,22 @@ checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate �
 Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝
 重放，`result_ready` 重试消息/event 提交，`result_committed` 从安全边界继续。
 
+每次 `resume()` 返回前都会为同一个 `run_id` 追加新的 run snapshot 并替换
+`latest_run`。后续 gate 会写入新的 `interaction_id`；`ok`、`max_steps` 和 `error` 终态会
+移除 waiting marker。若 metadata 保存失败，`resume()` 返回 `session` 错误，不会先向调用方
+报告成功。
+
+### `AgentRuntime.load_resumable_interaction(session_id)`
+
+为 host adapter 查询当前 session 可交给 `resume()` 的 interaction。查询以
+`latest_run.waiting_human` 和 `latest_run.interaction_id` 为主索引，因此能返回 `pending`、
+`resolved` 或 `consumed` lifecycle；唯一 pending interaction 只用于覆盖新 gate 已创建但
+marker 尚未写入的窄窗口。
+
+该方法只读取 session/interaction 状态，不 resolve response、不 claim interaction，也不执行
+工具。marker 缺失目标、指向其它 session，或与另一个 active pending interaction 冲突时会
+fail closed。
+
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 
 执行有界工具循环。assistant 没有工具调用时返回 `RuntimeStatus.OK`；如果每一步都继续
