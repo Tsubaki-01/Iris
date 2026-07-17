@@ -225,6 +225,53 @@ marker 尚未写入的窄窗口。
 工具。marker 缺失目标、指向其它 session，或与另一个 active pending interaction 冲突时会
 fail closed。
 
+Host adapter 可在读取新用户输入前执行启动恢复：
+
+```python
+from collections.abc import Callable
+
+from iris.hitl import (
+    HumanInteraction,
+    HumanInteractionResponse,
+    InteractionStatus,
+)
+from iris.runtime import AgentRuntime
+from iris.runtime.models import RuntimeStatus, RuntimeTurnResult
+
+
+async def recover_on_start(
+    runtime: AgentRuntime,
+    session_id: str,
+    collect_response: Callable[[HumanInteraction], HumanInteractionResponse],
+) -> RuntimeTurnResult | None:
+    interaction = runtime.load_resumable_interaction(session_id)
+    if interaction is None:
+        return None
+
+    response = (
+        collect_response(interaction)
+        if interaction.status is InteractionStatus.PENDING
+        else None
+    )
+    result = await runtime.resume(interaction.interaction_id, response)
+    while result.status is RuntimeStatus.WAITING_HUMAN:
+        pending = result.pending_interaction
+        assert pending is not None
+        result = await runtime.resume(
+            pending.interaction_id,
+            collect_response(pending),
+        )
+    return result
+```
+
+`iris chat` 使用这一路径作为首个 terminal host adapter：启动恢复的 provider trace 标记为
+turn 0，普通输入仍从 turn 1 开始。adapter 只为 `pending` 收集新 response；`resolved` 和
+`consumed` 必须传 `None`，避免重复响应。Ctrl+C/EOF 发生在人工 prompt 时不会调用
+`resume()`，所以不等价于 reject/cancel。
+
+跨进程恢复要求 session 与 interaction 共用 SQLite backend。内存 backend 只适合当前进程；
+`claimed` 且 outcome unknown 的 interaction 会 fail closed，不会自动重放工具。
+
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 
 执行有界工具循环。assistant 没有工具调用时返回 `RuntimeStatus.OK`；如果每一步都继续
