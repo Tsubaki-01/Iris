@@ -80,6 +80,8 @@ uv run iris chat demo/agent.yaml `
 ```text
 读取 workspace 里的文件列表
 看一下 hello.py 做了什么
+在 workspace 新建 hitl-demo.txt，内容为 approved once
+调用 ask_question 询问我部署到测试还是生产环境
 ```
 
 常用 slash command：
@@ -91,12 +93,37 @@ uv run iris chat demo/agent.yaml `
 ## 工具与写入权限
 
 `agent.yaml` 当前暴露了 `file.read`、`file.list`、`file.grep`、`file.write` 和
-`file.edit`，并将 `permissions.writes` 设置为 `allow`。这些工具的工作区限制在
-`demo/workspace/` 下。
+`file.edit`，以及 `human.ask` 对应的 `ask_question`；这些工具的工作区限制在
+`demo/workspace/` 下。`permissions.writes` 设置为 `confirm`，因此每个写调用都会先显示
+一次 `PERMISSION [y/N]`：
 
-`context.yaml` 同时要求 demo agent 不主动执行写入、删除、提交或权限提升操作。因此这个
-demo 更适合验证读取、搜索、trace 和 session 行为；如需验证写入工具，建议先明确给出写入
-目标，并检查 `demo/workspace/` 内的文件变化。
+- 输入 `y` 或 `yes` 只批准面板中展示的精确调用一次。
+- 输入空值、`n` 或 `no` 会 reject，并向模型回灌 `USER_REJECTED`；目标文件不会改变。
+- 其它输入不会调用 `resume()`，CLI 会继续要求输入有效选项。
+
+`allow` 会直接执行写调用；`deny` 会直接拒绝，不能被 CLI 的 `y` 覆盖。
+
+`ask_question` 会显示 `QUESTION` 面板。有 options 时可输入从 `1` 开始的编号，也可以输入
+自由文本；空回答会重新询问。同一个 assistant response 若依次触发 permission/question，
+CLI 会按 runtime 返回的 gate 顺序处理，最后只渲染一次终态答复。
+
+### 重启恢复
+
+demo 使用 SQLite session。要验证恢复：
+
+1. 使用固定的 `--session-id demo` 触发 permission 或 question。
+2. 在 `[y/N]` 或 `回答>` prompt 处按 Ctrl+C；EOF 也可结束当前进程。
+3. 使用完全相同的 agent 配置和 session ID 重新运行命令。
+4. CLI 会先显示 `RECOVERY` 和同一个 `interaction_id`，完成它后才读取新的普通输入。
+5. interaction 完成后再次重启，确认不再显示该 recovery。
+
+Ctrl+C/EOF 不等于 reject 或 cancel，不会提交 response，interaction 仍保持 pending。
+SQLite backend 支持这种跨进程恢复；`session.backend: none` 的内存 store 不作此承诺。
+若 runtime 发现 interaction 已被领取但工具执行结果未知，会返回
+`HITL_EXECUTION_OUTCOME_UNKNOWN` 并退出，不会猜测结果或重放工具。
+
+`context.yaml` 要求只有在用户明确提出时才执行写入，并继续禁止删除、提交或权限提升。
+验证 approve/reject 时请给出明确的相对路径和内容，并检查 `demo/workspace/` 内的文件变化。
 
 ## 产物
 
