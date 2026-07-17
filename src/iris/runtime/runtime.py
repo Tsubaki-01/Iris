@@ -25,6 +25,7 @@ from ..context import ContextBuilder, ContextBuildInput
 from ..exceptions import (
     HITLCheckpointInvalidError,
     HITLExecutionOutcomeUnknownError,
+    HITLNotFoundError,
     HITLResponseRequiredError,
     IrisError,
 )
@@ -252,6 +253,90 @@ class AgentRuntime:
             )
         raise HITLCheckpointInvalidError("未知的 HITL interaction 请求")
 
+    def load_resumable_interaction(self, session_id: str) -> HumanInteraction | None:
+        """读取当前 session 可安全交给 ``resume()`` 的 interaction。
+
+        latest run marker 是恢复发现的主索引；唯一 pending interaction 只用于覆盖新 gate
+        已创建但 marker 尚未写入的窄窗口。该查询不会修改 interaction 或 session。
+
+        Args:
+            session_id: 要检查的 session 标识。
+
+        Returns:
+            可恢复的 interaction；当前没有恢复目标时返回 ``None``。
+
+        Raises:
+            HITLCheckpointInvalidError: marker 缺失目标、跨 session 或与 pending 状态冲突。
+        """
+        metadata = self.session_store.load_run_metadata(session_id)
+        pending = self.interaction_service.list_pending(session_id)
+        if len(pending) > 1:
+            raise HITLCheckpointInvalidError(
+                "同一 session 存在多个 pending HITL interaction",
+                session_id=session_id,
+            )
+        fallback = pending[0] if pending else None
+        latest = metadata.get("latest_run")
+        if not isinstance(latest, dict) or latest.get("waiting_human") is not True:
+            return fallback
+
+        interaction_id = latest.get("interaction_id")
+        if not isinstance(interaction_id, str) or not interaction_id.strip():
+            if fallback is not None:
+                return fallback
+            raise HITLCheckpointInvalidError(
+                "HITL waiting marker 缺少 interaction_id",
+                session_id=session_id,
+            )
+        try:
+            target = self.interaction_service.get(interaction_id)
+        except HITLNotFoundError as exc:
+            raise HITLCheckpointInvalidError(
+                "HITL waiting marker 指向的 interaction 不存在",
+                session_id=session_id,
+                interaction_id=interaction_id,
+            ) from exc
+        if target.session_id != session_id:
+            raise HITLCheckpointInvalidError(
+                "HITL waiting marker 与请求 session 不匹配",
+                session_id=session_id,
+                interaction_id=interaction_id,
+            )
+        if fallback is None or fallback.interaction_id == target.interaction_id:
+            return target
+        if (
+            target.status is InteractionStatus.CONSUMED
+            and target.resume_phase is InteractionResumePhase.RESULT_COMMITTED
+        ):
+            return fallback
+        raise HITLCheckpointInvalidError(
+            "HITL waiting marker 与 pending interaction 冲突",
+            session_id=session_id,
+            interaction_id=interaction_id,
+            pending_interaction_id=fallback.interaction_id,
+        )
+
+    def _synchronize_resume_metadata(self, result: RuntimeTurnResult) -> RuntimeTurnResult:
+        """在向 host 返回 resume 结果前同步 latest run snapshot。"""
+        try:
+            existing = self.session_store.load_run_metadata(result.session_id)
+            metadata = _build_resume_run_metadata(
+                existing=existing,
+                result=result,
+                message_count=len(self.session_store.load_messages(result.session_id)),
+            )
+            self.session_store.save_run_metadata(result.session_id, metadata)
+        except Exception as exc:
+            return _error_result(
+                session_id=result.session_id,
+                run_id=result.run_id,
+                error=normalize_runtime_error(exc),
+                assistant_message=result.assistant_message,
+                steps=result.steps,
+                metadata=result.metadata,
+            )
+        return result
+
     async def resume(
         self,
         interaction_id: str,
@@ -278,9 +363,11 @@ class AgentRuntime:
                 raise HITLCheckpointInvalidError("HITL checkpoint 与当前 runtime 不匹配")
             self.tool_bridge.restore_read_state(
                 interaction.session_id,
-                checkpoint.get("read_state")
-                if isinstance(checkpoint.get("read_state"), dict)
-                else None,
+                (
+                    checkpoint.get("read_state")
+                    if isinstance(checkpoint.get("read_state"), dict)
+                    else None
+                ),
             )
             calls = [ToolUseBlock.model_validate(item) for item in checkpoint["tool_calls"]]
             plan = self.tool_bridge.preflight_once(
@@ -315,14 +402,16 @@ class AgentRuntime:
                     raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
                 committed = await self._commit_ready_interaction(interaction)
                 if checkpoint.get("continuation_complete") is True:
-                    return committed
-                return await self._resume_batch(
-                    committed=committed,
-                    interaction=interaction,
-                    checkpoint=checkpoint,
-                    options=options,
-                    plan=plan,
-                    next_index=int(checkpoint["next_tool_index"]),
+                    return self._synchronize_resume_metadata(committed)
+                return self._synchronize_resume_metadata(
+                    await self._resume_batch(
+                        committed=committed,
+                        interaction=interaction,
+                        checkpoint=checkpoint,
+                        options=options,
+                        plan=plan,
+                        next_index=int(checkpoint["next_tool_index"]),
+                    )
                 )
 
             self.interaction_service.claim(interaction_id, checkpoint)
@@ -377,23 +466,28 @@ class AgentRuntime:
                 ready_checkpoint,
             )
             committed = await self._commit_ready_interaction(interaction)
-            return await self._resume_batch(
-                committed=committed,
-                interaction=interaction,
-                checkpoint=ready_checkpoint,
-                options=options,
-                plan=plan,
-                next_index=current_index + 1,
+            return self._synchronize_resume_metadata(
+                await self._resume_batch(
+                    committed=committed,
+                    interaction=interaction,
+                    checkpoint=ready_checkpoint,
+                    options=options,
+                    plan=plan,
+                    next_index=current_index + 1,
+                )
             )
         except Exception as exc:
             loaded_interaction = self.interaction_store.load_interaction(interaction_id)
-            return _error_result(
-                session_id=loaded_interaction.session_id
-                if loaded_interaction is not None
-                else "default",
+            error_result = _error_result(
+                session_id=(
+                    loaded_interaction.session_id if loaded_interaction is not None else "default"
+                ),
                 run_id=loaded_interaction.run_id if loaded_interaction is not None else "resume",
                 error=normalize_runtime_error(exc),
             )
+            if loaded_interaction is None:
+                return error_result
+            return self._synchronize_resume_metadata(error_result)
 
     async def _resume_batch(
         self,
@@ -1443,6 +1537,39 @@ def _build_run_metadata(
         latest_run["waiting_human"] = True
     if interaction_id is not None:
         latest_run["interaction_id"] = interaction_id
+    runs = existing.get("runs", [])
+    run_list = list(runs) if isinstance(runs, list) else []
+    run_list.append(latest_run)
+    return {**existing, "latest_run": latest_run, "runs": run_list}
+
+
+def _build_resume_run_metadata(
+    *,
+    existing: dict[str, object],
+    result: RuntimeTurnResult,
+    message_count: int,
+) -> dict[str, object]:
+    """基于原 run snapshot 构建 resume 后的 append-like metadata。"""
+    previous = existing.get("latest_run")
+    latest_run = dict(previous) if isinstance(previous, dict) else {}
+    latest_run.update(
+        session_id=result.session_id,
+        run_id=result.run_id,
+        status=result.status.value,
+        message_count=message_count,
+        steps=result.steps,
+        tool_count=len(result.tool_results),
+    )
+    latest_run.pop("waiting_human", None)
+    latest_run.pop("interaction_id", None)
+    latest_run.pop("error", None)
+    if result.error is not None:
+        latest_run["error"] = result.error.model_dump(mode="json")
+    if result.status is RuntimeStatus.WAITING_HUMAN:
+        if result.pending_interaction is None:
+            raise HITLCheckpointInvalidError("waiting_human 结果缺少 pending interaction")
+        latest_run["waiting_human"] = True
+        latest_run["interaction_id"] = result.pending_interaction.interaction_id
     runs = existing.get("runs", [])
     run_list = list(runs) if isinstance(runs, list) else []
     run_list.append(latest_run)

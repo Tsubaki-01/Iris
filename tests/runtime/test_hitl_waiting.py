@@ -7,7 +7,8 @@ from fakes import FakeProvider
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
-from iris.hitl import InMemoryInteractionStore
+from iris.exceptions import HITLCheckpointInvalidError
+from iris.hitl import InMemoryInteractionStore, QuestionInteractionResponse
 from iris.hitl.models import InteractionKind, PermissionInteractionRequest
 from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
@@ -63,6 +64,27 @@ def _tool_response(*tool_calls: ToolUseBlock) -> LLMResponse:
     )
 
 
+def _question_runtime(
+    responses: list[LLMResponse],
+    *,
+    session_store: InMemorySessionStore | None = None,
+    interaction_store: InMemoryInteractionStore | None = None,
+) -> AgentRuntime:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    return AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(responses),
+        session_store=session_store,
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_turn_waits_and_persists_question_interaction_before_execution() -> None:
     registry = ToolRegistry()
@@ -99,6 +121,7 @@ async def test_run_turn_waits_and_persists_question_interaction_before_execution
     latest_run = session_store.load_run_metadata("session-1")["latest_run"]
     assert latest_run["waiting_human"] is True
     assert latest_run["interaction_id"] == result.pending_interaction.interaction_id
+    assert runtime.load_resumable_interaction("session-1") == result.pending_interaction
     checkpoint = result.pending_interaction.checkpoint
     assert checkpoint["run_mode"] == "turn"
     assert checkpoint["next_tool_index"] == 0
@@ -213,6 +236,127 @@ async def test_invalid_checkpoint_returns_structured_error_without_interaction()
     assert result.error is not None
     assert result.error.code == "HITL_CHECKPOINT_INVALID"
     assert interaction_store.list_pending_interactions() == []
+
+
+def test_load_resumable_interaction_returns_none_without_marker_or_pending() -> None:
+    runtime = _question_runtime([])
+
+    assert runtime.load_resumable_interaction("session-1") is None
+
+
+@pytest.mark.asyncio
+async def test_load_resumable_interaction_uses_orphan_pending_fallback() -> None:
+    session_store = InMemorySessionStore()
+    runtime = _question_runtime([_question_response()], session_store=session_store)
+    waiting = await runtime.run_turn(
+        "需要部署配置",
+        options=RuntimeOptions(session_id="session-1", run_id="run-1"),
+    )
+    assert waiting.pending_interaction is not None
+    session_store.save_run_metadata(
+        "session-1",
+        {"latest_run": {"status": "ok"}, "runs": []},
+    )
+
+    assert runtime.load_resumable_interaction("session-1") == waiting.pending_interaction
+
+
+@pytest.mark.asyncio
+async def test_load_resumable_interaction_uses_pending_when_marker_lacks_id() -> None:
+    session_store = InMemorySessionStore()
+    runtime = _question_runtime([_question_response()], session_store=session_store)
+    waiting = await runtime.run_turn(
+        "需要部署配置",
+        options=RuntimeOptions(session_id="session-1", run_id="run-1"),
+    )
+    assert waiting.pending_interaction is not None
+    session_store.save_run_metadata(
+        "session-1",
+        {"latest_run": {"waiting_human": True}, "runs": []},
+    )
+
+    assert runtime.load_resumable_interaction("session-1") == waiting.pending_interaction
+
+
+def test_load_resumable_interaction_rejects_marker_without_id() -> None:
+    session_store = InMemorySessionStore()
+    session_store.save_run_metadata(
+        "session-1",
+        {"latest_run": {"waiting_human": True}, "runs": []},
+    )
+    runtime = _question_runtime([], session_store=session_store)
+
+    with pytest.raises(HITLCheckpointInvalidError, match="interaction_id"):
+        runtime.load_resumable_interaction("session-1")
+
+
+def test_load_resumable_interaction_rejects_unknown_marker_target() -> None:
+    session_store = InMemorySessionStore()
+    session_store.save_run_metadata(
+        "session-1",
+        {
+            "latest_run": {
+                "waiting_human": True,
+                "interaction_id": "int_00000000000000000000000000000000",
+            },
+            "runs": [],
+        },
+    )
+    runtime = _question_runtime([], session_store=session_store)
+
+    with pytest.raises(HITLCheckpointInvalidError, match="不存在"):
+        runtime.load_resumable_interaction("session-1")
+
+
+@pytest.mark.asyncio
+async def test_load_resumable_interaction_rejects_session_mismatch() -> None:
+    session_store = InMemorySessionStore()
+    runtime = _question_runtime([_question_response()], session_store=session_store)
+    waiting = await runtime.run_turn(
+        "需要部署配置",
+        options=RuntimeOptions(session_id="other-session", run_id="run-1"),
+    )
+    assert waiting.pending_interaction is not None
+    session_store.save_run_metadata(
+        "session-1",
+        {
+            "latest_run": {
+                "waiting_human": True,
+                "interaction_id": waiting.pending_interaction.interaction_id,
+            },
+            "runs": [],
+        },
+    )
+
+    with pytest.raises(HITLCheckpointInvalidError, match="session"):
+        runtime.load_resumable_interaction("session-1")
+
+
+@pytest.mark.asyncio
+async def test_load_resumable_interaction_rejects_conflicting_pending_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _question_runtime([_question_response()])
+    waiting = await runtime.run_turn(
+        "需要部署配置",
+        options=RuntimeOptions(session_id="session-1", run_id="run-1"),
+    )
+    assert waiting.pending_interaction is not None
+    runtime.interaction_service.resolve(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="测试"),
+    )
+    other_pending = waiting.pending_interaction.model_copy(
+        update={"interaction_id": "int_11111111111111111111111111111111"}
+    )
+    monkeypatch.setattr(
+        runtime.interaction_service,
+        "list_pending",
+        lambda session_id=None: [other_pending],
+    )
+
+    with pytest.raises(HITLCheckpointInvalidError, match="冲突"):
+        runtime.load_resumable_interaction("session-1")
 
 
 @pytest.mark.asyncio
