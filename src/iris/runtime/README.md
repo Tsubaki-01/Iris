@@ -287,8 +287,8 @@ gate 同样返回 `RuntimeStatus.WAITING_HUMAN`，并保留已完成步骤的工
 - `context`: 读取独立 `context.yaml`。
 - `tools`: 通过 `build_tool_registry()` 构建工具注册表。
 - `permissions`: 解析 workspace，并创建工具权限策略。
-- `session`: 创建 `InMemorySessionStore` 或 `SQLiteSessionStore`。
-- `interaction_store`: SQLite session 时复用同一个 `SQLiteSessionStore`；其它默认装配为
+- `session`: 创建 `InMemorySessionStore` 或 `iris.store.SQLiteStore`。
+- `interaction_store`: SQLite backend 时复用同一个 `SQLiteStore`；其它默认装配为
   `InMemoryInteractionStore`，用于保存 `human.ask` 与权限确认请求。
 
 ## 显式 memory
@@ -314,7 +314,7 @@ runtime 会通过 `SessionStore` 保存三类数据：
 及其 JSON-safe runtime checkpoint 由 interaction store 保存。
 
 默认 `session.backend: none` 使用 `InMemorySessionStore`。配置
-`session.backend: sqlite` 后，`RuntimeFactory` 会创建 `SQLiteSessionStore`。
+`session.backend: sqlite` 后，`RuntimeFactory` 会创建 `SQLiteStore`。
 
 ## 错误处理
 
