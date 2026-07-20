@@ -212,7 +212,7 @@ async def test_run_loop_preserves_file_read_state_between_steps(
         tool_view=registry.view(),
         tool_executor=ToolExecutor(
             registry,
-            permission_policy=DefaultPermissionPolicy(allow_writes=True),
+            permission_policy=DefaultPermissionPolicy(write_mode="allow"),
         ),
         workspace_root=tmp_path,
     )

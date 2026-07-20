@@ -15,7 +15,12 @@ from iris.runtime import AgentRuntime, RuntimeFactory
 from iris.runtime.models import RuntimeStatus
 from iris.session import InMemorySessionStore
 from iris.store import SQLiteStore
-from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutionContext
+from iris.tools import (
+    DefaultPermissionPolicy,
+    PermissionEffect,
+    ToolCapability,
+    ToolExecutionContext,
+)
 
 
 def _assistant_response(text: str = "来自 factory。") -> LLMResponse:
@@ -299,7 +304,7 @@ def test_permissions_allow_maps_to_writable_policy(tmp_path: Path) -> None:
     )
 
     assert isinstance(runtime.permission_policy, DefaultPermissionPolicy)
-    assert runtime.permission_policy.allow_writes is True
+    assert runtime.permission_policy.write_mode == "allow"
 
     write_tool = runtime.tool_registry.get("write_file")
     context = ToolExecutionContext(
@@ -311,7 +316,7 @@ def test_permissions_allow_maps_to_writable_policy(tmp_path: Path) -> None:
     decision = runtime.permission_policy.check(write_tool, {}, context)
 
     assert write_tool.definition.capabilities <= {ToolCapability.WRITE}
-    assert decision.allowed is True
+    assert decision.effect is PermissionEffect.ALLOW
 
 
 def test_from_config_uses_registered_custom_provider(tmp_path: Path) -> None:

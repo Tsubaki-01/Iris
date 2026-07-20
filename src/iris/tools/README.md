@@ -121,7 +121,7 @@ tool_obj = registry.register_function(
 ```python
 executor = ToolExecutor(
     registry,
-    permission_policy=DefaultPermissionPolicy(allow_writes=False),
+    permission_policy=DefaultPermissionPolicy(write_mode="confirm"),
     middleware=[],
     circuit_breaker=None,
 )
@@ -154,7 +154,7 @@ from iris.tools import (
 registry = register_file_tools(max_result_chars=50000)
 executor = ToolExecutor(
     registry,
-    permission_policy=DefaultPermissionPolicy(allow_writes=True),
+    permission_policy=DefaultPermissionPolicy(write_mode="allow"),
 )
 ```
 
@@ -211,7 +211,7 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 文件写入成功返回的 workspace 相对路径统一使用 `/` 分隔，避免不同操作系统返回不同格式。
 
-默认权限策略不会直接允许写工具。使用文件写入/编辑时，需要给 `ToolExecutor` 传入允许写入的策略，例如 `DefaultPermissionPolicy(allow_writes=True)`。
+默认权限策略不会直接允许写工具。使用文件写入/编辑时，需要给 `ToolExecutor` 传入允许写入的策略，例如 `DefaultPermissionPolicy(write_mode="allow")`。
 
 ## 权限、artifact、middleware、熔断
 

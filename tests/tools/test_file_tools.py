@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -16,11 +17,14 @@ from iris.tools import (
 )
 
 
-def _file_executor(*, allow_writes: bool = False) -> ToolExecutor:
+def _file_executor(
+    *,
+    write_mode: Literal["confirm", "allow", "deny"] = "confirm",
+) -> ToolExecutor:
     registry = register_file_tools()
     return ToolExecutor(
         registry,
-        permission_policy=DefaultPermissionPolicy(allow_writes=allow_writes),
+        permission_policy=DefaultPermissionPolicy(write_mode=write_mode),
     )
 
 
@@ -131,7 +135,7 @@ async def test_write_file_refuses_existing_unread_file(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("old", encoding="utf-8")
 
-    result = await _file_executor(allow_writes=True).execute_one(
+    result = await _file_executor(write_mode="allow").execute_one(
         ToolUseBlock(
             id="call_1",
             name="write_file",
@@ -151,7 +155,7 @@ async def test_write_file_refuses_existing_unread_file(tmp_path: Path) -> None:
 async def test_write_file_reports_workspace_relative_path(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "notes.txt"
 
-    result = await _file_executor(allow_writes=True).execute_one(
+    result = await _file_executor(write_mode="allow").execute_one(
         ToolUseBlock(
             id="call_1",
             name="write_file",
@@ -171,7 +175,7 @@ async def test_edit_file_reports_workspace_relative_posix_path(tmp_path: Path) -
     path.parent.mkdir()
     path.write_text("hello old\n", encoding="utf-8")
     context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
     await executor.execute_one(
         ToolUseBlock(id="read_1", name="read_file", input={"file_path": str(path)}),
         context,
@@ -198,7 +202,7 @@ async def test_read_then_edit_works_without_preseeded_read_state(
     path = tmp_path / "notes.txt"
     path.write_text("hello old\n", encoding="utf-8")
     context = ToolExecutionContext(workspace_root=tmp_path)
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
 
     await executor.execute_one(
         ToolUseBlock(id="read_1", name="read_file", input={"file_path": "notes.txt"}),
@@ -221,7 +225,7 @@ async def test_read_then_edit_works_without_preseeded_read_state(
 async def test_execute_many_read_then_edit_shares_read_state(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("hello old\n", encoding="utf-8")
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
 
     results = await executor.execute_many(
         [
@@ -252,7 +256,7 @@ async def test_edit_file_refuses_stale_read_state(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_text("old", encoding="utf-8")
     context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
     await executor.execute_one(
         ToolUseBlock(id="read_1", name="read_file", input={"file_path": "notes.txt"}),
         context,
@@ -278,7 +282,7 @@ async def test_edit_file_reports_missing_and_ambiguous_matches(tmp_path: Path) -
     path = tmp_path / "notes.txt"
     path.write_text("same\nsame\n", encoding="utf-8")
     context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
     await executor.execute_one(
         ToolUseBlock(id="read_1", name="read_file", input={"file_path": "notes.txt"}),
         context,
@@ -314,7 +318,7 @@ async def test_successful_edit_updates_file_and_read_state(tmp_path: Path) -> No
     path = tmp_path / "notes.txt"
     path.write_text("hello old\n", encoding="utf-8")
     context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-    executor = _file_executor(allow_writes=True)
+    executor = _file_executor(write_mode="allow")
     await executor.execute_one(
         ToolUseBlock(id="read_1", name="read_file", input={"file_path": "notes.txt"}),
         context,
