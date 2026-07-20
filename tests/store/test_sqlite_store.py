@@ -32,21 +32,37 @@ def test_sqlite_store_persists_run_metadata(tmp_path: Path) -> None:
 def test_sqlite_store_appends_tool_events(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "session.db")
 
-    store.append_tool_event("session-1", {"tool_name": "read_file", "status": "ok"})
-    store.append_tool_event("session-1", {"tool_name": "grep_search", "status": "error"})
+    store.append_tool_event(
+        "session-1",
+        "tool_result:run_1:call_1",
+        {"tool_name": "read_file", "status": "ok"},
+    )
+    store.append_tool_event(
+        "session-1",
+        "tool_result:run_1:call_2",
+        {"tool_name": "grep_search", "status": "error"},
+    )
 
     assert store.load_tool_events("session-1") == [
-        {"tool_name": "read_file", "status": "ok"},
-        {"tool_name": "grep_search", "status": "error"},
+        {
+            "tool_name": "read_file",
+            "status": "ok",
+            "event_id": "tool_result:run_1:call_1",
+        },
+        {
+            "tool_name": "grep_search",
+            "status": "error",
+            "event_id": "tool_result:run_1:call_2",
+        },
     ]
 
 
-def test_sqlite_store_appends_same_idempotent_event_once(tmp_path: Path) -> None:
+def test_sqlite_store_appends_same_event_once(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "session.db")
     event_id = "tool_result:run_1:call_1"
 
-    store.append_tool_event_once("session-1", event_id, {"status": "ok", "count": 1})
-    store.append_tool_event_once("session-1", event_id, {"count": 1, "status": "ok"})
+    store.append_tool_event("session-1", event_id, {"status": "ok", "count": 1})
+    store.append_tool_event("session-1", event_id, {"count": 1, "status": "ok"})
 
     assert store.load_tool_events("session-1") == [
         {"status": "ok", "count": 1, "event_id": event_id}
@@ -57,17 +73,17 @@ def test_sqlite_store_rejects_different_idempotent_event_payload(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "session.db")
-    store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"status": "ok"})
+    store.append_tool_event("session-1", "tool_result:run_1:call_1", {"status": "ok"})
 
     with pytest.raises(IrisSessionError):
-        store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"status": "error"})
+        store.append_tool_event("session-1", "tool_result:run_1:call_1", {"status": "error"})
 
 
 def test_sqlite_store_rejects_non_json_idempotent_event(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "session.db")
 
     with pytest.raises(IrisSessionError):
-        store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"not_json": {"set"}})
+        store.append_tool_event("session-1", "tool_result:run_1:call_1", {"not_json": {"set"}})
 
 
 def test_sqlite_store_returns_empty_defaults_for_missing_session(

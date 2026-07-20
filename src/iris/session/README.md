@@ -31,8 +31,7 @@ store = SQLiteStore(".iris/session.db")
 - `load_messages(session_id)`
 - `save_run_metadata(session_id, metadata)`
 - `load_run_metadata(session_id)`
-- `append_tool_event(session_id, event)`
-- `append_tool_event_once(session_id, event_id, event)`
+- `append_tool_event(session_id, event_id, event)`
 - `load_tool_events(session_id)`
 
 ## InMemorySessionStore

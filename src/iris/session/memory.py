@@ -38,11 +38,7 @@ class InMemorySessionStore:
         """读取运行元数据。"""
         return deepcopy(self._run_metadata.get(session_id, {}))
 
-    def append_tool_event(self, session_id: str, event: dict[str, object]) -> None:
-        """追加工具调用或结果摘要。"""
-        self._tool_events.setdefault(session_id, []).append(deepcopy(event))
-
-    def append_tool_event_once(
+    def append_tool_event(
         self,
         session_id: str,
         event_id: str,

@@ -27,7 +27,7 @@ messages = store.load_messages("default")
 构造时会创建父目录，并通过 `CREATE TABLE/INDEX IF NOT EXISTS` 初始化 schema。已有
 `.iris/session.db` 无需迁移。
 
-`append_tool_event_once()` 按 `(session_id, event_id)` 幂等追加事件：相同 payload 是
+`append_tool_event()` 按 `(session_id, event_id)` 幂等追加事件：相同 payload 是
 no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。
 
 ## 边界

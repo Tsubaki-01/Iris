@@ -20,10 +20,7 @@ class SessionStore(Protocol):
     def load_run_metadata(self, session_id: str) -> dict[str, object]:
         """读取运行元数据。"""
 
-    def append_tool_event(self, session_id: str, event: dict[str, object]) -> None:
-        """追加工具调用或结果摘要。"""
-
-    def append_tool_event_once(
+    def append_tool_event(
         self,
         session_id: str,
         event_id: str,

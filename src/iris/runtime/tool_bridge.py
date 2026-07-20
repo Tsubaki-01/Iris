@@ -142,18 +142,22 @@ class ToolBridge:
 
         results = [cast(ToolResult, result) for result in result_slots]
         messages = [_to_tool_result_message(result) for result in results]
+        event_ids = [
+            f"tool_result:{run_id}:{result.tool_use_id}" for result in results
+        ]
         events = [
             _to_tool_event(
                 result,
+                event_id=event_id,
                 run_id=run_id,
                 step_index=step_index,
                 agent_id=agent_id,
                 metadata=metadata,
             )
-            for result in results
+            for result, event_id in zip(results, event_ids, strict=True)
         ]
-        for event in events:
-            session_store.append_tool_event(session_id, event)
+        for event_id, event in zip(event_ids, events, strict=True):
+            session_store.append_tool_event(session_id, event_id, event)
 
         return ToolBridgeResult(results=results, messages=messages, events=events)
 
@@ -214,6 +218,7 @@ def _to_tool_result_message(result: ToolResult) -> Msg:
 def _to_tool_event(
     result: ToolResult,
     *,
+    event_id: str,
     run_id: str,
     step_index: int,
     agent_id: str,
@@ -223,6 +228,7 @@ def _to_tool_event(
     error = result.error.model_dump(mode="json") if result.error is not None else None
     artifact = result.artifact.model_dump(mode="json") if result.artifact is not None else None
     event: dict[str, object] = {
+        "event_id": event_id,
         "type": "tool_result",
         "tool_call_id": result.tool_use_id,
         "tool_name": result.tool_name,
