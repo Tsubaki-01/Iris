@@ -15,7 +15,7 @@ from iris.hitl import (
     PermissionInteractionRequest,
     PermissionInteractionResponse,
 )
-from iris.session import SQLiteSessionStore
+from iris.store import SQLiteStore
 
 
 class _StoreFactory(Protocol):
@@ -26,7 +26,7 @@ class _StoreFactory(Protocol):
 def interaction_store(request: pytest.FixtureRequest, tmp_path: Path) -> object:
     factories: dict[str, _StoreFactory] = {
         "memory": lambda _path: InMemoryInteractionStore(),
-        "sqlite": lambda path: SQLiteSessionStore(path),
+        "sqlite": lambda path: SQLiteStore(path),
     }
     return factories[request.param](tmp_path / "interactions.db")
 
@@ -142,9 +142,9 @@ def test_store_rejects_stale_compare_and_set_versions(interaction_store: object)
 def test_sqlite_store_persists_interactions_across_instances(tmp_path: Path) -> None:
     path = tmp_path / "interactions.db"
     interaction = _interaction(session_id="session_1", interaction_id="int_" + "1" * 32)
-    SQLiteSessionStore(path).create_interaction(interaction)
+    SQLiteStore(path).create_interaction(interaction)
 
-    loaded = SQLiteSessionStore(path).load_interaction(interaction.interaction_id)
+    loaded = SQLiteStore(path).load_interaction(interaction.interaction_id)
 
     assert loaded == interaction
 

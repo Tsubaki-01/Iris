@@ -13,7 +13,8 @@ from iris.message import LLMResponse, TextBlock
 from iris.providers import ProviderClient
 from iris.runtime import AgentRuntime, RuntimeFactory
 from iris.runtime.models import RuntimeStatus
-from iris.session import InMemorySessionStore, SQLiteSessionStore
+from iris.session import InMemorySessionStore
+from iris.store import SQLiteStore
 from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutionContext
 
 
@@ -170,7 +171,7 @@ session:
         provider=FakeProvider([_assistant_response()]),
     )
 
-    assert isinstance(runtime.session_store, SQLiteSessionStore)
+    assert isinstance(runtime.session_store, SQLiteStore)
     assert runtime.interaction_store is runtime.session_store
     assert runtime.session_store.path == config_dir / "data" / "session.db"
     assert runtime.session_store.path.exists()

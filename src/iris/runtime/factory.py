@@ -22,7 +22,8 @@ from ..context import (
 )
 from ..hitl import HumanInteractionService, InMemoryInteractionStore, InteractionStore
 from ..providers import create_provider_client
-from ..session import InMemorySessionStore, SessionStore, SQLiteSessionStore
+from ..session import InMemorySessionStore, SessionStore
+from ..store import SQLiteStore
 from ..tools import DefaultPermissionPolicy, ToolExecutor
 from .runtime import AgentRuntime, RuntimeProvider
 
@@ -118,7 +119,7 @@ class RuntimeFactory:
         )
         resolved_interaction_store = interaction_store or (
             resolved_session_store
-            if isinstance(resolved_session_store, SQLiteSessionStore)
+            if isinstance(resolved_session_store, SQLiteStore)
             else InMemoryInteractionStore()
         )
         resolved_provider = provider or create_provider_client(
@@ -178,7 +179,7 @@ def _build_session_store(config: AgentConfig, *, base_dir: Path) -> SessionStore
     if config.session.backend == "none":
         return InMemorySessionStore()
     session_path = config.session.path or ".iris/session.db"
-    return SQLiteSessionStore(_resolve_relative_to_base(session_path, base_dir=base_dir))
+    return SQLiteStore(_resolve_relative_to_base(session_path, base_dir=base_dir))
 
 
 def _resolve_relative_to_base(path: str | Path, *, base_dir: Path) -> Path:
