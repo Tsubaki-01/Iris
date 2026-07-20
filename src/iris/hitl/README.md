@@ -24,7 +24,7 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 会产生冲突。
 
 `InMemoryInteractionStore` 适合测试和 `session.backend: none`，进程退出即丢失。
-`SQLiteSessionStore` 同时实现 `InteractionStore`，将 interaction 保存到独立的
+`iris.store.SQLiteStore` 同时实现 `InteractionStore`，将 interaction 保存到独立的
 `human_interactions` 表，可跨 runtime 重建恢复。
 
 ## Runtime 边界
