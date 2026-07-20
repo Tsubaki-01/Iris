@@ -108,6 +108,7 @@ async def test_tool_bridge_executes_active_calls_and_appends_events(
     assert result.events == store.load_tool_events("session-1")
     assert result.events == [
         {
+            "event_id": "tool_result:run-1:call_1",
             "type": "tool_result",
             "tool_call_id": "call_1",
             "tool_name": "echo",
@@ -445,7 +446,12 @@ class MismatchedExecutor(ToolExecutor):
 class FailingToolEventSessionStore(InMemorySessionStore):
     """测试工具事件追加失败的 session store。"""
 
-    def append_tool_event(self, session_id: str, event: dict[str, object]) -> None:
+    def append_tool_event(
+        self,
+        session_id: str,
+        event_id: str,
+        event: dict[str, object],
+    ) -> None:
         """模拟 session 工具事件写入失败。"""
-        del session_id, event
+        del session_id, event_id, event
         raise IrisSessionError("tool event 写入失败")

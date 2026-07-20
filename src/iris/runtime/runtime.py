@@ -689,7 +689,7 @@ class AgentRuntime:
         self.session_store.save_messages(
             session_id, [item.model_dump(mode="json") for item in history]
         )
-        self.session_store.append_tool_event_once(
+        self.session_store.append_tool_event(
             session_id,
             f"tool_result:{run_id}:{result.tool_use_id}",
             {
@@ -854,7 +854,7 @@ class AgentRuntime:
                 interaction.session_id, [item.model_dump(mode="json") for item in messages]
             )
         event_id = f"tool_result:{interaction.run_id}:{interaction.tool_call_id}"
-        self.session_store.append_tool_event_once(
+        self.session_store.append_tool_event(
             interaction.session_id,
             event_id,
             {

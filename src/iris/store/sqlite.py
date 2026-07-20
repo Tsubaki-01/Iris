@@ -60,13 +60,7 @@ class SQLiteStore:
         value = self._load_column(session_id, "run_metadata_json", "{}")
         return cast(dict[str, object], json.loads(value))
 
-    def append_tool_event(self, session_id: str, event: dict[str, object]) -> None:
-        """追加工具调用或结果摘要。"""
-        events = self.load_tool_events(session_id)
-        events.append(event)
-        self._upsert_column(session_id, "tool_events_json", _dump_json(events))
-
-    def append_tool_event_once(
+    def append_tool_event(
         self,
         session_id: str,
         event_id: str,
