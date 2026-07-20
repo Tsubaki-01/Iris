@@ -12,8 +12,8 @@ from ..exceptions import IrisSessionError
 class InMemorySessionStore:
     """使用进程内字典保存 session 数据。
 
-    该实现适合测试、无持久化运行和调用方显式不需要跨进程恢复的场景。它实现与
-    `SQLiteSessionStore` 相同的 `SessionStore` 协议，但不会写入本地文件。
+    该实现适合测试、无持久化运行和调用方显式不需要跨进程恢复的场景。它实现
+    `SessionStore` 协议，但不会写入本地文件。
     """
 
     def __init__(self) -> None:

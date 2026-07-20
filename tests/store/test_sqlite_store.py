@@ -7,11 +7,11 @@ import pytest
 
 from iris.agents import load_agent_config
 from iris.exceptions import IrisSessionError
-from iris.session import SQLiteSessionStore
+from iris.store import SQLiteStore
 
 
-def test_sqlite_session_store_persists_messages(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_persists_messages(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
     messages = [{"role": "user", "content": "你好"}]
 
     store.save_messages("session-1", messages)
@@ -20,8 +20,8 @@ def test_sqlite_session_store_persists_messages(tmp_path: Path) -> None:
     assert (tmp_path / "session.db").is_file()
 
 
-def test_sqlite_session_store_persists_run_metadata(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_persists_run_metadata(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
     metadata = {"model": "openai/gpt-4o-mini", "status": "ok"}
 
     store.save_run_metadata("session-1", metadata)
@@ -29,8 +29,8 @@ def test_sqlite_session_store_persists_run_metadata(tmp_path: Path) -> None:
     assert store.load_run_metadata("session-1") == metadata
 
 
-def test_sqlite_session_store_appends_tool_events(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_appends_tool_events(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
 
     store.append_tool_event("session-1", {"tool_name": "read_file", "status": "ok"})
     store.append_tool_event("session-1", {"tool_name": "grep_search", "status": "error"})
@@ -41,8 +41,8 @@ def test_sqlite_session_store_appends_tool_events(tmp_path: Path) -> None:
     ]
 
 
-def test_sqlite_session_store_appends_same_idempotent_event_once(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_appends_same_idempotent_event_once(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
     event_id = "tool_result:run_1:call_1"
 
     store.append_tool_event_once("session-1", event_id, {"status": "ok", "count": 1})
@@ -53,27 +53,27 @@ def test_sqlite_session_store_appends_same_idempotent_event_once(tmp_path: Path)
     ]
 
 
-def test_sqlite_session_store_rejects_different_idempotent_event_payload(
+def test_sqlite_store_rejects_different_idempotent_event_payload(
     tmp_path: Path,
 ) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+    store = SQLiteStore(tmp_path / "session.db")
     store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"status": "ok"})
 
     with pytest.raises(IrisSessionError):
         store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"status": "error"})
 
 
-def test_sqlite_session_store_rejects_non_json_idempotent_event(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_rejects_non_json_idempotent_event(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
 
     with pytest.raises(IrisSessionError):
         store.append_tool_event_once("session-1", "tool_result:run_1:call_1", {"not_json": {"set"}})
 
 
-def test_sqlite_session_store_returns_empty_defaults_for_missing_session(
+def test_sqlite_store_returns_empty_defaults_for_missing_session(
     tmp_path: Path,
 ) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+    store = SQLiteStore(tmp_path / "session.db")
 
     assert store.load_messages("missing") == []
     assert store.load_run_metadata("missing") == {}
@@ -100,22 +100,22 @@ session:
     assert not (tmp_path / ".iris" / "session.db").exists()
 
 
-def test_sqlite_session_store_rejects_non_json_values(tmp_path: Path) -> None:
-    store = SQLiteSessionStore(tmp_path / "session.db")
+def test_sqlite_store_rejects_non_json_values(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "session.db")
 
     with pytest.raises(IrisSessionError):
         store.save_messages("session-1", [{"bad": object()}])
 
 
-def test_sqlite_session_store_wraps_directory_creation_errors(tmp_path: Path) -> None:
+def test_sqlite_store_wraps_directory_creation_errors(tmp_path: Path) -> None:
     parent_file = tmp_path / "not-a-directory"
     parent_file.write_text("occupied", encoding="utf-8")
 
     with pytest.raises(IrisSessionError):
-        SQLiteSessionStore(parent_file / "session.db")
+        SQLiteStore(parent_file / "session.db")
 
 
-def test_sqlite_session_store_auto_upgrades_sessions_only_database(tmp_path: Path) -> None:
+def test_sqlite_store_auto_upgrades_sessions_only_database(tmp_path: Path) -> None:
     path = tmp_path / "session.db"
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -130,7 +130,7 @@ def test_sqlite_session_store_auto_upgrades_sessions_only_database(tmp_path: Pat
             """
         )
 
-    SQLiteSessionStore(path)
+    SQLiteStore(path)
 
     with sqlite3.connect(path) as connection:
         tables = {

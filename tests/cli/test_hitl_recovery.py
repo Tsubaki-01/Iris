@@ -21,7 +21,7 @@ from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeOptions, RuntimeStatus, RuntimeTurnResult
-from iris.session import SQLiteSessionStore
+from iris.store import SQLiteStore
 from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutor, ToolRegistry
 
 SESSION_ID = "restart-session"
@@ -80,7 +80,7 @@ def _make_runtime(
     trace_store: ChatTraceStore | None = None,
     writes: list[str] | None = None,
     reads: list[str] | None = None,
-) -> tuple[AgentRuntime, RecordingProvider, SQLiteSessionStore]:
+) -> tuple[AgentRuntime, RecordingProvider, SQLiteStore]:
     write_calls = writes if writes is not None else []
     read_calls = reads if reads is not None else []
 
@@ -108,7 +108,7 @@ def _make_runtime(
     provider = (
         TracingRuntimeProvider(delegate, trace_store) if trace_store is not None else delegate
     )
-    store = SQLiteSessionStore(database)
+    store = SQLiteStore(database)
     runtime = AgentRuntime(
         agent_config=_agent_config(),
         context_input=_context_input(),
@@ -163,7 +163,7 @@ def _tool_result_contents(request: LLMRequest) -> list[str]:
     return [block.content for message in request.messages for block in message.tool_results]
 
 
-def _tool_result_count(store: SQLiteSessionStore, tool_use_id: str) -> int:
+def _tool_result_count(store: SQLiteStore, tool_use_id: str) -> int:
     count = 0
     for message in store.load_messages(SESSION_ID):
         content = message.get("content")
@@ -177,7 +177,7 @@ def _tool_result_count(store: SQLiteSessionStore, tool_use_id: str) -> int:
     return count
 
 
-def _event_count(store: SQLiteSessionStore, tool_use_id: str) -> int:
+def _event_count(store: SQLiteStore, tool_use_id: str) -> int:
     return sum(
         event.get("tool_call_id") == tool_use_id for event in store.load_tool_events(SESSION_ID)
     )

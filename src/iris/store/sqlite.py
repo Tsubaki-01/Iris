@@ -1,4 +1,4 @@
-"""SQLite 会话存储实现。"""
+"""SQLite session 与 HITL interaction 存储实现。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from ..hitl.models import (
 )
 
 
-class SQLiteSessionStore:
-    """使用本地 SQLite 文件保存 session JSON 数据。
+class SQLiteStore:
+    """使用本地 SQLite 文件保存 session 与 HITL interaction 数据。
 
     Args:
         path (str | Path): SQLite 数据库文件路径。
@@ -472,4 +472,4 @@ def _row_to_interaction(row: sqlite3.Row, *, path: Path) -> HumanInteraction:
         raise IrisSessionError("SQLite HITL interaction 数据无效", path=str(path)) from exc
 
 
-__all__ = ["SQLiteSessionStore"]
+__all__ = ["SQLiteStore"]
