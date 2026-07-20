@@ -37,16 +37,6 @@ class PermissionDecision(BaseModel):
             raise ValueError("权限拒绝必须包含原因")
         return self
 
-    @property
-    def allowed(self) -> bool:
-        """兼容旧调用方的 allow 判断。"""
-        return self.effect is PermissionEffect.ALLOW
-
-    @property
-    def require_confirmation(self) -> bool:
-        """兼容旧调用方的人工确认判断。"""
-        return self.effect is PermissionEffect.REQUIRE_HUMAN
-
 
 class ReadFileRecord(BaseModel):
     """已读取文件的乐观锁记录。"""
@@ -124,19 +114,10 @@ class DefaultPermissionPolicy(PermissionPolicy):
         *,
         workspace_policy: WorkspacePolicy | None = None,
         write_mode: Literal["confirm", "allow", "deny"] = "confirm",
-        allow_writes: bool | None = None,
     ) -> None:
         """初始化默认策略。"""
-        if allow_writes is not None:
-            compatibility_mode: Literal["allow", "confirm"] = (
-                "allow" if allow_writes else "confirm"
-            )
-            if write_mode != "confirm" and write_mode != compatibility_mode:
-                raise IrisToolValidationError("write_mode 与 allow_writes 配置冲突")
-            write_mode = compatibility_mode
         self.workspace_policy = workspace_policy or WorkspacePolicy()
         self.write_mode = write_mode
-        self.allow_writes = write_mode == "allow"
 
     def check(
         self,

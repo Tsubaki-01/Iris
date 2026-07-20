@@ -182,7 +182,9 @@ class ToolExecutor:
                     "PERMISSION_ERROR",
                     decision.reason,
                     details={
-                        "require_confirmation": decision.require_confirmation,
+                        "require_confirmation": (
+                            decision.effect is PermissionEffect.REQUIRE_HUMAN
+                        ),
                         "effect": decision.effect.value,
                         **decision.metadata,
                     },

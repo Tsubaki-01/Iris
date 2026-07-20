@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from iris.exceptions import IrisToolValidationError
 from iris.tools import (
     DefaultPermissionPolicy,
+    PermissionDecision,
     PermissionEffect,
     ToolCapability,
     ToolExecutionContext,
@@ -37,27 +37,20 @@ def test_default_permission_policy_distinguishes_confirm_allow_and_deny() -> Non
     )
 
 
-def test_default_permission_policy_keeps_allow_writes_compatibility() -> None:
-    registry = ToolRegistry()
-    registry.register_function(
-        lambda: "written",
-        name="write_note",
-        description="写入笔记",
-        capabilities={ToolCapability.WRITE},
-    )
-    write_tool = registry.get("write_note")
-    context = ToolExecutionContext(workspace_root=".")
+def test_permission_decision_only_exposes_effect() -> None:
+    decision = PermissionDecision(effect=PermissionEffect.ALLOW)
 
-    assert (
-        DefaultPermissionPolicy(allow_writes=True).check(write_tool, {}, context).effect
-        is PermissionEffect.ALLOW
-    )
-    assert (
-        DefaultPermissionPolicy(allow_writes=False).check(write_tool, {}, context).effect
-        is PermissionEffect.REQUIRE_HUMAN
-    )
+    assert not hasattr(decision, "allowed")
+    assert not hasattr(decision, "require_confirmation")
 
 
-def test_default_permission_policy_rejects_conflicting_compatibility_arguments() -> None:
-    with pytest.raises(IrisToolValidationError):
-        DefaultPermissionPolicy(write_mode="deny", allow_writes=True)
+def test_default_permission_policy_rejects_removed_allow_writes_argument() -> None:
+    with pytest.raises(TypeError):
+        DefaultPermissionPolicy(allow_writes=True)  # type: ignore[call-arg]
+
+
+def test_default_permission_policy_only_exposes_write_mode() -> None:
+    policy = DefaultPermissionPolicy(write_mode="allow")
+
+    assert policy.write_mode == "allow"
+    assert not hasattr(policy, "allow_writes")
