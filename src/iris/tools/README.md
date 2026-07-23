@@ -132,7 +132,8 @@ executor = ToolExecutor(
 - `execute_one(tool_use, context)`: 执行单个 `ToolUseBlock`，始终返回 `ToolResult`，常见错误码包括 `NOT_FOUND`、`VALIDATION_ERROR`、`PERMISSION_ERROR`、`EXECUTION_ERROR`、`MIDDLEWARE_ERROR`、`CIRCUIT_OPEN`。
 - `execute_many(tool_uses, context)`: 连续只读且并发安全的调用会并发执行；遇到写入或非并发安全工具时按顺序执行。
 - `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
-  `PreparedToolCall`；不会运行 middleware、circuit breaker、artifact 或工具本体。
+  `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(subject, prompt)`，
+  不会运行 middleware、circuit breaker、artifact 或工具本体。
 - `execute_prepared(prepared, context, approved_tool_call_id=None)`: 重新校验当前状态后执行
   一条预检调用，供 runtime 的 HITL 恢复路径使用。
 
@@ -250,6 +251,11 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 人工批准只覆盖对应的 tool call ID，且不能绕过当前 `DENY`、输入 schema、workspace 边界或
 文件 stale-read 检查；恢复执行会重新校验这些条件。
+
+预检优先级固定为：`DENY` 直接产生 `PERMISSION_ERROR`；human tool 只在 `ALLOW` 时产生自身
+question；human tool 收到 `REQUIRE_HUMAN` 时 fail closed，避免 permission 与 question
+叠加；普通工具的 `REQUIRE_HUMAN` 才产生 permission prompt。Permission 和 question 的
+subject/fingerprint 均由 executor 的同一路径构造。
 
 ## Deferred discovery / tool_search
 

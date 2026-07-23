@@ -3,15 +3,17 @@
 from .memory import InMemoryInteractionStore
 from .models import (
     HumanInteraction,
+    HumanInteractionPrompt,
     HumanInteractionRequest,
     HumanInteractionResponse,
     InteractionKind,
     InteractionResumePhase,
     InteractionStatus,
-    PermissionInteractionRequest,
     PermissionInteractionResponse,
-    QuestionInteractionRequest,
+    PermissionPrompt,
     QuestionInteractionResponse,
+    QuestionPrompt,
+    ToolCallSubject,
     make_call_fingerprint,
 )
 from .service import HumanInteractionService
@@ -19,6 +21,7 @@ from .store import InteractionStore
 
 __all__ = [
     "HumanInteraction",
+    "HumanInteractionPrompt",
     "HumanInteractionRequest",
     "HumanInteractionResponse",
     "HumanInteractionService",
@@ -27,9 +30,10 @@ __all__ = [
     "InteractionResumePhase",
     "InteractionStatus",
     "InteractionStore",
-    "PermissionInteractionRequest",
+    "PermissionPrompt",
     "PermissionInteractionResponse",
-    "QuestionInteractionRequest",
+    "QuestionPrompt",
     "QuestionInteractionResponse",
+    "ToolCallSubject",
     "make_call_fingerprint",
 ]

@@ -94,20 +94,18 @@ def make_call_fingerprint(
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
-class PermissionInteractionRequest(BaseModel):
-    """一次等待人工确认的工具权限请求。"""
+class ToolCallSubject(BaseModel):
+    """触发人工 gate 的精确工具调用身份。"""
 
-    kind: Literal[InteractionKind.PERMISSION] = InteractionKind.PERMISSION
     tool_call_id: str
     tool_name: str
     arguments: dict[str, Any]
-    reason: str
     workspace_root: str
-    call_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    @field_validator("tool_call_id", "tool_name", "reason", "workspace_root", "call_fingerprint")
+    @field_validator("tool_call_id", "tool_name", "workspace_root", "fingerprint")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -118,17 +116,30 @@ class PermissionInteractionRequest(BaseModel):
         return _validate_json_safe(value, field_name="arguments")
 
 
-class QuestionInteractionRequest(BaseModel):
-    """一次等待人工回答的问题请求。"""
+class PermissionPrompt(BaseModel):
+    """向人展示的一次工具权限确认。"""
+
+    kind: Literal[InteractionKind.PERMISSION] = InteractionKind.PERMISSION
+    reason: str
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+
+    @field_validator("reason")
+    @classmethod
+    def _validate_reason(cls, value: str) -> str:
+        return _trim_required(value, field_name="reason")
+
+
+class QuestionPrompt(BaseModel):
+    """向人展示的一次信息问题。"""
 
     kind: Literal[InteractionKind.QUESTION] = InteractionKind.QUESTION
-    tool_call_id: str
     question: str
     options: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    @field_validator("tool_call_id", "question")
+    @field_validator("question")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -140,6 +151,21 @@ class QuestionInteractionRequest(BaseModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("options 不能包含重复项")
         return normalized
+
+
+HumanInteractionPrompt = Annotated[
+    PermissionPrompt | QuestionPrompt,
+    Field(discriminator="kind"),
+]
+
+
+class HumanInteractionRequest(BaseModel):
+    """所有人工 gate 共用的工具调用与提示信封。"""
+
+    subject: ToolCallSubject
+    prompt: HumanInteractionPrompt
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
 
 class PermissionInteractionResponse(BaseModel):
@@ -165,10 +191,6 @@ class QuestionInteractionResponse(BaseModel):
         return _trim_required(value, field_name="answer")
 
 
-HumanInteractionRequest = Annotated[
-    PermissionInteractionRequest | QuestionInteractionRequest,
-    Field(discriminator="kind"),
-]
 HumanInteractionResponse = Annotated[
     PermissionInteractionResponse | QuestionInteractionResponse,
     Field(discriminator="kind"),
@@ -182,8 +204,6 @@ class HumanInteraction(BaseModel):
     session_id: str
     run_id: str
     step_index: int = Field(ge=0)
-    tool_call_id: str
-    kind: InteractionKind
     status: InteractionStatus = InteractionStatus.PENDING
     resume_phase: InteractionResumePhase = InteractionResumePhase.WAITING
     request: HumanInteractionRequest
@@ -196,7 +216,7 @@ class HumanInteraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    @field_validator("interaction_id", "session_id", "run_id", "tool_call_id")
+    @field_validator("interaction_id", "session_id", "run_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -208,12 +228,8 @@ class HumanInteraction(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> HumanInteraction:
-        if self.request.kind != self.kind:
-            raise ValueError("interaction kind 必须匹配 request kind")
-        if self.request.tool_call_id != self.tool_call_id:
-            raise ValueError("interaction tool_call_id 必须匹配 request tool_call_id")
-        if self.response is not None and self.response.kind != self.kind:
-            raise ValueError("interaction kind 必须匹配 response kind")
+        if self.response is not None and self.response.kind != self.request.prompt.kind:
+            raise ValueError("interaction prompt kind 必须匹配 response kind")
         if self.status is InteractionStatus.PENDING and self.response is not None:
             raise ValueError("pending interaction 不能包含 response")
         if (
@@ -236,14 +252,16 @@ class HumanInteraction(BaseModel):
 
 __all__ = [
     "HumanInteraction",
+    "HumanInteractionPrompt",
     "HumanInteractionRequest",
     "HumanInteractionResponse",
     "InteractionKind",
     "InteractionResumePhase",
     "InteractionStatus",
-    "PermissionInteractionRequest",
+    "PermissionPrompt",
     "PermissionInteractionResponse",
-    "QuestionInteractionRequest",
+    "QuestionPrompt",
     "QuestionInteractionResponse",
+    "ToolCallSubject",
     "make_call_fingerprint",
 ]

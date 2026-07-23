@@ -17,6 +17,27 @@ from ..hitl.models import (
     InteractionResumePhase,
 )
 
+_HITL_SCHEMA_V1 = (
+    ("interaction_id", "TEXT", 0, None, 1),
+    ("session_id", "TEXT", 1, None, 0),
+    ("run_id", "TEXT", 1, None, 0),
+    ("step_index", "INTEGER", 1, None, 0),
+    ("tool_call_id", "TEXT", 1, None, 0),
+    ("kind", "TEXT", 1, None, 0),
+    ("status", "TEXT", 1, None, 0),
+    ("resume_phase", "TEXT", 1, None, 0),
+    ("request_json", "TEXT", 1, None, 0),
+    ("response_json", "TEXT", 0, None, 0),
+    ("checkpoint_json", "TEXT", 1, None, 0),
+    ("version", "INTEGER", 1, "1", 0),
+    ("created_at", "TEXT", 1, None, 0),
+    ("resolved_at", "TEXT", 0, None, 0),
+    ("consumed_at", "TEXT", 0, None, 0),
+)
+_HITL_SCHEMA_V2 = tuple(
+    column for column in _HITL_SCHEMA_V1 if column[0] not in {"tool_call_id", "kind"}
+)
+
 
 class SQLiteStore:
     """使用本地 SQLite 文件保存 session 与 HITL interaction 数据。
@@ -116,10 +137,10 @@ class SQLiteStore:
                 connection.execute(
                     """
                     INSERT INTO human_interactions (
-                        interaction_id, session_id, run_id, step_index, tool_call_id,
-                        kind, status, resume_phase, request_json, response_json,
+                        interaction_id, session_id, run_id, step_index,
+                        status, resume_phase, request_json, response_json,
                         checkpoint_json, version, created_at, resolved_at, consumed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     values,
                 )
@@ -181,7 +202,11 @@ class SQLiteStore:
             with sqlite3.connect(self.path) as connection:
                 connection.row_factory = sqlite3.Row
                 current = _load_interaction_row(connection, interaction_id)
-                if current is None or current["kind"] != response.kind.value:
+                if (
+                    current is None
+                    or _row_to_interaction(current, path=self.path).request.prompt.kind
+                    != response.kind
+                ):
                     raise HITLResponseMismatchError(
                         "HITL response kind 与 interaction 不匹配",
                         interaction_id=interaction_id,
@@ -277,6 +302,7 @@ class SQLiteStore:
         """创建 session 和 HITL interaction 表。"""
         try:
             with sqlite3.connect(self.path) as connection:
+                connection.execute("BEGIN")
                 connection.execute("""
                     CREATE TABLE IF NOT EXISTS sessions (
                         session_id TEXT PRIMARY KEY,
@@ -286,41 +312,20 @@ class SQLiteStore:
                         updated_at TEXT NOT NULL
                     )
                     """)
-                connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS human_interactions (
-                        interaction_id TEXT PRIMARY KEY,
-                        session_id TEXT NOT NULL,
-                        run_id TEXT NOT NULL,
-                        step_index INTEGER NOT NULL,
-                        tool_call_id TEXT NOT NULL,
-                        kind TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        resume_phase TEXT NOT NULL,
-                        request_json TEXT NOT NULL,
-                        response_json TEXT,
-                        checkpoint_json TEXT NOT NULL,
-                        version INTEGER NOT NULL DEFAULT 1,
-                        created_at TEXT NOT NULL,
-                        resolved_at TEXT,
-                        consumed_at TEXT
+                signature = _hitl_schema_signature(connection)
+                if not signature:
+                    _create_hitl_v2_schema(connection)
+                elif signature == _HITL_SCHEMA_V1:
+                    connection.execute("DROP TABLE human_interactions")
+                    _create_hitl_v2_schema(connection)
+                    _clear_hitl_recovery_markers(connection, path=self.path)
+                elif signature == _HITL_SCHEMA_V2:
+                    _create_hitl_indexes(connection)
+                else:
+                    raise IrisSessionError(
+                        "SQLite HITL schema 无法识别",
+                        path=str(self.path),
                     )
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_human_interactions_session_status_phase
-                    ON human_interactions (session_id, status, resume_phase)
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_human_interactions_active_session
-                    ON human_interactions (session_id)
-                    WHERE status IN ('pending', 'resolved')
-                        OR (status = 'consumed' AND resume_phase != 'result_committed')
-                    """
-                )
         except sqlite3.Error as exc:
             raise IrisSessionError("SQLite session 初始化失败", path=str(self.path)) from exc
 
@@ -413,8 +418,6 @@ def _interaction_values(interaction: HumanInteraction) -> tuple[object, ...]:
         interaction.session_id,
         interaction.run_id,
         interaction.step_index,
-        interaction.tool_call_id,
-        interaction.kind.value,
         interaction.status.value,
         interaction.resume_phase.value,
         _dump_json(interaction.request.model_dump(mode="json")),
@@ -447,8 +450,6 @@ def _row_to_interaction(row: sqlite3.Row, *, path: Path) -> HumanInteraction:
                 "session_id": row["session_id"],
                 "run_id": row["run_id"],
                 "step_index": row["step_index"],
-                "tool_call_id": row["tool_call_id"],
-                "kind": row["kind"],
                 "status": row["status"],
                 "resume_phase": row["resume_phase"],
                 "request": json.loads(row["request_json"]),
@@ -464,6 +465,77 @@ def _row_to_interaction(row: sqlite3.Row, *, path: Path) -> HumanInteraction:
         )
     except (json.JSONDecodeError, TypeError, ValidationError) as exc:
         raise IrisSessionError("SQLite HITL interaction 数据无效", path=str(path)) from exc
+
+
+def _hitl_schema_signature(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[str, str, int, str | None, int], ...]:
+    rows = connection.execute("PRAGMA table_info(human_interactions)").fetchall()
+    return tuple(
+        (str(row[1]), str(row[2]).upper(), int(row[3]), row[4], int(row[5])) for row in rows
+    )
+
+
+def _create_hitl_v2_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE human_interactions (
+            interaction_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            step_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            resume_phase TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            response_json TEXT,
+            checkpoint_json TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            consumed_at TEXT
+        )
+        """
+    )
+    _create_hitl_indexes(connection)
+
+
+def _create_hitl_indexes(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_human_interactions_session_status_phase
+        ON human_interactions (session_id, status, resume_phase)
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_human_interactions_active_session
+        ON human_interactions (session_id)
+        WHERE status IN ('pending', 'resolved')
+            OR (status = 'consumed' AND resume_phase != 'result_committed')
+        """
+    )
+
+
+def _clear_hitl_recovery_markers(connection: sqlite3.Connection, *, path: Path) -> None:
+    rows = connection.execute("SELECT session_id, run_metadata_json FROM sessions").fetchall()
+    for session_id, metadata_json in rows:
+        try:
+            metadata = json.loads(metadata_json)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise IrisSessionError("SQLite session metadata 无效", path=str(path)) from exc
+        if not isinstance(metadata, dict):
+            raise IrisSessionError("SQLite session metadata 必须是 object", path=str(path))
+        latest_run = metadata.get("latest_run")
+        if not isinstance(latest_run, dict):
+            continue
+        had_marker = "waiting_human" in latest_run or "interaction_id" in latest_run
+        latest_run.pop("waiting_human", None)
+        latest_run.pop("interaction_id", None)
+        if had_marker:
+            connection.execute(
+                "UPDATE sessions SET run_metadata_json = ? WHERE session_id = ?",
+                (_dump_json(metadata), session_id),
+            )
 
 
 __all__ = ["SQLiteStore"]

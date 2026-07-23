@@ -26,8 +26,9 @@ from ..exceptions import (
 )
 from ..hitl.models import (
     HumanInteractionRequest,
-    PermissionInteractionRequest,
-    QuestionInteractionRequest,
+    PermissionPrompt,
+    QuestionPrompt,
+    ToolCallSubject,
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
@@ -182,9 +183,7 @@ class ToolExecutor:
                     "PERMISSION_ERROR",
                     decision.reason,
                     details={
-                        "require_confirmation": (
-                            decision.effect is PermissionEffect.REQUIRE_HUMAN
-                        ),
+                        "require_confirmation": (decision.effect is PermissionEffect.REQUIRE_HUMAN),
                         "effect": decision.effect.value,
                         **decision.metadata,
                     },
@@ -292,6 +291,49 @@ class ToolExecutor:
                 params = tool.validate_input(tool_use.input)
                 raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
                 decision = self.permission_policy.check(tool, raw_params, context)
+                if decision.effect is PermissionEffect.DENY:
+                    calls.append(
+                        PreparedToolCall(
+                            tool_use=tool_use,
+                            tool=tool,
+                            validated_params=raw_params,
+                            permission=decision,
+                            preflight_result=self._error_result(
+                                tool_use,
+                                "PERMISSION_ERROR",
+                                decision.reason,
+                                details={
+                                    "require_confirmation": False,
+                                    "effect": decision.effect.value,
+                                    **decision.metadata,
+                                },
+                            ),
+                        )
+                    )
+                    continue
+                if (
+                    tool.definition.group == "human"
+                    and decision.effect is PermissionEffect.REQUIRE_HUMAN
+                ):
+                    calls.append(
+                        PreparedToolCall(
+                            tool_use=tool_use,
+                            tool=tool,
+                            validated_params=raw_params,
+                            permission=decision,
+                            preflight_result=self._error_result(
+                                tool_use,
+                                "PERMISSION_ERROR",
+                                "human interaction tool 不能同时要求额外人工授权",
+                                details={
+                                    "require_confirmation": True,
+                                    "effect": decision.effect.value,
+                                    **decision.metadata,
+                                },
+                            ),
+                        )
+                    )
+                    continue
                 human_request = _human_interaction_request(
                     tool_use, tool, raw_params, decision, context
                 )
@@ -341,7 +383,9 @@ class ToolExecutor:
         """重新验证当前权限后执行一条预检调用。"""
         if prepared.preflight_result is not None:
             return prepared.preflight_result
-        if isinstance(prepared.human_request, QuestionInteractionRequest):
+        if prepared.human_request is not None and isinstance(
+            prepared.human_request.prompt, QuestionPrompt
+        ):
             return self._error_result(
                 prepared.tool_use,
                 "HITL_REQUIRED",
@@ -622,22 +666,34 @@ def _human_interaction_request(
     decision: PermissionDecision,
     context: ToolExecutionContext,
 ) -> HumanInteractionRequest | None:
+    prompt: PermissionPrompt | QuestionPrompt | None = None
     if tool.definition.group == "human":
-        builder = getattr(tool, "build_interaction_request", None)
+        builder = getattr(tool, "build_interaction_prompt", None)
         if callable(builder):
-            return builder(tool_call_id=tool_use.id, params=params)
+            prompt = builder(params=params)
+    elif decision.effect is PermissionEffect.REQUIRE_HUMAN:
+        prompt = PermissionPrompt(reason=decision.reason)
+    if prompt is None:
         return None
-    if decision.effect is not PermissionEffect.REQUIRE_HUMAN:
-        return None
+
+    subject = _tool_call_subject(tool_use, tool, params, context)
+    return HumanInteractionRequest(subject=subject, prompt=prompt)
+
+
+def _tool_call_subject(
+    tool_use: ToolUseBlock,
+    tool: BaseTool,
+    params: dict[str, Any],
+    context: ToolExecutionContext,
+) -> ToolCallSubject:
     run_id = str(context.metadata.get("run_id", ""))
     workspace_root = str(context.workspace_root.resolve())
-    return PermissionInteractionRequest(
+    return ToolCallSubject(
         tool_call_id=tool_use.id,
         tool_name=tool.name,
         arguments=params,
-        reason=decision.reason,
         workspace_root=workspace_root,
-        call_fingerprint=make_call_fingerprint(
+        fingerprint=make_call_fingerprint(
             session_id=context.session_id,
             run_id=run_id,
             tool_call_id=tool_use.id,

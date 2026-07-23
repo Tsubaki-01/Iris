@@ -13,7 +13,9 @@ from iris.hitl import (
     InteractionResumePhase,
     InteractionStatus,
     PermissionInteractionResponse,
+    PermissionPrompt,
     QuestionInteractionResponse,
+    QuestionPrompt,
 )
 from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMResponse, Role, TextBlock, ToolUseBlock
@@ -253,11 +255,203 @@ async def test_resume_pauses_again_for_second_gate_in_same_batch() -> None:
 
     assert resumed.status is RuntimeStatus.WAITING_HUMAN
     assert resumed.pending_interaction is not None
-    assert resumed.pending_interaction.tool_call_id == "second"
+    assert resumed.pending_interaction.request.subject.tool_call_id == "second"
     latest_run = session_store.load_run_metadata("default")["latest_run"]
     assert latest_run["status"] == "waiting_human"
     assert latest_run["waiting_human"] is True
     assert latest_run["interaction_id"] == resumed.pending_interaction.interaction_id
+
+
+@pytest.mark.asyncio
+async def test_resume_supports_question_then_permission_in_the_same_batch() -> None:
+    calls: list[str] = []
+
+    def write_note() -> str:
+        calls.append("write")
+        return "written"
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    registry.register_function(
+        write_note,
+        description="写入笔记",
+        capabilities={ToolCapability.WRITE},
+    )
+    policy = DefaultPermissionPolicy(write_mode="confirm")
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                LLMResponse(
+                    provider="fake",
+                    content=[
+                        ToolUseBlock(
+                            id="question",
+                            name="ask_question",
+                            input={"question": "一？"},
+                        ),
+                        ToolUseBlock(id="write", name="write_note", input={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry, permission_policy=policy),
+        workspace_root=Path.cwd(),
+    )
+
+    first = await runtime.run_turn("开始")
+    assert first.pending_interaction is not None
+    assert isinstance(first.pending_interaction.request.prompt, QuestionPrompt)
+
+    second = await runtime.resume(
+        first.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+    assert second.pending_interaction is not None
+    assert isinstance(second.pending_interaction.request.prompt, PermissionPrompt)
+    assert second.pending_interaction.request.subject.tool_call_id == "write"
+
+    completed = await runtime.resume(
+        second.pending_interaction.interaction_id,
+        PermissionInteractionResponse(decision="approve"),
+    )
+
+    assert completed.status is RuntimeStatus.OK
+    assert calls == ["write"]
+
+
+@pytest.mark.asyncio
+async def test_resume_permission_fails_closed_when_policy_changes_to_deny() -> None:
+    calls: list[str] = []
+
+    def write_note() -> str:
+        calls.append("write")
+        return "written"
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write_note,
+        description="写入笔记",
+        capabilities={ToolCapability.WRITE},
+    )
+    policy = DefaultPermissionPolicy(write_mode="confirm")
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [_tool_response(ToolUseBlock(id="write", name="write_note", input={}))]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry, permission_policy=policy),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    policy.write_mode = "deny"
+
+    resumed = await runtime.resume(
+        waiting.pending_interaction.interaction_id,
+        PermissionInteractionResponse(decision="approve"),
+    )
+
+    assert resumed.status is RuntimeStatus.ERROR
+    assert resumed.error is not None
+    assert resumed.error.code == "HITL_CHECKPOINT_INVALID"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_tampered_subject_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                _tool_response(
+                    ToolUseBlock(
+                        id="question",
+                        name="ask_question",
+                        input={"question": "继续？"},
+                    )
+                )
+            ]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    resolved = runtime.interaction_service.resolve(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+    subject = resolved.request.subject.model_copy(update={"fingerprint": "b" * 64})
+    tampered = resolved.model_copy(
+        update={"request": resolved.request.model_copy(update={"subject": subject})}
+    )
+    monkeypatch.setattr(runtime.interaction_service, "get", lambda _: tampered)
+
+    resumed = await runtime.resume(resolved.interaction_id)
+
+    assert resumed.status is RuntimeStatus.ERROR
+    assert resumed.error is not None
+    assert resumed.error.code == "HITL_CHECKPOINT_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_v1_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                _tool_response(
+                    ToolUseBlock(
+                        id="question",
+                        name="ask_question",
+                        input={"question": "继续？"},
+                    )
+                )
+            ]
+        ),
+        interaction_store=InMemoryInteractionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    resolved = runtime.interaction_service.resolve(
+        waiting.pending_interaction.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+    checkpoint = dict(resolved.checkpoint)
+    checkpoint["checkpoint_version"] = 1
+    legacy = resolved.model_copy(update={"checkpoint": checkpoint})
+    monkeypatch.setattr(runtime.interaction_service, "get", lambda _: legacy)
+
+    resumed = await runtime.resume(resolved.interaction_id)
+
+    assert resumed.status is RuntimeStatus.ERROR
+    assert resumed.error is not None
+    assert resumed.error.code == "HITL_CHECKPOINT_INVALID"
 
 
 @pytest.mark.asyncio

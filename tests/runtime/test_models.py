@@ -9,9 +9,12 @@ from iris.message import Msg
 from iris.runtime.assembler import RuntimeMessageAssembler
 from iris.runtime.models import (
     BoundedLoopOptions,
+    ProviderResponseSnapshot,
     Runstate,
     RuntimeErrorInfo,
+    RuntimeHITLCheckpoint,
     RuntimeOptions,
+    RuntimeOptionsSnapshot,
     RuntimeStatus,
     RuntimeTurnInput,
     RuntimeTurnResult,
@@ -30,9 +33,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -67,6 +68,26 @@ def test_runtime_options_reject_invalid_positive_fields() -> None:
 
     with pytest.raises(ValidationError):
         RuntimeOptions(memory_max_chars=0)
+
+
+def test_hitl_checkpoint_v2_has_no_duplicated_call_fingerprint() -> None:
+    checkpoint = _hitl_checkpoint()
+
+    assert checkpoint.checkpoint_version == 2
+    assert "call_fingerprint" not in checkpoint.model_dump()
+
+
+def test_hitl_checkpoint_rejects_v1_and_legacy_fingerprint() -> None:
+    values = _hitl_checkpoint().model_dump()
+    values["checkpoint_version"] = 1
+
+    with pytest.raises(ValidationError):
+        RuntimeHITLCheckpoint.model_validate(values)
+
+    values["checkpoint_version"] = 2
+    values["call_fingerprint"] = "a" * 64
+    with pytest.raises(ValidationError):
+        RuntimeHITLCheckpoint.model_validate(values)
 
 
 def test_runstate_rejects_negative_step_index() -> None:
@@ -167,3 +188,18 @@ def test_turn_result_rejects_non_positive_steps() -> None:
             status=RuntimeStatus.OK,
             steps=0,
         )
+
+
+def _hitl_checkpoint() -> RuntimeHITLCheckpoint:
+    return RuntimeHITLCheckpoint(
+        run_mode="turn",
+        agent_name="runtime-agent",
+        session_id="session-1",
+        run_id="run-1",
+        step_index=0,
+        runtime_options=RuntimeOptionsSnapshot(options={}),
+        assistant_message={"role": "assistant", "content": []},
+        provider_response=ProviderResponseSnapshot(provider="fake"),
+        tool_calls=[],
+        next_tool_index=0,
+    )

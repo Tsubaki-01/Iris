@@ -13,12 +13,11 @@ from ..config import init_config, is_config_initialized
 from ..exceptions import HITLCheckpointInvalidError
 from ..hitl import (
     HumanInteraction,
-    InteractionKind,
     InteractionStatus,
-    PermissionInteractionRequest,
     PermissionInteractionResponse,
-    QuestionInteractionRequest,
+    PermissionPrompt,
     QuestionInteractionResponse,
+    QuestionPrompt,
 )
 from ..providers import create_provider_client
 from ..runtime import AgentRuntime, RuntimeFactory
@@ -225,10 +224,8 @@ def _collect_interaction_response(
     renderer: ChatRenderer,
 ) -> PermissionInteractionResponse | QuestionInteractionResponse:
     """渲染人工请求并把终端输入映射为现有 typed response。"""
-    request = interaction.request
-    if interaction.kind is InteractionKind.PERMISSION and isinstance(
-        request, PermissionInteractionRequest
-    ):
+    prompt = interaction.request.prompt
+    if isinstance(prompt, PermissionPrompt):
         renderer.render_permission_interaction(interaction)
         while True:
             token = input_func("批准该调用？ [y/N] ").strip().lower()
@@ -238,24 +235,22 @@ def _collect_interaction_response(
                 return PermissionInteractionResponse(decision="reject")
             renderer.render_warning("请输入 y/yes/n/no；空输入默认拒绝。")
 
-    if interaction.kind is InteractionKind.QUESTION and isinstance(
-        request, QuestionInteractionRequest
-    ):
+    if isinstance(prompt, QuestionPrompt):
         renderer.render_question_interaction(interaction)
         while True:
             answer = input_func("回答> ").strip()
             if not answer:
                 renderer.render_warning("回答不能为空，请重新输入。")
                 continue
-            if request.options and answer.isdecimal():
+            if prompt.options and answer.isdecimal():
                 option_index = int(answer) - 1
-                if 0 <= option_index < len(request.options):
-                    return QuestionInteractionResponse(answer=request.options[option_index])
+                if 0 <= option_index < len(prompt.options):
+                    return QuestionInteractionResponse(answer=prompt.options[option_index])
                 renderer.render_warning("请输入有效的选项编号，或输入自由文本。")
                 continue
             return QuestionInteractionResponse(answer=answer)
 
-    raise HITLCheckpointInvalidError("interaction kind/request 不匹配")
+    raise HITLCheckpointInvalidError("interaction prompt 不受支持")
 
 
 async def _resume_until_terminal(

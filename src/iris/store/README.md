@@ -24,8 +24,14 @@ messages = store.load_messages("default")
 - interaction 状态更新使用 version compare-and-set；
 - 部分唯一索引保证每个 session 最多存在一个 active interaction。
 
-构造时会创建父目录，并通过 `CREATE TABLE/INDEX IF NOT EXISTS` 初始化 schema。已有
-`.iris/session.db` 无需迁移。
+构造时会创建父目录，并用完整有序 `PRAGMA table_info` signature 识别 HITL schema：无表时
+创建 v2，精确 v2 时补齐索引，精确 v1 时在单事务内删除并重建 `human_interactions`、清除
+`latest_run.waiting_human` / `interaction_id` marker。v1 pending interaction 不迁移、不备份，
+普通 messages、非 HITL run metadata 与 tool events 保留；成功升级后不支持降级。
+
+除精确 v1/v2 外的缺列、额外列、列顺序、类型、nullability、default 或 primary-key 差异均
+视为未知 schema，初始化抛出 `IrisSessionError` 且不会 drop 原表。v1 重建与 marker 清理共享
+事务，提交前失败会整体回滚。
 
 `append_tool_event()` 按 `(session_id, event_id)` 幂等追加事件：相同 payload 是
 no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。

@@ -15,13 +15,10 @@ from ..exceptions import (
 )
 from .models import (
     HumanInteraction,
+    HumanInteractionRequest,
     HumanInteractionResponse,
-    InteractionKind,
     InteractionResumePhase,
     InteractionStatus,
-    PermissionInteractionRequest,
-    QuestionInteractionRequest,
-    make_call_fingerprint,
 )
 from .store import InteractionStore
 
@@ -32,70 +29,20 @@ class HumanInteractionService:
     def __init__(self, store: InteractionStore) -> None:
         self.store = store
 
-    def create_permission(
+    def create(
         self,
+        request: HumanInteractionRequest,
         *,
         session_id: str,
         run_id: str,
         step_index: int,
-        tool_call_id: str,
-        tool_name: str,
-        arguments: dict[str, Any],
-        reason: str,
-        workspace_root: str,
         checkpoint: dict[str, Any],
     ) -> HumanInteraction:
-        """创建并保存一条 pending 权限确认。"""
-        request = PermissionInteractionRequest(
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            reason=reason,
-            workspace_root=workspace_root,
-            call_fingerprint=make_call_fingerprint(
-                session_id=session_id,
-                run_id=run_id,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                arguments=arguments,
-                workspace_root=workspace_root,
-            ),
-        )
+        """创建并保存一条 pending 人工 gate。"""
         interaction = HumanInteraction(
             session_id=session_id,
             run_id=run_id,
             step_index=step_index,
-            tool_call_id=tool_call_id,
-            kind=InteractionKind.PERMISSION,
-            request=request,
-            checkpoint=self._validate_checkpoint(checkpoint),
-        )
-        self.store.create_interaction(interaction)
-        return interaction
-
-    def create_question(
-        self,
-        *,
-        session_id: str,
-        run_id: str,
-        step_index: int,
-        tool_call_id: str,
-        question: str,
-        options: list[str] | None = None,
-        checkpoint: dict[str, Any],
-    ) -> HumanInteraction:
-        """创建并保存一条 pending 人工问答。"""
-        request = QuestionInteractionRequest(
-            tool_call_id=tool_call_id,
-            question=question,
-            options=options or [],
-        )
-        interaction = HumanInteraction(
-            session_id=session_id,
-            run_id=run_id,
-            step_index=step_index,
-            tool_call_id=tool_call_id,
-            kind=InteractionKind.QUESTION,
             request=request,
             checkpoint=self._validate_checkpoint(checkpoint),
         )
@@ -120,7 +67,7 @@ class HumanInteractionService:
     ) -> HumanInteraction:
         """保存人工响应，并保证重复相同响应幂等。"""
         interaction = self.get(interaction_id)
-        if response.kind != interaction.kind:
+        if response.kind != interaction.request.prompt.kind:
             raise HITLResponseMismatchError(
                 "HITL response kind 与 interaction 不匹配",
                 interaction_id=interaction_id,

@@ -62,7 +62,7 @@ class InMemoryInteractionStore:
     ) -> HumanInteraction:
         """以 CAS 写入人工响应。"""
         interaction = self._require(interaction_id)
-        if response.kind != interaction.kind:
+        if response.kind != interaction.request.prompt.kind:
             raise HITLResponseMismatchError(
                 "HITL response kind 与 interaction 不匹配",
                 interaction_id=interaction_id,

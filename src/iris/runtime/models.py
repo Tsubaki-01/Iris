@@ -97,7 +97,7 @@ class RuntimeOptionsSnapshot(BaseModel):
 class RuntimeHITLCheckpoint(BaseModel):
     """第一次人工等待前保存的 runtime 恢复快照。"""
 
-    checkpoint_version: Literal[1] = 1
+    checkpoint_version: Literal[2] = 2
     run_mode: Literal["turn", "loop"]
     agent_name: str
     session_id: str
@@ -112,7 +112,6 @@ class RuntimeHITLCheckpoint(BaseModel):
     all_tool_results: list[dict[str, Any]] = Field(default_factory=list)
     read_state: dict[str, Any] | None = None
     pending_result: dict[str, Any] | None = None
-    call_fingerprint: str
     continuation_complete: bool = False
 
     model_config = ConfigDict(extra="forbid")

@@ -15,12 +15,13 @@ from iris.cli.trace import ChatTraceStore, TracingRuntimeProvider
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.hitl import (
     HumanInteraction,
-    InteractionKind,
+    HumanInteractionRequest,
     InteractionStatus,
-    PermissionInteractionRequest,
     PermissionInteractionResponse,
-    QuestionInteractionRequest,
+    PermissionPrompt,
     QuestionInteractionResponse,
+    QuestionPrompt,
+    ToolCallSubject,
 )
 from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
@@ -132,56 +133,55 @@ def _renderer() -> tuple[ChatRenderer, Console]:
 
 
 def _permission_interaction() -> HumanInteraction:
-    request = PermissionInteractionRequest(
-        tool_call_id="call_write",
-        tool_name="write_file",
-        arguments={"path": "notes.md"},
-        reason="工具需要写入工作区",
-        workspace_root=str(Path.cwd()),
-        call_fingerprint="a" * 64,
+    request = HumanInteractionRequest(
+        subject=ToolCallSubject(
+            tool_call_id="call_write",
+            tool_name="write_file",
+            arguments={"path": "notes.md"},
+            workspace_root=str(Path.cwd()),
+            fingerprint="a" * 64,
+        ),
+        prompt=PermissionPrompt(reason="工具需要写入工作区"),
     )
     return HumanInteraction(
         interaction_id="int_11111111111111111111111111111111",
         session_id="demo",
         run_id="run-1",
         step_index=0,
-        tool_call_id=request.tool_call_id,
-        kind=InteractionKind.PERMISSION,
         request=request,
         checkpoint={},
     )
 
 
 def _question_interaction() -> HumanInteraction:
-    request = QuestionInteractionRequest(
-        tool_call_id="call_question",
-        question="请选择部署环境",
-        options=["测试", "生产"],
+    request = HumanInteractionRequest(
+        subject=ToolCallSubject(
+            tool_call_id="call_question",
+            tool_name="ask_question",
+            arguments={"question": "请选择部署环境", "options": ["测试", "生产"]},
+            workspace_root=str(Path.cwd()),
+            fingerprint="b" * 64,
+        ),
+        prompt=QuestionPrompt(question="请选择部署环境", options=["测试", "生产"]),
     )
     return HumanInteraction(
         interaction_id="int_22222222222222222222222222222222",
         session_id="demo",
         run_id="run-1",
         step_index=0,
-        tool_call_id=request.tool_call_id,
-        kind=InteractionKind.QUESTION,
         request=request,
         checkpoint={},
     )
 
 
 def _waiting_result(interaction: HumanInteraction) -> RuntimeTurnResult:
-    tool_name = (
-        interaction.request.tool_name
-        if isinstance(interaction.request, PermissionInteractionRequest)
-        else "ask_question"
-    )
+    subject = interaction.request.subject
     return RuntimeTurnResult(
         session_id=interaction.session_id,
         run_id=interaction.run_id,
         status=RuntimeStatus.WAITING_HUMAN,
         assistant_message=Msg.assistant(
-            [ToolUseBlock(id=interaction.tool_call_id, name=tool_name, input={})]
+            [ToolUseBlock(id=subject.tool_call_id, name=subject.tool_name, input={})]
         ),
         steps=1,
         pending_interaction=interaction,

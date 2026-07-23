@@ -8,12 +8,13 @@ import pytest
 from iris.exceptions import HITLConflictError
 from iris.hitl import (
     HumanInteraction,
+    HumanInteractionRequest,
     InMemoryInteractionStore,
-    InteractionKind,
     InteractionResumePhase,
     InteractionStatus,
-    PermissionInteractionRequest,
     PermissionInteractionResponse,
+    PermissionPrompt,
+    ToolCallSubject,
 )
 from iris.store import SQLiteStore
 
@@ -82,13 +83,13 @@ def test_result_committed_interaction_no_longer_blocks_its_session(
     )
     claimed = store.claim_interaction(
         interaction.interaction_id,
-        {"checkpoint_version": 1, "result": "ready"},
+        {"checkpoint_version": 2, "result": "ready"},
         expected_version=resolved.version,
     )
     store.update_consumed_interaction(
         interaction.interaction_id,
         resume_phase=InteractionResumePhase.RESULT_COMMITTED,
-        checkpoint={"checkpoint_version": 1, "result": "committed"},
+        checkpoint={"checkpoint_version": 2, "result": "committed"},
         expected_version=claimed.version,
     )
 
@@ -114,25 +115,25 @@ def test_store_rejects_stale_compare_and_set_versions(interaction_store: object)
     with pytest.raises(HITLConflictError):
         store.claim_interaction(
             interaction.interaction_id,
-            {"checkpoint_version": 1},
+            {"checkpoint_version": 2},
             expected_version=interaction.version,
         )
     claimed = store.claim_interaction(
         interaction.interaction_id,
-        {"checkpoint_version": 1},
+        {"checkpoint_version": 2},
         expected_version=resolved.version,
     )
     with pytest.raises(HITLConflictError):
         store.update_consumed_interaction(
             interaction.interaction_id,
             resume_phase=InteractionResumePhase.RESULT_READY,
-            checkpoint={"checkpoint_version": 1},
+            checkpoint={"checkpoint_version": 2},
             expected_version=resolved.version,
         )
     updated = store.update_consumed_interaction(
         interaction.interaction_id,
         resume_phase=InteractionResumePhase.RESULT_READY,
-        checkpoint={"checkpoint_version": 1, "result": "ready"},
+        checkpoint={"checkpoint_version": 2, "result": "ready"},
         expected_version=claimed.version,
     )
 
@@ -196,15 +197,15 @@ def _interaction(*, session_id: str, interaction_id: str) -> HumanInteraction:
         session_id=session_id,
         run_id="run_1",
         step_index=0,
-        tool_call_id="call_1",
-        kind=InteractionKind.PERMISSION,
-        request=PermissionInteractionRequest(
-            tool_call_id="call_1",
-            tool_name="write_file",
-            arguments={"path": "notes.txt", "content": "hello"},
-            reason="needs approval",
-            workspace_root="C:/workspace",
-            call_fingerprint="a" * 64,
+        request=HumanInteractionRequest(
+            subject=ToolCallSubject(
+                tool_call_id="call_1",
+                tool_name="write_file",
+                arguments={"path": "notes.txt", "content": "hello"},
+                workspace_root="C:/workspace",
+                fingerprint="a" * 64,
+            ),
+            prompt=PermissionPrompt(reason="needs approval"),
         ),
-        checkpoint={"checkpoint_version": 1, "metadata": {"source": "test"}},
+        checkpoint={"checkpoint_version": 2, "metadata": {"source": "test"}},
     )

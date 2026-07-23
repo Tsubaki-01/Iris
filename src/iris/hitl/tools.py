@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ..exceptions import IrisHITLError
 from ..tools.base import BaseTool, ToolDefinition, ToolExecutionContext, ToolResult
 from ..tools.schema import schema_from_pydantic_model
-from .models import QuestionInteractionRequest
+from .models import QuestionPrompt
 
 
 class AskQuestionInput(BaseModel):
@@ -62,16 +62,14 @@ class AskQuestionTool(BaseTool):
     def validate_input(self, params: dict[str, Any]) -> AskQuestionInput:
         return AskQuestionInput.model_validate(params)
 
-    def build_interaction_request(
+    def build_interaction_prompt(
         self,
         *,
-        tool_call_id: str,
         params: AskQuestionInput | dict[str, Any],
-    ) -> QuestionInteractionRequest:
-        """将已验证问题转换为 runtime 后续可持久化的请求模型。"""
+    ) -> QuestionPrompt:
+        """将已验证输入转换为向人展示的问题。"""
         input_data = AskQuestionInput.model_validate(params)
-        return QuestionInteractionRequest(
-            tool_call_id=tool_call_id,
+        return QuestionPrompt(
             question=input_data.question,
             options=input_data.options,
         )

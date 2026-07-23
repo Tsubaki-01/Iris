@@ -14,9 +14,8 @@ from ..agents import AgentConfig
 from ..exceptions import HITLCheckpointInvalidError
 from ..hitl import (
     HumanInteraction,
-    InteractionKind,
-    PermissionInteractionRequest,
-    QuestionInteractionRequest,
+    PermissionPrompt,
+    QuestionPrompt,
 )
 from ..runtime.models import RuntimeErrorInfo, RuntimeStatus, RuntimeTurnResult
 from ..tools import ToolResult
@@ -67,36 +66,33 @@ class ChatRenderer:
 
     def render_permission_interaction(self, interaction: HumanInteraction) -> None:
         """渲染一次精确工具调用的权限确认。"""
-        request = interaction.request
-        if interaction.kind is not InteractionKind.PERMISSION or not isinstance(
-            request, PermissionInteractionRequest
-        ):
+        subject = interaction.request.subject
+        prompt = interaction.request.prompt
+        if not isinstance(prompt, PermissionPrompt):
             raise HITLCheckpointInvalidError("permission interaction kind/request 不匹配")
-        arguments = json.dumps(request.arguments, ensure_ascii=False, indent=2)
+        arguments = json.dumps(subject.arguments, ensure_ascii=False, indent=2)
         body = (
             f"interaction_id: {interaction.interaction_id}\n"
-            f"tool_name: {request.tool_name}\n"
+            f"tool_name: {subject.tool_name}\n"
             f"arguments:\n{arguments}\n"
-            f"reason: {request.reason}\n"
-            f"workspace_root: {request.workspace_root}\n"
+            f"reason: {prompt.reason}\n"
+            f"workspace_root: {subject.workspace_root}\n"
             "本次批准只适用于该调用。"
         )
         self.console.print(Panel(body, title="PERMISSION [y/N]", border_style="yellow"))
 
     def render_question_interaction(self, interaction: HumanInteraction) -> None:
         """渲染人工问题及可选答案。"""
-        request = interaction.request
-        if interaction.kind is not InteractionKind.QUESTION or not isinstance(
-            request, QuestionInteractionRequest
-        ):
+        prompt = interaction.request.prompt
+        if not isinstance(prompt, QuestionPrompt):
             raise HITLCheckpointInvalidError("question interaction kind/request 不匹配")
         options = "\n".join(
-            f"{index}. {option}" for index, option in enumerate(request.options, start=1)
+            f"{index}. {option}" for index, option in enumerate(prompt.options, start=1)
         )
         option_block = f"{options}\n" if options else ""
         body = (
             f"interaction_id: {interaction.interaction_id}\n"
-            f"question: {request.question}\n"
+            f"question: {prompt.question}\n"
             f"{option_block}"
             "也可输入自由文本。"
         )
@@ -107,7 +103,7 @@ class ChatRenderer:
         body = (
             "正在恢复未完成的人工交互。\n"
             f"interaction_id: {interaction.interaction_id}\n"
-            f"kind: {interaction.kind.value}\n"
+            f"kind: {interaction.request.prompt.kind.value}\n"
             f"status: {interaction.status.value}"
         )
         self.console.print(Panel(body, title="RECOVERY", border_style="yellow"))

@@ -7,9 +7,10 @@ from iris.cli.render import ChatRenderer
 from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import (
     HumanInteraction,
-    InteractionKind,
-    PermissionInteractionRequest,
-    QuestionInteractionRequest,
+    HumanInteractionRequest,
+    PermissionPrompt,
+    QuestionPrompt,
+    ToolCallSubject,
 )
 
 
@@ -19,39 +20,42 @@ def _renderer() -> tuple[ChatRenderer, Console]:
 
 
 def _permission_interaction() -> HumanInteraction:
-    request = PermissionInteractionRequest(
-        tool_call_id="call_write",
-        tool_name="write_file",
-        arguments={"路径": "资料/计划.md", "内容": "你好"},
-        reason="工具需要写入工作区",
-        workspace_root=r"J:\Tsubaki-01\Iris",
-        call_fingerprint="a" * 64,
+    request = HumanInteractionRequest(
+        subject=ToolCallSubject(
+            tool_call_id="call_write",
+            tool_name="write_file",
+            arguments={"路径": "资料/计划.md", "内容": "你好"},
+            workspace_root=r"J:\Tsubaki-01\Iris",
+            fingerprint="a" * 64,
+        ),
+        prompt=PermissionPrompt(reason="工具需要写入工作区"),
     )
     return HumanInteraction(
         interaction_id="int_11111111111111111111111111111111",
         session_id="session-1",
         run_id="run-1",
         step_index=0,
-        tool_call_id=request.tool_call_id,
-        kind=InteractionKind.PERMISSION,
         request=request,
         checkpoint={},
     )
 
 
 def _question_interaction() -> HumanInteraction:
-    request = QuestionInteractionRequest(
-        tool_call_id="call_question",
-        question="请选择部署环境",
-        options=["测试", "生产"],
+    request = HumanInteractionRequest(
+        subject=ToolCallSubject(
+            tool_call_id="call_question",
+            tool_name="ask_question",
+            arguments={"question": "请选择部署环境", "options": ["测试", "生产"]},
+            workspace_root=r"J:\Tsubaki-01\Iris",
+            fingerprint="b" * 64,
+        ),
+        prompt=QuestionPrompt(question="请选择部署环境", options=["测试", "生产"]),
     )
     return HumanInteraction(
         interaction_id="int_22222222222222222222222222222222",
         session_id="session-1",
         run_id="run-1",
         step_index=0,
-        tool_call_id=request.tool_call_id,
-        kind=InteractionKind.QUESTION,
         request=request,
         checkpoint={},
     )

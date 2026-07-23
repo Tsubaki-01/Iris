@@ -133,7 +133,7 @@ session。
 - `run_loop()`：执行有界 tool loop。第一步追加当前用户输入，后续步骤从 session history
   重新组装请求。
 - 两个入口都会先预检完整工具批次。遇到第一个权限确认或 `human.ask` 时，runtime 会保存
-  checkpoint 与 interaction，并返回等待状态；该批次不会执行任何工具。
+  checkpoint v2 与统一 `HumanInteractionRequest`，并返回等待状态；该批次不会执行任何工具。
 
 ### `RuntimeOptions`
 
@@ -205,6 +205,11 @@ runtime 会执行一次工具桥接，把工具结果消息写回 session histor
 `run_loop()` 恢复后会将结果回灌 provider，并在下一 gate 或 loop 终态返回。
 checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate 前尚未执行的工具会按原始
 顺序补齐；恢复后的普通工具结果同样写入 session，并继续遵守 `tool_error_policy`。
+
+首次 gate 与同批次 follow-up gate 复用同一个 interaction 创建 helper；`resume()` 主流程
+只消费工具结果，permission approve/reject 与 question answer 的差异集中在一个私有 resolver。
+Checkpoint 固定为 v2，调用 fingerprint 只保存在 `interaction.request.subject`，不再在
+checkpoint 重复存储；v1 checkpoint 会被明确拒绝。
 
 Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝
 重放，`result_ready` 重试消息/event 提交，`result_committed` 从安全边界继续。

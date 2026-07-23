@@ -9,7 +9,7 @@ from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import InMemoryInteractionStore, QuestionInteractionResponse
-from iris.hitl.models import InteractionKind, PermissionInteractionRequest
+from iris.hitl.models import InteractionKind, PermissionPrompt
 from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
@@ -110,7 +110,7 @@ async def test_run_turn_waits_and_persists_question_interaction_before_execution
 
     assert result.status is RuntimeStatus.WAITING_HUMAN
     assert result.pending_interaction is not None
-    assert result.pending_interaction.request.question == "请选择部署环境"
+    assert result.pending_interaction.request.prompt.question == "请选择部署环境"
     assert interaction_store.load_interaction(result.pending_interaction.interaction_id) == (
         result.pending_interaction
     )
@@ -124,6 +124,8 @@ async def test_run_turn_waits_and_persists_question_interaction_before_execution
     assert runtime.load_resumable_interaction("session-1") == result.pending_interaction
     checkpoint = result.pending_interaction.checkpoint
     assert checkpoint["run_mode"] == "turn"
+    assert checkpoint["checkpoint_version"] == 2
+    assert "call_fingerprint" not in checkpoint
     assert checkpoint["next_tool_index"] == 0
     assert checkpoint["tool_calls"][0]["id"] == "call_question"
 
@@ -169,7 +171,7 @@ async def test_run_loop_waits_before_executing_earlier_read_only_tool() -> None:
 
     assert result.status is RuntimeStatus.WAITING_HUMAN
     assert result.pending_interaction is not None
-    assert result.pending_interaction.tool_call_id == "call_question"
+    assert result.pending_interaction.request.subject.tool_call_id == "call_question"
     assert executed == []
 
 
@@ -204,11 +206,11 @@ async def test_permission_gate_creates_permission_interaction() -> None:
 
     assert result.status is RuntimeStatus.WAITING_HUMAN
     assert result.pending_interaction is not None
-    assert result.pending_interaction.kind is InteractionKind.PERMISSION
+    assert result.pending_interaction.request.prompt.kind is InteractionKind.PERMISSION
     request = result.pending_interaction.request
-    assert isinstance(request, PermissionInteractionRequest)
-    assert request.tool_call_id == "call_write"
-    assert request.tool_name == "write_probe"
+    assert isinstance(request.prompt, PermissionPrompt)
+    assert request.subject.tool_call_id == "call_write"
+    assert request.subject.tool_name == "write_probe"
 
 
 @pytest.mark.asyncio

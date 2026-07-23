@@ -11,32 +11,47 @@ from iris.exceptions import (
 )
 from iris.hitl import (
     HumanInteraction,
+    HumanInteractionRequest,
     HumanInteractionResponse,
     HumanInteractionService,
     InteractionResumePhase,
     InteractionStatus,
     PermissionInteractionResponse,
+    PermissionPrompt,
     QuestionInteractionResponse,
+    QuestionPrompt,
+    ToolCallSubject,
 )
 
 
-def test_service_creates_permission_with_a_bound_fingerprint() -> None:
+@pytest.mark.parametrize(
+    "prompt",
+    [PermissionPrompt(reason="needs approval"), QuestionPrompt(question="继续吗？")],
+)
+def test_service_creates_both_prompt_kinds_from_one_request(
+    prompt: PermissionPrompt | QuestionPrompt,
+) -> None:
     store = _FakeStore()
-    interaction = _service(store).create_permission(
+    request = HumanInteractionRequest(subject=_subject(), prompt=prompt)
+
+    interaction = _service(store).create(
+        request,
         session_id="session_1",
         run_id="run_1",
         step_index=0,
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"path": "notes.txt"},
-        reason="needs approval",
-        workspace_root="C:/workspace",
-        checkpoint={"checkpoint_version": 1},
+        checkpoint={"checkpoint_version": 2},
     )
 
     assert interaction.status is InteractionStatus.PENDING
-    assert interaction.request.call_fingerprint
+    assert interaction.request == request
     assert store.interactions[interaction.interaction_id] == interaction
+
+
+def test_service_does_not_expose_legacy_creation_methods() -> None:
+    service = _service(_FakeStore())
+
+    assert not hasattr(service, "create_permission")
+    assert not hasattr(service, "create_question")
 
 
 def test_resolving_same_response_twice_is_idempotent() -> None:
@@ -84,12 +99,21 @@ def test_claim_and_update_reject_invalid_checkpoint_values() -> None:
     with pytest.raises(HITLCheckpointInvalidError):
         service.claim(interaction.interaction_id, {"not_json": {"set"}})
 
+    with pytest.raises(HITLCheckpointInvalidError):
+        service.create(
+            _permission_request(),
+            session_id="session_1",
+            run_id="run_1",
+            step_index=0,
+            checkpoint={"not_json": {"set"}},
+        )
+
 
 def test_claimed_interaction_cannot_be_resolved_again() -> None:
     service = _service(_FakeStore())
     interaction = _permission_interaction(service)
     service.resolve(interaction.interaction_id, PermissionInteractionResponse(decision="approve"))
-    service.claim(interaction.interaction_id, {"checkpoint_version": 1})
+    service.claim(interaction.interaction_id, {"checkpoint_version": 2})
 
     with pytest.raises(HITLAlreadyConsumedError):
         service.resolve(
@@ -182,14 +206,27 @@ def _service(store: _FakeStore) -> HumanInteractionService:
 
 
 def _permission_interaction(service: HumanInteractionService) -> HumanInteraction:
-    return service.create_permission(
+    return service.create(
+        _permission_request(),
         session_id="session_1",
         run_id="run_1",
         step_index=0,
+        checkpoint={"checkpoint_version": 2},
+    )
+
+
+def _permission_request() -> HumanInteractionRequest:
+    return HumanInteractionRequest(
+        subject=_subject(),
+        prompt=PermissionPrompt(reason="needs approval"),
+    )
+
+
+def _subject() -> ToolCallSubject:
+    return ToolCallSubject(
         tool_call_id="call_1",
         tool_name="write_file",
         arguments={"path": "notes.txt"},
-        reason="needs approval",
         workspace_root="C:/workspace",
-        checkpoint={"checkpoint_version": 1},
+        fingerprint="a" * 64,
     )

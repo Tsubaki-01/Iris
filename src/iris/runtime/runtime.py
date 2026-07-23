@@ -36,17 +36,15 @@ from ..hitl import (
     InteractionResumePhase,
     InteractionStatus,
     InteractionStore,
-    PermissionInteractionRequest,
     PermissionInteractionResponse,
-    QuestionInteractionRequest,
     QuestionInteractionResponse,
-    make_call_fingerprint,
 )
 from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 from ..session import InMemorySessionStore, SessionStore
 from ..tools import (
     DefaultPermissionPolicy,
     PermissionPolicy,
+    PreparedToolCall,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
@@ -219,39 +217,34 @@ class AgentRuntime:
             batch_results=[],
             all_tool_results=all_tool_results,
             read_state=self.tool_bridge.read_state(runtime_options.session_id),
-            call_fingerprint=_call_fingerprint(
-                request=gate.human_request,
-                session_id=runtime_options.session_id,
-                run_id=runtime_options.run_id,
-                tool_name=gate.tool_use.name,
-                arguments=gate.validated_params,
-                workspace_root=self.workspace_root,
-            ),
         )
-        request = gate.human_request
-        if isinstance(request, PermissionInteractionRequest):
-            return self.interaction_service.create_permission(
-                session_id=runtime_options.session_id,
-                run_id=runtime_options.run_id,
-                step_index=step_index,
-                tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name,
-                arguments=request.arguments,
-                reason=request.reason,
-                workspace_root=request.workspace_root,
-                checkpoint=checkpoint,
-            )
-        if isinstance(request, QuestionInteractionRequest):
-            return self.interaction_service.create_question(
-                session_id=runtime_options.session_id,
-                run_id=runtime_options.run_id,
-                step_index=step_index,
-                tool_call_id=request.tool_call_id,
-                question=request.question,
-                options=request.options,
-                checkpoint=checkpoint,
-            )
-        raise HITLCheckpointInvalidError("未知的 HITL interaction 请求")
+        return self._create_interaction(
+            prepared=gate,
+            checkpoint=checkpoint,
+            session_id=runtime_options.session_id,
+            run_id=runtime_options.run_id,
+            step_index=step_index,
+        )
+
+    def _create_interaction(
+        self,
+        *,
+        prepared: PreparedToolCall,
+        checkpoint: dict[str, Any],
+        session_id: str,
+        run_id: str,
+        step_index: int,
+    ) -> HumanInteraction:
+        """通过统一 service 路径持久化一处人工 gate。"""
+        if prepared.human_request is None:
+            raise HITLCheckpointInvalidError("预检工具调用缺少 HITL interaction 请求")
+        return self.interaction_service.create(
+            prepared.human_request,
+            session_id=session_id,
+            run_id=run_id,
+            step_index=step_index,
+            checkpoint=checkpoint,
+        )
 
     def load_resumable_interaction(self, session_id: str) -> HumanInteraction | None:
         """读取当前 session 可安全交给 ``resume()`` 的 interaction。
@@ -352,7 +345,7 @@ class AgentRuntime:
             elif interaction.status is InteractionStatus.RESOLVED and response is not None:
                 interaction = self.interaction_service.resolve(interaction_id, response)
             checkpoint = interaction.checkpoint
-            if checkpoint.get("checkpoint_version") != 1:
+            if checkpoint.get("checkpoint_version") != 2:
                 raise HITLCheckpointInvalidError("不支持的 HITL checkpoint 版本")
             options = RuntimeOptions.model_validate(checkpoint["runtime_options"]["options"])
             if (
@@ -381,22 +374,17 @@ class AgentRuntime:
                 tools_enabled=options.include_tools,
             )
             prepared = next(
-                (item for item in plan.calls if item.tool_use.id == interaction.tool_call_id), None
+                (
+                    item
+                    for item in plan.calls
+                    if item.tool_use.id == interaction.request.subject.tool_call_id
+                ),
+                None,
             )
             if prepared is None or prepared.human_request is None:
                 raise HITLCheckpointInvalidError("HITL checkpoint 工具调用不再需要人工确认")
             if interaction.request != prepared.human_request:
                 raise HITLCheckpointInvalidError("HITL interaction 请求与当前工具定义不匹配")
-            expected_fingerprint = _call_fingerprint(
-                request=prepared.human_request,
-                session_id=interaction.session_id,
-                run_id=interaction.run_id,
-                tool_name=prepared.tool_use.name,
-                arguments=prepared.validated_params,
-                workspace_root=self.workspace_root,
-            )
-            if checkpoint.get("call_fingerprint") != expected_fingerprint:
-                raise HITLCheckpointInvalidError("HITL checkpoint 调用指纹与当前 runtime 不匹配")
             if interaction.status is InteractionStatus.CONSUMED:
                 if interaction.resume_phase is InteractionResumePhase.CLAIMED:
                     raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
@@ -426,28 +414,11 @@ class AgentRuntime:
                 options=options,
                 interaction=interaction,
             )
-            if isinstance(interaction.response, PermissionInteractionResponse):
-                if interaction.response.decision == "approve":
-                    result = await self.tool_executor.execute_prepared(
-                        prepared,
-                        self._tool_context(options),
-                        approved_tool_call_id=interaction.tool_call_id,
-                    )
-                else:
-                    result = ToolResult(
-                        tool_use_id=interaction.tool_call_id,
-                        tool_name=prepared.tool_use.name,
-                        is_error=True,
-                        error=ToolErrorInfo(code="USER_REJECTED", message="用户拒绝了工具调用"),
-                    )
-            else:
-                if not isinstance(interaction.response, QuestionInteractionResponse):
-                    raise HITLCheckpointInvalidError("HITL interaction 缺少有效 response")
-                result = ToolResult(
-                    tool_use_id=interaction.tool_call_id,
-                    tool_name=prepared.tool_use.name,
-                    content=[TextBlock(text=interaction.response.answer)],
-                )
+            result = await self._resolve_interaction_result(
+                interaction=interaction,
+                prepared=prepared,
+                options=options,
+            )
             ready_checkpoint = dict(checkpoint)
             batch_results = [*prefix_results, result]
             all_tool_results = [
@@ -488,6 +459,37 @@ class AgentRuntime:
             if loaded_interaction is None:
                 return error_result
             return self._synchronize_resume_metadata(error_result)
+
+    async def _resolve_interaction_result(
+        self,
+        *,
+        interaction: HumanInteraction,
+        prepared: PreparedToolCall,
+        options: RuntimeOptions,
+    ) -> ToolResult:
+        """将 typed 人工响应收敛为一个工具结果。"""
+        response = interaction.response
+        tool_call_id = interaction.request.subject.tool_call_id
+        if isinstance(response, PermissionInteractionResponse):
+            if response.decision == "approve":
+                return await self.tool_executor.execute_prepared(
+                    prepared,
+                    self._tool_context(options),
+                    approved_tool_call_id=tool_call_id,
+                )
+            return ToolResult(
+                tool_use_id=tool_call_id,
+                tool_name=prepared.tool_use.name,
+                is_error=True,
+                error=ToolErrorInfo(code="USER_REJECTED", message="用户拒绝了工具调用"),
+            )
+        if isinstance(response, QuestionInteractionResponse):
+            return ToolResult(
+                tool_use_id=tool_call_id,
+                tool_name=prepared.tool_use.name,
+                content=[TextBlock(text=response.answer)],
+            )
+        raise HITLCheckpointInvalidError("HITL interaction 缺少有效 response")
 
     async def _resume_batch(
         self,
@@ -626,13 +628,11 @@ class AgentRuntime:
         *,
         interaction: HumanInteraction,
         checkpoint: dict[str, Any],
-        prepared: Any,
+        prepared: PreparedToolCall,
         next_index: int,
         results: list[ToolResult],
     ) -> HumanInteraction:
         """为批次中下一处人工 gate 创建独立 interaction。"""
-        request = prepared.human_request
-        assert request is not None
         read_state = self.tool_bridge.read_state(interaction.session_id)
         next_checkpoint = dict(checkpoint)
         next_checkpoint.update(
@@ -642,35 +642,13 @@ class AgentRuntime:
             pending_result=None,
             continuation_complete=False,
             read_state=read_state.model_dump(mode="json") if read_state is not None else None,
-            call_fingerprint=_call_fingerprint(
-                request=request,
-                session_id=interaction.session_id,
-                run_id=interaction.run_id,
-                tool_name=prepared.tool_use.name,
-                arguments=prepared.validated_params,
-                workspace_root=self.workspace_root,
-            ),
         )
-        if isinstance(request, PermissionInteractionRequest):
-            return self.interaction_service.create_permission(
-                session_id=interaction.session_id,
-                run_id=interaction.run_id,
-                step_index=interaction.step_index,
-                tool_call_id=request.tool_call_id,
-                tool_name=request.tool_name,
-                arguments=request.arguments,
-                reason=request.reason,
-                workspace_root=request.workspace_root,
-                checkpoint=next_checkpoint,
-            )
-        return self.interaction_service.create_question(
+        return self._create_interaction(
+            prepared=prepared,
+            checkpoint=next_checkpoint,
             session_id=interaction.session_id,
             run_id=interaction.run_id,
             step_index=interaction.step_index,
-            tool_call_id=request.tool_call_id,
-            question=request.question,
-            options=request.options,
-            checkpoint=next_checkpoint,
         )
 
     def _append_resumed_result(
@@ -853,7 +831,7 @@ class AgentRuntime:
             self.session_store.save_messages(
                 interaction.session_id, [item.model_dump(mode="json") for item in messages]
             )
-        event_id = f"tool_result:{interaction.run_id}:{interaction.tool_call_id}"
+        event_id = f"tool_result:{interaction.run_id}:{interaction.request.subject.tool_call_id}"
         self.session_store.append_tool_event(
             interaction.session_id,
             event_id,
@@ -1341,7 +1319,6 @@ def _build_hitl_checkpoint(
     batch_results: list[dict[str, Any]],
     all_tool_results: list[ToolResult],
     read_state: Any | None,
-    call_fingerprint: str,
 ) -> dict[str, Any]:
     """构造并验证等待恢复所需的 JSON-safe checkpoint。"""
     import json
@@ -1387,34 +1364,11 @@ def _build_hitl_checkpoint(
             batch_results=batch_results,
             all_tool_results=[result.model_dump(mode="json") for result in all_tool_results],
             read_state=read_state_json,
-            call_fingerprint=call_fingerprint,
         ).model_dump(mode="json")
         json.dumps(checkpoint, allow_nan=False, sort_keys=True)
     except (TypeError, ValueError) as exc:
         raise HITLCheckpointInvalidError("HITL checkpoint 必须是 JSON-safe 数据") from exc
     return checkpoint
-
-
-def _call_fingerprint(
-    *,
-    request: PermissionInteractionRequest | QuestionInteractionRequest,
-    session_id: str,
-    run_id: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-    workspace_root: Path,
-) -> str:
-    """返回权限请求原有或问题请求派生的调用指纹。"""
-    if isinstance(request, PermissionInteractionRequest):
-        return request.call_fingerprint
-    return make_call_fingerprint(
-        session_id=session_id,
-        run_id=run_id,
-        tool_call_id=request.tool_call_id,
-        tool_name=tool_name,
-        arguments=arguments,
-        workspace_root=str(workspace_root),
-    )
 
 
 def _tool_result_message(result: ToolResult) -> Msg:
