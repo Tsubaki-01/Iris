@@ -76,5 +76,5 @@ uv run pytest tests/scripts/test_deepseek_agent_flow.py \
 
 ```bash
 uv run ruff check scripts/deepseek_agent_flow.py scripts/deepseek_flow tests/scripts/test_deepseek_agent_flow.py
-uv run black --check scripts/deepseek_agent_flow.py scripts/deepseek_flow tests/scripts/test_deepseek_agent_flow.py
+uv run ruff format --check scripts/deepseek_agent_flow.py scripts/deepseek_flow tests/scripts/test_deepseek_agent_flow.py
 ```

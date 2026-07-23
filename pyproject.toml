@@ -30,7 +30,7 @@ iris = ["templates/builtin/*/*"]
 
 [dependency-groups]
 dev = [
-    "black>=26.3.1",
+    "mypy",
     "pre-commit>=4.6.0",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
@@ -70,9 +70,19 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 files = ["src/"]
-# exclude = ["file or dir"]
-# warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+disallow_incomplete_defs = true
 ignore_missing_imports = true
-disable_error_code = ["arg-type"]
+disable_error_code = [
+    "arg-type",
+    "var-annotated",
+    "union-attr",
+    "assignment",
+    "attr-defined",
+    "import-untyped",
+    "truthy-function",
+    "typeddict-item",
+]
+follow_imports = "skip"
+explicit_package_bases = true

@@ -20,23 +20,4 @@ repos:
         language: system
         types: [python]
         require_serial: true
-        exclude:
-            (?x)(
-                pb2\.py$
-                | grpc\.py$
-                | ^docs
-                | \.html$
-            )
-        args: [ --disallow-untyped-defs,
-                --disallow-incomplete-defs,
-                --ignore-missing-imports,
-                --disable-error-code=var-annotated,
-                --disable-error-code=union-attr,
-                --disable-error-code=assignment,
-                --disable-error-code=attr-defined,
-                --disable-error-code=import-untyped,
-                --disable-error-code=truthy-function,
-                --disable-error-code=typeddict-item,
-                --follow-imports=skip,
-                --explicit-package-bases,
-                ]
+        pass_filenames: false
