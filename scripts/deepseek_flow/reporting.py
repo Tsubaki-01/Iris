@@ -79,9 +79,7 @@ def aggregate_report(
         "total_steps": sum(int(scenario["steps"]) for scenario in scenarios),
         "failed_scenarios": failed,
         "blocking_scenarios": failed,
-        "blocking_modules": [
-            module["module"] for module in module_coverage if not module["ok"]
-        ],
+        "blocking_modules": [module["module"] for module in module_coverage if not module["ok"]],
         "module_coverage": module_coverage,
         "failure_summary": failure_summary,
         "scenarios": scenarios,
@@ -148,8 +146,7 @@ def _render_summary(report: dict[str, Any]) -> str:
 
     lines.extend(["", "## Module Coverage", ""])
     lines.append(
-        "| Module | Result | Scenarios | API calls | Steps | Runtime APIs | "
-        "Failed scenarios |"
+        "| Module | Result | Scenarios | API calls | Steps | Runtime APIs | Failed scenarios |"
     )
     lines.append("| --- | --- | ---: | ---: | ---: | --- | --- |")
     for module in report["module_coverage"]:
@@ -246,9 +243,7 @@ def _module_coverage(scenarios: list[ScenarioReport]) -> list[dict[str, Any]]:
     return list(modules.values())
 
 
-def print_intro(
-    console: Console, *, api_key: str, work_dir: Path, log_dir: Path
-) -> None:
+def print_intro(console: Console, *, api_key: str, work_dir: Path, log_dir: Path) -> None:
     """打印验证输入提示。"""
     console.print(
         Panel.fit(

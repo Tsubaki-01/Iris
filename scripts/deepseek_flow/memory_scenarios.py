@@ -42,9 +42,7 @@ async def run_memory_results_live(work_dir: Path, retries: int) -> ScenarioRepor
             metadata={"scenario": "memory_results_live"},
         ),
     )
-    final_text = (
-        result.assistant_message.text.strip() if result.assistant_message else ""
-    )
+    final_text = result.assistant_message.text.strip() if result.assistant_message else ""
     prompt_text = "\n".join(message.text for message in provider.requests[0].messages)
     ok = (
         result.status.value == "ok"
@@ -68,9 +66,7 @@ async def run_memory_results_live(work_dir: Path, retries: int) -> ScenarioRepor
             "request_snapshots": provider.request_snapshots(),
         },
         error_code="" if ok else _runtime_error_code(result),
-        error_message=(
-            "" if ok else _runtime_error_message(result, "memory_results 验证失败")
-        ),
+        error_message=("" if ok else _runtime_error_message(result, "memory_results 验证失败")),
     )
 
 
@@ -105,9 +101,7 @@ async def run_memory_query_live(work_dir: Path, retries: int) -> ScenarioReport:
             metadata={"scenario": "memory_query_live"},
         ),
     )
-    final_text = (
-        result.assistant_message.text.strip() if result.assistant_message else ""
-    )
+    final_text = result.assistant_message.text.strip() if result.assistant_message else ""
     prompt_text = "\n".join(message.text for message in provider.requests[0].messages)
     ok = (
         result.status.value == "ok"
@@ -129,9 +123,7 @@ async def run_memory_query_live(work_dir: Path, retries: int) -> ScenarioReport:
             "request_snapshots": provider.request_snapshots(),
         },
         error_code="" if ok else _runtime_error_code(result),
-        error_message=(
-            "" if ok else _runtime_error_message(result, "memory_query 验证失败")
-        ),
+        error_message=("" if ok else _runtime_error_message(result, "memory_query 验证失败")),
     )
 
 

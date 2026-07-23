@@ -55,12 +55,8 @@ session:
                 metadata={"scenario": "python_tool_live"},
             ),
         )
-        final_text = (
-            result.assistant_message.text.strip() if result.assistant_message else ""
-        )
-        tool_contents = [
-            tool_result.model_content for tool_result in result.tool_results
-        ]
+        final_text = result.assistant_message.text.strip() if result.assistant_message else ""
+        tool_contents = [tool_result.model_content for tool_result in result.tool_results]
         ok = (
             result.status.value == "ok"
             and any("PYTHON_TOOL_TOKEN_0708" in content for content in tool_contents)

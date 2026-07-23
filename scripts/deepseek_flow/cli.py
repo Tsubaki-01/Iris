@@ -67,9 +67,7 @@ async def amain(argv: list[str] | None = None) -> int:
         return 2
 
     if args.retries < 0:
-        console.print(
-            Panel("--retries 必须非负。", title="参数错误", border_style="red")
-        )
+        console.print(Panel("--retries 必须非负。", title="参数错误", border_style="red"))
         return 2
 
     if args.work_dir is not None:

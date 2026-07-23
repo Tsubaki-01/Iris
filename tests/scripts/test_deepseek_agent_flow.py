@@ -59,9 +59,7 @@ class DelegateProvider:
 
 
 def _load_demo_module() -> ModuleType:
-    module_path = (
-        Path(__file__).resolve().parents[2] / "scripts" / "deepseek_agent_flow.py"
-    )
+    module_path = Path(__file__).resolve().parents[2] / "scripts" / "deepseek_agent_flow.py"
     spec = importlib.util.spec_from_file_location("deepseek_agent_flow", module_path)
     assert spec is not None
     assert spec.loader is not None
@@ -159,10 +157,7 @@ def test_scenario_catalog_describes_each_live_scenario() -> None:
     }
     assert catalog.SCENARIO_CATALOG["run_turn_live"]["runtime_api"] == "run_turn"
     assert catalog.SCENARIO_CATALOG["provider_smoke_live"]["module"] == "providers"
-    assert (
-        catalog.SCENARIO_CATALOG["permission_path_escape_live"]["module"]
-        == "tools.permissions"
-    )
+    assert catalog.SCENARIO_CATALOG["permission_path_escape_live"]["module"] == "tools.permissions"
     assert (
         catalog.SCENARIO_CATALOG["file_not_read_recovery_live"]["description"]
         == "验证模型收到 FILE_NOT_READ 后会先读文件再重试写入。"
@@ -183,9 +178,7 @@ def test_only_run_turn_scenario_uses_run_turn_api() -> None:
         for path in scripts_dir.glob("*.py")
     }
 
-    non_empty_usages = {
-        file_name: lines for file_name, lines in run_turn_usages.items() if lines
-    }
+    non_empty_usages = {file_name: lines for file_name, lines in run_turn_usages.items() if lines}
     assert set(non_empty_usages) == {"runtime_scenarios.py"}
     assert len(non_empty_usages["runtime_scenarios.py"]) == 1
 
@@ -204,14 +197,8 @@ def test_strict_runtime_final_answer_requires_prefix_and_token() -> None:
     token = "deepseek-flow-token-test"
 
     assert module._runtime_final_ok(f"IRIS_RUNTIME_TOOL_OK: {token}", token) is True
-    assert (
-        module._runtime_final_ok(f"prefix IRIS_RUNTIME_TOOL_OK: {token}", token)
-        is False
-    )
-    assert (
-        module._runtime_final_ok(f"IRIS_RUNTIME_TOOL_OK: {token}\nextra", token)
-        is False
-    )
+    assert module._runtime_final_ok(f"prefix IRIS_RUNTIME_TOOL_OK: {token}", token) is False
+    assert module._runtime_final_ok(f"IRIS_RUNTIME_TOOL_OK: {token}\nextra", token) is False
     assert module._runtime_final_ok("IRIS_RUNTIME_TOOL_OK: missing", token) is False
 
 
@@ -497,9 +484,7 @@ def test_file_not_read_recovery_live_reports_read_then_write_sequence(
     report = asyncio.run(module.run_file_not_read_recovery_live(tmp_path, retries=0))
 
     assert report["ok"] is True
-    assert (
-        report["actual"] == "write_file:FILE_NOT_READ -> read_file:ok -> write_file:ok"
-    )
+    assert report["actual"] == "write_file:FILE_NOT_READ -> read_file:ok -> write_file:ok"
     assert report["api_calls"] == 3
     assert report["steps"] == 3
     assert report["evidence"]["tool_sequence"] == [
@@ -905,9 +890,7 @@ def test_write_report_persists_human_summary(tmp_path: Path) -> None:
         "| Module | Result | Scenarios | API calls | Steps | Runtime APIs | Failed scenarios |"
         in summary
     )
-    assert (
-        "| runtime | FAIL | 1 | 2 | 2 | run_loop | runtime_read_loop_live |" in summary
-    )
+    assert "| runtime | FAIL | 1 | 2 | 2 | run_loop | runtime_read_loop_live |" in summary
     scenario_matrix_header = (
         "| Scenario | Module | Runtime API | Result | Status | "
         "API calls | Steps | Scenario dir | Error |"

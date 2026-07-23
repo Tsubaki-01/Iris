@@ -45,10 +45,7 @@ async def run_deepseek_flow(
     started_at = datetime.now(UTC)
     started = perf_counter()
     logger.info(
-        (
-            "deepseek.flow.start work_dir={} log_dir={} route={} "
-            "scenario={} retries={} api_key={}"
-        ),
+        ("deepseek.flow.start work_dir={} log_dir={} route={} scenario={} retries={} api_key={}"),
         work_dir,
         log_dir,
         DEFAULT_PROVIDER_ROUTE,

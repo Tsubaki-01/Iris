@@ -75,15 +75,15 @@ async def run_builtin_file_tools_live(work_dir: Path, retries: int) -> ScenarioR
             tool_codes.append(
                 "ok"
                 if not tool_result.is_error
-                else tool_result.error.code if tool_result.error else "ERROR"
+                else tool_result.error.code
+                if tool_result.error
+                else "ERROR"
             )
 
         notes_text = (work_dir / "workspace" / "notes.txt").read_text(encoding="utf-8")
         generated_path = work_dir / "workspace" / "generated.txt"
         generated_text = (
-            generated_path.read_text(encoding="utf-8")
-            if generated_path.exists()
-            else ""
+            generated_path.read_text(encoding="utf-8") if generated_path.exists() else ""
         )
         ok = (
             tool_codes == ["ok", "ok", "ok", "ok", "ok"]
@@ -143,7 +143,9 @@ async def run_file_not_read_recovery_live(
             (
                 "ok"
                 if not tool_result.is_error
-                else tool_result.error.code if tool_result.error else "ERROR"
+                else tool_result.error.code
+                if tool_result.error
+                else "ERROR"
             )
             for tool_result in result.tool_results
         ]

@@ -49,12 +49,8 @@ class RecordingRuntimeProvider:
                 "tool_choice": request.tool_choice,
                 "temperature": request.temperature,
                 "max_tokens": request.max_tokens,
-                "has_tool_result": any(
-                    message.tool_results for message in request.messages
-                ),
-                "messages": [
-                    _message_snapshot(message) for message in request.messages
-                ],
+                "has_tool_result": any(message.tool_results for message in request.messages),
+                "messages": [_message_snapshot(message) for message in request.messages],
             }
             for index, request in enumerate(self.requests, start=1)
         ]
@@ -62,9 +58,7 @@ class RecordingRuntimeProvider:
 
 def recording_provider() -> RecordingRuntimeProvider:
     """创建记录请求的真实 DeepSeek provider。"""
-    return RecordingRuntimeProvider(
-        create_provider_client(DEFAULT_PROVIDER_ROUTE, timeout=60)
-    )
+    return RecordingRuntimeProvider(create_provider_client(DEFAULT_PROVIDER_ROUTE, timeout=60))
 
 
 def _tool_schema_names(tools: list[dict[str, object]]) -> list[str]:
@@ -109,9 +103,7 @@ async def run_provider_smoke_live(work_dir: Path, retries: int) -> ScenarioRepor
             LLMRequest(
                 model=DEFAULT_MODEL,
                 messages=[
-                    Msg.user(
-                        "这是连通性验证。请只回答 IRIS_PROVIDER_OK，不要添加其他内容。"
-                    )
+                    Msg.user("这是连通性验证。请只回答 IRIS_PROVIDER_OK，不要添加其他内容。")
                 ],
                 temperature=0,
                 max_tokens=32,

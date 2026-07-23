@@ -103,9 +103,7 @@ def prepare_file_not_read_recovery_agent(base_dir: Path) -> Path:
     """准备 FILE_NOT_READ 后模型自恢复验证用 agent 配置。"""
     workspace = base_dir / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "target.txt").write_text(
-        "ORIGINAL_WRITE_TOKEN_0708\n", encoding="utf-8"
-    )
+    (workspace / "target.txt").write_text("ORIGINAL_WRITE_TOKEN_0708\n", encoding="utf-8")
     return _write_agent_yaml(
         base_dir,
         f"""

@@ -40,9 +40,7 @@ async def run_runtime_read_loop_live(work_dir: Path, retries: int) -> ScenarioRe
                 metadata={"scenario": "runtime_read_loop_live"},
             ),
         )
-        final_text = (
-            result.assistant_message.text.strip() if result.assistant_message else ""
-        )
+        final_text = result.assistant_message.text.strip() if result.assistant_message else ""
         ok = (
             result.status.value == "ok"
             and len(result.tool_results) > 0
@@ -64,9 +62,7 @@ async def run_runtime_read_loop_live(work_dir: Path, retries: int) -> ScenarioRe
                 "request_snapshots": provider.request_snapshots(),
             },
             error_code="" if ok else _runtime_error_code(result),
-            error_message=(
-                "" if ok else _runtime_error_message(result, "未得到严格最终回答")
-            ),
+            error_message=("" if ok else _runtime_error_message(result, "未得到严格最终回答")),
         )
 
     return await _retry_assertion(attempt, retries)

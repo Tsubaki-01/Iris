@@ -113,8 +113,7 @@ session:
             "outside_file": str(outside_file.resolve()),
             "outside_file_exists": outside_file.exists(),
             "outside_file_readable_by_tool": any(
-                "PATH_ESCAPE_SECRET_SHOULD_NOT_BE_READ" in content
-                for content in model_contents
+                "PATH_ESCAPE_SECRET_SHOULD_NOT_BE_READ" in content for content in model_contents
             ),
             "attempted_path": attempted_path,
             "executor_error_code": code,

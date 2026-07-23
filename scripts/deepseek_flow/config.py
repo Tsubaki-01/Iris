@@ -75,9 +75,7 @@ def _redact_current_api_key(message: str) -> str:
 def _local_env_paths(base_dir: Path) -> list[Path]:
     """返回按优先级存在的本地 env 文件路径。"""
     return [
-        base_dir / file_name
-        for file_name in LOCAL_ENV_FILES
-        if (base_dir / file_name).exists()
+        base_dir / file_name for file_name in LOCAL_ENV_FILES if (base_dir / file_name).exists()
     ]
 
 

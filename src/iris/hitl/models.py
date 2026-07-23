@@ -153,21 +153,6 @@ class QuestionPrompt(BaseModel):
         return normalized
 
 
-HumanInteractionPrompt = Annotated[
-    PermissionPrompt | QuestionPrompt,
-    Field(discriminator="kind"),
-]
-
-
-class HumanInteractionRequest(BaseModel):
-    """所有人工 gate 共用的工具调用与提示信封。"""
-
-    subject: ToolCallSubject
-    prompt: HumanInteractionPrompt
-
-    model_config = ConfigDict(extra="forbid", use_enum_values=False)
-
-
 class PermissionInteractionResponse(BaseModel):
     """人工对权限请求的单次决定。"""
 
@@ -191,10 +176,23 @@ class QuestionInteractionResponse(BaseModel):
         return _trim_required(value, field_name="answer")
 
 
+HumanInteractionPrompt = Annotated[
+    PermissionPrompt | QuestionPrompt,
+    Field(discriminator="kind"),
+]
 HumanInteractionResponse = Annotated[
     PermissionInteractionResponse | QuestionInteractionResponse,
     Field(discriminator="kind"),
 ]
+
+
+class HumanInteractionRequest(BaseModel):
+    """所有人工 gate 共用的工具调用与提示信封。"""
+
+    subject: ToolCallSubject
+    prompt: HumanInteractionPrompt
+
+    model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
 
 class HumanInteraction(BaseModel):

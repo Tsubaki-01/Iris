@@ -36,9 +36,7 @@ async def run_sqlite_session_live(work_dir: Path, retries: int) -> ScenarioRepor
         messages = runtime.session_store.load_messages(session_id)
         metadata = runtime.session_store.load_run_metadata(session_id)
         tool_events = runtime.session_store.load_tool_events(session_id)
-        final_text = (
-            result.assistant_message.text.strip() if result.assistant_message else ""
-        )
+        final_text = result.assistant_message.text.strip() if result.assistant_message else ""
         db_path = work_dir / "session.db"
         ok = (
             result.status.value == "ok"
