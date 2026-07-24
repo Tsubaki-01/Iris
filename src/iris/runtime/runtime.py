@@ -54,6 +54,7 @@ from ..tools import (
 from .assembler import RuntimeMessageAssembler
 from .errors import error_result, normalize_runtime_error, tool_error_info
 from .memory_context import prepare_memory_context_input
+from .metadata import build_run_metadata, synchronize_resume_metadata
 from .models import (
     ProviderResponseSnapshot,
     RuntimeErrorInfo,
@@ -309,27 +310,6 @@ class AgentRuntime:
             pending_interaction_id=fallback.interaction_id,
         )
 
-    def _synchronize_resume_metadata(self, result: RuntimeTurnResult) -> RuntimeTurnResult:
-        """在向 host 返回 resume 结果前同步 latest run snapshot。"""
-        try:
-            existing = self.session_store.load_run_metadata(result.session_id)
-            metadata = _build_resume_run_metadata(
-                existing=existing,
-                result=result,
-                message_count=len(self.session_store.load_messages(result.session_id)),
-            )
-            self.session_store.save_run_metadata(result.session_id, metadata)
-        except Exception as exc:
-            return error_result(
-                session_id=result.session_id,
-                run_id=result.run_id,
-                error=normalize_runtime_error(exc),
-                assistant_message=result.assistant_message,
-                steps=result.steps,
-                metadata=result.metadata,
-            )
-        return result
-
     async def resume(
         self,
         interaction_id: str,
@@ -390,9 +370,13 @@ class AgentRuntime:
                     raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
                 committed = await self._commit_ready_interaction(interaction)
                 if checkpoint.get("continuation_complete") is True:
-                    return self._synchronize_resume_metadata(committed)
-                return self._synchronize_resume_metadata(
-                    await self._resume_batch(
+                    return synchronize_resume_metadata(
+                        session_store=self.session_store,
+                        result=committed,
+                    )
+                return synchronize_resume_metadata(
+                    session_store=self.session_store,
+                    result=await self._resume_batch(
                         committed=committed,
                         interaction=interaction,
                         checkpoint=checkpoint,
@@ -437,8 +421,9 @@ class AgentRuntime:
                 ready_checkpoint,
             )
             committed = await self._commit_ready_interaction(interaction)
-            return self._synchronize_resume_metadata(
-                await self._resume_batch(
+            return synchronize_resume_metadata(
+                session_store=self.session_store,
+                result=await self._resume_batch(
                     committed=committed,
                     interaction=interaction,
                     checkpoint=ready_checkpoint,
@@ -458,7 +443,10 @@ class AgentRuntime:
             )
             if loaded_interaction is None:
                 return failed_result
-            return self._synchronize_resume_metadata(failed_result)
+            return synchronize_resume_metadata(
+                session_store=self.session_store,
+                result=failed_result,
+            )
 
     async def _resolve_interaction_result(
         self,
@@ -934,7 +922,7 @@ class AgentRuntime:
             if pending_interaction is not None:
                 self.session_store.save_run_metadata(
                     session_id,
-                    _build_run_metadata(
+                    build_run_metadata(
                         existing=self.session_store.load_run_metadata(session_id),
                         session_id=session_id,
                         run_id=run_id,
@@ -976,7 +964,7 @@ class AgentRuntime:
                 )
             self.session_store.save_run_metadata(
                 session_id,
-                _build_run_metadata(
+                build_run_metadata(
                     existing=self.session_store.load_run_metadata(session_id),
                     session_id=session_id,
                     run_id=run_id,
@@ -993,7 +981,7 @@ class AgentRuntime:
             try:
                 self.session_store.save_run_metadata(
                     session_id,
-                    _build_run_metadata(
+                    build_run_metadata(
                         existing=self.session_store.load_run_metadata(session_id),
                         session_id=session_id,
                         run_id=run_id,
@@ -1110,7 +1098,7 @@ class AgentRuntime:
                 if not latest_assistant.has_tool_calls:
                     self.session_store.save_run_metadata(
                         session_id,
-                        _build_run_metadata(
+                        build_run_metadata(
                             existing=self.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
@@ -1146,7 +1134,7 @@ class AgentRuntime:
                 if pending_interaction is not None:
                     self.session_store.save_run_metadata(
                         session_id,
-                        _build_run_metadata(
+                        build_run_metadata(
                             existing=self.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
@@ -1208,7 +1196,7 @@ class AgentRuntime:
                 try:
                     self.session_store.save_run_metadata(
                         session_id,
-                        _build_run_metadata(
+                        build_run_metadata(
                             existing=self.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
@@ -1253,7 +1241,7 @@ class AgentRuntime:
         try:
             self.session_store.save_run_metadata(
                 session_id,
-                _build_run_metadata(
+                build_run_metadata(
                     existing=self.session_store.load_run_metadata(session_id),
                     session_id=session_id,
                     run_id=run_id,
@@ -1394,90 +1382,6 @@ def _apply_tool_schemas(
         api_style="chat",
     )
     return request.model_copy(update={"tools": tools})
-
-
-def _build_run_metadata(
-    *,
-    existing: dict[str, object],
-    session_id: str,
-    run_id: str,
-    status: RuntimeStatus,
-    provider: str,
-    response: LLMResponse | None,
-    message_count: int,
-    metadata: Mapping[str, Any],
-    steps: int = 1,
-    tool_count: int = 0,
-    error: RuntimeErrorInfo | None = None,
-    waiting_human: bool = False,
-    interaction_id: str | None = None,
-) -> dict[str, object]:
-    """构建 session 中保存的 run metadata。
-
-    `latest_run` 便于快速读取最近一次结果，`runs` 保留 append-like 历史，避免 Stage 03
-    引入新的持久化表结构或 session model。
-    """
-    latest_run: dict[str, object] = {
-        "session_id": session_id,
-        "run_id": run_id,
-        "status": status.value,
-        "provider": cast(object, provider),
-        "model": cast(object, response.model if response is not None else ""),
-        "finish_reason": cast(
-            object,
-            response.finish_reason if response is not None else "",
-        ),
-        "input_tokens": response.input_tokens if response is not None else 0,
-        "output_tokens": response.output_tokens if response is not None else 0,
-        "total_tokens": response.total_tokens if response is not None else 0,
-        "message_count": message_count,
-        "steps": steps,
-        "tool_count": tool_count,
-        "metadata": dict(metadata),
-    }
-    if error is not None:
-        latest_run["error"] = error.model_dump(mode="json")
-    if waiting_human:
-        latest_run["waiting_human"] = True
-    if interaction_id is not None:
-        latest_run["interaction_id"] = interaction_id
-    runs = existing.get("runs", [])
-    run_list = list(runs) if isinstance(runs, list) else []
-    run_list.append(latest_run)
-    return {**existing, "latest_run": latest_run, "runs": run_list}
-
-
-def _build_resume_run_metadata(
-    *,
-    existing: dict[str, object],
-    result: RuntimeTurnResult,
-    message_count: int,
-) -> dict[str, object]:
-    """基于原 run snapshot 构建 resume 后的 append-like metadata。"""
-    previous = existing.get("latest_run")
-    latest_run = dict(previous) if isinstance(previous, dict) else {}
-    latest_run.update(
-        session_id=result.session_id,
-        run_id=result.run_id,
-        status=result.status.value,
-        message_count=message_count,
-        steps=result.steps,
-        tool_count=len(result.tool_results),
-    )
-    latest_run.pop("waiting_human", None)
-    latest_run.pop("interaction_id", None)
-    latest_run.pop("error", None)
-    if result.error is not None:
-        latest_run["error"] = result.error.model_dump(mode="json")
-    if result.status is RuntimeStatus.WAITING_HUMAN:
-        if result.pending_interaction is None:
-            raise HITLCheckpointInvalidError("waiting_human 结果缺少 pending interaction")
-        latest_run["waiting_human"] = True
-        latest_run["interaction_id"] = result.pending_interaction.interaction_id
-    runs = existing.get("runs", [])
-    run_list = list(runs) if isinstance(runs, list) else []
-    run_list.append(latest_run)
-    return {**existing, "latest_run": latest_run, "runs": run_list}
 
 
 def _should_stop_on_tool_error(

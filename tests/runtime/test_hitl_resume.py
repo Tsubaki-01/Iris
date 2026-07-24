@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from fakes import FakeProvider
 
+import iris.runtime.runtime as runtime_module
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisSessionError
@@ -594,13 +595,17 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
     commit_ready = runtime._commit_ready_interaction
-    synchronize = runtime._synchronize_resume_metadata
+    synchronize = runtime_module.synchronize_resume_metadata
 
     async def fail_before_result_commit(_: object) -> RuntimeTurnResult:
         raise RuntimeError("模拟 result_ready 后崩溃")
 
     monkeypatch.setattr(runtime, "_commit_ready_interaction", fail_before_result_commit)
-    monkeypatch.setattr(runtime, "_synchronize_resume_metadata", lambda result: result)
+    monkeypatch.setattr(
+        runtime_module,
+        "synchronize_resume_metadata",
+        lambda *, session_store, result: result,
+    )
     interrupted = await runtime.resume(
         interaction_id,
         QuestionInteractionResponse(answer="继续"),
@@ -612,7 +617,7 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     assert runtime.load_resumable_interaction("default") == result_ready
 
     monkeypatch.setattr(runtime, "_commit_ready_interaction", commit_ready)
-    monkeypatch.setattr(runtime, "_synchronize_resume_metadata", synchronize)
+    monkeypatch.setattr(runtime_module, "synchronize_resume_metadata", synchronize)
     recovered = await runtime.resume(interaction_id)
 
     assert recovered.status is RuntimeStatus.OK
