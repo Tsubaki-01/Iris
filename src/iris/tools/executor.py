@@ -28,7 +28,7 @@ from ..hitl.models import (
     HumanInteractionRequest,
     PermissionPrompt,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
@@ -676,19 +676,19 @@ def _human_interaction_request(
     if prompt is None:
         return None
 
-    subject = _tool_call_subject(tool_use, tool, params, context)
-    return HumanInteractionRequest(subject=subject, prompt=prompt)
+    tool_call = _tool_call_snapshot(tool_use, tool, params, context)
+    return HumanInteractionRequest(tool_call=tool_call, prompt=prompt)
 
 
-def _tool_call_subject(
+def _tool_call_snapshot(
     tool_use: ToolUseBlock,
     tool: BaseTool,
     params: dict[str, Any],
     context: ToolExecutionContext,
-) -> ToolCallSubject:
+) -> ToolCallSnapshot:
     run_id = str(context.metadata.get("run_id", ""))
     workspace_root = str(context.workspace_root.resolve())
-    return ToolCallSubject(
+    return ToolCallSnapshot(
         tool_call_id=tool_use.id,
         tool_name=tool.name,
         arguments=params,

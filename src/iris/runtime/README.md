@@ -208,7 +208,7 @@ checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate �
 
 首次 gate 与同批次 follow-up gate 复用同一个 interaction 创建 helper；`resume()` 主流程
 只消费工具结果，permission approve/reject 与 question answer 的差异集中在一个私有 resolver。
-Checkpoint 固定为 v2，调用 fingerprint 只保存在 `interaction.request.subject`，不再在
+Checkpoint 固定为 v2，调用 fingerprint 只保存在 `interaction.request.tool_call`，不再在
 checkpoint 重复存储；v1 checkpoint 会被明确拒绝。
 
 Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝

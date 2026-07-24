@@ -15,7 +15,7 @@ from iris.hitl import (
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
     make_call_fingerprint,
 )
 from iris.hitl.models import HumanInteractionPrompt, HumanInteractionResponse
@@ -46,16 +46,26 @@ def test_prompts_and_responses_round_trip_as_discriminated_unions() -> None:
     assert isinstance(response, QuestionInteractionResponse)
 
 
-def test_request_uses_one_subject_and_typed_prompt_envelope() -> None:
+def test_request_uses_one_tool_call_snapshot_and_typed_prompt_envelope() -> None:
     request = HumanInteractionRequest(
-        subject=_subject(),
+        tool_call=_tool_call_snapshot(),
         prompt=QuestionPrompt(question="继续执行吗？", options=["继续", "取消"]),
     )
 
     restored = HumanInteractionRequest.model_validate_json(request.model_dump_json())
 
-    assert restored.subject == _subject()
+    assert restored.tool_call == _tool_call_snapshot()
     assert isinstance(restored.prompt, QuestionPrompt)
+
+
+def test_request_rejects_legacy_subject_field() -> None:
+    with pytest.raises(ValidationError):
+        HumanInteractionRequest.model_validate(
+            {
+                "subject": _tool_call_snapshot().model_dump(),
+                "prompt": {"kind": "permission", "reason": "needs approval"},
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -161,14 +171,14 @@ def test_human_interaction_rejects_non_json_safe_checkpoint() -> None:
         ("arguments", {"not_json": {1, 2}}),
     ],
 )
-def test_tool_call_subject_validates_identity_and_json_safe_arguments(
+def test_tool_call_snapshot_validates_identity_and_json_safe_arguments(
     field: str, value: object
 ) -> None:
-    values = _subject().model_dump()
+    values = _tool_call_snapshot().model_dump()
     values[field] = value
 
     with pytest.raises(ValidationError):
-        ToolCallSubject.model_validate(values)
+        ToolCallSnapshot.model_validate(values)
 
 
 def test_call_fingerprint_is_canonical_and_binds_call_workspace_and_arguments() -> None:
@@ -224,7 +234,7 @@ def _permission_interaction() -> HumanInteraction:
         status=InteractionStatus.RESOLVED,
         resume_phase=InteractionResumePhase.WAITING,
         request=HumanInteractionRequest(
-            subject=_subject(),
+            tool_call=_tool_call_snapshot(),
             prompt=PermissionPrompt(reason="needs approval"),
         ),
         response=PermissionInteractionResponse(decision="approve"),
@@ -232,8 +242,8 @@ def _permission_interaction() -> HumanInteraction:
     )
 
 
-def _subject() -> ToolCallSubject:
-    return ToolCallSubject(
+def _tool_call_snapshot() -> ToolCallSnapshot:
+    return ToolCallSnapshot(
         tool_call_id="call_1",
         tool_name="write_file",
         arguments={"path": "notes.txt"},

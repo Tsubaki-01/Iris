@@ -66,7 +66,7 @@ class ChatRenderer:
 
     def render_permission_interaction(self, interaction: HumanInteraction) -> None:
         """渲染一次精确工具调用的权限确认。"""
-        subject = interaction.request.subject
+        subject = interaction.request.tool_call
         prompt = interaction.request.prompt
         if not isinstance(prompt, PermissionPrompt):
             raise HITLCheckpointInvalidError("permission interaction kind/request 不匹配")

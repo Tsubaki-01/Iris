@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from iris.exceptions import IrisHITLError
-from iris.hitl.models import QuestionPrompt, ToolCallSubject, make_call_fingerprint
+from iris.hitl.models import QuestionPrompt, ToolCallSnapshot, make_call_fingerprint
 from iris.hitl.tools import AskQuestionInput, AskQuestionTool
 from iris.message import ToolUseBlock
 from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
@@ -64,7 +64,7 @@ def test_preflight_classifies_ask_question_as_a_human_gate() -> None:
 
     assert prepared.human_request is not None
     assert isinstance(prepared.human_request.prompt, QuestionPrompt)
-    assert prepared.human_request.subject == ToolCallSubject(
+    assert prepared.human_request.tool_call == ToolCallSnapshot(
         tool_call_id="call_1",
         tool_name="ask_question",
         arguments={"question": "继续吗？", "options": []},

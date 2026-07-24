@@ -10,7 +10,7 @@ from iris.hitl import (
     HumanInteractionRequest,
     PermissionPrompt,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
 )
 
 
@@ -21,7 +21,7 @@ def _renderer() -> tuple[ChatRenderer, Console]:
 
 def _permission_interaction() -> HumanInteraction:
     request = HumanInteractionRequest(
-        subject=ToolCallSubject(
+        tool_call=ToolCallSnapshot(
             tool_call_id="call_write",
             tool_name="write_file",
             arguments={"路径": "资料/计划.md", "内容": "你好"},
@@ -42,7 +42,7 @@ def _permission_interaction() -> HumanInteraction:
 
 def _question_interaction() -> HumanInteraction:
     request = HumanInteractionRequest(
-        subject=ToolCallSubject(
+        tool_call=ToolCallSnapshot(
             tool_call_id="call_question",
             tool_name="ask_question",
             arguments={"question": "请选择部署环境", "options": ["测试", "生产"]},

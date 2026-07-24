@@ -171,7 +171,7 @@ async def test_run_loop_waits_before_executing_earlier_read_only_tool() -> None:
 
     assert result.status is RuntimeStatus.WAITING_HUMAN
     assert result.pending_interaction is not None
-    assert result.pending_interaction.request.subject.tool_call_id == "call_question"
+    assert result.pending_interaction.request.tool_call.tool_call_id == "call_question"
     assert executed == []
 
 
@@ -209,8 +209,8 @@ async def test_permission_gate_creates_permission_interaction() -> None:
     assert result.pending_interaction.request.prompt.kind is InteractionKind.PERMISSION
     request = result.pending_interaction.request
     assert isinstance(request.prompt, PermissionPrompt)
-    assert request.subject.tool_call_id == "call_write"
-    assert request.subject.tool_name == "write_probe"
+    assert request.tool_call.tool_call_id == "call_write"
+    assert request.tool_call.tool_name == "write_probe"
 
 
 @pytest.mark.asyncio

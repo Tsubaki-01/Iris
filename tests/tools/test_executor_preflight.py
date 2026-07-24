@@ -177,13 +177,13 @@ def test_both_gate_kinds_use_the_same_subject_fingerprint_contract() -> None:
     assert question.human_request is not None
     assert permission.human_request is not None
     for request in (question.human_request, permission.human_request):
-        assert request.subject.fingerprint == make_call_fingerprint(
+        assert request.tool_call.fingerprint == make_call_fingerprint(
             session_id="session_1",
             run_id="run_1",
-            tool_call_id=request.subject.tool_call_id,
-            tool_name=request.subject.tool_name,
-            arguments=request.subject.arguments,
-            workspace_root=request.subject.workspace_root,
+            tool_call_id=request.tool_call.tool_call_id,
+            tool_name=request.tool_call.tool_name,
+            arguments=request.tool_call.arguments,
+            workspace_root=request.tool_call.workspace_root,
         )
 
 
