@@ -67,6 +67,7 @@ from .models import (
     ToolErrorPolicy,
 )
 from .tool_bridge import ToolBridge
+from .tool_results import build_tool_result_event, build_tool_result_message
 
 # endregion
 
@@ -655,33 +656,20 @@ class AgentRuntime:
         self, *, result: ToolResult, session_id: str, run_id: str, step_index: int
     ) -> Msg:
         """保存续跑工具结果，并使用稳定 event ID 避免重复追加。"""
-        message = Msg.tool_result(
-            tool_use_id=result.tool_use_id,
-            content=result.model_content,
-            is_error=result.is_error,
-            name=result.tool_name,
-            metadata=result.to_block_metadata(),
-        )
+        message = build_tool_result_message(result)
         history = _load_history(self.session_store, session_id)
         history.append(message)
         self.session_store.save_messages(
             session_id, [item.model_dump(mode="json") for item in history]
         )
-        self.session_store.append_tool_event(
-            session_id,
-            f"tool_result:{run_id}:{result.tool_use_id}",
-            {
-                "type": "tool_result",
-                "tool_call_id": result.tool_use_id,
-                "tool_name": result.tool_name,
-                "status": "error" if result.is_error else "ok",
-                "error": result.error.model_dump(mode="json") if result.error else None,
-                "run_id": run_id,
-                "step_index": step_index,
-                "agent_id": self.agent_config.name,
-                "metadata": {},
-            },
+        event = build_tool_result_event(
+            result,
+            run_id=run_id,
+            step_index=step_index,
+            agent_id=self.agent_config.name,
+            metadata=None,
         )
+        self.session_store.append_tool_event(session_id, str(event["event_id"]), event)
         return message
 
     def _tool_context(self, options: RuntimeOptions) -> ToolExecutionContext:
@@ -820,7 +808,7 @@ class AgentRuntime:
         if not isinstance(raw_result, dict):
             raise HITLExecutionOutcomeUnknownError("HITL 已消费 interaction 缺少待提交结果")
         result = ToolResult.model_validate(raw_result)
-        message = _tool_result_message(result)
+        message = build_tool_result_message(result)
         messages = _load_history(self.session_store, interaction.session_id)
         if not any(
             block.tool_use_id == result.tool_use_id
@@ -831,21 +819,17 @@ class AgentRuntime:
             self.session_store.save_messages(
                 interaction.session_id, [item.model_dump(mode="json") for item in messages]
             )
-        event_id = f"tool_result:{interaction.run_id}:{interaction.request.tool_call.tool_call_id}"
+        event = build_tool_result_event(
+            result,
+            run_id=interaction.run_id,
+            step_index=interaction.step_index,
+            agent_id=self.agent_config.name,
+            metadata=None,
+        )
         self.session_store.append_tool_event(
             interaction.session_id,
-            event_id,
-            {
-                "type": "tool_result",
-                "tool_call_id": result.tool_use_id,
-                "tool_name": result.tool_name,
-                "status": "error" if result.is_error else "ok",
-                "error": result.error.model_dump(mode="json") if result.error else None,
-                "run_id": interaction.run_id,
-                "step_index": interaction.step_index,
-                "agent_id": self.agent_config.name,
-                "metadata": {},
-            },
+            str(event["event_id"]),
+            event,
         )
         if interaction.resume_phase is not InteractionResumePhase.RESULT_COMMITTED:
             interaction = self.interaction_service.update_consumed(
@@ -862,7 +846,7 @@ class AgentRuntime:
             session_id=interaction.session_id,
             run_id=interaction.run_id,
             status=RuntimeStatus.OK,
-            tool_result_messages=[_tool_result_message(item) for item in all_tool_results],
+            tool_result_messages=[build_tool_result_message(item) for item in all_tool_results],
             tool_results=all_tool_results,
             steps=interaction.step_index + 1,
         )
@@ -1369,17 +1353,6 @@ def _build_hitl_checkpoint(
     except (TypeError, ValueError) as exc:
         raise HITLCheckpointInvalidError("HITL checkpoint 必须是 JSON-safe 数据") from exc
     return checkpoint
-
-
-def _tool_result_message(result: ToolResult) -> Msg:
-    """将结构化工具结果转换为 provider-neutral 消息。"""
-    return Msg.tool_result(
-        tool_use_id=result.tool_use_id,
-        content=result.model_content,
-        is_error=result.is_error,
-        name=result.tool_name,
-        metadata=result.to_block_metadata(),
-    )
 
 
 def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
