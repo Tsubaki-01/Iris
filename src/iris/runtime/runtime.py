@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
@@ -52,15 +52,13 @@ from ..tools import (
     ToolResult,
 )
 from .assembler import RuntimeMessageAssembler
+from .checkpoint import build_hitl_checkpoint, validate_hitl_checkpoint
 from .errors import error_result, normalize_runtime_error, tool_error_info
 from .memory_context import prepare_memory_context_input
 from .metadata import build_run_metadata, synchronize_resume_metadata
 from .models import (
-    ProviderResponseSnapshot,
     RuntimeErrorInfo,
-    RuntimeHITLCheckpoint,
     RuntimeOptions,
-    RuntimeOptionsSnapshot,
     RuntimeStatus,
     RuntimeTurnResult,
     ToolBridgeResult,
@@ -207,8 +205,8 @@ class AgentRuntime:
         if gate is None or gate.human_request is None:
             return None
 
-        checkpoint = _build_hitl_checkpoint(
-            run_mode=cast("str", run_mode),
+        checkpoint = build_hitl_checkpoint(
+            run_mode=run_mode,
             agent_name=self.agent_config.name,
             runtime_options=runtime_options,
             assistant_message=assistant_message,
@@ -324,16 +322,10 @@ class AgentRuntime:
                 interaction = self.interaction_service.resolve(interaction_id, response)
             elif interaction.status is InteractionStatus.RESOLVED and response is not None:
                 interaction = self.interaction_service.resolve(interaction_id, response)
-            checkpoint = interaction.checkpoint
-            if checkpoint.get("checkpoint_version") != 2:
-                raise HITLCheckpointInvalidError("不支持的 HITL checkpoint 版本")
-            options = RuntimeOptions.model_validate(checkpoint["runtime_options"]["options"])
-            if (
-                checkpoint.get("agent_name") != self.agent_config.name
-                or options.session_id != interaction.session_id
-                or options.run_id != interaction.run_id
-            ):
-                raise HITLCheckpointInvalidError("HITL checkpoint 与当前 runtime 不匹配")
+            checkpoint, options = validate_hitl_checkpoint(
+                interaction,
+                agent_name=self.agent_config.name,
+            )
             self.tool_bridge.restore_read_state(
                 interaction.session_id,
                 (
@@ -383,7 +375,7 @@ class AgentRuntime:
                         options=options,
                         plan=plan,
                         next_index=int(checkpoint["next_tool_index"]),
-                    )
+                    ),
                 )
 
             self.interaction_service.claim(interaction_id, checkpoint)
@@ -430,7 +422,7 @@ class AgentRuntime:
                     options=options,
                     plan=plan,
                     next_index=current_index + 1,
-                )
+                ),
             )
         except Exception as exc:
             loaded_interaction = self.interaction_store.load_interaction(interaction_id)
@@ -1275,70 +1267,6 @@ class AgentRuntime:
             error=error,
             metadata=max_step_metadata,
         )
-
-
-def _build_hitl_checkpoint(
-    *,
-    run_mode: str,
-    agent_name: str,
-    runtime_options: RuntimeOptions,
-    assistant_message: Msg,
-    response: LLMResponse,
-    step_index: int,
-    next_tool_index: int,
-    batch_results: list[dict[str, Any]],
-    all_tool_results: list[ToolResult],
-    read_state: Any | None,
-) -> dict[str, Any]:
-    """构造并验证等待恢复所需的 JSON-safe checkpoint。"""
-    import json
-
-    try:
-        read_state_json: Any | None = None
-        if read_state is not None:
-            read_state_json = (
-                read_state.model_dump(mode="json")
-                if hasattr(read_state, "model_dump")
-                else read_state
-            )
-        checkpoint = RuntimeHITLCheckpoint(
-            run_mode=run_mode,
-            agent_name=agent_name,
-            session_id=runtime_options.session_id,
-            run_id=runtime_options.run_id,
-            step_index=step_index,
-            runtime_options=RuntimeOptionsSnapshot(options=runtime_options.model_dump(mode="json")),
-            assistant_message={
-                "role": "assistant",
-                "content": [block.model_dump(mode="json") for block in response.content],
-                "metadata": {
-                    "provider": response.provider,
-                    "id": response.id,
-                    "model": response.model,
-                    "finish_reason": response.finish_reason,
-                },
-            },
-            provider_response=ProviderResponseSnapshot(
-                provider=response.provider,
-                response_id=response.id,
-                model=response.model,
-                content=[block.model_dump(mode="json") for block in response.content],
-                finish_reason=response.finish_reason,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                total_tokens=response.total_tokens,
-                reasoning=response.reasoning,
-            ),
-            tool_calls=[call.model_dump(mode="json") for call in assistant_message.tool_calls],
-            next_tool_index=next_tool_index,
-            batch_results=batch_results,
-            all_tool_results=[result.model_dump(mode="json") for result in all_tool_results],
-            read_state=read_state_json,
-        ).model_dump(mode="json")
-        json.dumps(checkpoint, allow_nan=False, sort_keys=True)
-    except (TypeError, ValueError) as exc:
-        raise HITLCheckpointInvalidError("HITL checkpoint 必须是 JSON-safe 数据") from exc
-    return checkpoint
 
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
