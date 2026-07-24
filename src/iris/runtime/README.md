@@ -17,7 +17,10 @@ flowchart LR
     Runtime --> Assembler["RuntimeMessageAssembler"]
     Runtime --> Provider["RuntimeProvider"]
     Runtime --> Bridge["ToolBridge"]
+    Runtime --> Helpers["errors / metadata / checkpoint / resume"]
+    Runtime --> Projection["tool_results"]
     Bridge --> Executor["ToolExecutor"]
+    Bridge --> Projection
     Runtime --> Session["SessionStore"]
     Runtime --> HITL["HumanInteractionService"]
     HITL --> InteractionStore["InteractionStore"]
@@ -135,6 +138,12 @@ session。
 - 两个入口都会先预检完整工具批次。遇到第一个权限确认或 `human.ask` 时，runtime 会保存
   checkpoint v2 与统一 `HumanInteractionRequest`，并返回等待状态；该批次不会执行任何工具。
 
+`AgentRuntime` 保留依赖所有权和公开编排。稳定的内部职责按领域拆分：`errors.py` 负责错误
+分类与结果归一化，`metadata.py` 负责 run snapshot 构建和 resume metadata 同步，
+`checkpoint.py` 负责 checkpoint v2 构建与身份校验，`resume.py` 负责恢复目标发现、typed
+response 投影和 result-ready 提交，`tool_results.py` 负责唯一的工具结果消息/事件投影。这些
+helper 不反向依赖 `runtime.py`，也不属于 `iris.runtime` 顶层公共 API。
+
 ### `RuntimeOptions`
 
 调用级选项，常用字段包括：
@@ -169,8 +178,8 @@ runtime 对外返回的结果模型，包含：
 1. 从 assistant message 收集 tool calls。
 2. 检查工具是否在当前 `ToolRegistryView` 中暴露。
 3. 调用 `ToolExecutor.execute_many()`。
-4. 把 `ToolResult` 转为 `Msg.tool_result(...)`。
-5. 写入 `SessionStore.append_tool_event()`。
+4. 通过 `tool_results.py` 把 `ToolResult` 投影为 `Msg.tool_result(...)` 与统一事件。
+5. 用 event 自带的稳定 `event_id` 调用 `SessionStore.append_tool_event(session_id, event)`。
 
 工具参数校验、权限策略、artifact、middleware 和具体业务逻辑仍由 `iris.tools` 负责。
 runtime 当前通过 LiteLLM Chat Completion 调用 provider，因此挂载到 `LLMRequest.tools`
@@ -207,7 +216,8 @@ checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate �
 顺序补齐；恢复后的普通工具结果同样写入 session，并继续遵守 `tool_error_policy`。
 
 首次 gate 与同批次 follow-up gate 复用同一个 interaction 创建 helper；`resume()` 主流程
-只消费工具结果，permission approve/reject 与 question answer 的差异集中在一个私有 resolver。
+只消费工具结果，permission approve/reject 与 question answer 的差异集中在
+`resume.resolve_interaction_result()`。
 Checkpoint 固定为 v2，调用 fingerprint 只保存在 `interaction.request.tool_call`，不再在
 checkpoint 重复存储；v1 checkpoint 会被明确拒绝。
 
@@ -306,6 +316,7 @@ context：
 
 `memory_results` 会通过 `MemoryContextBuilder` 裁剪并映射为 `ContextSlot`。
 `memory_query` 需要创建 runtime 时注入 `memory_service`，否则返回 `MEMORY_ERROR`。
+runtime 侧的适配逻辑位于 `src/iris/runtime/memory_context.py`，它不拥有长期记忆存储或检索。
 
 ## Session 写入
 
@@ -314,6 +325,10 @@ runtime 会通过 `SessionStore` 保存三类数据：
 - messages：history、current input、assistant message 和 tool result messages。
 - run metadata：最近一次运行摘要和历史 runs 列表。
 - tool events：每次工具结果的 JSON-safe 事件快照。
+
+工具事件由 `tool_results.build_tool_result_event()` 统一构造，字段包含 `event_id`、`type`、
+`tool_call_id`、`tool_name`、`status`、`error`、`artifact`、`run_id`、`step_index`、
+`agent_id` 和 `metadata`。`event_id` 固定为 `tool_result:{run_id}:{tool_call_id}`。
 
 人工等待时 session metadata 会附加 `waiting_human=true` 和 `interaction_id`；interaction
 及其 JSON-safe runtime checkpoint 由 interaction store 保存。

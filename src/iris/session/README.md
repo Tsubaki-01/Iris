@@ -37,7 +37,12 @@ store = SQLiteStore(".iris/session.db")
 ## InMemorySessionStore
 
 `InMemorySessionStore()` 使用进程内字典保存 session 数据，适合测试、无持久化运行和调用方
-明确不需要跨进程恢复历史的场景。进程退出后数据丢失。
+明确不需要跨进程恢复历史的场景。实现位于 `src/iris/session/in_memory.py`，进程退出后数据
+丢失。
+
+工具事件追加由 `src/iris/session/_tool_events.py` 统一校验：新 `event_id` 追加；同 ID、同
+canonical payload 为 no-op；同 ID、不同 payload 抛出 `IrisSessionError`。in-memory 与
+SQLite backend 共用这套语义，不维护第二份 event ID 索引。
 
 ## 与 agent 配置的关系
 
