@@ -449,9 +449,8 @@ class FailingToolEventSessionStore(InMemorySessionStore):
     def append_tool_event(
         self,
         session_id: str,
-        event_id: str,
         event: dict[str, object],
     ) -> None:
         """模拟 session 工具事件写入失败。"""
-        del session_id, event_id, event
+        del session_id, event
         raise IrisSessionError("tool event 写入失败")

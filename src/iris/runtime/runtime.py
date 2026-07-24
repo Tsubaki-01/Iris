@@ -669,7 +669,7 @@ class AgentRuntime:
             agent_id=self.agent_config.name,
             metadata=None,
         )
-        self.session_store.append_tool_event(session_id, str(event["event_id"]), event)
+        self.session_store.append_tool_event(session_id, event)
         return message
 
     def _tool_context(self, options: RuntimeOptions) -> ToolExecutionContext:
@@ -828,7 +828,6 @@ class AgentRuntime:
         )
         self.session_store.append_tool_event(
             interaction.session_id,
-            str(event["event_id"]),
             event,
         )
         if interaction.resume_phase is not InteractionResumePhase.RESULT_COMMITTED:

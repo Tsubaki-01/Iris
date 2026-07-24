@@ -153,7 +153,7 @@ class ToolBridge:
             for result in results
         ]
         for event in events:
-            session_store.append_tool_event(session_id, str(event["event_id"]), event)
+            session_store.append_tool_event(session_id, event)
 
         return ToolBridgeResult(results=results, messages=messages, events=events)
 

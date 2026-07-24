@@ -90,13 +90,19 @@ def test_sqlite_store_appends_tool_events(tmp_path: Path) -> None:
 
     store.append_tool_event(
         "session-1",
-        "tool_result:run_1:call_1",
-        {"tool_name": "read_file", "status": "ok"},
+        {
+            "event_id": "tool_result:run_1:call_1",
+            "tool_name": "read_file",
+            "status": "ok",
+        },
     )
     store.append_tool_event(
         "session-1",
-        "tool_result:run_1:call_2",
-        {"tool_name": "grep_search", "status": "error"},
+        {
+            "event_id": "tool_result:run_1:call_2",
+            "tool_name": "grep_search",
+            "status": "error",
+        },
     )
 
     assert store.load_tool_events("session-1") == [
@@ -117,8 +123,12 @@ def test_sqlite_store_appends_same_event_once(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "session.db")
     event_id = "tool_result:run_1:call_1"
 
-    store.append_tool_event("session-1", event_id, {"status": "ok", "count": 1})
-    store.append_tool_event("session-1", event_id, {"count": 1, "status": "ok"})
+    store.append_tool_event(
+        "session-1", {"event_id": event_id, "status": "ok", "count": 1}
+    )
+    store.append_tool_event(
+        "session-1", {"count": 1, "status": "ok", "event_id": event_id}
+    )
 
     assert store.load_tool_events("session-1") == [
         {"status": "ok", "count": 1, "event_id": event_id}
@@ -129,17 +139,60 @@ def test_sqlite_store_rejects_different_idempotent_event_payload(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "session.db")
-    store.append_tool_event("session-1", "tool_result:run_1:call_1", {"status": "ok"})
+    store.append_tool_event(
+        "session-1",
+        {"event_id": "tool_result:run_1:call_1", "status": "ok"},
+    )
 
     with pytest.raises(IrisSessionError):
-        store.append_tool_event("session-1", "tool_result:run_1:call_1", {"status": "error"})
+        store.append_tool_event(
+            "session-1",
+            {"event_id": "tool_result:run_1:call_1", "status": "error"},
+        )
 
 
-def test_sqlite_store_rejects_non_json_idempotent_event(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "event",
+    [
+        {},
+        {"event_id": "  "},
+        {"event_id": 1},
+        {"event_id": "tool_result:run_1:call_1", "not_json": {"set"}},
+    ],
+)
+def test_sqlite_store_rejects_invalid_idempotent_event(
+    tmp_path: Path,
+    event: dict[str, object],
+) -> None:
     store = SQLiteStore(tmp_path / "session.db")
 
     with pytest.raises(IrisSessionError):
-        store.append_tool_event("session-1", "tool_result:run_1:call_1", {"not_json": {"set"}})
+        store.append_tool_event("session-1", event)
+
+
+def test_sqlite_store_rejects_inconsistent_existing_events(tmp_path: Path) -> None:
+    path = tmp_path / "session.db"
+    store = SQLiteStore(path)
+    store.save_messages("session-1", [])
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE sessions SET tool_events_json = ? WHERE session_id = ?",
+            (
+                json.dumps(
+                    [
+                        {"event_id": "tool_result:run_1:call_1", "status": "ok"},
+                        {"event_id": "tool_result:run_1:call_1", "status": "error"},
+                    ]
+                ),
+                "session-1",
+            ),
+        )
+
+    with pytest.raises(IrisSessionError):
+        store.append_tool_event(
+            "session-1",
+            {"event_id": "tool_result:run_1:call_1", "status": "ok"},
+        )
 
 
 def test_sqlite_store_returns_empty_defaults_for_missing_session(
