@@ -17,12 +17,17 @@ from iris.hitl import (
     InteractionStatus,
     QuestionInteractionResponse,
 )
-from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeOptions, RuntimeStatus, RuntimeTurnResult
 from iris.store import SQLiteStore
-from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutor, ToolRegistry
+from iris.tools import (
+    AskQuestionTool,
+    DefaultPermissionPolicy,
+    ToolCapability,
+    ToolExecutor,
+    ToolRegistry,
+)
 
 SESSION_ID = "restart-session"
 

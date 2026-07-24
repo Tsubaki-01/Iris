@@ -10,12 +10,12 @@ from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import InMemoryInteractionStore, QuestionInteractionResponse
 from iris.hitl.models import InteractionKind, PermissionPrompt
-from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
 from iris.tools import (
+    AskQuestionTool,
     DefaultPermissionPolicy,
     ToolCapability,
     ToolExecutor,
