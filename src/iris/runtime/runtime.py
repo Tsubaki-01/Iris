@@ -27,7 +27,6 @@ from ..exceptions import (
     HITLExecutionOutcomeUnknownError,
     HITLNotFoundError,
     HITLResponseRequiredError,
-    IrisError,
 )
 from ..hitl import (
     HumanInteraction,
@@ -53,11 +52,11 @@ from ..tools import (
     ToolResult,
 )
 from .assembler import RuntimeMessageAssembler
+from .errors import error_result, normalize_runtime_error, tool_error_info
 from .memory_context import prepare_memory_context_input
 from .models import (
     ProviderResponseSnapshot,
     RuntimeErrorInfo,
-    RuntimeErrorSource,
     RuntimeHITLCheckpoint,
     RuntimeOptions,
     RuntimeOptionsSnapshot,
@@ -321,7 +320,7 @@ class AgentRuntime:
             )
             self.session_store.save_run_metadata(result.session_id, metadata)
         except Exception as exc:
-            return _error_result(
+            return error_result(
                 session_id=result.session_id,
                 run_id=result.run_id,
                 error=normalize_runtime_error(exc),
@@ -450,7 +449,7 @@ class AgentRuntime:
             )
         except Exception as exc:
             loaded_interaction = self.interaction_store.load_interaction(interaction_id)
-            error_result = _error_result(
+            failed_result = error_result(
                 session_id=(
                     loaded_interaction.session_id if loaded_interaction is not None else "default"
                 ),
@@ -458,8 +457,8 @@ class AgentRuntime:
                 error=normalize_runtime_error(exc),
             )
             if loaded_interaction is None:
-                return error_result
-            return self._synchronize_resume_metadata(error_result)
+                return failed_result
+            return self._synchronize_resume_metadata(failed_result)
 
     async def _resolve_interaction_result(
         self,
@@ -774,7 +773,7 @@ class AgentRuntime:
                     tool_results=continued.tool_results,
                     tool_result_messages=continued.tool_result_messages,
                     steps=continued.steps,
-                    error=_tool_error_info(bridge),
+                    error=tool_error_info(bridge),
                     metadata=continued.metadata,
                 )
             if continued.steps >= options.loop.max_steps:
@@ -794,7 +793,7 @@ class AgentRuntime:
                 )
             return await self._continue_resumed_loop(continued, options)
         except Exception as exc:
-            return _error_result(
+            return error_result(
                 session_id=committed.session_id,
                 run_id=committed.run_id,
                 error=normalize_runtime_error(exc),
@@ -897,7 +896,7 @@ class AgentRuntime:
                 provider=self.agent_config.model.provider,
             )
         except Exception as exc:
-            return _error_result(
+            return error_result(
                 session_id=session_id,
                 run_id=run_id,
                 error=normalize_runtime_error(exc),
@@ -909,7 +908,7 @@ class AgentRuntime:
             response = await self.provider.complete(request)
             assistant_message = response.to_msg()
         except Exception as exc:
-            return _error_result(
+            return error_result(
                 session_id=session_id,
                 run_id=run_id,
                 error=normalize_runtime_error(exc),
@@ -1008,7 +1007,7 @@ class AgentRuntime:
                 )
             except Exception:
                 pass
-            return _error_result(
+            return error_result(
                 session_id=session_id,
                 run_id=run_id,
                 error=error,
@@ -1088,7 +1087,7 @@ class AgentRuntime:
                 latest_response = await self.provider.complete(request)
                 latest_assistant = latest_response.to_msg()
             except Exception as exc:
-                return _error_result(
+                return error_result(
                     session_id=session_id,
                     run_id=run_id,
                     error=normalize_runtime_error(exc),
@@ -1192,7 +1191,7 @@ class AgentRuntime:
                     [message.model_dump(mode="json") for message in messages],
                 )
             except Exception as exc:
-                return _error_result(
+                return error_result(
                     session_id=session_id,
                     run_id=run_id,
                     error=normalize_runtime_error(exc),
@@ -1205,7 +1204,7 @@ class AgentRuntime:
             all_tool_messages.extend(bridge_result.messages)
 
             if _should_stop_on_tool_error(runtime_options, bridge_result):
-                error = _tool_error_info(bridge_result)
+                error = tool_error_info(bridge_result)
                 try:
                     self.session_store.save_run_metadata(
                         session_id,
@@ -1224,7 +1223,7 @@ class AgentRuntime:
                         ),
                     )
                 except Exception as exc:
-                    return _error_result(
+                    return error_result(
                         session_id=session_id,
                         run_id=run_id,
                         error=normalize_runtime_error(exc),
@@ -1269,7 +1268,7 @@ class AgentRuntime:
                 ),
             )
         except Exception as exc:
-            return _error_result(
+            return error_result(
                 session_id=session_id,
                 run_id=run_id,
                 error=normalize_runtime_error(exc),
@@ -1352,27 +1351,6 @@ def _build_hitl_checkpoint(
     except (TypeError, ValueError) as exc:
         raise HITLCheckpointInvalidError("HITL checkpoint 必须是 JSON-safe 数据") from exc
     return checkpoint
-
-
-def normalize_runtime_error(error: Exception) -> RuntimeErrorInfo:
-    """将 runtime 边界异常归一化为稳定错误信息。
-
-    Args:
-        error (Exception): Runtime 边界捕获到的异常。
-
-    Returns:
-        RuntimeErrorInfo: 可放入 `RuntimeTurnResult.error` 的结构化错误。
-    """
-    code, source = _classify_runtime_error(error)
-    details: dict[str, Any] = {}
-    if isinstance(error, IrisError):
-        details.update(error.context)
-    return RuntimeErrorInfo(
-        code=code,
-        message=str(error),
-        source=source,
-        details=details,
-    )
 
 
 def _load_history(session_store: SessionStore, session_id: str) -> list[Msg]:
@@ -1502,27 +1480,6 @@ def _build_resume_run_metadata(
     return {**existing, "latest_run": latest_run, "runs": run_list}
 
 
-def _error_result(
-    *,
-    session_id: str,
-    run_id: str,
-    error: RuntimeErrorInfo,
-    assistant_message: Msg | None = None,
-    steps: int = 1,
-    metadata: Mapping[str, Any] | None = None,
-) -> RuntimeTurnResult:
-    """构造统一失败结果。"""
-    return RuntimeTurnResult(
-        session_id=session_id,
-        run_id=run_id,
-        status=RuntimeStatus.ERROR,
-        assistant_message=assistant_message,
-        steps=steps,
-        error=error,
-        metadata=dict(metadata or {}),
-    )
-
-
 def _should_stop_on_tool_error(
     options: RuntimeOptions,
     bridge_result: ToolBridgeResult,
@@ -1531,33 +1488,6 @@ def _should_stop_on_tool_error(
     return options.loop.tool_error_policy == ToolErrorPolicy.STOP and any(
         result.is_error for result in bridge_result.results
     )
-
-
-def _tool_error_info(bridge_result: ToolBridgeResult) -> RuntimeErrorInfo:
-    """从第一个工具错误构造 runtime 错误信息。
-
-    并行执行时不一定是调用顺序上的第一个失败
-    """
-    for result in bridge_result.results:
-        if result.is_error and result.error is not None:
-            return RuntimeErrorInfo(
-                code=result.error.code,
-                message=result.error.message,
-                source="tool",
-                details=result.error.details,
-            )
-    return RuntimeErrorInfo(
-        code="TOOL_ERROR",
-        message="工具执行失败",
-        source="tool",
-    )
-
-
-def _classify_runtime_error(error: Exception) -> tuple[str, RuntimeErrorSource]:
-    """从 Iris 异常实例读取 runtime 错误映射。"""
-    if isinstance(error, IrisError):
-        return error.runtime_code, error.runtime_source
-    return "RUNTIME_ERROR", "runtime"
 
 
 __all__ = ["AgentRuntime", "RuntimeProvider", "normalize_runtime_error"]

@@ -16,6 +16,9 @@ from iris.runtime import (
     ToolBridge,
     normalize_runtime_error,
 )
+from iris.runtime.errors import error_result, tool_error_info
+from iris.runtime.models import RuntimeErrorInfo, RuntimeStatus, ToolBridgeResult
+from iris.tools import ToolErrorInfo, ToolResult
 
 
 def test_domain_exceptions_map_to_stable_runtime_error_info() -> None:
@@ -45,3 +48,52 @@ def test_runtime_public_exports_include_stable_surface() -> None:
     assert ToolBridge.__name__ == "ToolBridge"
     assert callable(normalize_runtime_error)
     assert hasattr(AgentRuntime, "run_loop")
+
+
+def test_error_result_preserves_runtime_error_context() -> None:
+    error = RuntimeErrorInfo(
+        code="SESSION_ERROR",
+        message="session failed",
+        source="session",
+    )
+
+    result = error_result(
+        session_id="session-1",
+        run_id="run-1",
+        error=error,
+        metadata={"trace_id": "trace-1"},
+    )
+
+    assert result.status is RuntimeStatus.ERROR
+    assert result.error == error
+    assert result.steps == 1
+    assert result.metadata == {"trace_id": "trace-1"}
+
+
+def test_tool_error_info_uses_first_structured_error_or_fallback() -> None:
+    bridge = ToolBridgeResult(
+        results=[
+            ToolResult(
+                tool_use_id="call-1",
+                tool_name="write_note",
+                is_error=True,
+                error=ToolErrorInfo(
+                    code="PERMISSION_ERROR",
+                    message="denied",
+                    details={"effect": "deny"},
+                ),
+            )
+        ]
+    )
+
+    error = tool_error_info(bridge)
+    fallback = tool_error_info(ToolBridgeResult())
+
+    assert error.model_dump() == {
+        "code": "PERMISSION_ERROR",
+        "message": "denied",
+        "source": "tool",
+        "details": {"effect": "deny"},
+    }
+    assert fallback.code == "TOOL_ERROR"
+    assert fallback.source == "tool"
