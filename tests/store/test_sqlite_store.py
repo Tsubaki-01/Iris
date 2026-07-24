@@ -278,6 +278,26 @@ def test_sqlite_store_keeps_exact_v2_schema_and_restores_indexes(tmp_path: Path)
     with sqlite3.connect(path) as connection:
         _create_sessions_table(connection)
         _create_hitl_table(connection, _V2_COLUMNS)
+        connection.execute(
+            """
+            INSERT INTO human_interactions (
+                interaction_id, session_id, run_id, step_index, status, resume_phase,
+                request_json, checkpoint_json, version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "int_keep",
+                "session-1",
+                "run-1",
+                0,
+                "pending",
+                "waiting",
+                "{}",
+                "{}",
+                1,
+                "2026-07-23T00:00:00",
+            ),
+        )
 
     SQLiteStore(path)
     first_signature = _hitl_signature(path)
@@ -288,13 +308,17 @@ def test_sqlite_store_keeps_exact_v2_schema_and_restores_indexes(tmp_path: Path)
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
+        rows = connection.execute(
+            "SELECT interaction_id, session_id, run_id FROM human_interactions"
+        ).fetchall()
     assert first_signature == _V2_SIGNATURE
     assert _hitl_signature(path) == _V2_SIGNATURE
     assert "idx_human_interactions_session_status_phase" in indexes
     assert "idx_human_interactions_active_session" in indexes
+    assert rows == [("int_keep", "session-1", "run-1")]
 
 
-def test_sqlite_store_rebuilds_exact_v1_and_preserves_non_hitl_session_data(
+def test_sqlite_store_rejects_exact_v1_without_modifying_database(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "session.db"
@@ -369,19 +393,29 @@ def test_sqlite_store_rebuilds_exact_v1_and_preserves_non_hitl_session_data(
             ),
         )
 
-    store = SQLiteStore(path)
+    with sqlite3.connect(path) as connection:
+        original_sessions = connection.execute(
+            "SELECT * FROM sessions ORDER BY session_id"
+        ).fetchall()
+        original_interactions = connection.execute("SELECT * FROM human_interactions").fetchall()
+        original_indexes = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name"
+        ).fetchall()
 
-    assert _hitl_signature(path) == _V2_SIGNATURE
-    assert store.list_pending_interactions() == []
-    assert store.load_messages("session-1") == [{"role": "user", "content": "keep"}]
-    assert store.load_tool_events("session-1") == [{"event_id": "event-1", "status": "ok"}]
-    assert store.load_run_metadata("session-1") == {
-        "latest_run": {"status": "waiting_human", "keep": "value"},
-        "other": "metadata",
-    }
-    assert store.load_messages("session-2") == [{"role": "user", "content": "untouched"}]
-    assert store.load_tool_events("session-2") == [{"event_id": "event-2", "status": "ok"}]
-    assert store.load_run_metadata("session-2") == untouched_metadata
+    with pytest.raises(IrisSessionError, match="v1"):
+        SQLiteStore(path)
+
+    assert _hitl_signature(path) == _V1_SIGNATURE
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT * FROM sessions ORDER BY session_id").fetchall() == (
+            original_sessions
+        )
+        assert connection.execute("SELECT * FROM human_interactions").fetchall() == (
+            original_interactions
+        )
+        assert connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name"
+        ).fetchall() == original_indexes
 
 
 @pytest.mark.parametrize(
@@ -416,56 +450,22 @@ def test_sqlite_store_rejects_unknown_hitl_schema_without_dropping_it(
     with sqlite3.connect(path) as connection:
         _create_sessions_table(connection)
         _create_hitl_table(connection, columns)
+        connection.execute(
+            "INSERT INTO sessions (session_id, updated_at) VALUES ('session-1', 'before')"
+        )
     original_signature = _hitl_signature(path)
+    with sqlite3.connect(path) as connection:
+        original_sessions = connection.execute("SELECT * FROM sessions").fetchall()
+        original_interactions = connection.execute("SELECT * FROM human_interactions").fetchall()
 
     with pytest.raises(IrisSessionError, match="schema"):
         SQLiteStore(path)
 
     assert _hitl_signature(path) == original_signature
-
-
-def test_sqlite_store_rolls_back_v1_rebuild_when_marker_cleanup_fails(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "session.db"
     with sqlite3.connect(path) as connection:
-        _create_sessions_table(connection)
-        connection.execute(
-            """
-            INSERT INTO sessions (session_id, run_metadata_json, updated_at)
-            VALUES ('session-1', ?, '2026-07-23T00:00:00')
-            """,
-            (json.dumps({"latest_run": {"waiting_human": True, "interaction_id": "int_old"}}),),
-        )
-        connection.execute(
-            """
-            CREATE TRIGGER reject_session_marker_cleanup
-            BEFORE UPDATE OF run_metadata_json ON sessions
-            BEGIN
-                SELECT RAISE(FAIL, 'marker cleanup failed');
-            END
-            """
-        )
-        _create_hitl_table(connection, _V1_COLUMNS)
-        connection.execute(
-            """
-            INSERT INTO human_interactions (
-                interaction_id, session_id, run_id, step_index, tool_call_id, kind,
-                status, resume_phase, request_json, checkpoint_json, created_at
-            ) VALUES (
-                'int_old', 'session-1', 'run-1', 0, 'call-1', 'permission',
-                'pending', 'waiting', '{}', '{}', '2026-07-23T00:00:00'
-            )
-            """
-        )
-
-    with pytest.raises(IrisSessionError):
-        SQLiteStore(path)
-
-    assert _hitl_signature(path) == _V1_SIGNATURE
-    with sqlite3.connect(path) as connection:
-        assert connection.execute("SELECT interaction_id FROM human_interactions").fetchone() == (
-            "int_old",
+        assert connection.execute("SELECT * FROM sessions").fetchall() == original_sessions
+        assert connection.execute("SELECT * FROM human_interactions").fetchall() == (
+            original_interactions
         )
 
 
