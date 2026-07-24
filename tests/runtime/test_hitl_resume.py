@@ -73,6 +73,28 @@ class FailingRunMetadataStore(InMemorySessionStore):
         super().save_run_metadata(session_id, metadata)
 
 
+_TOOL_RESULT_EVENT_KEYS = {
+    "event_id",
+    "type",
+    "tool_call_id",
+    "tool_name",
+    "status",
+    "error",
+    "artifact",
+    "run_id",
+    "step_index",
+    "agent_id",
+    "metadata",
+}
+
+
+def _assert_tool_result_event_schema(event: dict[str, object]) -> None:
+    assert set(event) == _TOOL_RESULT_EVENT_KEYS
+    assert event["type"] == "tool_result"
+    assert event["agent_id"] == "hitl-resume-agent"
+    assert event["artifact"] is None
+
+
 @pytest.mark.asyncio
 async def test_resume_question_returns_answer_without_another_provider_call() -> None:
     registry = ToolRegistry()
@@ -122,6 +144,9 @@ async def test_resume_question_returns_answer_without_another_provider_call() ->
     assert [result.model_content for result in resumed.tool_results] == ["选生产"]
     assert len(provider.requests) == 1
     assert session_store.load_messages("session-1")[-1]["content"][0]["content"] == "选生产"
+    question_event = session_store.load_tool_events("session-1")[0]
+    _assert_tool_result_event_schema(question_event)
+    assert question_event["event_id"] == "tool_result:run-1:call_question"
     metadata = session_store.load_run_metadata("session-1")
     latest_run = metadata["latest_run"]
     assert latest_run["status"] == "ok"
@@ -153,10 +178,12 @@ async def test_resume_approved_permission_executes_only_matching_call_once() -> 
     provider = FakeProvider(
         [_tool_response(ToolUseBlock(id="call_write", name="write_note", input={"value": "ok"}))]
     )
+    session_store = InMemorySessionStore()
     runtime = AgentRuntime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
+        session_store=session_store,
         interaction_store=InMemoryInteractionStore(),
         tool_registry=registry,
         tool_view=registry.view(),
@@ -178,6 +205,9 @@ async def test_resume_approved_permission_executes_only_matching_call_once() -> 
     assert resumed.status is RuntimeStatus.OK
     assert calls == ["ok"]
     assert len(provider.requests) == 1
+    permission_event = session_store.load_tool_events("default")[0]
+    _assert_tool_result_event_schema(permission_event)
+    assert permission_event["event_id"] == "tool_result:run-2:call_write"
 
 
 @pytest.mark.asyncio
@@ -586,6 +616,9 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     recovered = await runtime.resume(interaction_id)
 
     assert recovered.status is RuntimeStatus.OK
+    ready_event = runtime.session_store.load_tool_events("default")[0]
+    _assert_tool_result_event_schema(ready_event)
+    assert str(ready_event["event_id"]).endswith(":call")
 
 
 @pytest.mark.asyncio
