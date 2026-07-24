@@ -14,6 +14,8 @@ from .base import (
 )
 from .builtin import (
     FILE_TOOL_CLASSES,
+    AskQuestionInput,
+    AskQuestionTool,
     EditFileInput,
     FileTool,
     GrepSearchInput,
@@ -49,6 +51,8 @@ from .schema import (
 )
 
 __all__ = [
+    "AskQuestionInput",
+    "AskQuestionTool",
     "BaseTool",
     "CallableTool",
     "CircuitBreaker",

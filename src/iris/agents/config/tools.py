@@ -7,8 +7,7 @@ from importlib import import_module
 from typing import Any
 
 from ...exceptions import IrisConfigError
-from ...hitl.tools import AskQuestionTool
-from ...tools import ToolRegistry, WorkspaceFileService
+from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
 from ...tools.builtin.file import (
     EditFileTool,

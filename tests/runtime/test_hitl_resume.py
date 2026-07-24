@@ -17,7 +17,6 @@ from iris.hitl import (
     QuestionInteractionResponse,
     QuestionPrompt,
 )
-from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMResponse, Role, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import (
@@ -29,6 +28,7 @@ from iris.runtime.models import (
 )
 from iris.session import InMemorySessionStore
 from iris.tools import (
+    AskQuestionTool,
     DefaultPermissionPolicy,
     ToolCapability,
     ToolExecutor,

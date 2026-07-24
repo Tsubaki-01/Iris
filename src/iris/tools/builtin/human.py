@@ -1,4 +1,4 @@
-"""HITL 专属的 provider-visible 工具定义。"""
+"""面向人工交互的内置工具定义。"""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..exceptions import IrisHITLError
-from ..tools.base import BaseTool, ToolDefinition, ToolExecutionContext, ToolResult
-from ..tools.schema import schema_from_pydantic_model
-from .models import QuestionPrompt
+from ...exceptions import IrisHITLError
+from ...hitl.models import QuestionPrompt
+from ..base import BaseTool, ToolDefinition, ToolExecutionContext, ToolResult
+from ..schema import schema_from_pydantic_model
 
 
 class AskQuestionInput(BaseModel):

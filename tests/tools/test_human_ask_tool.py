@@ -7,9 +7,14 @@ from pydantic import ValidationError
 
 from iris.exceptions import IrisHITLError
 from iris.hitl.models import QuestionPrompt, ToolCallSnapshot, make_call_fingerprint
-from iris.hitl.tools import AskQuestionInput, AskQuestionTool
 from iris.message import ToolUseBlock
-from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from iris.tools import (
+    AskQuestionInput,
+    AskQuestionTool,
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+)
 
 
 def test_ask_question_tool_exposes_human_question_schema() -> None:

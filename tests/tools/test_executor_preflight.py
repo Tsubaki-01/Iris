@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from iris.hitl import PermissionPrompt, QuestionPrompt, make_call_fingerprint
-from iris.hitl.tools import AskQuestionTool
 from iris.message import ToolUseBlock
 from iris.tools import (
+    AskQuestionTool,
     DefaultPermissionPolicy,
     PermissionDecision,
     PermissionEffect,

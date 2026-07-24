@@ -11,8 +11,11 @@ from .file import (
     WriteFileInput,
     register_file_tools,
 )
+from .human import AskQuestionInput, AskQuestionTool
 
 __all__ = [
+    "AskQuestionInput",
+    "AskQuestionTool",
     "EditFileInput",
     "FILE_TOOL_CLASSES",
     "FileTool",

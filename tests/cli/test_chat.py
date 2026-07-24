@@ -23,12 +23,17 @@ from iris.hitl import (
     QuestionPrompt,
     ToolCallSnapshot,
 )
-from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeErrorInfo, RuntimeStatus, RuntimeTurnResult
 from iris.session import InMemorySessionStore
-from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolExecutor, ToolRegistry
+from iris.tools import (
+    AskQuestionTool,
+    DefaultPermissionPolicy,
+    ToolCapability,
+    ToolExecutor,
+    ToolRegistry,
+)
 
 
 class FakeProvider:
