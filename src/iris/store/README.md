@@ -33,7 +33,7 @@ messages = store.load_messages("default")
 视为未知 schema，初始化抛出 `IrisSessionError` 且不会 drop 原表。v1 重建与 marker 清理共享
 事务，提交前失败会整体回滚。
 
-`append_tool_event()` 按 `(session_id, event_id)` 幂等追加事件：相同 payload 是
+`append_tool_event(session_id, event)` 从 event 内读取 `event_id` 幂等追加：相同 payload 是
 no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。
 
 ## 边界

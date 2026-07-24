@@ -31,7 +31,7 @@ store = SQLiteStore(".iris/session.db")
 - `load_messages(session_id)`
 - `save_run_metadata(session_id, metadata)`
 - `load_run_metadata(session_id)`
-- `append_tool_event(session_id, event_id, event)`
+- `append_tool_event(session_id, event)`；`event["event_id"]` 是唯一 ID 来源
 - `load_tool_events(session_id)`
 
 ## InMemorySessionStore

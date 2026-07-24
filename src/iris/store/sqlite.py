@@ -16,6 +16,7 @@ from ..hitl.models import (
     HumanInteractionResponse,
     InteractionResumePhase,
 )
+from ..session._tool_events import prepare_tool_event_append
 
 _HITL_SCHEMA_V1 = (
     ("interaction_id", "TEXT", 0, None, 1),
@@ -84,11 +85,9 @@ class SQLiteStore:
     def append_tool_event(
         self,
         session_id: str,
-        event_id: str,
         event: dict[str, object],
     ) -> None:
-        """按稳定 event ID 幂等追加工具结果事件。"""
-        payload, canonical_payload = _normalize_idempotent_event(event_id, event)
+        """按 event 内稳定 ID 幂等追加工具结果事件。"""
         try:
             with sqlite3.connect(self.path) as connection:
                 row = connection.execute(
@@ -96,14 +95,8 @@ class SQLiteStore:
                     (session_id,),
                 ).fetchone()
                 events = cast(list[dict[str, object]], json.loads(row[0])) if row else []
-                existing_payload = _find_existing_event_payload(events, event_id)
-                if existing_payload is not None:
-                    if existing_payload != canonical_payload:
-                        raise IrisSessionError(
-                            "相同 event_id 的 tool event payload 不一致",
-                            session_id=session_id,
-                            event_id=event_id,
-                        )
+                payload = prepare_tool_event_append(events, event)
+                if payload is None:
                     return
                 events.append(payload)
                 updated_at = datetime.now().isoformat()
@@ -372,42 +365,6 @@ def _dump_json(value: Any) -> str:
     """序列化 JSON 值。"""
     try:
         return json.dumps(value, ensure_ascii=False, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise IrisSessionError("Session 数据必须可 JSON 序列化") from exc
-
-
-def _normalize_idempotent_event(
-    event_id: str,
-    event: dict[str, object],
-) -> tuple[dict[str, object], str]:
-    if not event_id.strip():
-        raise IrisSessionError("tool event_id 不能为空")
-    if "event_id" in event and event["event_id"] != event_id:
-        raise IrisSessionError("tool event 包含冲突的 event_id", event_id=event_id)
-    payload = dict(event)
-    payload["event_id"] = event_id
-    canonical_payload = _canonical_json(payload)
-    return cast(dict[str, object], json.loads(canonical_payload)), canonical_payload
-
-
-def _find_existing_event_payload(events: list[dict[str, object]], event_id: str) -> str | None:
-    payloads = [_canonical_json(event) for event in events if event.get("event_id") == event_id]
-    if not payloads:
-        return None
-    if len(set(payloads)) != 1:
-        raise IrisSessionError("相同 event_id 的已有 tool event payload 不一致", event_id=event_id)
-    return payloads[0]
-
-
-def _canonical_json(value: object) -> str:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
     except (TypeError, ValueError) as exc:
         raise IrisSessionError("Session 数据必须可 JSON 序列化") from exc
 
