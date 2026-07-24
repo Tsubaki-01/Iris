@@ -377,7 +377,7 @@ class AgentRuntime:
                 (
                     item
                     for item in plan.calls
-                    if item.tool_use.id == interaction.request.subject.tool_call_id
+                    if item.tool_use.id == interaction.request.tool_call.tool_call_id
                 ),
                 None,
             )
@@ -469,7 +469,7 @@ class AgentRuntime:
     ) -> ToolResult:
         """将 typed 人工响应收敛为一个工具结果。"""
         response = interaction.response
-        tool_call_id = interaction.request.subject.tool_call_id
+        tool_call_id = interaction.request.tool_call.tool_call_id
         if isinstance(response, PermissionInteractionResponse):
             if response.decision == "approve":
                 return await self.tool_executor.execute_prepared(
@@ -831,7 +831,7 @@ class AgentRuntime:
             self.session_store.save_messages(
                 interaction.session_id, [item.model_dump(mode="json") for item in messages]
             )
-        event_id = f"tool_result:{interaction.run_id}:{interaction.request.subject.tool_call_id}"
+        event_id = f"tool_result:{interaction.run_id}:{interaction.request.tool_call.tool_call_id}"
         self.session_store.append_tool_event(
             interaction.session_id,
             event_id,

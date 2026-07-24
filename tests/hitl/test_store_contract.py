@@ -14,7 +14,7 @@ from iris.hitl import (
     InteractionStatus,
     PermissionInteractionResponse,
     PermissionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
 )
 from iris.store import SQLiteStore
 
@@ -198,7 +198,7 @@ def _interaction(*, session_id: str, interaction_id: str) -> HumanInteraction:
         run_id="run_1",
         step_index=0,
         request=HumanInteractionRequest(
-            subject=ToolCallSubject(
+            tool_call=ToolCallSnapshot(
                 tool_call_id="call_1",
                 tool_name="write_file",
                 arguments={"path": "notes.txt", "content": "hello"},

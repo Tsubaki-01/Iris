@@ -255,7 +255,7 @@ async def test_resume_pauses_again_for_second_gate_in_same_batch() -> None:
 
     assert resumed.status is RuntimeStatus.WAITING_HUMAN
     assert resumed.pending_interaction is not None
-    assert resumed.pending_interaction.request.subject.tool_call_id == "second"
+    assert resumed.pending_interaction.request.tool_call.tool_call_id == "second"
     latest_run = session_store.load_run_metadata("default")["latest_run"]
     assert latest_run["status"] == "waiting_human"
     assert latest_run["waiting_human"] is True
@@ -314,7 +314,7 @@ async def test_resume_supports_question_then_permission_in_the_same_batch() -> N
     )
     assert second.pending_interaction is not None
     assert isinstance(second.pending_interaction.request.prompt, PermissionPrompt)
-    assert second.pending_interaction.request.subject.tool_call_id == "write"
+    assert second.pending_interaction.request.tool_call.tool_call_id == "write"
 
     completed = await runtime.resume(
         second.pending_interaction.interaction_id,
@@ -368,7 +368,7 @@ async def test_resume_permission_fails_closed_when_policy_changes_to_deny() -> N
 
 
 @pytest.mark.asyncio
-async def test_resume_rejects_tampered_subject_fingerprint(
+async def test_resume_rejects_tampered_tool_call_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = ToolRegistry()
@@ -399,9 +399,9 @@ async def test_resume_rejects_tampered_subject_fingerprint(
         waiting.pending_interaction.interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
-    subject = resolved.request.subject.model_copy(update={"fingerprint": "b" * 64})
+    tool_call = resolved.request.tool_call.model_copy(update={"fingerprint": "b" * 64})
     tampered = resolved.model_copy(
-        update={"request": resolved.request.model_copy(update={"subject": subject})}
+        update={"request": resolved.request.model_copy(update={"tool_call": tool_call})}
     )
     monkeypatch.setattr(runtime.interaction_service, "get", lambda _: tampered)
 

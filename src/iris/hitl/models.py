@@ -94,7 +94,7 @@ def make_call_fingerprint(
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
-class ToolCallSubject(BaseModel):
+class ToolCallSnapshot(BaseModel):
     """触发人工 gate 的精确工具调用身份。"""
 
     tool_call_id: str
@@ -189,7 +189,7 @@ HumanInteractionResponse = Annotated[
 class HumanInteractionRequest(BaseModel):
     """所有人工 gate 共用的工具调用与提示信封。"""
 
-    subject: ToolCallSubject
+    tool_call: ToolCallSnapshot
     prompt: HumanInteractionPrompt
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
@@ -260,6 +260,6 @@ __all__ = [
     "PermissionInteractionResponse",
     "QuestionPrompt",
     "QuestionInteractionResponse",
-    "ToolCallSubject",
+    "ToolCallSnapshot",
     "make_call_fingerprint",
 ]

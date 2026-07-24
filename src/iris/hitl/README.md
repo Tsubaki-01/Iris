@@ -9,7 +9,7 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 
 ## 核心模型
 
-- `ToolCallSubject`：两类 gate 共用的精确工具调用身份，包含工具名、参数、workspace 与稳定
+- `ToolCallSnapshot`：两类 gate 共用的精确工具调用身份，包含工具名、参数、workspace 与稳定
   `fingerprint`。
 - `PermissionPrompt`：权限策略产生的批准/拒绝提示；批准只绑定当前 subject。
 - `QuestionPrompt`：`human.ask` 的单个问题与可选选项。

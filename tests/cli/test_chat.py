@@ -21,7 +21,7 @@ from iris.hitl import (
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
 )
 from iris.hitl.tools import AskQuestionTool
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
@@ -134,7 +134,7 @@ def _renderer() -> tuple[ChatRenderer, Console]:
 
 def _permission_interaction() -> HumanInteraction:
     request = HumanInteractionRequest(
-        subject=ToolCallSubject(
+        tool_call=ToolCallSnapshot(
             tool_call_id="call_write",
             tool_name="write_file",
             arguments={"path": "notes.md"},
@@ -155,7 +155,7 @@ def _permission_interaction() -> HumanInteraction:
 
 def _question_interaction() -> HumanInteraction:
     request = HumanInteractionRequest(
-        subject=ToolCallSubject(
+        tool_call=ToolCallSnapshot(
             tool_call_id="call_question",
             tool_name="ask_question",
             arguments={"question": "请选择部署环境", "options": ["测试", "生产"]},
@@ -175,7 +175,7 @@ def _question_interaction() -> HumanInteraction:
 
 
 def _waiting_result(interaction: HumanInteraction) -> RuntimeTurnResult:
-    subject = interaction.request.subject
+    subject = interaction.request.tool_call
     return RuntimeTurnResult(
         session_id=interaction.session_id,
         run_id=interaction.run_id,

@@ -20,7 +20,7 @@ from iris.hitl import (
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
 )
 
 
@@ -32,7 +32,7 @@ def test_service_creates_both_prompt_kinds_from_one_request(
     prompt: PermissionPrompt | QuestionPrompt,
 ) -> None:
     store = _FakeStore()
-    request = HumanInteractionRequest(subject=_subject(), prompt=prompt)
+    request = HumanInteractionRequest(tool_call=_subject(), prompt=prompt)
 
     interaction = _service(store).create(
         request,
@@ -217,13 +217,13 @@ def _permission_interaction(service: HumanInteractionService) -> HumanInteractio
 
 def _permission_request() -> HumanInteractionRequest:
     return HumanInteractionRequest(
-        subject=_subject(),
+        tool_call=_subject(),
         prompt=PermissionPrompt(reason="needs approval"),
     )
 
 
-def _subject() -> ToolCallSubject:
-    return ToolCallSubject(
+def _subject() -> ToolCallSnapshot:
+    return ToolCallSnapshot(
         tool_call_id="call_1",
         tool_name="write_file",
         arguments={"path": "notes.txt"},

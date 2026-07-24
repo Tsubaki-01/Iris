@@ -13,7 +13,7 @@ from .models import (
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
-    ToolCallSubject,
+    ToolCallSnapshot,
     make_call_fingerprint,
 )
 from .service import HumanInteractionService
@@ -34,6 +34,6 @@ __all__ = [
     "PermissionInteractionResponse",
     "QuestionPrompt",
     "QuestionInteractionResponse",
-    "ToolCallSubject",
+    "ToolCallSnapshot",
     "make_call_fingerprint",
 ]
