@@ -53,7 +53,7 @@ from ..tools import (
     ToolResult,
 )
 from .assembler import RuntimeMessageAssembler
-from .memory import prepare_memory_context_input
+from .memory_context import prepare_memory_context_input
 from .models import (
     ProviderResponseSnapshot,
     RuntimeErrorInfo,
