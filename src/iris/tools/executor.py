@@ -15,7 +15,7 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Sequence
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -142,109 +142,14 @@ class ToolExecutor:
         Returns:
             ToolResult: 带有确切结果与成功与否标识体，支持大体积落盘记录。
         """
-        # --- 1. 准备上下文并验证 ---
-        context.call_id = tool_use.id
-        context.tool_name = tool_use.name
-        execution_context = context
-        tool: BaseTool | None = None
-        try:
-            tool = self.registry.get(tool_use.name)
-            if self.circuit_breaker is not None:
-                try:
-                    self.circuit_breaker.before_call(tool.name)
-                except IrisToolExecutionError as exc:
-                    return self._error_result(
-                        tool_use,
-                        str(exc.context.get("code", "CIRCUIT_OPEN")),
-                        exc.message,
-                        details=exc.context,
-                    )
-            params = tool.validate_input(tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            middleware_error = await self._run_before_call(tool, raw_params, execution_context)
-            if middleware_error is not None:
-                self._record_breaker_result(tool.name, middleware_error)
-                return middleware_error
-
-            # --- 2. 执行权限策略 ---
-            try:
-                decision = self.permission_policy.check(tool, raw_params, execution_context)
-            except Exception as exc:
-                result = self._error_result(tool_use, "PERMISSION_ERROR", str(exc))
-                self._record_breaker_result(tool.name, result)
-                return result
-
-            if decision.effect is PermissionEffect.DENY or (
-                decision.effect is PermissionEffect.REQUIRE_HUMAN
-                and approved_tool_call_id != tool_use.id
-            ):
-                result = self._error_result(
-                    tool_use,
-                    "PERMISSION_ERROR",
-                    decision.reason,
-                    details={
-                        "require_confirmation": (decision.effect is PermissionEffect.REQUIRE_HUMAN),
-                        "effect": decision.effect.value,
-                        **decision.metadata,
-                    },
-                )
-                self._record_breaker_result(tool.name, result)
-                return result
-
-            # --- 3. 执行工具并格式化结果 ---
-            try:
-                result = await tool.arun(params, execution_context)
-            except Exception as exc:
-                handled = await self._run_on_error(tool, exc, execution_context)
-                if handled is None:
-                    raise
-                result = handled
-            normalized = result.model_copy(
-                update={
-                    "tool_use_id": result.tool_use_id or tool_use.id,
-                    "tool_name": result.tool_name or tool_use.name,
-                }
-            )
-
-            # --- 4. 若数据量较大，处理持久化存储 ---
-            artifact_store = self._artifact_store(execution_context)
-            persisted = artifact_store.persist_if_large(
-                normalized,
-                max_chars=tool.definition.max_result_chars,
-            )
-            final_result = await self._run_after_call(tool, persisted, execution_context)
-            final_result = final_result.model_copy(
-                update={
-                    "tool_use_id": final_result.tool_use_id or tool_use.id,
-                    "tool_name": final_result.tool_name or tool_use.name,
-                }
-            )
-            self._record_breaker_result(tool.name, final_result)
-            return final_result
-        except IrisToolNotFoundError:
-            return self._error_result(tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}")
-        except (IrisToolValidationError, ValidationError) as exc:
-            result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
-            if tool is not None:
-                self._record_breaker_result(tool.name, result)
-            return result
-        except IrisToolExecutionError as exc:
-            allow_structured = tool is not None and (
-                tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
-            )
-            code, message = _tool_error_code_and_message(
-                exc.message,
-                allow_structured=allow_structured,
-            )
-            result = self._error_result(tool_use, code, message)
-            if tool is not None:
-                self._record_breaker_result(tool.name, result)
-            return result
-        except Exception as exc:
-            result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
-            if tool is not None:
-                self._record_breaker_result(tool.name, result)
-            return result
+        prepared = self._prepare_call(tool_use, context)
+        permission_error = self._permission_error(
+            prepared,
+            approved_tool_call_id=approved_tool_call_id,
+        )
+        if permission_error is not None:
+            return permission_error
+        return await self._execute_authorized(prepared, context)
 
     async def execute_many(
         self,
@@ -283,94 +188,7 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> ToolBatchPlan:
         """在不触发执行生命周期的情况下预检一批工具调用。"""
-        calls: list[PreparedToolCall] = []
-        for tool_use in tool_uses:
-            tool: BaseTool | None = None
-            try:
-                tool = self.registry.get(tool_use.name)
-                params = tool.validate_input(tool_use.input)
-                raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-                decision = self.permission_policy.check(tool, raw_params, context)
-                if decision.effect is PermissionEffect.DENY:
-                    calls.append(
-                        PreparedToolCall(
-                            tool_use=tool_use,
-                            tool=tool,
-                            validated_params=raw_params,
-                            permission=decision,
-                            preflight_result=self._error_result(
-                                tool_use,
-                                "PERMISSION_ERROR",
-                                decision.reason,
-                                details={
-                                    "require_confirmation": False,
-                                    "effect": decision.effect.value,
-                                    **decision.metadata,
-                                },
-                            ),
-                        )
-                    )
-                    continue
-                if (
-                    tool.definition.group == "human"
-                    and decision.effect is PermissionEffect.REQUIRE_HUMAN
-                ):
-                    calls.append(
-                        PreparedToolCall(
-                            tool_use=tool_use,
-                            tool=tool,
-                            validated_params=raw_params,
-                            permission=decision,
-                            preflight_result=self._error_result(
-                                tool_use,
-                                "PERMISSION_ERROR",
-                                "human interaction tool 不能同时要求额外人工授权",
-                                details={
-                                    "require_confirmation": True,
-                                    "effect": decision.effect.value,
-                                    **decision.metadata,
-                                },
-                            ),
-                        )
-                    )
-                    continue
-                human_request = _human_interaction_request(
-                    tool_use, tool, raw_params, decision, context
-                )
-                calls.append(
-                    PreparedToolCall(
-                        tool_use=tool_use,
-                        tool=tool,
-                        validated_params=raw_params,
-                        permission=decision,
-                        human_request=human_request,
-                    )
-                )
-            except IrisToolNotFoundError:
-                calls.append(
-                    PreparedToolCall(
-                        tool_use=tool_use,
-                        preflight_result=self._error_result(
-                            tool_use, "NOT_FOUND", f"工具不存在: {tool_use.name}"
-                        ),
-                    )
-                )
-            except (IrisToolValidationError, ValidationError) as exc:
-                calls.append(
-                    PreparedToolCall(
-                        tool_use=tool_use,
-                        tool=tool,
-                        preflight_result=self._error_result(tool_use, "VALIDATION_ERROR", str(exc)),
-                    )
-                )
-            except Exception as exc:
-                calls.append(
-                    PreparedToolCall(
-                        tool_use=tool_use,
-                        tool=tool,
-                        preflight_result=self._error_result(tool_use, "PERMISSION_ERROR", str(exc)),
-                    )
-                )
+        calls = [self._prepare_call(tool_use, context) for tool_use in tool_uses]
         return ToolBatchPlan(calls=calls)
 
     async def execute_prepared(
@@ -381,45 +199,14 @@ class ToolExecutor:
         approved_tool_call_id: str | None = None,
     ) -> ToolResult:
         """重新验证当前权限后执行一条预检调用。"""
-        if prepared.preflight_result is not None:
-            return prepared.preflight_result
-        if prepared.human_request is not None and isinstance(
-            prepared.human_request.prompt, QuestionPrompt
-        ):
-            return self._error_result(
-                prepared.tool_use,
-                "HITL_REQUIRED",
-                "human interaction 必须由 runtime 处理",
-            )
-        try:
-            tool = self.registry.get(prepared.tool_use.name)
-            params = tool.validate_input(prepared.tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            decision = self.permission_policy.check(tool, raw_params, context)
-        except IrisToolNotFoundError:
-            return self._error_result(
-                prepared.tool_use, "NOT_FOUND", f"工具不存在: {prepared.tool_use.name}"
-            )
-        except (IrisToolValidationError, ValidationError) as exc:
-            return self._error_result(prepared.tool_use, "VALIDATION_ERROR", str(exc))
-        except Exception as exc:
-            return self._error_result(prepared.tool_use, "PERMISSION_ERROR", str(exc))
-        if decision.effect is PermissionEffect.DENY:
-            return self._error_result(
-                prepared.tool_use, "PERMISSION_ERROR", decision.reason, details=decision.metadata
-            )
-        if (
-            decision.effect is PermissionEffect.REQUIRE_HUMAN
-            and approved_tool_call_id != prepared.tool_use.id
-        ):
-            return self._error_result(
-                prepared.tool_use, "PERMISSION_ERROR", decision.reason, details=decision.metadata
-            )
-        return await self.execute_one(
-            prepared.tool_use,
-            context,
+        current = self._prepare_call(prepared.tool_use, context)
+        permission_error = self._permission_error(
+            current,
             approved_tool_call_id=approved_tool_call_id,
         )
+        if permission_error is not None:
+            return permission_error
+        return await self._execute_authorized(current, context)
 
     # endregion
 
@@ -427,6 +214,203 @@ class ToolExecutor:
     #               Helper Methods
     # ==========================================
     # region
+    def _prepare_call(
+        self,
+        tool_use: ToolUseBlock,
+        context: ToolExecutionContext,
+    ) -> PreparedToolCall:
+        """查找、校验并鉴权一条调用，不触发执行生命周期。"""
+        tool: BaseTool | None = None
+        try:
+            tool = self.registry.get(tool_use.name)
+            params = tool.validate_input(tool_use.input)
+            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
+            decision = self.permission_policy.check(tool, raw_params, context)
+            preflight_result: ToolResult | None = None
+            if decision.effect is PermissionEffect.DENY:
+                preflight_result = self._error_result(
+                    tool_use,
+                    "PERMISSION_ERROR",
+                    decision.reason,
+                    details={
+                        "require_confirmation": False,
+                        "effect": decision.effect.value,
+                        **decision.metadata,
+                    },
+                )
+            elif (
+                tool.definition.group == "human"
+                and decision.effect is PermissionEffect.REQUIRE_HUMAN
+            ):
+                preflight_result = self._error_result(
+                    tool_use,
+                    "PERMISSION_ERROR",
+                    "human interaction tool 不能同时要求额外人工授权",
+                    details={
+                        "require_confirmation": True,
+                        "effect": decision.effect.value,
+                        **decision.metadata,
+                    },
+                )
+            human_request = None
+            if preflight_result is None:
+                human_request = _human_interaction_request(
+                    tool_use,
+                    tool,
+                    raw_params,
+                    decision,
+                    context,
+                )
+            return PreparedToolCall(
+                tool_use=tool_use,
+                tool=tool,
+                validated_params=raw_params,
+                permission=decision,
+                human_request=human_request,
+                preflight_result=preflight_result,
+            )
+        except IrisToolNotFoundError:
+            return PreparedToolCall(
+                tool_use=tool_use,
+                preflight_result=self._error_result(
+                    tool_use,
+                    "NOT_FOUND",
+                    f"工具不存在: {tool_use.name}",
+                ),
+            )
+        except (IrisToolValidationError, ValidationError) as exc:
+            return PreparedToolCall(
+                tool_use=tool_use,
+                tool=tool,
+                preflight_result=self._error_result(tool_use, "VALIDATION_ERROR", str(exc)),
+            )
+        except Exception as exc:
+            return PreparedToolCall(
+                tool_use=tool_use,
+                tool=tool,
+                preflight_result=self._error_result(tool_use, "PERMISSION_ERROR", str(exc)),
+            )
+
+    def _permission_error(
+        self,
+        prepared: PreparedToolCall,
+        *,
+        approved_tool_call_id: str | None,
+    ) -> ToolResult | None:
+        """按安全优先级将当前鉴权结果映射为错误。"""
+        if prepared.preflight_result is not None:
+            return prepared.preflight_result
+        decision = prepared.permission
+        if decision is not None and decision.effect is PermissionEffect.DENY:
+            return self._error_result(
+                prepared.tool_use,
+                "PERMISSION_ERROR",
+                decision.reason,
+                details={
+                    "require_confirmation": False,
+                    "effect": decision.effect.value,
+                    **decision.metadata,
+                },
+            )
+        if prepared.human_request is not None and isinstance(
+            prepared.human_request.prompt,
+            QuestionPrompt,
+        ):
+            return self._error_result(
+                prepared.tool_use,
+                "HITL_REQUIRED",
+                "human interaction 必须由 runtime 处理",
+            )
+        if (
+            decision is not None
+            and decision.effect is PermissionEffect.REQUIRE_HUMAN
+            and approved_tool_call_id != prepared.tool_use.id
+        ):
+            return self._error_result(
+                prepared.tool_use,
+                "PERMISSION_ERROR",
+                decision.reason,
+                details={
+                    "require_confirmation": True,
+                    "effect": decision.effect.value,
+                    **decision.metadata,
+                },
+            )
+        return None
+
+    async def _execute_authorized(
+        self,
+        prepared: PreparedToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """执行已通过当前鉴权的调用及其生命周期。"""
+        tool_use = prepared.tool_use
+        tool = cast(BaseTool, prepared.tool)
+        params = prepared.validated_params
+        context.call_id = tool_use.id
+        context.tool_name = tool_use.name
+        try:
+            if self.circuit_breaker is not None:
+                try:
+                    self.circuit_breaker.before_call(tool.name)
+                except IrisToolExecutionError as exc:
+                    return self._error_result(
+                        tool_use,
+                        str(exc.context.get("code", "CIRCUIT_OPEN")),
+                        exc.message,
+                        details=exc.context,
+                    )
+            middleware_error = await self._run_before_call(tool, params, context)
+            if middleware_error is not None:
+                self._record_breaker_result(tool.name, middleware_error)
+                return middleware_error
+            try:
+                result = await tool.arun(params, context)
+            except Exception as exc:
+                handled = await self._run_on_error(tool, exc, context)
+                if handled is None:
+                    raise
+                result = handled
+            normalized = result.model_copy(
+                update={
+                    "tool_use_id": result.tool_use_id or tool_use.id,
+                    "tool_name": result.tool_name or tool_use.name,
+                }
+            )
+            artifact_store = self._artifact_store(context)
+            persisted = artifact_store.persist_if_large(
+                normalized,
+                max_chars=tool.definition.max_result_chars,
+            )
+            final_result = await self._run_after_call(tool, persisted, context)
+            final_result = final_result.model_copy(
+                update={
+                    "tool_use_id": final_result.tool_use_id or tool_use.id,
+                    "tool_name": final_result.tool_name or tool_use.name,
+                }
+            )
+            self._record_breaker_result(tool.name, final_result)
+            return final_result
+        except (IrisToolValidationError, ValidationError) as exc:
+            result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
+            self._record_breaker_result(tool.name, result)
+            return result
+        except IrisToolExecutionError as exc:
+            allow_structured = (
+                tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
+            )
+            code, message = _tool_error_code_and_message(
+                exc.message,
+                allow_structured=allow_structured,
+            )
+            result = self._error_result(tool_use, code, message)
+            self._record_breaker_result(tool.name, result)
+            return result
+        except Exception as exc:
+            result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
+            self._record_breaker_result(tool.name, result)
+            return result
+
     def _error_result(
         self,
         tool_use: ToolUseBlock,
