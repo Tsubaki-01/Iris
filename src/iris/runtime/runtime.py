@@ -25,7 +25,6 @@ from ..context import ContextBuilder, ContextBuildInput
 from ..exceptions import (
     HITLCheckpointInvalidError,
     HITLExecutionOutcomeUnknownError,
-    HITLNotFoundError,
     HITLResponseRequiredError,
 )
 from ..hitl import (
@@ -38,13 +37,12 @@ from ..hitl import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
+from ..message import LLMRequest, LLMResponse, Msg, ToolUseBlock
 from ..session import InMemorySessionStore, SessionStore
 from ..tools import (
     DefaultPermissionPolicy,
     PermissionPolicy,
     PreparedToolCall,
-    ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
     ToolRegistry,
@@ -64,8 +62,13 @@ from .models import (
     ToolBridgeResult,
     ToolErrorPolicy,
 )
+from .resume import (
+    append_resumed_result,
+    commit_ready_interaction,
+    load_resumable_interaction,
+    resolve_interaction_result,
+)
 from .tool_bridge import ToolBridge
-from .tool_results import build_tool_result_event, build_tool_result_message
 
 # endregion
 
@@ -260,52 +263,10 @@ class AgentRuntime:
         Raises:
             HITLCheckpointInvalidError: marker 缺失目标、跨 session 或与 pending 状态冲突。
         """
-        metadata = self.session_store.load_run_metadata(session_id)
-        pending = self.interaction_service.list_pending(session_id)
-        if len(pending) > 1:
-            raise HITLCheckpointInvalidError(
-                "同一 session 存在多个 pending HITL interaction",
-                session_id=session_id,
-            )
-        fallback = pending[0] if pending else None
-        latest = metadata.get("latest_run")
-        if not isinstance(latest, dict) or latest.get("waiting_human") is not True:
-            return fallback
-
-        interaction_id = latest.get("interaction_id")
-        if not isinstance(interaction_id, str) or not interaction_id.strip():
-            if fallback is not None:
-                return fallback
-            raise HITLCheckpointInvalidError(
-                "HITL waiting marker 缺少 interaction_id",
-                session_id=session_id,
-            )
-        try:
-            target = self.interaction_service.get(interaction_id)
-        except HITLNotFoundError as exc:
-            raise HITLCheckpointInvalidError(
-                "HITL waiting marker 指向的 interaction 不存在",
-                session_id=session_id,
-                interaction_id=interaction_id,
-            ) from exc
-        if target.session_id != session_id:
-            raise HITLCheckpointInvalidError(
-                "HITL waiting marker 与请求 session 不匹配",
-                session_id=session_id,
-                interaction_id=interaction_id,
-            )
-        if fallback is None or fallback.interaction_id == target.interaction_id:
-            return target
-        if (
-            target.status is InteractionStatus.CONSUMED
-            and target.resume_phase is InteractionResumePhase.RESULT_COMMITTED
-        ):
-            return fallback
-        raise HITLCheckpointInvalidError(
-            "HITL waiting marker 与 pending interaction 冲突",
+        return load_resumable_interaction(
+            session_store=self.session_store,
+            interaction_service=self.interaction_service,
             session_id=session_id,
-            interaction_id=interaction_id,
-            pending_interaction_id=fallback.interaction_id,
         )
 
     async def resume(
@@ -360,7 +321,12 @@ class AgentRuntime:
             if interaction.status is InteractionStatus.CONSUMED:
                 if interaction.resume_phase is InteractionResumePhase.CLAIMED:
                     raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
-                committed = await self._commit_ready_interaction(interaction)
+                committed = await commit_ready_interaction(
+                    interaction=interaction,
+                    session_store=self.session_store,
+                    interaction_service=self.interaction_service,
+                    agent_id=self.agent_config.name,
+                )
                 if checkpoint.get("continuation_complete") is True:
                     return synchronize_resume_metadata(
                         session_store=self.session_store,
@@ -390,10 +356,11 @@ class AgentRuntime:
                 options=options,
                 interaction=interaction,
             )
-            result = await self._resolve_interaction_result(
+            result = await resolve_interaction_result(
                 interaction=interaction,
                 prepared=prepared,
-                options=options,
+                tool_executor=self.tool_executor,
+                tool_context=self._tool_context(options),
             )
             ready_checkpoint = dict(checkpoint)
             batch_results = [*prefix_results, result]
@@ -412,7 +379,12 @@ class AgentRuntime:
                 InteractionResumePhase.RESULT_READY,
                 ready_checkpoint,
             )
-            committed = await self._commit_ready_interaction(interaction)
+            committed = await commit_ready_interaction(
+                interaction=interaction,
+                session_store=self.session_store,
+                interaction_service=self.interaction_service,
+                agent_id=self.agent_config.name,
+            )
             return synchronize_resume_metadata(
                 session_store=self.session_store,
                 result=await self._resume_batch(
@@ -439,37 +411,6 @@ class AgentRuntime:
                 session_store=self.session_store,
                 result=failed_result,
             )
-
-    async def _resolve_interaction_result(
-        self,
-        *,
-        interaction: HumanInteraction,
-        prepared: PreparedToolCall,
-        options: RuntimeOptions,
-    ) -> ToolResult:
-        """将 typed 人工响应收敛为一个工具结果。"""
-        response = interaction.response
-        tool_call_id = interaction.request.tool_call.tool_call_id
-        if isinstance(response, PermissionInteractionResponse):
-            if response.decision == "approve":
-                return await self.tool_executor.execute_prepared(
-                    prepared,
-                    self._tool_context(options),
-                    approved_tool_call_id=tool_call_id,
-                )
-            return ToolResult(
-                tool_use_id=tool_call_id,
-                tool_name=prepared.tool_use.name,
-                is_error=True,
-                error=ToolErrorInfo(code="USER_REJECTED", message="用户拒绝了工具调用"),
-            )
-        if isinstance(response, QuestionInteractionResponse):
-            return ToolResult(
-                tool_use_id=tool_call_id,
-                tool_name=prepared.tool_use.name,
-                content=[TextBlock(text=response.answer)],
-            )
-        raise HITLCheckpointInvalidError("HITL interaction 缺少有效 response")
 
     async def _resume_batch(
         self,
@@ -513,11 +454,13 @@ class AgentRuntime:
             result = await self.tool_executor.execute_prepared(
                 prepared, self._tool_context(options)
             )
-            message = self._append_resumed_result(
+            message = append_resumed_result(
                 result=result,
+                session_store=self.session_store,
                 session_id=interaction.session_id,
                 run_id=interaction.run_id,
                 step_index=interaction.step_index,
+                agent_id=self.agent_config.name,
             )
             results.append(result)
             messages.append(message)
@@ -564,11 +507,13 @@ class AgentRuntime:
                     prepared,
                     self._tool_context(options),
                 )
-            self._append_resumed_result(
+            append_resumed_result(
                 result=result,
+                session_store=self.session_store,
                 session_id=interaction.session_id,
                 run_id=interaction.run_id,
                 step_index=interaction.step_index,
+                agent_id=self.agent_config.name,
             )
             results.append(result)
         return results
@@ -630,26 +575,6 @@ class AgentRuntime:
             run_id=interaction.run_id,
             step_index=interaction.step_index,
         )
-
-    def _append_resumed_result(
-        self, *, result: ToolResult, session_id: str, run_id: str, step_index: int
-    ) -> Msg:
-        """保存续跑工具结果，并使用稳定 event ID 避免重复追加。"""
-        message = build_tool_result_message(result)
-        history = _load_history(self.session_store, session_id)
-        history.append(message)
-        self.session_store.save_messages(
-            session_id, [item.model_dump(mode="json") for item in history]
-        )
-        event = build_tool_result_event(
-            result,
-            run_id=run_id,
-            step_index=step_index,
-            agent_id=self.agent_config.name,
-            metadata=None,
-        )
-        self.session_store.append_tool_event(session_id, event)
-        return message
 
     def _tool_context(self, options: RuntimeOptions) -> ToolExecutionContext:
         """从 checkpoint 还原执行工具所需的最小上下文。"""
@@ -779,55 +704,6 @@ class AgentRuntime:
                 error=normalize_runtime_error(exc),
                 steps=committed.steps,
             )
-
-    async def _commit_ready_interaction(self, interaction: HumanInteraction) -> RuntimeTurnResult:
-        """幂等写入已准备工具结果的消息与事件。"""
-        checkpoint = interaction.checkpoint
-        raw_result = checkpoint.get("pending_result")
-        if not isinstance(raw_result, dict):
-            raise HITLExecutionOutcomeUnknownError("HITL 已消费 interaction 缺少待提交结果")
-        result = ToolResult.model_validate(raw_result)
-        message = build_tool_result_message(result)
-        messages = _load_history(self.session_store, interaction.session_id)
-        if not any(
-            block.tool_use_id == result.tool_use_id
-            for existing in messages
-            for block in existing.tool_results
-        ):
-            messages.append(message)
-            self.session_store.save_messages(
-                interaction.session_id, [item.model_dump(mode="json") for item in messages]
-            )
-        event = build_tool_result_event(
-            result,
-            run_id=interaction.run_id,
-            step_index=interaction.step_index,
-            agent_id=self.agent_config.name,
-            metadata=None,
-        )
-        self.session_store.append_tool_event(
-            interaction.session_id,
-            event,
-        )
-        if interaction.resume_phase is not InteractionResumePhase.RESULT_COMMITTED:
-            interaction = self.interaction_service.update_consumed(
-                interaction.interaction_id,
-                InteractionResumePhase.RESULT_COMMITTED,
-                checkpoint,
-            )
-        all_tool_results = [
-            ToolResult.model_validate(item) for item in checkpoint.get("all_tool_results", [])
-        ]
-        if not any(item.tool_use_id == result.tool_use_id for item in all_tool_results):
-            all_tool_results.append(result)
-        return RuntimeTurnResult(
-            session_id=interaction.session_id,
-            run_id=interaction.run_id,
-            status=RuntimeStatus.OK,
-            tool_result_messages=[build_tool_result_message(item) for item in all_tool_results],
-            tool_results=all_tool_results,
-            steps=interaction.step_index + 1,
-        )
 
     async def run_turn(
         self,
