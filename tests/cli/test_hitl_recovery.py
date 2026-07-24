@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+import iris.runtime.runtime as runtime_module
 from iris.agents import AgentConfig
 from iris.cli.chat import ChatOptions, run_chat_loop
 from iris.cli.render import ChatRenderer
@@ -322,17 +323,22 @@ def test_result_ready_recovery_commits_once(
         ),
     )
 
-    async def fail_before_commit(_: HumanInteraction) -> RuntimeTurnResult:
+    async def fail_before_commit(**_: object) -> RuntimeTurnResult:
         raise RuntimeError("模拟 result_ready 后进程退出")
 
-    monkeypatch.setattr(first, "_commit_ready_interaction", fail_before_commit)
-    monkeypatch.setattr(first, "_synchronize_resume_metadata", lambda result: result)
-    interrupted = asyncio.run(
-        first.resume(
-            interaction.interaction_id,
-            QuestionInteractionResponse(answer="继续"),
+    with monkeypatch.context() as crash_patch:
+        crash_patch.setattr(runtime_module, "commit_ready_interaction", fail_before_commit)
+        crash_patch.setattr(
+            runtime_module,
+            "synchronize_resume_metadata",
+            lambda *, session_store, result: result,
         )
-    )
+        interrupted = asyncio.run(
+            first.resume(
+                interaction.interaction_id,
+                QuestionInteractionResponse(answer="继续"),
+            )
+        )
     assert interrupted.status is RuntimeStatus.ERROR
     ready = store.load_interaction(interaction.interaction_id)
     assert ready is not None
@@ -371,14 +377,19 @@ def test_result_committed_recovery_continues_without_replaying_tools(
     async def fail_after_commit(**_: object) -> RuntimeTurnResult:
         raise RuntimeError("模拟 result_committed 后进程退出")
 
-    monkeypatch.setattr(first, "_resume_batch", fail_after_commit)
-    monkeypatch.setattr(first, "_synchronize_resume_metadata", lambda result: result)
-    interrupted = asyncio.run(
-        first.resume(
-            interaction.interaction_id,
-            QuestionInteractionResponse(answer="继续"),
+    with monkeypatch.context() as crash_patch:
+        crash_patch.setattr(first, "_resume_batch", fail_after_commit)
+        crash_patch.setattr(
+            runtime_module,
+            "synchronize_resume_metadata",
+            lambda *, session_store, result: result,
         )
-    )
+        interrupted = asyncio.run(
+            first.resume(
+                interaction.interaction_id,
+                QuestionInteractionResponse(answer="继续"),
+            )
+        )
     assert interrupted.status is RuntimeStatus.ERROR
     committed = store.load_interaction(interaction.interaction_id)
     assert committed is not None

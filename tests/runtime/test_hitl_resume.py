@@ -594,13 +594,13 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
-    commit_ready = runtime._commit_ready_interaction
+    commit_ready = runtime_module.commit_ready_interaction
     synchronize = runtime_module.synchronize_resume_metadata
 
-    async def fail_before_result_commit(_: object) -> RuntimeTurnResult:
+    async def fail_before_result_commit(**_: object) -> RuntimeTurnResult:
         raise RuntimeError("模拟 result_ready 后崩溃")
 
-    monkeypatch.setattr(runtime, "_commit_ready_interaction", fail_before_result_commit)
+    monkeypatch.setattr(runtime_module, "commit_ready_interaction", fail_before_result_commit)
     monkeypatch.setattr(
         runtime_module,
         "synchronize_resume_metadata",
@@ -616,7 +616,7 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     assert result_ready.resume_phase is InteractionResumePhase.RESULT_READY
     assert runtime.load_resumable_interaction("default") == result_ready
 
-    monkeypatch.setattr(runtime, "_commit_ready_interaction", commit_ready)
+    monkeypatch.setattr(runtime_module, "commit_ready_interaction", commit_ready)
     monkeypatch.setattr(runtime_module, "synchronize_resume_metadata", synchronize)
     recovered = await runtime.resume(interaction_id)
 
