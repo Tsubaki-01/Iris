@@ -11,9 +11,10 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 
 - `ToolCallSnapshot`：两类 gate 共用的精确工具调用身份，包含工具名、参数、workspace 与稳定
   `fingerprint`。
-- `PermissionPrompt`：权限策略产生的批准/拒绝提示；批准只绑定当前 subject。
+- `PermissionPrompt`：权限策略产生的批准/拒绝提示；批准只绑定当前 tool call snapshot。
 - `QuestionPrompt`：`human.ask` 的单个问题与可选选项。
-- `HumanInteractionRequest`：唯一的 `subject + typed prompt` 请求信封。
+- `HumanInteractionRequest`：唯一的 `tool_call + typed prompt` 请求信封；旧 `subject` 字段
+  不兼容。
 - `HumanInteraction`：持久化记录，含 request、response 与 JSON-safe checkpoint。
 - `InteractionStatus`：`pending`、`resolved`、`consumed` 表示人工响应生命周期。
 - `InteractionResumePhase`：`waiting`、`claimed`、`result_ready`、`result_committed`
@@ -22,11 +23,11 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 ## 服务与存储
 
 `HumanInteractionService` 在 `InteractionStore` 上通过唯一 `create(request, ...)` 入口以及
-resolve、claim 和
-`update_consumed` 的 CAS 状态转换。相同 resolved response 是幂等的，不同 response
-会产生冲突。
+resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved response 是幂等的，
+不同 response 会产生冲突。
 
-`InMemoryInteractionStore` 适合测试和 `session.backend: none`，进程退出即丢失。
+`InMemoryInteractionStore` 位于 `src/iris/hitl/in_memory.py`，适合测试和
+`session.backend: none`，进程退出即丢失。
 `iris.store.SQLiteStore` 同时实现 `InteractionStore`，将 interaction 保存到独立的
 `human_interactions` 表，可跨 runtime 重建恢复。
 
@@ -50,3 +51,7 @@ resolve、claim 和
 `PERMISSION_ERROR` fail closed，避免同一调用形成嵌套双 gate。普通工具只有在
 `REQUIRE_HUMAN` 时产生 permission。当前没有 TUI 或 Web adapter，也不提供超时、取消或
 长期授权规则。
+
+模型可见的 `AskQuestionTool` 不属于 HITL 状态机，定义在
+`iris.tools.builtin.human` 并由 `iris.tools` 顶层导出；本包只拥有 typed request/response、
+checkpoint 生命周期和存储协议。

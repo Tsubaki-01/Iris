@@ -132,12 +132,16 @@ executor = ToolExecutor(
 - `execute_one(tool_use, context)`: 执行单个 `ToolUseBlock`，始终返回 `ToolResult`，常见错误码包括 `NOT_FOUND`、`VALIDATION_ERROR`、`PERMISSION_ERROR`、`EXECUTION_ERROR`、`MIDDLEWARE_ERROR`、`CIRCUIT_OPEN`。
 - `execute_many(tool_uses, context)`: 连续只读且并发安全的调用会并发执行；遇到写入或非并发安全工具时按顺序执行。
 - `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
-  `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(subject, prompt)`，
+  `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(tool_call, prompt)`，
   不会运行 middleware、circuit breaker、artifact 或工具本体。
 - `execute_prepared(prepared, context, approved_tool_call_id=None)`: 重新校验当前状态后执行
   一条预检调用，供 runtime 的 HITL 恢复路径使用。
 
-执行顺序是：设置 context → 查 registry → circuit breaker `before_call` → 输入校验 → middleware `before_call` → 权限检查 → `tool.arun()` → middleware `on_error` 或 `after_call`/`after_execute` → artifact 处理 → circuit breaker 记录结果。
+预检阶段由唯一 `_prepare_call()` 完成 registry lookup、输入校验和 policy check，不运行工具
+生命周期。执行阶段会重新 `_prepare_call()` 一次，再按 `preflight_result` / `DENY`、human
+protocol guard、精确 approve 的优先级授权；通过后才进入 circuit breaker → middleware
+`before_call` → `tool.arun()` → artifact → middleware after hooks → breaker 记录。一次阶段内
+policy 只检查一次，历史 approve 不能覆盖当前 `DENY`。
 
 文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
 
@@ -214,6 +218,14 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 默认权限策略不会直接允许写工具。使用文件写入/编辑时，需要给 `ToolExecutor` 传入允许写入的策略，例如 `DefaultPermissionPolicy(write_mode="allow")`。
 
+## Human tool
+
+`AskQuestionInput` 与 `AskQuestionTool` 位于 `iris.tools.builtin.human`，并从 `iris.tools` 顶层
+导出；agent YAML 名称仍为 `human.ask`，模型可见工具名仍为 `ask_question`。该工具只负责
+schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执行。Executor 仅在 policy
+为 `ALLOW` 时产生 question；`DENY` 直接拒绝，`REQUIRE_HUMAN` fail closed，避免 question
+外再嵌套 permission gate。
+
 ## 权限、artifact、middleware、熔断
 
 ### 权限
@@ -255,7 +267,7 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 预检优先级固定为：`DENY` 直接产生 `PERMISSION_ERROR`；human tool 只在 `ALLOW` 时产生自身
 question；human tool 收到 `REQUIRE_HUMAN` 时 fail closed，避免 permission 与 question
 叠加；普通工具的 `REQUIRE_HUMAN` 才产生 permission prompt。Permission 和 question 的
-subject/fingerprint 均由 executor 的同一路径构造。
+tool-call snapshot/fingerprint 均由 executor 的同一路径构造。
 
 ## Deferred discovery / tool_search
 
@@ -305,13 +317,15 @@ registry.register(ToolSearchTool(registry))
 `iris.tools.__all__` 当前导出：
 
 ```text
-BaseTool, CallableTool, CircuitBreaker, CircuitBreakerState,
+AskQuestionInput, AskQuestionTool, BaseTool, CallableTool,
+CircuitBreaker, CircuitBreakerState,
 DeferredToolIndex, DocstringInfo, DocstringSchemaExtractor,
 DefaultPermissionPolicy, EditFileInput, FILE_TOOL_CLASSES, FileTool,
-GrepSearchInput, ListFilesInput, PermissionDecision, PermissionPolicy,
+GrepSearchInput, ListFilesInput, PermissionDecision, PermissionEffect,
+PermissionPolicy, PreparedToolCall,
 ReadFileInput, ReadFileRecord, ReadFileState, ToolArtifact,
 ToolArtifactStore, ToolCapability, ToolDefinition, ToolErrorInfo,
-ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
+ToolBatchPlan, ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 register_file_tools, schema_from_callable, schema_from_pydantic_model,
