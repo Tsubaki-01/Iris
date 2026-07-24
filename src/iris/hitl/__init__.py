@@ -1,6 +1,6 @@
 """Human-in-the-loop 领域模型、协议和服务。"""
 
-from .memory import InMemoryInteractionStore
+from .in_memory import InMemoryInteractionStore
 from .models import (
     HumanInteraction,
     HumanInteractionPrompt,
