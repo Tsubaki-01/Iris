@@ -309,9 +309,10 @@ class SQLiteStore:
                 if not signature:
                     _create_hitl_v2_schema(connection)
                 elif signature == _HITL_SCHEMA_V1:
-                    connection.execute("DROP TABLE human_interactions")
-                    _create_hitl_v2_schema(connection)
-                    _clear_hitl_recovery_markers(connection, path=self.path)
+                    raise IrisSessionError(
+                        "SQLite HITL schema v1 不受支持",
+                        path=str(self.path),
+                    )
                 elif signature == _HITL_SCHEMA_V2:
                     _create_hitl_indexes(connection)
                 else:
@@ -471,28 +472,6 @@ def _create_hitl_indexes(connection: sqlite3.Connection) -> None:
             OR (status = 'consumed' AND resume_phase != 'result_committed')
         """
     )
-
-
-def _clear_hitl_recovery_markers(connection: sqlite3.Connection, *, path: Path) -> None:
-    rows = connection.execute("SELECT session_id, run_metadata_json FROM sessions").fetchall()
-    for session_id, metadata_json in rows:
-        try:
-            metadata = json.loads(metadata_json)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise IrisSessionError("SQLite session metadata 无效", path=str(path)) from exc
-        if not isinstance(metadata, dict):
-            raise IrisSessionError("SQLite session metadata 必须是 object", path=str(path))
-        latest_run = metadata.get("latest_run")
-        if not isinstance(latest_run, dict):
-            continue
-        had_marker = "waiting_human" in latest_run or "interaction_id" in latest_run
-        latest_run.pop("waiting_human", None)
-        latest_run.pop("interaction_id", None)
-        if had_marker:
-            connection.execute(
-                "UPDATE sessions SET run_metadata_json = ? WHERE session_id = ?",
-                (_dump_json(metadata), session_id),
-            )
 
 
 __all__ = ["SQLiteStore"]
