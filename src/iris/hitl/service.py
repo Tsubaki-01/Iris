@@ -111,13 +111,20 @@ class HumanInteractionService:
         interaction_id: str,
         phase: InteractionResumePhase,
         checkpoint: dict[str, Any],
+        *,
+        expected_phase: InteractionResumePhase,
+        expected_version: int,
     ) -> HumanInteraction:
-        """推进已消费 interaction 的恢复阶段。"""
+        """按调用方读取的阶段与版本推进 consumed interaction。"""
         interaction = self.get(interaction_id)
         checkpoint = self._validate_checkpoint(checkpoint)
         if interaction.status is not InteractionStatus.CONSUMED:
             raise HITLConflictError(
                 "只能更新已消费的 HITL interaction", interaction_id=interaction_id
+            )
+        if interaction.resume_phase is not expected_phase:
+            raise HITLConflictError(
+                "HITL interaction 恢复阶段已变更", interaction_id=interaction_id
             )
         if phase is InteractionResumePhase.WAITING:
             raise HITLConflictError(
@@ -127,7 +134,8 @@ class HumanInteractionService:
             interaction_id,
             resume_phase=phase,
             checkpoint=checkpoint,
-            expected_version=interaction.version,
+            expected_phase=expected_phase,
+            expected_version=expected_version,
         )
 
     @staticmethod

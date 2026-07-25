@@ -68,14 +68,14 @@ def _ready_interaction(
     checkpoint = {
         **claimed.checkpoint,
         "pending_result": pending_result.model_dump(mode="json"),
-        "all_tool_results": [
-            result.model_dump(mode="json") for result in all_tool_results
-        ],
+        "all_tool_results": [result.model_dump(mode="json") for result in all_tool_results],
     }
     ready = service.update_consumed(
         claimed.interaction_id,
         InteractionResumePhase.RESULT_READY,
         checkpoint,
+        expected_phase=claimed.resume_phase,
+        expected_version=claimed.version,
     )
     return session_store, service, ready
 
@@ -207,9 +207,7 @@ async def test_commit_ready_rejects_inconsistent_result_identity_before_writes(
     elif case == "duplicate":
         all_results = [expected, expected]
     elif case == "payload_mismatch":
-        all_results = [
-            expected.model_copy(update={"content": [TextBlock(text="不同")]})
-        ]
+        all_results = [expected.model_copy(update={"content": [TextBlock(text="不同")]})]
 
     session_store, service, ready = _ready_interaction(
         pending_result=pending_result,

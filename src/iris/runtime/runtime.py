@@ -327,6 +327,7 @@ class AgentRuntime:
                     interaction_service=self.interaction_service,
                     agent_id=self.agent_config.name,
                 )
+                interaction = self.interaction_service.get(interaction_id)
                 if checkpoint.get("continuation_complete") is True:
                     return synchronize_resume_metadata(
                         session_store=self.session_store,
@@ -344,7 +345,7 @@ class AgentRuntime:
                     ),
                 )
 
-            self.interaction_service.claim(interaction_id, checkpoint)
+            interaction = self.interaction_service.claim(interaction_id, checkpoint)
             current_index = plan.calls.index(prepared)
             next_index = int(checkpoint["next_tool_index"])
             if next_index > current_index:
@@ -378,6 +379,8 @@ class AgentRuntime:
                 interaction_id,
                 InteractionResumePhase.RESULT_READY,
                 ready_checkpoint,
+                expected_phase=interaction.resume_phase,
+                expected_version=interaction.version,
             )
             committed = await commit_ready_interaction(
                 interaction=interaction,
@@ -385,6 +388,7 @@ class AgentRuntime:
                 interaction_service=self.interaction_service,
                 agent_id=self.agent_config.name,
             )
+            interaction = self.interaction_service.get(interaction_id)
             return synchronize_resume_metadata(
                 session_store=self.session_store,
                 result=await self._resume_batch(
@@ -428,7 +432,7 @@ class AgentRuntime:
         batch_results = [ToolResult.model_validate(item) for item in checkpoint["batch_results"]]
         for index, prepared in enumerate(plan.calls[next_index:], start=next_index):
             if prepared.human_request is not None:
-                checkpoint = self._update_resume_checkpoint(
+                interaction, checkpoint = self._update_resume_checkpoint(
                     interaction=interaction,
                     checkpoint=checkpoint,
                     next_tool_index=index,
@@ -465,7 +469,7 @@ class AgentRuntime:
             results.append(result)
             messages.append(message)
             batch_results.append(result)
-            checkpoint = self._update_resume_checkpoint(
+            interaction, checkpoint = self._update_resume_checkpoint(
                 interaction=interaction,
                 checkpoint=checkpoint,
                 next_tool_index=index + 1,
@@ -477,7 +481,7 @@ class AgentRuntime:
         )
         if checkpoint.get("run_mode") == "loop":
             completed = await self._continue_resumed_loop(completed, options)
-        self._update_resume_checkpoint(
+        interaction, checkpoint = self._update_resume_checkpoint(
             interaction=interaction,
             checkpoint=checkpoint,
             next_tool_index=len(plan.calls),
@@ -527,7 +531,7 @@ class AgentRuntime:
         batch_results: list[ToolResult],
         all_tool_results: list[ToolResult],
         continuation_complete: bool = False,
-    ) -> dict[str, Any]:
+    ) -> tuple[HumanInteraction, dict[str, Any]]:
         """保存当前批次的安全恢复游标。"""
         updated = dict(checkpoint)
         updated.update(
@@ -541,12 +545,14 @@ class AgentRuntime:
             ),
             continuation_complete=continuation_complete,
         )
-        self.interaction_service.update_consumed(
+        interaction = self.interaction_service.update_consumed(
             interaction.interaction_id,
             InteractionResumePhase.RESULT_COMMITTED,
             updated,
+            expected_phase=interaction.resume_phase,
+            expected_version=interaction.version,
         )
-        return updated
+        return interaction, updated
 
     def _create_followup_interaction(
         self,

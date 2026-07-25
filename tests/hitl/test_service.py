@@ -121,10 +121,41 @@ def test_claimed_interaction_cannot_be_resolved_again() -> None:
         )
 
 
+def test_update_consumed_uses_callers_phase_and_version_snapshot() -> None:
+    store = _FakeStore()
+    service = _service(store)
+    interaction = _permission_interaction(service)
+    resolved = service.resolve(
+        interaction.interaction_id,
+        PermissionInteractionResponse(decision="approve"),
+    )
+    claimed = service.claim(resolved.interaction_id, resolved.checkpoint)
+
+    updated = service.update_consumed(
+        claimed.interaction_id,
+        InteractionResumePhase.RESULT_READY,
+        claimed.checkpoint,
+        expected_phase=claimed.resume_phase,
+        expected_version=claimed.version,
+    )
+
+    assert updated.resume_phase is InteractionResumePhase.RESULT_READY
+    assert store.last_update_snapshot == (claimed.resume_phase, claimed.version)
+    with pytest.raises(HITLConflictError):
+        service.update_consumed(
+            claimed.interaction_id,
+            InteractionResumePhase.RESULT_COMMITTED,
+            claimed.checkpoint,
+            expected_phase=claimed.resume_phase,
+            expected_version=claimed.version,
+        )
+
+
 class _FakeStore:
     def __init__(self) -> None:
         self.interactions: dict[str, HumanInteraction] = {}
         self.resolve_calls = 0
+        self.last_update_snapshot: tuple[InteractionResumePhase, int] | None = None
 
     def create_interaction(self, interaction: HumanInteraction) -> None:
         self.interactions[interaction.interaction_id] = interaction
@@ -186,10 +217,17 @@ class _FakeStore:
         *,
         resume_phase: InteractionResumePhase,
         checkpoint: dict[str, object],
+        expected_phase: InteractionResumePhase,
         expected_version: int,
     ) -> HumanInteraction:
         interaction = self.interactions[interaction_id]
-        assert interaction.version == expected_version
+        self.last_update_snapshot = (expected_phase, expected_version)
+        if (
+            interaction.status is not InteractionStatus.CONSUMED
+            or interaction.resume_phase is not expected_phase
+            or interaction.version != expected_version
+        ):
+            raise HITLConflictError("HITL update compare-and-set 失败")
         updated = interaction.model_copy(
             update={
                 "resume_phase": resume_phase,
