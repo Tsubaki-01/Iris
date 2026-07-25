@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import (
+    HumanInteraction,
     HumanInteractionRequest,
     HumanInteractionService,
     InMemoryInteractionStore,
@@ -30,17 +32,52 @@ from iris.tools import (
 )
 
 
-def _request() -> HumanInteractionRequest:
+def _request(*, tool_name: str = "ask_question") -> HumanInteractionRequest:
     return HumanInteractionRequest(
         tool_call=ToolCallSnapshot(
             tool_call_id="call-1",
-            tool_name="ask_question",
+            tool_name=tool_name,
             arguments={"question": "继续？"},
             workspace_root="/workspace",
             fingerprint="a" * 64,
         ),
         prompt=QuestionPrompt(question="继续？"),
     )
+
+
+def _ready_interaction(
+    *,
+    pending_result: ToolResult,
+    all_tool_results: list[ToolResult],
+    request_tool_name: str = "ask_question",
+) -> tuple[InMemorySessionStore, HumanInteractionService, HumanInteraction]:
+    session_store = InMemorySessionStore()
+    service = HumanInteractionService(InMemoryInteractionStore())
+    pending = service.create(
+        _request(tool_name=request_tool_name),
+        session_id="session-1",
+        run_id="run-1",
+        step_index=0,
+        checkpoint={"checkpoint_version": 2},
+    )
+    resolved = service.resolve(
+        pending.interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+    claimed = service.claim(resolved.interaction_id, resolved.checkpoint)
+    checkpoint = {
+        **claimed.checkpoint,
+        "pending_result": pending_result.model_dump(mode="json"),
+        "all_tool_results": [
+            result.model_dump(mode="json") for result in all_tool_results
+        ],
+    }
+    ready = service.update_consumed(
+        claimed.interaction_id,
+        InteractionResumePhase.RESULT_READY,
+        checkpoint,
+    )
+    return session_store, service, ready
 
 
 def test_load_resumable_interaction_uses_waiting_marker() -> None:
@@ -127,34 +164,14 @@ def test_append_resumed_result_writes_message_and_event() -> None:
 
 @pytest.mark.asyncio
 async def test_commit_ready_interaction_advances_phase_and_persists_result() -> None:
-    session_store = InMemorySessionStore()
-    service = HumanInteractionService(InMemoryInteractionStore())
     result = ToolResult(
         tool_use_id="call-1",
         tool_name="ask_question",
         content=[TextBlock(text="继续")],
     )
-    pending = service.create(
-        _request(),
-        session_id="session-1",
-        run_id="run-1",
-        step_index=0,
-        checkpoint={"checkpoint_version": 2},
-    )
-    resolved = service.resolve(
-        pending.interaction_id,
-        QuestionInteractionResponse(answer="继续"),
-    )
-    claimed = service.claim(resolved.interaction_id, resolved.checkpoint)
-    ready_checkpoint = {
-        **claimed.checkpoint,
-        "pending_result": result.model_dump(mode="json"),
-        "all_tool_results": [result.model_dump(mode="json")],
-    }
-    ready = service.update_consumed(
-        claimed.interaction_id,
-        InteractionResumePhase.RESULT_READY,
-        ready_checkpoint,
+    session_store, service, ready = _ready_interaction(
+        pending_result=result,
+        all_tool_results=[result],
     )
 
     committed = await commit_ready_interaction(
@@ -168,3 +185,68 @@ async def test_commit_ready_interaction_advances_phase_and_persists_result() -> 
     assert service.get(ready.interaction_id).resume_phase is InteractionResumePhase.RESULT_COMMITTED
     assert len(session_store.load_messages("session-1")) == 1
     assert len(session_store.load_tool_events("session-1")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["wrong_id", "missing", "duplicate", "payload_mismatch"])
+async def test_commit_ready_rejects_inconsistent_result_identity_before_writes(
+    case: str,
+) -> None:
+    expected = ToolResult(
+        tool_use_id="call-1",
+        tool_name="ask_question",
+        content=[TextBlock(text="继续")],
+    )
+    pending_result = expected
+    all_results = [expected]
+    if case == "wrong_id":
+        pending_result = expected.model_copy(update={"tool_use_id": "call-2"})
+        all_results = [pending_result]
+    elif case == "missing":
+        all_results = []
+    elif case == "duplicate":
+        all_results = [expected, expected]
+    elif case == "payload_mismatch":
+        all_results = [
+            expected.model_copy(update={"content": [TextBlock(text="不同")]})
+        ]
+
+    session_store, service, ready = _ready_interaction(
+        pending_result=pending_result,
+        all_tool_results=all_results,
+    )
+
+    with pytest.raises(HITLCheckpointInvalidError):
+        await commit_ready_interaction(
+            interaction=ready,
+            session_store=session_store,
+            interaction_service=service,
+            agent_id="agent-1",
+        )
+
+    assert session_store.load_messages("session-1") == []
+    assert session_store.load_tool_events("session-1") == []
+    assert service.get(ready.interaction_id).resume_phase is InteractionResumePhase.RESULT_READY
+
+
+@pytest.mark.asyncio
+async def test_commit_ready_accepts_alias_request_with_canonical_result_name() -> None:
+    result = ToolResult(
+        tool_use_id="call-1",
+        tool_name="canonical_question",
+        content=[TextBlock(text="继续")],
+    )
+    session_store, service, ready = _ready_interaction(
+        pending_result=result,
+        all_tool_results=[result],
+        request_tool_name="question_alias",
+    )
+
+    committed = await commit_ready_interaction(
+        interaction=ready,
+        session_store=session_store,
+        interaction_service=service,
+        agent_id="agent-1",
+    )
+
+    assert committed.tool_results == [result]
