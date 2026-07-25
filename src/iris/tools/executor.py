@@ -143,13 +143,11 @@ class ToolExecutor:
             ToolResult: 带有确切结果与成功与否标识体，支持大体积落盘记录。
         """
         prepared = self._prepare_call(tool_use, context)
-        permission_error = self._permission_error(
+        return await self._execute_current(
             prepared,
+            context,
             approved_tool_call_id=approved_tool_call_id,
         )
-        if permission_error is not None:
-            return permission_error
-        return await self._execute_authorized(prepared, context)
 
     async def execute_many(
         self,
@@ -169,15 +167,16 @@ class ToolExecutor:
             list[ToolResult]: 所有结果合包，结果序列一一对应清单集原有次序。
         """
         results: list[ToolResult] = []
-        batch: list[ToolUseBlock] = []
+        batch: list[PreparedToolCall] = []
         for tool_use in tool_uses:
-            if self._is_read_only_concurrency_safe(tool_use):
-                batch.append(tool_use)
+            prepared = self._prepare_call(tool_use, context)
+            if self._is_read_only_concurrency_safe(prepared):
+                batch.append(prepared)
                 continue
             if batch:
                 results.extend(await self._execute_read_batch(batch, context))
                 batch = []
-            results.append(await self.execute_one(tool_use, context))
+            results.append(await self._execute_current(prepared, context))
         if batch:
             results.extend(await self._execute_read_batch(batch, context))
         return results
@@ -200,13 +199,27 @@ class ToolExecutor:
     ) -> ToolResult:
         """重新验证当前权限后执行一条预检调用。"""
         current = self._prepare_call(prepared.tool_use, context)
-        permission_error = self._permission_error(
+        return await self._execute_current(
             current,
+            context,
+            approved_tool_call_id=approved_tool_call_id,
+        )
+
+    async def _execute_current(
+        self,
+        prepared: PreparedToolCall,
+        context: ToolExecutionContext,
+        *,
+        approved_tool_call_id: str | None = None,
+    ) -> ToolResult:
+        """执行当前阶段已完成 lookup、校验与鉴权的调用。"""
+        permission_error = self._permission_error(
+            prepared,
             approved_tool_call_id=approved_tool_call_id,
         )
         if permission_error is not None:
             return permission_error
-        return await self._execute_authorized(current, context)
+        return await self._execute_authorized(prepared, context)
 
     # endregion
 
@@ -441,7 +454,7 @@ class ToolExecutor:
 
     async def _execute_read_batch(
         self,
-        tool_uses: list[ToolUseBlock],
+        prepared_calls: list[PreparedToolCall],
         context: ToolExecutionContext,
     ) -> list[ToolResult]:
         """并发执行连续只读批次。
@@ -449,43 +462,49 @@ class ToolExecutor:
         将一串经过判断安全的调用批量压入异步调度池内争取快速返回。
 
         Args:
-            tool_uses (list[ToolUseBlock]): 需要同步执行的任务组合。
+            prepared_calls (list[PreparedToolCall]): 需要并发执行的已准备调用。
             context (ToolExecutionContext): 生命周期环境。
 
         Returns:
             list[ToolResult]: 生成的已完成数据流集。
         """
-        if context.read_state is None and self._has_file_tool(tool_uses):
+        if context.read_state is None and self._has_file_tool(prepared_calls):
             context.read_state = ReadFileState()
         tasks = (
-            self.execute_one(tool_use, _copy_context_for_parallel_call(context))
-            for tool_use in tool_uses
+            self._execute_current(prepared, _copy_context_for_parallel_call(context))
+            for prepared in prepared_calls
         )
         return list(await asyncio.gather(*tasks))
 
-    def _has_file_tool(self, tool_uses: list[ToolUseBlock]) -> bool:
+    def _has_file_tool(self, prepared_calls: list[PreparedToolCall]) -> bool:
         """判断批次中是否包含内置文件工具。"""
         return any(
-            self.registry.get(tool_use.name).definition.group == "file" for tool_use in tool_uses
+            prepared.tool is not None and prepared.tool.definition.group == "file"
+            for prepared in prepared_calls
         )
 
-    def _is_read_only_concurrency_safe(self, tool_use: ToolUseBlock) -> bool:
+    def _is_read_only_concurrency_safe(self, prepared: PreparedToolCall) -> bool:
         """判断工具调用是否可进入只读并发批次。
 
-        通过请求注册表的定义对具体指令及装载参数判断并行支持兼容度。
+        使用当前阶段已解析的工具与参数判断并行支持兼容度。
 
         Args:
-            tool_use (ToolUseBlock): 测试能否无锁快速通行的请求件。
+            prepared (PreparedToolCall): 已完成 lookup、校验与鉴权的调用。
 
         Returns:
-            bool: 回报其支持策略状态。有验证崩溃或缺失统统退库阻塞排队。
+            bool: 回报其支持策略状态。分类异常或无效调用保守退回串行。
         """
+        if (
+            prepared.tool is None
+            or prepared.preflight_result is not None
+            or prepared.human_request is not None
+        ):
+            return False
         try:
-            tool = self.registry.get(tool_use.name)
-            params = tool.validate_input(tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            return tool.is_read_only(raw_params) and tool.is_concurrency_safe(raw_params)
-        except (IrisToolNotFoundError, IrisToolValidationError, ValidationError):
+            return prepared.tool.is_read_only(
+                prepared.validated_params
+            ) and prepared.tool.is_concurrency_safe(prepared.validated_params)
+        except Exception:
             return False
 
     def _artifact_store(self, context: ToolExecutionContext) -> ToolArtifactStore:
