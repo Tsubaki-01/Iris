@@ -61,6 +61,45 @@ def _tool_response(call: ToolUseBlock) -> LLMResponse:
     )
 
 
+def _runtime_with_remaining_echo(
+    executed: list[str],
+) -> tuple[AgentRuntime, InMemoryInteractionStore]:
+    def echo() -> str:
+        executed.append("echo")
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    registry.register_function(echo, description="回显")
+    interaction_store = InMemoryInteractionStore()
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                LLMResponse(
+                    provider="fake",
+                    content=[
+                        ToolUseBlock(
+                            id="question",
+                            name="ask_question",
+                            input={"question": "继续？"},
+                        ),
+                        ToolUseBlock(id="echo", name="echo", input={}),
+                    ],
+                    finish_reason="tool_calls",
+                )
+            ]
+        ),
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    return runtime, interaction_store
+
+
 class FailingRunMetadataStore(InMemorySessionStore):
     """按需模拟 resume metadata 写入失败。"""
 
@@ -873,6 +912,287 @@ async def test_result_committed_resume_continues_remaining_batch(
     assert retried.status is RuntimeStatus.OK
     assert executed == ["echo"]
     assert len(runtime.session_store.load_messages("default")) == message_count
+
+
+@pytest.mark.asyncio
+async def test_resume_fails_closed_after_tool_before_result_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+    runtime, interaction_store = _runtime_with_remaining_echo(executed)
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    interaction_id = waiting.pending_interaction.interaction_id
+
+    def fail_after_tool(**_: object) -> object:
+        raise RuntimeError("模拟工具执行后、结果写入前崩溃")
+
+    append_result = runtime_module.append_resumed_result
+    monkeypatch.setattr(runtime_module, "append_resumed_result", fail_after_tool)
+    interrupted = await runtime.resume(
+        interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert interrupted.status is RuntimeStatus.ERROR
+    assert executed == ["echo"]
+    stored = interaction_store.load_interaction(interaction_id)
+    assert stored is not None
+    assert stored.resume_phase is InteractionResumePhase.RESULT_COMMITTED
+    assert stored.checkpoint["continuation_claim"] == {
+        "kind": "tool",
+        "next_tool_index": 1,
+        "tool_call_id": "echo",
+    }
+
+    monkeypatch.setattr(runtime_module, "append_resumed_result", append_result)
+    retried = await runtime.resume(interaction_id)
+
+    assert retried.status is RuntimeStatus.ERROR
+    assert retried.error is not None
+    assert retried.error.code == "HITL_EXECUTION_OUTCOME_UNKNOWN"
+    assert executed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_resume_fails_closed_after_claim_before_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+    runtime, interaction_store = _runtime_with_remaining_echo(executed)
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    interaction_id = waiting.pending_interaction.interaction_id
+    execute_prepared = runtime.tool_executor.execute_prepared
+
+    async def fail_before_tool(*_: object, **__: object) -> object:
+        raise RuntimeError("模拟 claim 后、工具执行前崩溃")
+
+    monkeypatch.setattr(runtime.tool_executor, "execute_prepared", fail_before_tool)
+    interrupted = await runtime.resume(
+        interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert interrupted.status is RuntimeStatus.ERROR
+    assert executed == []
+    stored = interaction_store.load_interaction(interaction_id)
+    assert stored is not None
+    assert stored.checkpoint["continuation_claim"]["tool_call_id"] == "echo"
+
+    monkeypatch.setattr(runtime.tool_executor, "execute_prepared", execute_prepared)
+    retried = await runtime.resume(interaction_id)
+
+    assert retried.status is RuntimeStatus.ERROR
+    assert retried.error is not None
+    assert retried.error.code == "HITL_EXECUTION_OUTCOME_UNKNOWN"
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_resume_fails_closed_after_result_append_before_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+    runtime, interaction_store = _runtime_with_remaining_echo(executed)
+    waiting = await runtime.run_turn("开始")
+    assert waiting.pending_interaction is not None
+    interaction_id = waiting.pending_interaction.interaction_id
+
+    def fail_before_cursor(**_: object) -> object:
+        raise RuntimeError("模拟结果写入后、游标提交前崩溃")
+
+    complete = runtime._complete_resumed_continuation
+    monkeypatch.setattr(runtime, "_complete_resumed_continuation", fail_before_cursor)
+    interrupted = await runtime.resume(
+        interaction_id,
+        QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert interrupted.status is RuntimeStatus.ERROR
+    assert executed == ["echo"]
+    stored = interaction_store.load_interaction(interaction_id)
+    assert stored is not None
+    assert stored.checkpoint["continuation_claim"]["tool_call_id"] == "echo"
+    message_count = len(runtime.session_store.load_messages("default"))
+    event_count = len(runtime.session_store.load_tool_events("default"))
+
+    monkeypatch.setattr(runtime, "_complete_resumed_continuation", complete)
+    retried = await runtime.resume(interaction_id)
+
+    assert retried.status is RuntimeStatus.ERROR
+    assert retried.error is not None
+    assert retried.error.code == "HITL_EXECUTION_OUTCOME_UNKNOWN"
+    assert executed == ["echo"]
+    assert len(runtime.session_store.load_messages("default")) == message_count
+    assert len(runtime.session_store.load_tool_events("default")) == event_count
+
+
+@pytest.mark.asyncio
+async def test_resumed_loop_claim_prevents_provider_and_tool_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    executed: list[str] = []
+
+    def echo() -> str:
+        executed.append("echo")
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    registry.register_function(echo, description="回显")
+    interaction_store = InMemoryInteractionStore()
+    provider = FakeProvider(
+        [
+            _tool_response(
+                ToolUseBlock(id="question", name="ask_question", input={"question": "继续？"})
+            ),
+            _tool_response(ToolUseBlock(id="echo", name="echo", input={})),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=provider,
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_loop("开始")
+    assert waiting.pending_interaction is not None
+    interaction_id = waiting.pending_interaction.interaction_id
+    execute_once = runtime.tool_bridge.execute_once
+
+    async def crash_after_loop_tool(**kwargs: object) -> object:
+        await execute_once(**kwargs)
+        raise SimulatedProcessCrash
+
+    monkeypatch.setattr(runtime.tool_bridge, "execute_once", crash_after_loop_tool)
+    with pytest.raises(SimulatedProcessCrash):
+        await runtime.resume(
+            interaction_id,
+            QuestionInteractionResponse(answer="继续"),
+        )
+
+    stored = interaction_store.load_interaction(interaction_id)
+    assert stored is not None
+    assert stored.checkpoint["continuation_claim"] == {
+        "kind": "loop",
+        "next_tool_index": 1,
+        "tool_call_id": None,
+    }
+    assert executed == ["echo"]
+    assert len(provider.requests) == 2
+
+    monkeypatch.setattr(runtime.tool_bridge, "execute_once", execute_once)
+    retried = await runtime.resume(interaction_id)
+
+    assert retried.status is RuntimeStatus.ERROR
+    assert retried.error is not None
+    assert retried.error.code == "HITL_EXECUTION_OUTCOME_UNKNOWN"
+    assert executed == ["echo"]
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_resumed_loop_clears_claim_after_followup_gate() -> None:
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    interaction_store = InMemoryInteractionStore()
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                _tool_response(
+                    ToolUseBlock(id="first", name="ask_question", input={"question": "一？"})
+                ),
+                _tool_response(
+                    ToolUseBlock(id="second", name="ask_question", input={"question": "二？"})
+                ),
+            ]
+        ),
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_loop("开始")
+    assert waiting.pending_interaction is not None
+    first_id = waiting.pending_interaction.interaction_id
+
+    followup = await runtime.resume(
+        first_id,
+        QuestionInteractionResponse(answer="一"),
+    )
+
+    assert followup.status is RuntimeStatus.WAITING_HUMAN
+    assert followup.pending_interaction is not None
+    assert followup.pending_interaction.request.tool_call.tool_call_id == "second"
+    first = interaction_store.load_interaction(first_id)
+    assert first is not None
+    assert first.checkpoint["continuation_claim"] is None
+    assert first.checkpoint["continuation_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_followup_gate_remains_discoverable_before_old_claim_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    registry = ToolRegistry()
+    registry.register(AskQuestionTool())
+    interaction_store = InMemoryInteractionStore()
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input(),
+        provider=FakeProvider(
+            [
+                _tool_response(
+                    ToolUseBlock(id="first", name="ask_question", input={"question": "一？"})
+                ),
+                _tool_response(
+                    ToolUseBlock(id="second", name="ask_question", input={"question": "二？"})
+                ),
+            ]
+        ),
+        interaction_store=interaction_store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    waiting = await runtime.run_loop("开始")
+    assert waiting.pending_interaction is not None
+    first_id = waiting.pending_interaction.interaction_id
+    complete = runtime._complete_resumed_continuation
+
+    def crash_before_claim_clear(**_: object) -> object:
+        raise SimulatedProcessCrash
+
+    monkeypatch.setattr(
+        runtime,
+        "_complete_resumed_continuation",
+        crash_before_claim_clear,
+    )
+    with pytest.raises(SimulatedProcessCrash):
+        await runtime.resume(
+            first_id,
+            QuestionInteractionResponse(answer="一"),
+        )
+
+    pending = runtime.interaction_service.list_pending("default")
+    assert len(pending) == 1
+    monkeypatch.setattr(runtime, "_complete_resumed_continuation", complete)
+    assert runtime.load_resumable_interaction("default") == pending[0]
 
 
 @pytest.mark.asyncio

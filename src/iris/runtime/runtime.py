@@ -55,6 +55,7 @@ from .errors import error_result, normalize_runtime_error, tool_error_info
 from .memory_context import prepare_memory_context_input
 from .metadata import build_run_metadata, synchronize_resume_metadata
 from .models import (
+    RuntimeContinuationClaim,
     RuntimeErrorInfo,
     RuntimeOptions,
     RuntimeStatus,
@@ -321,6 +322,10 @@ class AgentRuntime:
             if interaction.status is InteractionStatus.CONSUMED:
                 if interaction.resume_phase is InteractionResumePhase.CLAIMED:
                     raise HITLExecutionOutcomeUnknownError("HITL 工具执行结果未知，拒绝重放")
+                if checkpoint.get("continuation_claim") is not None:
+                    raise HITLExecutionOutcomeUnknownError(
+                        "HITL continuation 执行结果未知，拒绝重放"
+                    )
                 committed = await commit_ready_interaction(
                     interaction=interaction,
                     session_store=self.session_store,
@@ -455,6 +460,15 @@ class AgentRuntime:
                         "tool_result_messages": messages,
                     }
                 )
+            interaction, checkpoint = self._claim_resumed_continuation(
+                interaction=interaction,
+                checkpoint=checkpoint,
+                claim=RuntimeContinuationClaim(
+                    kind="tool",
+                    next_tool_index=index,
+                    tool_call_id=prepared.tool_use.id,
+                ),
+            )
             result = await self.tool_executor.execute_prepared(
                 prepared, self._tool_context(options)
             )
@@ -469,7 +483,7 @@ class AgentRuntime:
             results.append(result)
             messages.append(message)
             batch_results.append(result)
-            interaction, checkpoint = self._update_resume_checkpoint(
+            interaction, checkpoint = self._complete_resumed_continuation(
                 interaction=interaction,
                 checkpoint=checkpoint,
                 next_tool_index=index + 1,
@@ -480,15 +494,32 @@ class AgentRuntime:
             update={"tool_results": results, "tool_result_messages": messages}
         )
         if checkpoint.get("run_mode") == "loop":
+            interaction, checkpoint = self._claim_resumed_continuation(
+                interaction=interaction,
+                checkpoint=checkpoint,
+                claim=RuntimeContinuationClaim(
+                    kind="loop",
+                    next_tool_index=len(plan.calls),
+                ),
+            )
             completed = await self._continue_resumed_loop(completed, options)
-        interaction, checkpoint = self._update_resume_checkpoint(
-            interaction=interaction,
-            checkpoint=checkpoint,
-            next_tool_index=len(plan.calls),
-            batch_results=batch_results,
-            all_tool_results=results,
-            continuation_complete=True,
-        )
+            interaction, checkpoint = self._complete_resumed_continuation(
+                interaction=interaction,
+                checkpoint=checkpoint,
+                next_tool_index=len(plan.calls),
+                batch_results=batch_results,
+                all_tool_results=completed.tool_results,
+                continuation_complete=True,
+            )
+        else:
+            interaction, checkpoint = self._update_resume_checkpoint(
+                interaction=interaction,
+                checkpoint=checkpoint,
+                next_tool_index=len(plan.calls),
+                batch_results=batch_results,
+                all_tool_results=results,
+                continuation_complete=True,
+            )
         return completed
 
     async def _execute_resumed_range(
@@ -543,6 +574,67 @@ class AgentRuntime:
                 if (state := self.tool_bridge.read_state(interaction.session_id)) is not None
                 else None
             ),
+            continuation_complete=continuation_complete,
+        )
+        interaction = self.interaction_service.update_consumed(
+            interaction.interaction_id,
+            InteractionResumePhase.RESULT_COMMITTED,
+            updated,
+            expected_phase=interaction.resume_phase,
+            expected_version=interaction.version,
+        )
+        return interaction, updated
+
+    def _claim_resumed_continuation(
+        self,
+        *,
+        interaction: HumanInteraction,
+        checkpoint: dict[str, Any],
+        claim: RuntimeContinuationClaim,
+    ) -> tuple[HumanInteraction, dict[str, Any]]:
+        """在恢复后的副作用执行前持久化 fail-closed claim。"""
+        if (
+            interaction.status is not InteractionStatus.CONSUMED
+            or interaction.resume_phase is not InteractionResumePhase.RESULT_COMMITTED
+        ):
+            raise HITLCheckpointInvalidError("HITL continuation 只能从 result_committed 执行")
+        if checkpoint.get("continuation_claim") is not None:
+            raise HITLExecutionOutcomeUnknownError("HITL continuation 执行结果未知，拒绝重放")
+        updated = dict(checkpoint)
+        updated["continuation_claim"] = claim.model_dump(mode="json")
+        interaction = self.interaction_service.update_consumed(
+            interaction.interaction_id,
+            InteractionResumePhase.RESULT_COMMITTED,
+            updated,
+            expected_phase=interaction.resume_phase,
+            expected_version=interaction.version,
+        )
+        return interaction, updated
+
+    def _complete_resumed_continuation(
+        self,
+        *,
+        interaction: HumanInteraction,
+        checkpoint: dict[str, Any],
+        next_tool_index: int,
+        batch_results: list[ToolResult],
+        all_tool_results: list[ToolResult],
+        continuation_complete: bool = False,
+    ) -> tuple[HumanInteraction, dict[str, Any]]:
+        """提交 continuation 结果、推进游标并原子清除 claim。"""
+        if checkpoint.get("continuation_claim") is None:
+            raise HITLCheckpointInvalidError("HITL continuation 缺少执行 claim")
+        updated = dict(checkpoint)
+        updated.update(
+            next_tool_index=next_tool_index,
+            batch_results=[item.model_dump(mode="json") for item in batch_results],
+            all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
+            read_state=(
+                state.model_dump(mode="json")
+                if (state := self.tool_bridge.read_state(interaction.session_id)) is not None
+                else None
+            ),
+            continuation_claim=None,
             continuation_complete=continuation_complete,
         )
         interaction = self.interaction_service.update_consumed(

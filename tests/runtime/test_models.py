@@ -11,6 +11,7 @@ from iris.runtime.models import (
     BoundedLoopOptions,
     ProviderResponseSnapshot,
     Runstate,
+    RuntimeContinuationClaim,
     RuntimeErrorInfo,
     RuntimeHITLCheckpoint,
     RuntimeOptions,
@@ -88,6 +89,35 @@ def test_hitl_checkpoint_rejects_v1_and_legacy_fingerprint() -> None:
     values["call_fingerprint"] = "a" * 64
     with pytest.raises(ValidationError):
         RuntimeHITLCheckpoint.model_validate(values)
+
+
+def test_continuation_claim_validates_subject_and_round_trips() -> None:
+    claim = RuntimeContinuationClaim(
+        kind="tool",
+        next_tool_index=1,
+        tool_call_id="call-2",
+    )
+
+    assert RuntimeContinuationClaim.model_validate(claim.model_dump(mode="json")) == claim
+    with pytest.raises(ValidationError):
+        RuntimeContinuationClaim(kind="tool", next_tool_index=1)
+    with pytest.raises(ValidationError):
+        RuntimeContinuationClaim(
+            kind="loop",
+            next_tool_index=1,
+            tool_call_id="call-2",
+        )
+    with pytest.raises(ValidationError):
+        RuntimeContinuationClaim(kind="loop", next_tool_index=-1)
+
+
+def test_hitl_checkpoint_defaults_missing_continuation_claim_to_none() -> None:
+    values = _hitl_checkpoint().model_dump()
+    values.pop("continuation_claim", None)
+
+    checkpoint = RuntimeHITLCheckpoint.model_validate(values)
+
+    assert checkpoint.continuation_claim is None
 
 
 def test_runstate_rejects_negative_step_index() -> None:
