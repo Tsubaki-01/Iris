@@ -94,6 +94,24 @@ class RuntimeOptionsSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RuntimeContinuationClaim(BaseModel):
+    """恢复后 continuation 的 fail-closed 执行标记。"""
+
+    kind: Literal["tool", "loop"]
+    next_tool_index: int = Field(ge=0)
+    tool_call_id: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_subject(self) -> RuntimeContinuationClaim:
+        if self.kind == "tool" and not self.tool_call_id:
+            raise ValueError("tool continuation claim 必须包含 tool_call_id")
+        if self.kind == "loop" and self.tool_call_id is not None:
+            raise ValueError("loop continuation claim 不能包含 tool_call_id")
+        return self
+
+
 class RuntimeHITLCheckpoint(BaseModel):
     """第一次人工等待前保存的 runtime 恢复快照。"""
 
@@ -112,6 +130,7 @@ class RuntimeHITLCheckpoint(BaseModel):
     all_tool_results: list[dict[str, Any]] = Field(default_factory=list)
     read_state: dict[str, Any] | None = None
     pending_result: dict[str, Any] | None = None
+    continuation_claim: RuntimeContinuationClaim | None = None
     continuation_complete: bool = False
 
     model_config = ConfigDict(extra="forbid")
@@ -244,6 +263,7 @@ __all__ = [
     "BoundedLoopOptions",
     "ProviderResponseSnapshot",
     "Runstate",
+    "RuntimeContinuationClaim",
     "RuntimeErrorInfo",
     "RuntimeHITLCheckpoint",
     "RuntimeOptions",

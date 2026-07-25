@@ -451,6 +451,66 @@ def test_claimed_unknown_outcome_fails_closed_without_reading_input(tmp_path: Pa
     assert "HITL_EXECUTION_OUTCOME_UNKNOWN" in console.export_text()
 
 
+def test_continuation_claim_fails_closed_without_replaying_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SimulatedProcessCrash(BaseException):
+        pass
+
+    database = tmp_path / "session.db"
+    reads: list[str] = []
+    first, _, store = _make_runtime(database, [], reads=reads)
+    interaction = _persist_waiting(
+        first,
+        _tool_response(
+            ToolUseBlock(
+                id="question",
+                name="ask_question",
+                input={"question": "继续？"},
+            ),
+            ToolUseBlock(id="read", name="read_probe", input={}),
+        ),
+    )
+
+    def fail_after_tool(**_: object) -> object:
+        raise SimulatedProcessCrash
+
+    with monkeypatch.context() as crash_patch:
+        crash_patch.setattr(runtime_module, "append_resumed_result", fail_after_tool)
+        with pytest.raises(SimulatedProcessCrash):
+            asyncio.run(
+                first.resume(
+                    interaction.interaction_id,
+                    QuestionInteractionResponse(answer="继续"),
+                )
+            )
+    assert reads == ["read"]
+    claimed = store.load_interaction(interaction.interaction_id)
+    assert claimed is not None
+    assert claimed.checkpoint["continuation_claim"]["tool_call_id"] == "read"
+
+    restarted, provider, _ = _make_runtime(database, [], reads=reads)
+    console = Console(record=True, width=120, color_system=None)
+
+    def fail_on_input(prompt: str) -> str:
+        raise AssertionError(f"不应读取普通输入: {prompt}")
+
+    code = run_chat_loop(
+        runtime=restarted,
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id=SESSION_ID),
+        trace_store=ChatTraceStore(),
+        renderer=ChatRenderer(console),
+        input_func=fail_on_input,
+    )
+
+    assert code == 1
+    assert provider.requests == []
+    assert reads == ["read"]
+    assert "HITL_EXECUTION_OUTCOME_UNKNOWN" in console.export_text()
+
+
 @pytest.mark.parametrize("stale_marker", [False, True])
 def test_followup_gate_is_recovered_by_marker_or_pending_fallback(
     tmp_path: Path,

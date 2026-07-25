@@ -70,6 +70,7 @@ def test_checkpoint_v2_builds_and_validates_as_runtime_snapshot() -> None:
         }
     ]
     assert validated["read_state"] == {"/workspace/file.txt": {"digest": "abc"}}
+    assert validated["continuation_claim"] is None
     assert options.session_id == "session-1"
     assert options.run_id == "run-1"
 
