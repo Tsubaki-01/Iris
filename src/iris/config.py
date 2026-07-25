@@ -151,11 +151,7 @@ def init_config(*, env_file: str | None = None, **kwargs: Any) -> Config:
         _config = Config(**kwargs)
     else:
         # 构造短生命周期子类注入 env_file，避免依赖私有构造参数。
-        base = {
-            k: v
-            for k, v in Config.model_config.items()
-            if k not in {"env_file", "extra"}
-        }
+        base = {k: v for k, v in Config.model_config.items() if k not in {"env_file", "extra"}}
         runtime_settings_cls = type(
             "RuntimeConfig",
             (Config,),

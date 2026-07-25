@@ -123,12 +123,8 @@ def test_sqlite_store_appends_same_event_once(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "session.db")
     event_id = "tool_result:run_1:call_1"
 
-    store.append_tool_event(
-        "session-1", {"event_id": event_id, "status": "ok", "count": 1}
-    )
-    store.append_tool_event(
-        "session-1", {"count": 1, "status": "ok", "event_id": event_id}
-    )
+    store.append_tool_event("session-1", {"event_id": event_id, "status": "ok", "count": 1})
+    store.append_tool_event("session-1", {"count": 1, "status": "ok", "event_id": event_id})
 
     assert store.load_tool_events("session-1") == [
         {"status": "ok", "count": 1, "event_id": event_id}
@@ -413,9 +409,12 @@ def test_sqlite_store_rejects_exact_v1_without_modifying_database(
         assert connection.execute("SELECT * FROM human_interactions").fetchall() == (
             original_interactions
         )
-        assert connection.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name"
-        ).fetchall() == original_indexes
+        assert (
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'index' ORDER BY name"
+            ).fetchall()
+            == original_indexes
+        )
 
 
 @pytest.mark.parametrize(

@@ -51,4 +51,5 @@ class InMemorySessionStore:
         """读取工具调用或结果摘要列表。"""
         return deepcopy(self._tool_events.get(session_id, []))
 
+
 __all__ = ["InMemorySessionStore"]

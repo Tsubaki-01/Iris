@@ -172,10 +172,7 @@ system:
 
     assert loaded.memory is None
     assert output.memory is not None
-    assert (
-        '<runtime_memory source="runtime">runtime content</runtime_memory>'
-        in output.memory.text
-    )
+    assert '<runtime_memory source="runtime">runtime content</runtime_memory>' in output.memory.text
 
 
 @pytest.mark.parametrize(
@@ -203,11 +200,7 @@ def test_load_context_build_input_rejects_legacy_fields(
         yaml_text = legacy_yaml
     else:
         yaml_text = (
-            "system:\n"
-            "  slots:\n"
-            "    - name: instructions\n"
-            "      content: content\n"
-            f"{legacy_yaml}\n"
+            f"system:\n  slots:\n    - name: instructions\n      content: content\n{legacy_yaml}\n"
         )
     config_path.write_text(yaml_text, encoding="utf-8")
 
@@ -223,13 +216,7 @@ def test_load_context_build_input_rejects_inline_with_valid_system_slot(
 ) -> None:
     config_path = tmp_path / "context.yaml"
     config_path.write_text(
-        (
-            "system:\n"
-            "  inline: legacy\n"
-            "  slots:\n"
-            "    - name: instructions\n"
-            "      content: content\n"
-        ),
+        ("system:\n  inline: legacy\n  slots:\n    - name: instructions\n      content: content\n"),
         encoding="utf-8",
     )
 

@@ -31,9 +31,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -204,9 +202,7 @@ class SpyMemoryService:
         self.bundle = bundle
         self.calls: list[tuple[MemoryQuery, int]] = []
 
-    def build_context(
-        self, query: MemoryQuery, *, max_chars: int
-    ) -> MemoryContextBundle:
+    def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """模拟 `MemoryService.build_context()`。"""
         self.calls.append((query, max_chars))
         return self.bundle

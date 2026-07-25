@@ -335,18 +335,14 @@ async def test_successful_edit_updates_file_and_read_state(tmp_path: Path) -> No
 
     assert result.is_error is False
     assert path.read_text(encoding="utf-8") == "hello new\n"
-    assert (
-        context.read_state.files[str(path.resolve())].size_bytes == path.stat().st_size
-    )
+    assert context.read_state.files[str(path.resolve())].size_bytes == path.stat().st_size
 
 
 @pytest.mark.asyncio
 async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("# existing\n", encoding="utf-8")
     path = tmp_path / "log.txt"
-    path.write_text(
-        "\n".join(f"needle {index}" for index in range(80)), encoding="utf-8"
-    )
+    path.write_text("\n".join(f"needle {index}" for index in range(80)), encoding="utf-8")
     context = ToolExecutionContext(
         workspace_root=tmp_path,
         session_id="session_1",
@@ -363,10 +359,7 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
 
     assert result.artifact is not None
     assert result.artifact.path.exists()
-    assert (
-        result.artifact.path
-        == tmp_path / ".iris" / "tool-results" / "session_1" / "grep_1.txt"
-    )
+    assert result.artifact.path == tmp_path / ".iris" / "tool-results" / "session_1" / "grep_1.txt"
     assert result.artifact.size_bytes > 120
     assert ".iris/" in result.model_content
     assert "建议将 .iris/ 加入 .gitignore" in result.model_content
@@ -375,9 +368,7 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_artifact_store_sanitizes_session_and_tool_ids(tmp_path: Path) -> None:
     path = tmp_path / "log.txt"
-    path.write_text(
-        "\n".join(f"needle {index}" for index in range(80)), encoding="utf-8"
-    )
+    path.write_text("\n".join(f"needle {index}" for index in range(80)), encoding="utf-8")
     context = ToolExecutionContext(
         workspace_root=tmp_path,
         session_id="../escape",
@@ -466,10 +457,7 @@ def test_workspace_policy_resolves_inside_paths_and_rejects_outside(
 ) -> None:
     policy = WorkspacePolicy()
 
-    assert (
-        policy.resolve_path("a.txt", workspace_root=tmp_path)
-        == (tmp_path / "a.txt").resolve()
-    )
+    assert policy.resolve_path("a.txt", workspace_root=tmp_path) == (tmp_path / "a.txt").resolve()
 
     with pytest.raises(Exception, match="PATH_OUTSIDE_WORKSPACE"):
         policy.resolve_path("../outside.txt", workspace_root=tmp_path)

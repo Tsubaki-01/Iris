@@ -75,8 +75,7 @@ def test_init_config_nested_env_var_overrides_env_file(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "IRIS_PROVIDER_API_KEYS__DEEPSEEK=file-deepseek-key\n"
-        "IRIS_API_KEY=file-generic-key\n",
+        "IRIS_PROVIDER_API_KEYS__DEEPSEEK=file-deepseek-key\nIRIS_API_KEY=file-generic-key\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("IRIS_PROVIDER_API_KEYS__DEEPSEEK", "env-deepseek-key")

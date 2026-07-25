@@ -86,12 +86,8 @@ def test_structured_context_keeps_memory_history_before_current_input_order() ->
     history = [Msg.user("历史输入")]
     current_input = Msg.user("当前输入")
     context_input = ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="系统规则")]
-        ),
-        memory=ContextSection(
-            slots=[ContextSlot(name="memory", content="用户偏好简洁回答")]
-        ),
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="系统规则")]),
+        memory=ContextSection(slots=[ContextSlot(name="memory", content="用户偏好简洁回答")]),
         before_current_input=ContextSection(
             slots=[ContextSlot(name="environment_state", content={"cwd": "J:/repo"})]
         ),
@@ -115,9 +111,7 @@ def test_structured_context_keeps_memory_history_before_current_input_order() ->
     assert context_output.memory is not None
     assert context_output.memory.text.startswith("<memory_context>")
     assert context_output.before_current_input is not None
-    assert context_output.before_current_input.text.startswith(
-        "<before_current_input_context>"
-    )
+    assert context_output.before_current_input.text.startswith("<before_current_input_context>")
 
 
 def test_current_input_none_is_not_appended() -> None:

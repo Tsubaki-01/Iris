@@ -157,9 +157,7 @@ class ProviderClient(BaseModel):
             provider=self.provider,
             id=str(self._get(data, "id", "") or ""),
             model=str(self._get(data, "model", "") or ""),
-            content=OpenAIChatMapper().content_blocks_from_chat_message(
-                self._as_mapping(message)
-            ),
+            content=OpenAIChatMapper().content_blocks_from_chat_message(self._as_mapping(message)),
             finish_reason=str(self._get(choice, "finish_reason", "") or ""),
             input_tokens=int(self._get(usage, "prompt_tokens", 0) or 0),
             output_tokens=int(self._get(usage, "completion_tokens", 0) or 0),

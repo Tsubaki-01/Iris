@@ -51,9 +51,7 @@ def test_remember_recall_and_build_context(tmp_path: Path) -> None:
         )
     )
     results = service.recall(MemoryQuery(scope=scope, text="简洁", limit=5))
-    bundle = service.build_context(
-        MemoryQuery(scope=scope, text="简洁", limit=5), max_chars=100
-    )
+    bundle = service.build_context(MemoryQuery(scope=scope, text="简洁", limit=5), max_chars=100)
 
     assert [result.item.id for result in results] == [item.id]
     assert bundle.fragments[0].item_id == item.id
@@ -130,9 +128,7 @@ def test_promote_candidate_returns_item_and_syncs_mirror(tmp_path: Path) -> None
     assert item.source_id == candidate.id
     assert service.list_candidates(scope)[0].status == MemoryCandidateStatus.ACCEPTED
     mirror_content = (root / "User" / "preferences.md").read_text(encoding="utf-8")
-    events_content = (root / "Sessions" / "recent_events.md").read_text(
-        encoding="utf-8"
-    )
+    events_content = (root / "Sessions" / "recent_events.md").read_text(encoding="utf-8")
     assert item.id in mirror_content
     assert "event_type: add" in events_content
     assert "event_type: candidate_accept" in events_content
@@ -152,6 +148,4 @@ def _service(tmp_path: Path) -> MemoryService:
 
 
 def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(
-        workspace_id="workspace", agent_id=agent_id, collection="default"
-    )
+    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")

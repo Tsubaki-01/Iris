@@ -68,9 +68,7 @@ class MemoryScopeConfig(BaseModel):
         Raises:
             IrisConfigError: 当配置的 visibility 与运行时 session 参数不匹配时抛出。
         """
-        effective_session_id = (
-            session_id if self.visibility == MemoryVisibility.SESSION else None
-        )
+        effective_session_id = session_id if self.visibility == MemoryVisibility.SESSION else None
         try:
             return MemoryScope(
                 workspace_id=workspace_id,
@@ -133,12 +131,8 @@ class MemoryConfig(BaseModel):
     scope: MemoryScopeConfig = Field(default_factory=MemoryScopeConfig)
     search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
     mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
-    write_policy: MemoryWritePolicyConfig = Field(
-        default_factory=MemoryWritePolicyConfig
-    )
-    orchestrator: MemoryOrchestratorConfig = Field(
-        default_factory=MemoryOrchestratorConfig
-    )
+    write_policy: MemoryWritePolicyConfig = Field(default_factory=MemoryWritePolicyConfig)
+    orchestrator: MemoryOrchestratorConfig = Field(default_factory=MemoryOrchestratorConfig)
 
 
 def build_memory_service_from_config(

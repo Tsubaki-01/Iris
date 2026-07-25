@@ -161,9 +161,7 @@ async def _run_tool_loop(agent_path: Path) -> dict[str, Any]:
         "provider_request_count": len(provider.requests),
         "first_request_tool_schema_count": len(provider.requests[0].tools),
         "second_request_has_tool_result": _request_has_tool_result(second_request),
-        "tool_results": [
-            tool_result.model_content for tool_result in result.tool_results
-        ],
+        "tool_results": [tool_result.model_content for tool_result in result.tool_results],
         "tool_events": runtime.session_store.load_tool_events("tool-loop"),
         "latest_run": metadata.get("latest_run", {}),
     }
@@ -184,9 +182,7 @@ async def _run_single_turn_tool_bridge(agent_path: Path) -> dict[str, Any]:
         "status": result.status.value,
         "provider_request_count": len(provider.requests),
         "tool_result_count": len(result.tool_results),
-        "tool_results": [
-            tool_result.model_content for tool_result in result.tool_results
-        ],
+        "tool_results": [tool_result.model_content for tool_result in result.tool_results],
     }
 
 
@@ -318,16 +314,14 @@ def _findings(
                 f"tool_result_count={single_turn['tool_result_count']}。"
             ),
             "correction": (
-                "需要让模型基于工具结果生成最终回答时，调用 run_loop() "
-                "而不是 run_turn()。"
+                "需要让模型基于工具结果生成最终回答时，调用 run_loop() 而不是 run_turn()。"
             ),
         },
         {
             "issue": "如果 mock/provider 持续返回工具调用，bounded loop 会在上限处停止。",
             "evidence": f"max_steps_probe 返回 {max_steps['error_code']}。",
             "correction": (
-                "调大 RuntimeOptions.loop.max_steps，或改进模型指令让工具结果足够时"
-                "输出最终文本。"
+                "调大 RuntimeOptions.loop.max_steps，或改进模型指令让工具结果足够时输出最终文本。"
             ),
         },
     ]

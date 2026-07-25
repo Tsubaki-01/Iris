@@ -28,8 +28,7 @@ class ContextXmlRenderer:
     def render_slot(self, slot: ContextSlot) -> str:
         """将单个 slot 渲染为 XML 元素。"""
         attributes = "".join(
-            f" {name}={quoteattr(str(value))}"
-            for name, value in sorted(slot.attributes.items())
+            f" {name}={quoteattr(str(value))}" for name, value in sorted(slot.attributes.items())
         )
         inner = _render_value(slot.content)
         if not inner:

@@ -44,9 +44,7 @@ def test_builder_renders_three_sections_with_expected_roles_and_roots() -> None:
 
     assert output.system.role == Role.SYSTEM
     assert output.system.text == (
-        "<system_context>\n"
-        "  <base_instructions>你是助手</base_instructions>\n"
-        "</system_context>"
+        "<system_context>\n  <base_instructions>你是助手</base_instructions>\n</system_context>"
     )
     assert "version" not in output.system.text
 
@@ -91,16 +89,12 @@ def test_builder_filters_disabled_slots_and_sorts_by_order_then_name() -> None:
 def test_builder_omits_missing_empty_and_disabled_optional_sections() -> None:
     missing_output = ContextBuilder().build(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="content")]
-            )
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="content")])
         )
     )
     empty_output = ContextBuilder().build(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="content")]
-            ),
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="content")]),
             memory=ContextSection(),
             before_current_input=ContextSection(
                 slots=[
@@ -164,9 +158,7 @@ def test_xml_renderer_rejects_unsafe_root_tag() -> None:
 def test_default_xml_preserves_control_character_in_content() -> None:
     output = ContextBuilder().build(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="a\x01b")]
-            )
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="a\x01b")])
         )
     )
 

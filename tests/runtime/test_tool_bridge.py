@@ -38,9 +38,7 @@ def _anthropic_agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -92,9 +90,7 @@ async def test_tool_bridge_executes_active_calls_and_appends_events(
         metadata={"trace_id": "trace-1"},
     )
 
-    assert [tool_result.model_content for tool_result in result.results] == [
-        "echo:Iris"
-    ]
+    assert [tool_result.model_content for tool_result in result.results] == ["echo:Iris"]
     assert len(result.messages) == 1
     message = result.messages[0]
     assert message.role == Role.USER
@@ -134,9 +130,7 @@ async def test_tool_bridge_rejects_inactive_tool_without_executor(
         tool_view=registry.view(deny={"hidden"}),
         tool_executor=executor,
     )
-    assistant_message = Msg.assistant(
-        [ToolUseBlock(id="call_1", name="hidden", input={})]
-    )
+    assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="hidden", input={})])
     store = InMemorySessionStore()
 
     result = await bridge.execute_once(
@@ -175,9 +169,7 @@ async def test_tool_bridge_rejects_missing_executor_results(tmp_path: Path) -> N
         tool_view=registry.view(),
         tool_executor=MismatchedExecutor(registry, results=[]),
     )
-    assistant_message = Msg.assistant(
-        [ToolUseBlock(id="call_1", name="echo", input={})]
-    )
+    assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="echo", input={})])
 
     with pytest.raises(IrisToolExecutionError, match="工具执行结果数量不匹配"):
         await bridge.execute_once(
@@ -207,9 +199,7 @@ async def test_tool_bridge_rejects_extra_executor_results(tmp_path: Path) -> Non
             ],
         ),
     )
-    assistant_message = Msg.assistant(
-        [ToolUseBlock(id="call_1", name="echo", input={})]
-    )
+    assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="echo", input={})])
 
     with pytest.raises(IrisToolExecutionError, match="工具执行结果数量不匹配"):
         await bridge.execute_once(
@@ -236,9 +226,7 @@ async def test_tool_bridge_rejects_non_json_event_metadata(tmp_path: Path) -> No
         tool_view=registry.view(),
         tool_executor=ToolExecutor(registry),
     )
-    assistant_message = Msg.assistant(
-        [ToolUseBlock(id="call_1", name="echo", input={})]
-    )
+    assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="echo", input={})])
 
     with pytest.raises(
         IrisToolExecutionError,
@@ -289,9 +277,7 @@ async def test_run_turn_bridges_tool_calls_without_second_provider_call(
     assert provider.requests[0].tools[0]["function"]["name"] == "echo"
     assert result.assistant_message is not None
     assert result.assistant_message.has_tool_calls is True
-    assert [tool_result.model_content for tool_result in result.tool_results] == [
-        "echo:Iris"
-    ]
+    assert [tool_result.model_content for tool_result in result.tool_results] == ["echo:Iris"]
     assert result.tool_result_messages[0].tool_results[0].content == "echo:Iris"
     saved_messages = store.load_messages("default")
     assert [message["role"] for message in saved_messages] == [
