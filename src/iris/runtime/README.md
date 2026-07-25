@@ -210,7 +210,8 @@ runtime 会执行一次工具桥接，把工具结果消息写回 session histor
 恢复已等待的 interaction。权限批准只覆盖对应 tool call；拒绝回灌
 `USER_REJECTED`，问题回答回灌 answer 文本。已领取但未保存结果的 interaction 会以
 `HITL_EXECUTION_OUTCOME_UNKNOWN` fail-closed，已准备或已提交结果则通过稳定 event ID
-幂等提交，不会重放工具调用。`run_turn()` 恢复当前工具批次但不会额外调用 provider；
+幂等提交；提交前会校验 `pending_result` 与 interaction tool call 及完整结果列表身份一致，
+损坏 checkpoint 不会产生消息或 event。`run_turn()` 恢复当前工具批次但不会额外调用 provider；
 `run_loop()` 恢复后会将结果回灌 provider，并在下一 gate 或 loop 终态返回。
 checkpoint 的 `next_tool_index` 指向下一条未完成调用，因此 gate 前尚未执行的工具会按原始
 顺序补齐；恢复后的普通工具结果同样写入 session，并继续遵守 `tool_error_policy`。
@@ -223,6 +224,11 @@ checkpoint 重复存储；v1 checkpoint 会被明确拒绝。
 
 Crash 恢复按 interaction phase 处理：`waiting` 需要 response，`claimed` 且无结果拒绝
 重放，`result_ready` 重试消息/event 提交，`result_committed` 从安全边界继续。
+`result_committed` 后的每条普通工具会先写入 typed `continuation_claim`，工具结果、游标与
+read state 通过同一次 CAS 提交后才清除；恢复后的 provider/tool loop 由一个整体 claim
+保护。进程在 claim 与清除之间退出时，后续恢复返回
+`HITL_EXECUTION_OUTCOME_UNKNOWN`，宁可停止也不重放可能已发生的副作用。该兼容字段仍属于
+checkpoint v2，不增加 interaction phase 或 SQLite 列。
 
 每次 `resume()` 返回前都会为同一个 `run_id` 追加新的 run snapshot 并替换
 `latest_run`。后续 gate 会写入新的 `interaction_id`；`ok`、`max_steps` 和 `error` 终态会
@@ -285,7 +291,8 @@ turn 0，普通输入仍从 turn 1 开始。adapter 只为 `pending` 收集新 r
 `resume()`，所以不等价于 reject/cancel。
 
 跨进程恢复要求 session 与 interaction 共用 SQLite backend。内存 backend 只适合当前进程；
-`claimed` 且 outcome unknown 的 interaction 会 fail closed，不会自动重放工具。
+`claimed` 或未清除的 `continuation_claim` 都表示 outcome unknown，恢复会 fail closed，
+不会自动重放工具或 provider continuation。
 
 ### `AgentRuntime.run_loop(user_input, *, options=None, metadata=None)`
 

@@ -24,7 +24,9 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 
 `HumanInteractionService` 在 `InteractionStore` 上通过唯一 `create(request, ...)` 入口以及
 resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved response 是幂等的，
-不同 response 会产生冲突。
+不同 response 会产生冲突。更新 consumed interaction 时，调用方必须传入读取快照中的
+`expected_phase` 与 `expected_version`；内存和 SQLite backend 都同时比较 status、phase
+和 version，任一变化都会冲突，Service 不会用重新读取的版本替换调用方快照。
 
 `InMemoryInteractionStore` 位于 `src/iris/hitl/in_memory.py`，适合测试和
 `session.backend: none`，进程退出即丢失。
@@ -44,7 +46,8 @@ resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved res
 - 同一个 run 连续出现多个 gate 时，adapter 按 runtime 返回顺序逐个恢复。
 - Ctrl+C 或 EOF 只退出当前 adapter，不等于 reject/cancel，pending interaction 保持不变。
 - SQLite backend 会在相同 session 下自动发现并恢复 interaction；内存 backend 不承诺跨进程。
-- `claimed` 且执行结果未知时 fail closed，不自动重放工具。
+- `claimed` 或 checkpoint 中存在未清除的 `continuation_claim` 时 fail closed，不自动重放
+  工具或 provider continuation。
 
 权限策略先于 host 输入，`DENY` 具有最高优先级且不可由人工回答覆盖。human tool 仅在
 `ALLOW` 时产生 question；若策略对 human tool 返回 `REQUIRE_HUMAN`，executor 会以
