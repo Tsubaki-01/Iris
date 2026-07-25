@@ -138,10 +138,13 @@ executor = ToolExecutor(
   一条预检调用，供 runtime 的 HITL 恢复路径使用。
 
 预检阶段由唯一 `_prepare_call()` 完成 registry lookup、输入校验和 policy check，不运行工具
-生命周期。执行阶段会重新 `_prepare_call()` 一次，再按 `preflight_result` / `DENY`、human
-protocol guard、精确 approve 的优先级授权；通过后才进入 circuit breaker → middleware
-`before_call` → `tool.arun()` → artifact → middleware after hooks → breaker 记录。一次阶段内
-policy 只检查一次，历史 approve 不能覆盖当前 `DENY`。
+生命周期。`execute_many()` 按输入顺序流式 prepare，每条调用在当前执行阶段只 lookup、校验和
+鉴权一次，再使用 `PreparedToolCall.tool` 与 `validated_params` 判断连续只读并发批次；
+classifier 异常会保守降级为串行执行。`execute_prepared()` 属于新的恢复执行阶段，因此会重新
+`_prepare_call()`，再按 `preflight_result` / `DENY`、human protocol guard、精确 approve 的
+优先级授权；通过后才进入 circuit breaker → middleware `before_call` → `tool.arun()` →
+artifact → middleware after hooks → breaker 记录。一次阶段内 policy 只检查一次，历史
+approve 不能覆盖当前 `DENY`。
 
 文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
 

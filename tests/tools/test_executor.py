@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from iris.message import ToolUseBlock
-from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
+from iris.message import TextBlock, ToolUseBlock
+from iris.tools import (
+    BaseTool,
+    PermissionDecision,
+    PermissionEffect,
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolExecutor,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 class ExplodingPermissionPolicy:
@@ -28,6 +38,81 @@ class ContextCaptureMiddleware:
         del tool
         await asyncio.sleep(0)
         self.seen.append((params["value"], context.call_id))
+
+
+class CountingPermissionPolicy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def check(
+        self,
+        tool: BaseTool,
+        params: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> PermissionDecision:
+        del tool, params, context
+        self.calls += 1
+        return PermissionDecision(effect=PermissionEffect.ALLOW)
+
+
+class CountingValidationTool(BaseTool):
+    definition = ToolDefinition(
+        name="counting_validation",
+        description="记录每个输入的 validation 次数",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+
+    def __init__(self) -> None:
+        self.validation_calls: dict[str, int] = {}
+
+    def validate_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        value = str(params["value"])
+        count = self.validation_calls.get(value, 0) + 1
+        self.validation_calls[value] = count
+        return {"value": value, "validation_count": count}
+
+    async def arun(
+        self,
+        params: BaseModel | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        assert isinstance(params, dict)
+        return ToolResult(
+            tool_use_id=context.call_id,
+            tool_name=context.tool_name,
+            content=[TextBlock(text=f"{params['value']}:{params['validation_count']}")],
+        )
+
+
+class ExplodingClassifierTool(CountingValidationTool):
+    definition = CountingValidationTool.definition.model_copy(
+        update={"name": "exploding_classifier"}
+    )
+
+    def __init__(self, executed: list[str]) -> None:
+        super().__init__()
+        self.executed = executed
+
+    def is_read_only(self, params: dict[str, Any]) -> bool:
+        del params
+        raise RuntimeError("classifier failed")
+
+    async def arun(
+        self,
+        params: BaseModel | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        del params
+        self.executed.append(context.call_id)
+        return ToolResult(
+            tool_use_id=context.call_id,
+            tool_name=context.tool_name,
+            content=[TextBlock(text="ok")],
+        )
 
 
 @pytest.mark.asyncio
@@ -141,6 +226,45 @@ async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> Non
     )
 
     assert [result.model_content for result in results] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_execute_many_prepares_each_call_once(tmp_path: Path) -> None:
+    tool = CountingValidationTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    policy = CountingPermissionPolicy()
+    executor = ToolExecutor(registry, permission_policy=policy)
+
+    results = await executor.execute_many(
+        [
+            ToolUseBlock(id="call-1", name=tool.name, input={"value": "a"}),
+            ToolUseBlock(id="call-2", name=tool.name, input={"value": "b"}),
+        ],
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert tool.validation_calls == {"a": 1, "b": 1}
+    assert policy.calls == 2
+    assert [result.model_content for result in results] == ["a:1", "b:1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_many_classifier_exception_falls_back_to_serial(
+    tmp_path: Path,
+) -> None:
+    executed: list[str] = []
+    tool = ExplodingClassifierTool(executed)
+    registry = ToolRegistry()
+    registry.register(tool)
+
+    results = await ToolExecutor(registry).execute_many(
+        [ToolUseBlock(id="call-1", name=tool.name, input={"value": "x"})],
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert results[0].is_error is False
+    assert executed == ["call-1"]
 
 
 @pytest.mark.asyncio
