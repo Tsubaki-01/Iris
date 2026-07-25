@@ -239,6 +239,8 @@ async def commit_ready_interaction(
             interaction.interaction_id,
             InteractionResumePhase.RESULT_COMMITTED,
             checkpoint,
+            expected_phase=interaction.resume_phase,
+            expected_version=interaction.version,
         )
     return RuntimeTurnResult(
         session_id=interaction.session_id,

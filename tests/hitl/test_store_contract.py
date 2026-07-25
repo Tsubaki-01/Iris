@@ -90,6 +90,7 @@ def test_result_committed_interaction_no_longer_blocks_its_session(
         interaction.interaction_id,
         resume_phase=InteractionResumePhase.RESULT_COMMITTED,
         checkpoint={"checkpoint_version": 2, "result": "committed"},
+        expected_phase=claimed.resume_phase,
         expected_version=claimed.version,
     )
 
@@ -128,16 +129,43 @@ def test_store_rejects_stale_compare_and_set_versions(interaction_store: object)
             interaction.interaction_id,
             resume_phase=InteractionResumePhase.RESULT_READY,
             checkpoint={"checkpoint_version": 2},
+            expected_phase=claimed.resume_phase,
             expected_version=resolved.version,
         )
     updated = store.update_consumed_interaction(
         interaction.interaction_id,
         resume_phase=InteractionResumePhase.RESULT_READY,
         checkpoint={"checkpoint_version": 2, "result": "ready"},
+        expected_phase=claimed.resume_phase,
         expected_version=claimed.version,
     )
 
     assert updated.resume_phase is InteractionResumePhase.RESULT_READY
+
+
+def test_store_rejects_wrong_consumed_resume_phase(interaction_store: object) -> None:
+    store = _as_store(interaction_store)
+    interaction = _interaction(session_id="session_1", interaction_id="int_" + "1" * 32)
+    store.create_interaction(interaction)
+    resolved = store.resolve_interaction(
+        interaction.interaction_id,
+        PermissionInteractionResponse(decision="approve"),
+        expected_version=interaction.version,
+    )
+    claimed = store.claim_interaction(
+        interaction.interaction_id,
+        {"checkpoint_version": 2},
+        expected_version=resolved.version,
+    )
+
+    with pytest.raises(HITLConflictError):
+        store.update_consumed_interaction(
+            interaction.interaction_id,
+            resume_phase=InteractionResumePhase.RESULT_READY,
+            checkpoint={"checkpoint_version": 2},
+            expected_phase=InteractionResumePhase.RESULT_READY,
+            expected_version=claimed.version,
+        )
 
 
 def test_sqlite_store_persists_interactions_across_instances(tmp_path: Path) -> None:
@@ -187,6 +215,7 @@ class _InteractionStore(Protocol):
         *,
         resume_phase: InteractionResumePhase,
         checkpoint: dict[str, object],
+        expected_phase: InteractionResumePhase,
         expected_version: int,
     ) -> HumanInteraction: ...
 

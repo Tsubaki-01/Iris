@@ -118,6 +118,7 @@ class InMemoryInteractionStore:
         *,
         resume_phase: InteractionResumePhase,
         checkpoint: dict[str, Any],
+        expected_phase: InteractionResumePhase,
         expected_version: int,
     ) -> HumanInteraction:
         """以 CAS 更新 consumed interaction 的恢复进度。"""
@@ -125,6 +126,7 @@ class InMemoryInteractionStore:
         if (
             interaction.status is not InteractionStatus.CONSUMED
             or resume_phase is InteractionResumePhase.WAITING
+            or interaction.resume_phase is not expected_phase
             or interaction.version != expected_version
         ):
             raise HITLConflictError(

@@ -47,9 +47,10 @@ class InteractionStore(Protocol):
         *,
         resume_phase: InteractionResumePhase,
         checkpoint: dict[str, Any],
+        expected_phase: InteractionResumePhase,
         expected_version: int,
     ) -> HumanInteraction:
-        """以 CAS 更新已消费 interaction 的恢复进度与 checkpoint。"""
+        """按恢复阶段和版本 CAS 更新 consumed interaction。"""
 
 
 __all__ = ["InteractionStore"]

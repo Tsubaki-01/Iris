@@ -262,6 +262,7 @@ class SQLiteStore:
         *,
         resume_phase: InteractionResumePhase,
         checkpoint: dict[str, Any],
+        expected_phase: InteractionResumePhase,
         expected_version: int,
     ) -> HumanInteraction:
         """以单事务 compare-and-set 更新已消费 interaction。"""
@@ -277,9 +278,16 @@ class SQLiteStore:
                     """
                     UPDATE human_interactions
                     SET checkpoint_json = ?, resume_phase = ?, version = version + 1
-                    WHERE interaction_id = ? AND status = 'consumed' AND version = ?
+                    WHERE interaction_id = ? AND status = 'consumed'
+                        AND resume_phase = ? AND version = ?
                     """,
-                    (checkpoint_json, resume_phase.value, interaction_id, expected_version),
+                    (
+                        checkpoint_json,
+                        resume_phase.value,
+                        interaction_id,
+                        expected_phase.value,
+                        expected_version,
+                    ),
                 )
                 if cursor.rowcount != 1:
                     raise HITLConflictError(
