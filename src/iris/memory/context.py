@@ -44,9 +44,7 @@ class MemoryContextBuilder:
             IrisMemoryError: 当字符预算不是正数时抛出。
         """
         if max_chars <= 0:
-            raise IrisMemoryError(
-                "memory context max_chars 必须为正数", max_chars=max_chars
-            )
+            raise IrisMemoryError("memory context max_chars 必须为正数", max_chars=max_chars)
 
         fragments: list[MemoryContextFragment] = []
         total_chars = 0
@@ -55,16 +53,12 @@ class MemoryContextBuilder:
             text = result.item.text
             next_total = total_chars + len(text)
             if next_total <= max_chars:
-                fragments.append(
-                    _fragment_from_result(result, text=text, truncated=False)
-                )
+                fragments.append(_fragment_from_result(result, text=text, truncated=False))
                 total_chars = next_total
                 continue
             if not fragments:
                 truncated_text = text[:max_chars]
-                fragments.append(
-                    _fragment_from_result(result, text=truncated_text, truncated=True)
-                )
+                fragments.append(_fragment_from_result(result, text=truncated_text, truncated=True))
                 total_chars = len(truncated_text)
                 omitted_count = len(results) - index - 1
                 break

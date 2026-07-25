@@ -67,9 +67,7 @@ def test_parse_model_route_rejects_invalid_model_strings(model: str) -> None:
         ("deepseek/deepseek-chat", "deepseek"),
     ],
 )
-def test_create_provider_client_selects_supported_provider(
-    model: str, provider: str
-) -> None:
+def test_create_provider_client_selects_supported_provider(model: str, provider: str) -> None:
     client = create_provider_client(model, api_key="test-key")
 
     assert isinstance(client, ProviderClient)
@@ -146,14 +144,10 @@ def test_create_provider_client_allows_explicit_key_without_config_secret() -> N
     assert client.api_key == "explicit-key"
 
 
-def test_create_provider_client_preserves_builtin_litellm_provider_on_override() -> (
-    None
-):
+def test_create_provider_client_preserves_builtin_litellm_provider_on_override() -> None:
     iris.init_config(
         provider_api_keys={"deepseek": "deepseek-key"},
-        providers={
-            "deepseek": ProviderConfig(base_url="https://api.deepseek.example/v1")
-        },
+        providers={"deepseek": ProviderConfig(base_url="https://api.deepseek.example/v1")},
     )
 
     client = create_provider_client("deepseek/deepseek-chat")

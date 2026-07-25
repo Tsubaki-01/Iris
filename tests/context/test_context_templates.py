@@ -95,24 +95,18 @@ def test_template_content_keeps_xml_autoescaping(tmp_path: Path) -> None:
         )
     )
 
-    assert output.system.text == (
-        "<system_context>&lt;local&gt; &amp; remote</system_context>"
-    )
+    assert output.system.text == ("<system_context>&lt;local&gt; &amp; remote</system_context>")
 
 
 def test_default_xml_escapes_numeric_character_reference_as_text() -> None:
     output = ContextBuilder().build(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="&#x1;")]
-            )
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="&#x1;")])
         )
     )
 
     assert output.system.text == (
-        "<system_context>\n"
-        "  <instructions>&amp;#x1;</instructions>\n"
-        "</system_context>"
+        "<system_context>\n  <instructions>&amp;#x1;</instructions>\n</system_context>"
     )
 
 
@@ -131,9 +125,7 @@ def test_default_xml_allows_exact_limit_and_rejects_one_less() -> None:
     limit = len(rendered) - 1
     with pytest.raises(IrisContextError) as exc_info:
         builder.build(
-            ContextBuildInput(
-                system=exact_section.model_copy(update={"max_chars": limit})
-            )
+            ContextBuildInput(system=exact_section.model_copy(update={"max_chars": limit}))
         )
 
     assert exc_info.value.context == {

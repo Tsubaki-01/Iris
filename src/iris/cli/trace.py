@@ -35,9 +35,7 @@ class TraceStep:
             "duration_ms": duration_ms,
             "request": self.request.model_dump(mode="json"),
             "response": (
-                self.response.model_dump(mode="json")
-                if self.response is not None
-                else None
+                self.response.model_dump(mode="json") if self.response is not None else None
             ),
             "error": self.error,
         }

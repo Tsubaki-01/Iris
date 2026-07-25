@@ -187,9 +187,7 @@ class WorkspaceFileService:
         Raises:
             IrisToolValidationError: 当路径越出 workspace 或策略拒绝访问时。
         """
-        return self.workspace_policy.resolve_path(
-            path, workspace_root=context.workspace_root
-        )
+        return self.workspace_policy.resolve_path(path, workspace_root=context.workspace_root)
 
     def ensure_read_state(self, context: ToolExecutionContext) -> ReadFileState:
         """获取或初始化文件读取状态。
@@ -307,14 +305,11 @@ class WorkspaceFileService:
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
         with path.open("r", encoding="utf-8") as handle:
-            selected = [
-                line.rstrip("\n") for line in islice(handle, offset, offset + limit)
-            ]
+            selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
         self.record_read(path, context)
         if params.with_line_numbers:
             return "\n".join(
-                f"L{index:04d} | {line}"
-                for index, line in enumerate(selected, start=offset + 1)
+                f"L{index:04d} | {line}" for index, line in enumerate(selected, start=offset + 1)
             )
         return "\n".join(selected)
 
@@ -339,9 +334,7 @@ class WorkspaceFileService:
         workspace_root = context.workspace_root.resolve()
         return "\n".join(str(path.relative_to(workspace_root)) for path in paths)
 
-    def grep_search(
-        self, params: GrepSearchInput, context: ToolExecutionContext
-    ) -> str:
+    def grep_search(self, params: GrepSearchInput, context: ToolExecutionContext) -> str:
         """搜索 workspace 内文本内容。
 
         Args:
@@ -362,9 +355,7 @@ class WorkspaceFileService:
         try:
             regex = re.compile(params.pattern)
         except re.error as exc:
-            raise IrisToolValidationError(
-                "invalid regex pattern", pattern=params.pattern
-            ) from exc
+            raise IrisToolValidationError("invalid regex pattern", pattern=params.pattern) from exc
 
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []
@@ -431,13 +422,9 @@ class WorkspaceFileService:
             raise IrisToolExecutionError("MATCH_NOT_FOUND: 未找到 old_string")
         if count > 1:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
-        self.atomic_write(
-            path, content.replace(params.old_string, params.new_string, 1)
-        )
+        self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
         self.record_read(path, context)
-        return (
-            f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
-        )
+        return f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
 
     # endregion
 
@@ -693,7 +680,5 @@ def register_file_tools(
     registry = registry or ToolRegistry()
     service = file_service or WorkspaceFileService()
     for tool_cls in FILE_TOOL_CLASSES:
-        registry.register(
-            tool_cls(file_service=service, max_result_chars=max_result_chars)
-        )
+        registry.register(tool_cls(file_service=service, max_result_chars=max_result_chars))
     return registry

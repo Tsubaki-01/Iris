@@ -29,9 +29,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -227,9 +225,7 @@ async def test_run_turn_normalizes_provider_failure_without_saving_assistant() -
 
 
 @pytest.mark.asyncio
-async def test_run_turn_does_not_turn_untyped_provider_exception_into_provider_error() -> (
-    None
-):
+async def test_run_turn_does_not_turn_untyped_provider_exception_into_provider_error() -> None:
     store = InMemorySessionStore()
     provider = BrokenProvider()
     runtime = AgentRuntime(

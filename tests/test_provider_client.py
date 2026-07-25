@@ -140,9 +140,7 @@ async def test_provider_client_does_not_double_prefix_litellm_model(
     monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
     client = ProviderClient(provider="openai", api_key="test-key")
 
-    await client.complete(
-        LLMRequest(model="openai/gpt-4o", messages=[Msg.user("你好")])
-    )
+    await client.complete(LLMRequest(model="openai/gpt-4o", messages=[Msg.user("你好")]))
 
     assert seen_model == "openai/gpt-4o"
 
@@ -167,9 +165,7 @@ async def test_provider_client_uses_litellm_provider_for_model_prefix(
         api_key="test-key",
     )
 
-    await client.complete(
-        LLMRequest(model="deepseek-ai/DeepSeek-V3", messages=[Msg.user("你好")])
-    )
+    await client.complete(LLMRequest(model="deepseek-ai/DeepSeek-V3", messages=[Msg.user("你好")]))
 
     assert seen_model == "openai/deepseek-ai/DeepSeek-V3"
 

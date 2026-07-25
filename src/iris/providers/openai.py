@@ -35,9 +35,7 @@ class OpenAIChatMapper:
         if msg.sender and msg.role == Role.USER:
             item["name"] = msg.sender
         if msg.tool_calls:
-            item["tool_calls"] = [
-                self._format_tool_call(block) for block in msg.tool_calls
-            ]
+            item["tool_calls"] = [self._format_tool_call(block) for block in msg.tool_calls]
         return [item]
 
     def _format_tool_result(self, block: ToolResultBlock) -> dict[str, Any]:
@@ -55,9 +53,7 @@ class OpenAIChatMapper:
             "type": "function",
             "function": {
                 "name": block.name,
-                "arguments": json.dumps(
-                    block.input, ensure_ascii=False, separators=(",", ":")
-                ),
+                "arguments": json.dumps(block.input, ensure_ascii=False, separators=(",", ":")),
             },
         }
 

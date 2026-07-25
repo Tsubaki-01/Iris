@@ -16,18 +16,14 @@ from iris.memory import (
 
 
 def test_context_builder_preserves_order_warns_and_counts_omitted() -> None:
-    scope = MemoryScope(
-        workspace_id="workspace", agent_id="agent", collection="default"
-    )
+    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
     results = [
         MemorySearchResult(
             item=MemoryItem(scope=scope, text="alpha memory", reason="test seed"),
             score=2.0,
         ),
         MemorySearchResult(
-            item=MemoryItem(
-                scope=scope, text="beta memory that is long", reason="test seed"
-            ),
+            item=MemoryItem(scope=scope, text="beta memory that is long", reason="test seed"),
             score=1.0,
         ),
     ]
@@ -41,9 +37,7 @@ def test_context_builder_preserves_order_warns_and_counts_omitted() -> None:
 
 
 def test_context_builder_copies_memory_item_semantics() -> None:
-    scope = MemoryScope(
-        workspace_id="workspace", agent_id="agent", collection="default"
-    )
+    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
     result = MemorySearchResult(
         item=MemoryItem(
             scope=scope,
@@ -75,9 +69,7 @@ def test_context_builder_copies_memory_item_semantics() -> None:
 
 
 def test_context_builder_keeps_semantics_when_first_fragment_is_truncated() -> None:
-    scope = MemoryScope(
-        workspace_id="workspace", agent_id="agent", collection="default"
-    )
+    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
     result = MemorySearchResult(
         item=MemoryItem(
             scope=scope,
@@ -112,9 +104,7 @@ def test_context_builder_rejects_non_positive_budget() -> None:
 
 
 def test_memory_query_can_be_used_by_context_builder() -> None:
-    scope = MemoryScope(
-        workspace_id="workspace", agent_id="agent", collection="default"
-    )
+    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
 
     query = MemoryQuery(scope=scope, text="alpha", limit=5)
 

@@ -342,9 +342,7 @@ def test_sqlite_store_promote_candidate_rolls_back_on_failure(
 
     assert store.list_items(scope) == []
     assert store.list_candidates(scope)[0].status == MemoryCandidateStatus.PENDING
-    assert MemoryEventType.ADD not in {
-        event.event_type for event in store.list_events(scope)
-    }
+    assert MemoryEventType.ADD not in {event.event_type for event in store.list_events(scope)}
     assert MemoryEventType.CANDIDATE_ACCEPT not in {
         event.event_type for event in store.list_events(scope)
     }
@@ -434,6 +432,4 @@ def test_sqlite_store_wraps_unserializable_metadata(tmp_path: Path) -> None:
 
 
 def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(
-        workspace_id="workspace", agent_id=agent_id, collection="default"
-    )
+    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")

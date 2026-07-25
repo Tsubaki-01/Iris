@@ -59,9 +59,7 @@ class SQLiteMemoryStore:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise IrisMemoryError(
-                "SQLite memory 目录创建失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory 目录创建失败", path=str(self.path)) from exc
         self.initialize_schema()
 
     @property
@@ -188,9 +186,7 @@ class SQLiteMemoryStore:
                     else:
                         self._fts_enabled = True
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory 初始化失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory 初始化失败", path=str(self.path)) from exc
 
     def rebuild_index(self) -> None:
         """重建 FTS 索引；未启用 FTS 时该方法不产生副作用。"""
@@ -211,22 +207,16 @@ class SQLiteMemoryStore:
                     [(row["id"], row["text"]) for row in rows],
                 )
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory 索引重建失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory 索引重建失败", path=str(self.path)) from exc
 
-    def add_episode(
-        self, episode: MemoryEpisode, *, event: MemoryEvent
-    ) -> MemoryEpisode:
+    def add_episode(self, episode: MemoryEpisode, *, event: MemoryEvent) -> MemoryEpisode:
         """保存 L1 片段记忆和对应审计事件。"""
         try:
             with self._connection() as connection:
                 self._insert_episode(connection, episode)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory episode 写入失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory episode 写入失败", path=str(self.path)) from exc
         return episode
 
     def add_item(self, item: MemoryItem, *, event: MemoryEvent) -> MemoryItem:
@@ -238,9 +228,7 @@ class SQLiteMemoryStore:
                 self._refresh_fts_row(connection, item)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory item 写入失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory item 写入失败", path=str(self.path)) from exc
         return item
 
     def update_item(
@@ -266,20 +254,14 @@ class SQLiteMemoryStore:
                 self._refresh_fts_row(connection, updated)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory item 更新失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory item 更新失败", path=str(self.path)) from exc
         return updated
 
-    def delete_item(
-        self, item_id: str, scope: MemoryScope, *, event: MemoryEvent
-    ) -> bool:
+    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> bool:
         """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
         try:
             with self._connection() as connection:
-                current = self._fetch_item(
-                    connection, item_id, scope, include_deleted=False
-                )
+                current = self._fetch_item(connection, item_id, scope, include_deleted=False)
                 if current is None:
                     return False
                 deleted = current.model_copy(
@@ -294,21 +276,15 @@ class SQLiteMemoryStore:
                 self._insert_event(connection, event)
                 return True
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory item 删除失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory item 删除失败", path=str(self.path)) from exc
 
     def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
         """读取指定 scope 下的活跃长期记忆条目。"""
         try:
             with self._connection() as connection:
-                return self._fetch_item(
-                    connection, item_id, scope, include_deleted=False
-                )
+                return self._fetch_item(connection, item_id, scope, include_deleted=False)
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory item 读取失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory item 读取失败", path=str(self.path)) from exc
 
     def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """按查询条件召回长期记忆。"""
@@ -347,9 +323,7 @@ class SQLiteMemoryStore:
             with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory item 列表读取失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory item 列表读取失败", path=str(self.path)) from exc
         return [_row_to_item(row) for row in rows]
 
     def list_events(
@@ -372,9 +346,7 @@ class SQLiteMemoryStore:
             with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory event 列表读取失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory event 列表读取失败", path=str(self.path)) from exc
         return [_row_to_event(row) for row in rows]
 
     def add_candidate(
@@ -462,13 +434,9 @@ class SQLiteMemoryStore:
                 if candidate is None:
                     raise IrisMemoryError("候选记忆不存在", candidate_id=candidate_id)
                 if candidate.status == MemoryCandidateStatus.ACCEPTED:
-                    existing = self._fetch_item_by_source_id(
-                        connection, candidate_id, scope
-                    )
+                    existing = self._fetch_item_by_source_id(connection, candidate_id, scope)
                     if existing is None:
-                        raise IrisMemoryError(
-                            "已接受候选缺少晋升条目", candidate_id=candidate_id
-                        )
+                        raise IrisMemoryError("已接受候选缺少晋升条目", candidate_id=candidate_id)
                     return existing
                 if candidate.status != MemoryCandidateStatus.PENDING:
                     raise IrisMemoryError(
@@ -537,9 +505,7 @@ class SQLiteMemoryStore:
         finally:
             connection.close()
 
-    def _insert_episode(
-        self, connection: sqlite3.Connection, episode: MemoryEpisode
-    ) -> None:
+    def _insert_episode(self, connection: sqlite3.Connection, episode: MemoryEpisode) -> None:
         """插入 L1 片段记忆。"""
         scope_values = _scope_values(episode.scope)
         connection.execute(
@@ -568,9 +534,7 @@ class SQLiteMemoryStore:
                 episode.source_id,
                 episode.text,
                 episode.category.value,
-                _dump_json(
-                    [artifact.model_dump(mode="json") for artifact in episode.artifacts]
-                ),
+                _dump_json([artifact.model_dump(mode="json") for artifact in episode.artifacts]),
                 _dump_json(episode.metadata),
                 episode.created_at,
             ),
@@ -669,9 +633,7 @@ class SQLiteMemoryStore:
                 item.reason,
                 item.confidence,
                 item.importance,
-                _dump_json(
-                    [artifact.model_dump(mode="json") for artifact in item.artifacts]
-                ),
+                _dump_json([artifact.model_dump(mode="json") for artifact in item.artifacts]),
                 _dump_json(item.metadata),
                 item.created_at,
                 item.updated_at,
@@ -852,9 +814,7 @@ class SQLiteMemoryStore:
             return None
         return _row_to_candidate(row)
 
-    def _refresh_fts_row(
-        self, connection: sqlite3.Connection, item: MemoryItem
-    ) -> None:
+    def _refresh_fts_row(self, connection: sqlite3.Connection, item: MemoryItem) -> None:
         """刷新单条 FTS 索引。"""
         if not self._fts_enabled:
             return
@@ -884,9 +844,7 @@ class SQLiteMemoryStore:
         """
         try:
             with self._connection() as connection:
-                rows = connection.execute(
-                    sql, [query.text, *params, query.limit]
-                ).fetchall()
+                rows = connection.execute(sql, [query.text, *params, query.limit]).fetchall()
         except sqlite3.Error:
             return None
         return [
@@ -916,9 +874,7 @@ class SQLiteMemoryStore:
             with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
         except sqlite3.Error as exc:
-            raise IrisMemoryError(
-                "SQLite memory 搜索失败", path=str(self.path)
-            ) from exc
+            raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc
         return [
             MemorySearchResult(
                 item=_row_to_item(row),
@@ -940,9 +896,7 @@ def _query_clause(query: MemoryQuery, *, item_alias: str = "") -> tuple[str, lis
         clause += f" AND {_column('category', item_alias)} IN ({_placeholders(query.categories)})"
         params.extend(category.value for category in query.categories)
     if query.kinds:
-        clause += (
-            f" AND {_column('kind', item_alias)} IN ({_placeholders(query.kinds)})"
-        )
+        clause += f" AND {_column('kind', item_alias)} IN ({_placeholders(query.kinds)})"
         params.extend(kind.value for kind in query.kinds)
     return clause, params
 
@@ -1015,9 +969,7 @@ def _row_to_item(row: sqlite3.Row) -> MemoryItem:
     )
 
 
-def _item_from_candidate(
-    candidate: MemoryCandidate, *, kind: MemoryItemKind
-) -> MemoryItem:
+def _item_from_candidate(candidate: MemoryCandidate, *, kind: MemoryItemKind) -> MemoryItem:
     """从 pending candidate 构造晋升后的 L2 item。"""
     metadata = {
         **candidate.metadata,

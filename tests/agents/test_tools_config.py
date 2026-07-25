@@ -10,9 +10,7 @@ from iris.exceptions import IrisConfigError, IrisToolNotFoundError
 
 def test_build_tool_registry_registers_named_builtin_tools() -> None:
     registry = build_tool_registry(
-        ToolsConfig(
-            builtin=["file.read", "file.list", "file.grep", "file.write", "file.edit"]
-        )
+        ToolsConfig(builtin=["file.read", "file.list", "file.grep", "file.write", "file.edit"])
     )
 
     assert registry.get("read_file").definition.name == "read_file"

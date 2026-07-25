@@ -79,11 +79,7 @@ def test_deferred_tool_search_uses_bm25_like_ranking() -> None:
     registry.register_function(vector_lookup)
     registry.register_function(file_search)
     index = DeferredToolIndex()
-    index.build(
-        registry.view(
-            allow={"alpha_dense", "vector_lookup", "file_search"}
-        ).active_tools
-    )
+    index.build(registry.view(allow={"alpha_dense", "vector_lookup", "file_search"}).active_tools)
 
     assert index.naive_search("dense")[0].name == "alpha_dense"
     assert index.search("vector search")[0].name == "vector_lookup"

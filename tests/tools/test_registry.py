@@ -95,8 +95,7 @@ def test_registry_view_filters_by_group() -> None:
     )
 
     active_names = [
-        schema["name"]
-        for schema in registry.view(include_groups={"readers"}).active_schemas()
+        schema["name"] for schema in registry.view(include_groups={"readers"}).active_schemas()
     ]
 
     assert active_names == ["read_item"]

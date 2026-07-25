@@ -34,9 +34,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -146,17 +144,13 @@ async def test_run_loop_feeds_tool_result_to_next_provider_request_once(
     assert provider.requests[0].messages[-1].text == "当前问题"
 
     second_messages = provider.requests[1].messages
-    assert [
-        message.text for message in second_messages if message.role == Role.USER
-    ] == [
+    assert [message.text for message in second_messages if message.role == Role.USER] == [
         "当前问题",
         "",
     ]
     assert second_messages[-1].tool_results[0].content == "echo:Iris"
     assert "当前问题" not in [message.text for message in second_messages[2:]]
-    assert [tool_result.model_content for tool_result in result.tool_results] == [
-        "echo:Iris"
-    ]
+    assert [tool_result.model_content for tool_result in result.tool_results] == ["echo:Iris"]
 
 
 @pytest.mark.asyncio

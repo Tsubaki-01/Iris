@@ -52,16 +52,14 @@ def test_mock_agent_flow_reports_runtime_capabilities(tmp_path: Path) -> None:
             "issue": "run_turn 会执行一次工具桥接，但不会把工具结果再次发送给 provider。",
             "evidence": "single_turn_tool_bridge provider_request_count=1 且 tool_result_count=1。",
             "correction": (
-                "需要让模型基于工具结果生成最终回答时，调用 run_loop() "
-                "而不是 run_turn()。"
+                "需要让模型基于工具结果生成最终回答时，调用 run_loop() 而不是 run_turn()。"
             ),
         },
         {
             "issue": "如果 mock/provider 持续返回工具调用，bounded loop 会在上限处停止。",
             "evidence": "max_steps_probe 返回 MAX_STEPS_REACHED。",
             "correction": (
-                "调大 RuntimeOptions.loop.max_steps，或改进模型指令让工具结果足够时"
-                "输出最终文本。"
+                "调大 RuntimeOptions.loop.max_steps，或改进模型指令让工具结果足够时输出最终文本。"
             ),
         },
     ]

@@ -396,8 +396,8 @@ class ToolExecutor:
             self._record_breaker_result(tool.name, result)
             return result
         except IrisToolExecutionError as exc:
-            allow_structured = (
-                tool.definition.group == "file" or exc.message.startswith("ARTIFACT_ERROR:")
+            allow_structured = tool.definition.group == "file" or exc.message.startswith(
+                "ARTIFACT_ERROR:"
             )
             code, message = _tool_error_code_and_message(
                 exc.message,
