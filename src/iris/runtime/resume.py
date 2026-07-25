@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from ..exceptions import (
     HITLCheckpointInvalidError,
-    HITLExecutionOutcomeUnknownError,
     HITLNotFoundError,
 )
 from ..hitl import (
@@ -125,7 +124,23 @@ def append_resumed_result(
     step_index: int,
     agent_id: str,
 ) -> Msg:
-    """保存续跑工具结果，并使用稳定 event ID 避免重复追加。"""
+    """投影已执行的普通续跑工具结果。
+
+    此函数不更新 HITL checkpoint 或 interaction phase，也不对 message 去重；调用方必须先
+    持久化 continuation claim。若任一步写入失败，claim 会保留，使后续恢复 fail closed，
+    而不是重放可能已经产生副作用的工具。event 使用稳定 ID，避免同一结果重复写入事件流。
+
+    Args:
+        result: 已完成的普通续跑工具结果。
+        session_store: 保存 session message 与工具事件的存储。
+        session_id: 目标 session 标识。
+        run_id: 当前 runtime run 标识。
+        step_index: 当前 loop 步骤索引。
+        agent_id: 产生工具调用的 agent 标识。
+
+    Returns:
+        Msg: 写入 session history 的 tool-result message。
+    """
     message = build_tool_result_message(result)
     history = [Msg.from_dict(item) for item in session_store.load_messages(session_id)]
     history.append(message)
@@ -144,6 +159,33 @@ def append_resumed_result(
     return message
 
 
+def _validate_ready_results(
+    interaction: HumanInteraction,
+) -> tuple[ToolResult, list[ToolResult]]:
+    """验证待提交结果与 interaction checkpoint 的身份和内容一致。
+
+    针对checkpoint损坏的 fail-closed 函数，正常流程下不会出现问题。
+    """
+    checkpoint = interaction.checkpoint
+    try:
+        result = ToolResult.model_validate(checkpoint.get("pending_result"))
+        all_tool_results = [
+            ToolResult.model_validate(item) for item in checkpoint.get("all_tool_results", [])
+        ]
+    except (TypeError, ValueError) as exc:
+        raise HITLCheckpointInvalidError("HITL 待提交工具结果结构无效") from exc
+
+    expected_id = interaction.request.tool_call.tool_call_id
+    if result.tool_use_id != expected_id:
+        raise HITLCheckpointInvalidError("HITL 待提交工具结果与 interaction 不匹配")
+    matches = [item for item in all_tool_results if item.tool_use_id == expected_id]
+    if len(matches) != 1:
+        raise HITLCheckpointInvalidError("HITL 工具结果列表必须包含唯一的 interaction 结果")
+    if matches[0] != result:
+        raise HITLCheckpointInvalidError("HITL 待提交工具结果 payload 不一致")
+    return result, all_tool_results
+
+
 async def commit_ready_interaction(
     *,
     interaction: HumanInteraction,
@@ -151,12 +193,27 @@ async def commit_ready_interaction(
     interaction_service: HumanInteractionService,
     agent_id: str,
 ) -> RuntimeTurnResult:
-    """幂等写入已准备工具结果的消息与事件。"""
+    """幂等提交 checkpoint 中已持久化的当前 gate 结果。
+
+    ``RESULT_READY`` 阶段的 ``pending_result`` 已是可恢复的 durable result；因此本函数
+    可在 message/event 写入中断后安全重试。它先校验 result 与 interaction 身份及完整结果
+    列表一致，再按 tool call ID 去重 message、以稳定 event ID 追加事件，最后通过 CAS 推进
+    interaction 至 ``RESULT_COMMITTED``。本函数不执行工具。
+
+    Args:
+        interaction: 处于 result-ready 或 result-committed 的已消费 interaction。
+        session_store: 保存 session message 与工具事件的存储。
+        interaction_service: 推进 interaction 恢复阶段的服务。
+        agent_id: 产生工具调用的 agent 标识。
+
+    Returns:
+        RuntimeTurnResult: 包含 checkpoint 全部已提交工具结果的恢复结果。
+
+    Raises:
+        HITLCheckpointInvalidError: checkpoint 结果缺失、结构无效或与 interaction 不一致时。
+    """
     checkpoint = interaction.checkpoint
-    raw_result = checkpoint.get("pending_result")
-    if not isinstance(raw_result, dict):
-        raise HITLExecutionOutcomeUnknownError("HITL 已消费 interaction 缺少待提交结果")
-    result = ToolResult.model_validate(raw_result)
+    result, all_tool_results = _validate_ready_results(interaction)
     message = build_tool_result_message(result)
     messages = [Msg.from_dict(item) for item in session_store.load_messages(interaction.session_id)]
     if not any(
@@ -183,11 +240,6 @@ async def commit_ready_interaction(
             InteractionResumePhase.RESULT_COMMITTED,
             checkpoint,
         )
-    all_tool_results = [
-        ToolResult.model_validate(item) for item in checkpoint.get("all_tool_results", [])
-    ]
-    if not any(item.tool_use_id == result.tool_use_id for item in all_tool_results):
-        all_tool_results.append(result)
     return RuntimeTurnResult(
         session_id=interaction.session_id,
         run_id=interaction.run_id,
