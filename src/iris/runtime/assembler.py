@@ -34,6 +34,30 @@ class RuntimeMessageAssembler:
     memory recall、工具执行和 provider 调用由外层 runtime 阶段负责。
     """
 
+    def build_turn_messages(
+        self,
+        *,
+        context_output: ContextBuildOutput,
+        current_input: Msg | None,
+    ) -> list[Msg]:
+        """构建仅属于当前用户 turn 的输入消息。
+
+        Args:
+            context_output (ContextBuildOutput): 已构建完成的 context 输出。
+            current_input (Msg | None): 当前用户输入；continuation step 为空。
+
+        Returns:
+            list[Msg]: 按 BCI、当前输入排列的独立消息列表。
+        """
+        if current_input is None:
+            return []
+
+        messages: list[Msg] = []
+        if context_output.before_current_input is not None:
+            messages.append(context_output.before_current_input)
+        messages.append(current_input)
+        return messages
+
     def build_conversation(
         self,
         *,
@@ -55,10 +79,12 @@ class RuntimeMessageAssembler:
         if context_output.memory is not None:
             messages.append(context_output.memory)
         messages.extend(history)
-        if context_output.before_current_input is not None:
-            messages.append(context_output.before_current_input)
-        if current_input is not None:
-            messages.append(current_input)
+        messages.extend(
+            self.build_turn_messages(
+                context_output=context_output,
+                current_input=current_input,
+            )
+        )
 
         return Conversation(messages=messages)
 

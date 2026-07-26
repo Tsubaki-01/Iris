@@ -114,6 +114,52 @@ def test_structured_context_keeps_memory_history_before_current_input_order() ->
     assert context_output.before_current_input.text.startswith("<before_current_input_context>")
 
 
+def test_build_turn_messages_groups_context_with_current_input() -> None:
+    context_output = _build_context_output(
+        ContextBuildInput(
+            system=ContextSection(
+                slots=[ContextSlot(name="instructions", content="系统规则")]
+            ),
+            before_current_input=ContextSection(
+                slots=[ContextSlot(name="environment_state", content="当前状态")]
+            ),
+        )
+    )
+    current_input = Msg.user("当前问题")
+
+    messages = RuntimeMessageAssembler().build_turn_messages(
+        context_output=context_output,
+        current_input=current_input,
+    )
+
+    assert messages == [context_output.before_current_input, current_input]
+    assert messages[-1] is current_input
+
+
+def test_before_current_input_is_not_added_without_current_input() -> None:
+    history = [Msg.user("当前问题"), Msg.assistant("调用工具")]
+    context_output = _build_context_output(
+        ContextBuildInput(
+            system=ContextSection(
+                slots=[ContextSlot(name="instructions", content="系统规则")]
+            ),
+            before_current_input=ContextSection(
+                slots=[ContextSlot(name="environment_state", content="当前状态")]
+            ),
+        )
+    )
+
+    request = RuntimeMessageAssembler().build_request(
+        agent_config=_agent_config(),
+        context_output=context_output,
+        history=history,
+        current_input=None,
+    )
+
+    assert request.messages == [context_output.system, *history]
+    assert all(message.sender != "context" for message in request.messages[1:])
+
+
 def test_current_input_none_is_not_appended() -> None:
     history = [Msg.user("历史问题")]
     context_output = _build_context_output()
