@@ -836,6 +836,10 @@ class AgentRuntime:
             )
             context_output = self.context_builder.build(context_input)
             current_input = Msg.user(user_input)
+            turn_messages = self.assembler.build_turn_messages(
+                context_output=context_output,
+                current_input=current_input,
+            )
             request = self.assembler.build_request(
                 agent_config=self.agent_config,
                 context_output=context_output,
@@ -870,7 +874,7 @@ class AgentRuntime:
             )
 
         # --- 3. Persist result ---
-        messages = [*history, current_input, assistant_message]
+        messages = [*history, *turn_messages, assistant_message]
         try:
             self.session_store.save_messages(
                 session_id,
@@ -1022,6 +1026,10 @@ class AgentRuntime:
                     memory_context_builder=self.memory_context_builder,
                 )
                 context_output = self.context_builder.build(context_input)
+                turn_messages = self.assembler.build_turn_messages(
+                    context_output=context_output,
+                    current_input=current_input,
+                )
                 request = self.assembler.build_request(
                     agent_config=self.agent_config,
                     context_output=context_output,
@@ -1050,10 +1058,7 @@ class AgentRuntime:
                     metadata=run_metadata,
                 )
 
-            messages = [*history]
-            if current_input is not None:
-                messages.append(current_input)
-            messages.append(latest_assistant)
+            messages = [*history, *turn_messages, latest_assistant]
 
             try:
                 self.session_store.save_messages(
