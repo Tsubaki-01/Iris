@@ -7,7 +7,8 @@ from fakes import FakeProvider
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
-from iris.message import LLMResponse, Role, TextBlock, ToolUseBlock
+from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
+from iris.providers.openai import OpenAIChatMapper
 from iris.runtime import AgentRuntime
 from iris.runtime.models import (
     BoundedLoopOptions,
@@ -35,6 +36,17 @@ def _agent_config() -> AgentConfig:
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
         system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
+    )
+
+
+def _context_input_with_before_current_input() -> ContextBuildInput:
+    return ContextBuildInput(
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
+        ),
+        before_current_input=ContextSection(
+            slots=[ContextSlot(name="environment_state", content="workspace-ready")]
+        ),
     )
 
 
@@ -151,6 +163,50 @@ async def test_run_loop_feeds_tool_result_to_next_provider_request_once(
     assert second_messages[-1].tool_results[0].content == "echo:Iris"
     assert "当前问题" not in [message.text for message in second_messages[2:]]
     assert [tool_result.model_content for tool_result in result.tool_results] == ["echo:Iris"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_replays_before_input_snapshot_without_reinjection(
+    tmp_path: Path,
+) -> None:
+    def echo(value: str) -> str:
+        return f"echo:{value}"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    store = InMemorySessionStore()
+    provider = FakeProvider(
+        [
+            _assistant_tool_response(value="Iris"),
+            _assistant_text_response("最终回答"),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input_with_before_current_input(),
+        provider=provider,
+        session_store=store,
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=tmp_path,
+    )
+
+    result = await runtime.run_loop("当前问题")
+
+    assert result.status is RuntimeStatus.OK
+    first_request = provider.requests[0].messages
+    second_request = provider.requests[1].messages
+    mapper = OpenAIChatMapper()
+    first_wire_messages = mapper.format_messages(first_request)
+    second_wire_messages = mapper.format_messages(second_request)
+    assert first_request[-1].text == "当前问题"
+    assert second_wire_messages[: len(first_wire_messages)] == first_wire_messages
+    assert second_request[-1].tool_results[0].content == "echo:Iris"
+    assert sum(message.sender == "context" for message in second_request) == 1
+
+    saved = [Msg.model_validate(item) for item in store.load_messages("default")]
+    assert sum(message.sender == "context" for message in saved) == 1
 
 
 @pytest.mark.asyncio

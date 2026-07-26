@@ -9,6 +9,7 @@ from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisAuthenticationError, IrisError, IrisSessionError
 from iris.message import LLMResponse, Msg, Role, TextBlock
+from iris.providers.openai import OpenAIChatMapper
 from iris.runtime import AgentRuntime, normalize_runtime_error
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
@@ -30,6 +31,17 @@ def _agent_config() -> AgentConfig:
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
         system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
+    )
+
+
+def _context_input_with_before_current_input() -> ContextBuildInput:
+    return ContextBuildInput(
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
+        ),
+        before_current_input=ContextSection(
+            slots=[ContextSlot(name="environment_state", content="workspace-ready")]
+        ),
     )
 
 
@@ -135,6 +147,48 @@ async def test_run_turn_calls_fake_provider_once_and_saves_assistant_message() -
     assert latest_run["total_tokens"] == 18
     assert latest_run["message_count"] == 3
     assert latest_run["metadata"] == {"trace_id": "trace-1"}
+
+
+@pytest.mark.asyncio
+async def test_run_turn_persists_before_input_snapshot_for_next_request() -> None:
+    store = InMemorySessionStore()
+    provider = FakeProvider(
+        [_assistant_response("第一答复"), _assistant_response("第二答复")]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input_with_before_current_input(),
+        provider=provider,
+        session_store=store,
+    )
+
+    await runtime.run_turn("第一问题")
+    await runtime.run_turn("第二问题")
+
+    first_request = provider.requests[0].messages
+    second_request = provider.requests[1].messages
+    mapper = OpenAIChatMapper()
+    first_wire_messages = mapper.format_messages(first_request)
+    second_wire_messages = mapper.format_messages(second_request)
+    assert second_wire_messages[: len(first_wire_messages)] == first_wire_messages
+
+    saved = [Msg.model_validate(item) for item in store.load_messages("default")]
+    assert [message.sender for message in saved] == [
+        "context",
+        "user",
+        "assistant",
+        "context",
+        "user",
+        "assistant",
+    ]
+    assert [saved[index].text for index in (1, 2, 4, 5)] == [
+        "第一问题",
+        "第一答复",
+        "第二问题",
+        "第二答复",
+    ]
+    assert saved[0].text.startswith("<before_current_input_context>")
+    assert saved[3].text.startswith("<before_current_input_context>")
 
 
 @pytest.mark.asyncio
