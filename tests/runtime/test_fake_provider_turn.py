@@ -36,9 +36,7 @@ def _context_input() -> ContextBuildInput:
 
 def _context_input_with_before_current_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        ),
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")]),
         before_current_input=ContextSection(
             slots=[ContextSlot(name="environment_state", content="workspace-ready")]
         ),
@@ -152,9 +150,7 @@ async def test_run_turn_calls_fake_provider_once_and_saves_assistant_message() -
 @pytest.mark.asyncio
 async def test_run_turn_persists_before_input_snapshot_for_next_request() -> None:
     store = InMemorySessionStore()
-    provider = FakeProvider(
-        [_assistant_response("第一答复"), _assistant_response("第二答复")]
-    )
+    provider = FakeProvider([_assistant_response("第一答复"), _assistant_response("第二答复")])
     runtime = AgentRuntime(
         agent_config=_agent_config(),
         context_input=_context_input_with_before_current_input(),

@@ -106,6 +106,15 @@ def _context_input() -> ContextBuildInput:
     )
 
 
+def _context_input_with_before_current_input() -> ContextBuildInput:
+    return ContextBuildInput(
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="保持简洁")]),
+        before_current_input=ContextSection(
+            slots=[ContextSlot(name="environment_state", content="workspace-ready")]
+        ),
+    )
+
+
 def _response(text: str) -> LLMResponse:
     return LLMResponse(
         provider="fake",
@@ -545,6 +554,58 @@ def test_chat_loop_real_runtime_handles_permission_question_and_trace_once() -> 
     assert output.count("REQUEST 1.1") == 1
     assert output.count("REQUEST 1.2") == 1
     assert output.count("ASSISTANT") == 1
+
+
+def test_chat_compact_trace_latest_uses_real_request_tail() -> None:
+    def echo(value: str) -> str:
+        return f"echo:{value}"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    trace_store = ChatTraceStore()
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="fake",
+                content=[
+                    ToolUseBlock(
+                        id="echo-1",
+                        name="echo",
+                        input={"value": "Iris"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            _response("完成"),
+        ]
+    )
+    runtime = AgentRuntime(
+        agent_config=_agent_config(),
+        context_input=_context_input_with_before_current_input(),
+        provider=TracingRuntimeProvider(provider, trace_store),
+        session_store=InMemorySessionStore(),
+        tool_registry=registry,
+        tool_view=registry.view(),
+        tool_executor=ToolExecutor(registry),
+        workspace_root=Path.cwd(),
+    )
+    renderer, console = _renderer()
+    inputs = iter(["开始", "/exit"])
+
+    code = run_chat_loop(
+        runtime=runtime,
+        agent_config=_agent_config(),
+        options=ChatOptions(config_path=Path("agent.yaml"), session_id="demo"),
+        trace_store=trace_store,
+        renderer=renderer,
+        input_func=lambda prompt: next(inputs),
+    )
+
+    assert code == 0
+    output = console.export_text()
+    assert "latest: 开始" in output
+    assert "latest: echo:Iris" in output
+    assert "latest: <before_current_input_context>" not in output
 
 
 def test_chat_loop_real_runtime_rejects_permission_without_side_effect() -> None:
