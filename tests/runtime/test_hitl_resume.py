@@ -19,6 +19,7 @@ from iris.hitl import (
     QuestionPrompt,
 )
 from iris.message import LLMResponse, Role, TextBlock, ToolUseBlock
+from iris.providers.openai import OpenAIChatMapper
 from iris.runtime import AgentRuntime
 from iris.runtime.models import (
     BoundedLoopOptions,
@@ -48,6 +49,15 @@ def _agent_config() -> AgentConfig:
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
         system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
+    )
+
+
+def _context_input_with_before_current_input() -> ContextBuildInput:
+    return ContextBuildInput(
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")]),
+        before_current_input=ContextSection(
+            slots=[ContextSlot(name="environment_state", content="workspace-ready")]
+        ),
     )
 
 
@@ -822,7 +832,7 @@ async def test_resumed_loop_persists_tool_result_for_next_provider_request() -> 
     )
     runtime = AgentRuntime(
         agent_config=_agent_config(),
-        context_input=_context_input(),
+        context_input=_context_input_with_before_current_input(),
         provider=provider,
         interaction_store=InMemoryInteractionStore(),
         tool_registry=registry,
@@ -844,6 +854,20 @@ async def test_resumed_loop_persists_tool_result_for_next_provider_request() -> 
         message for message in provider.requests[2].messages if message.role is Role.USER
     ]
     assert tool_messages[-1].tool_results[0].content == "echo:Iris"
+    first_request = provider.requests[0].messages
+    resumed_request = provider.requests[1].messages
+    final_request = provider.requests[2].messages
+    mapper = OpenAIChatMapper()
+    first_wire_messages = mapper.format_messages(first_request)
+    resumed_wire_messages = mapper.format_messages(resumed_request)
+    final_wire_messages = mapper.format_messages(final_request)
+
+    assert first_request[-1].text == "开始"
+    assert resumed_wire_messages[: len(first_wire_messages)] == first_wire_messages
+    assert final_wire_messages[: len(resumed_wire_messages)] == resumed_wire_messages
+    assert sum(message.sender == "context" for message in final_request) == 1
+    assert resumed_request[-1].tool_results[0].content == "继续"
+    assert final_request[-1].tool_results[0].content == "echo:Iris"
 
 
 @pytest.mark.asyncio

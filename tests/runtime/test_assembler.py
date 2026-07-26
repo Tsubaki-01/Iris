@@ -117,9 +117,7 @@ def test_structured_context_keeps_memory_history_before_current_input_order() ->
 def test_build_turn_messages_groups_context_with_current_input() -> None:
     context_output = _build_context_output(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="系统规则")]
-            ),
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="系统规则")]),
             before_current_input=ContextSection(
                 slots=[ContextSlot(name="environment_state", content="当前状态")]
             ),
@@ -140,9 +138,7 @@ def test_before_current_input_is_not_added_without_current_input() -> None:
     history = [Msg.user("当前问题"), Msg.assistant("调用工具")]
     context_output = _build_context_output(
         ContextBuildInput(
-            system=ContextSection(
-                slots=[ContextSlot(name="instructions", content="系统规则")]
-            ),
+            system=ContextSection(slots=[ContextSlot(name="instructions", content="系统规则")]),
             before_current_input=ContextSection(
                 slots=[ContextSlot(name="environment_state", content="当前状态")]
             ),

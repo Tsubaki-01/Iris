@@ -138,6 +138,12 @@ session。
 - 两个入口都会先预检完整工具批次。遇到第一个权限确认或 `human.ask` 时，runtime 会保存
   checkpoint v2 与统一 `HumanInteractionRequest`，并返回等待状态；该批次不会执行任何工具。
 
+`before_current_input` 是用户 turn 级快照。runtime 只在存在当前用户输入的首个 step
+把它放在输入之前，并与输入一起保存到 session；tool loop 后续 step 与 HITL resume
+从 history 重放该快照，不会重新构建或追加第二条 `before_current_input`。这使下一次
+provider request 不会因 BCI 重排而提前破坏上一请求的消息前缀，并让 request 尾消息
+反映当前输入或最新工具结果。
+
 `AgentRuntime` 保留依赖所有权和公开编排。稳定的内部职责按领域拆分：`errors.py` 负责错误
 分类与结果归一化，`metadata.py` 负责 run snapshot 构建和 resume metadata 同步，
 `checkpoint.py` 负责 checkpoint v2 构建与身份校验，`resume.py` 负责恢复目标发现、typed
@@ -329,7 +335,8 @@ runtime 侧的适配逻辑位于 `src/iris/runtime/memory_context.py`，它不�
 
 runtime 会通过 `SessionStore` 保存三类数据：
 
-- messages：history、current input、assistant message 和 tool result messages。
+- messages：history、每轮 `before_current_input` 快照、current input、assistant message
+  和 tool result messages；BCI 仅在配置且存在 current input 时保存。
 - run metadata：最近一次运行摘要和历史 runs 列表。
 - tool events：每次工具结果的 JSON-safe 事件快照。
 

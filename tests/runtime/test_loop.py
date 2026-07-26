@@ -41,9 +41,7 @@ def _context_input() -> ContextBuildInput:
 
 def _context_input_with_before_current_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        ),
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")]),
         before_current_input=ContextSection(
             slots=[ContextSlot(name="environment_state", content="workspace-ready")]
         ),
