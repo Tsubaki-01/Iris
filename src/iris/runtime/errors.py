@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..exceptions import IrisError
 from ..message import Msg
+from ..tools import ToolResult
 from .models import (
     RuntimeErrorInfo,
     RuntimeErrorSource,
     RuntimeStatus,
     RuntimeTurnResult,
-    ToolBridgeResult,
 )
 
 
@@ -51,9 +51,9 @@ def error_result(
     )
 
 
-def tool_error_info(bridge_result: ToolBridgeResult) -> RuntimeErrorInfo:
+def tool_error_info(results: Sequence[ToolResult]) -> RuntimeErrorInfo:
     """从第一个工具错误构造 runtime 错误信息。"""
-    for result in bridge_result.results:
+    for result in results:
         if result.is_error and result.error is not None:
             return RuntimeErrorInfo(
                 code=result.error.code,

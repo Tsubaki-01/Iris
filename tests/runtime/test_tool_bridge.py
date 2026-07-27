@@ -8,7 +8,7 @@ from fakes import FakeProvider
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisSessionError, IrisToolExecutionError
-from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
+from iris.message import LLMResponse, Msg, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime, ToolBridge
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
@@ -59,7 +59,7 @@ def _assistant_tool_response() -> LLMResponse:
 
 
 @pytest.mark.asyncio
-async def test_tool_bridge_executes_active_calls_and_appends_events(
+async def test_tool_bridge_executes_active_calls_in_original_order(
     tmp_path: Path,
 ) -> None:
     def echo(value: str) -> str:
@@ -67,7 +67,6 @@ async def test_tool_bridge_executes_active_calls_and_appends_events(
 
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")
-    store = InMemorySessionStore()
     bridge = ToolBridge(
         tool_view=registry.view(),
         tool_executor=ToolExecutor(registry),
@@ -78,45 +77,16 @@ async def test_tool_bridge_executes_active_calls_and_appends_events(
         ]
     )
 
-    result = await bridge.execute_once(
+    results = await bridge.execute_once(
         assistant_message=assistant_message,
         session_id="session-1",
-        run_id="run-1",
-        step_index=0,
         agent_id="agent-1",
         workspace_root=tmp_path,
         permission_mode="default",
-        session_store=store,
         metadata={"trace_id": "trace-1"},
     )
 
-    assert [tool_result.model_content for tool_result in result.results] == ["echo:Iris"]
-    assert len(result.messages) == 1
-    message = result.messages[0]
-    assert message.role == Role.USER
-    block = message.tool_results[0]
-    assert block.tool_use_id == "call_1"
-    assert block.content == "echo:Iris"
-    assert block.is_error is False
-    assert block.name == "echo"
-    assert block.metadata["tool_name"] == "echo"
-
-    assert result.events == store.load_tool_events("session-1")
-    assert result.events == [
-        {
-            "event_id": "tool_result:run-1:call_1",
-            "type": "tool_result",
-            "tool_call_id": "call_1",
-            "tool_name": "echo",
-            "status": "ok",
-            "error": None,
-            "artifact": None,
-            "run_id": "run-1",
-            "step_index": 0,
-            "agent_id": "agent-1",
-            "metadata": {"trace_id": "trace-1"},
-        }
-    ]
+    assert [tool_result.model_content for tool_result in results] == ["echo:Iris"]
 
 
 @pytest.mark.asyncio
@@ -131,34 +101,20 @@ async def test_tool_bridge_rejects_inactive_tool_without_executor(
         tool_executor=executor,
     )
     assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="hidden", input={})])
-    store = InMemorySessionStore()
-
-    result = await bridge.execute_once(
+    results = await bridge.execute_once(
         assistant_message=assistant_message,
         session_id="session-1",
-        run_id="run-1",
-        step_index=0,
         agent_id="agent-1",
         workspace_root=tmp_path,
         permission_mode="default",
-        session_store=store,
         metadata=None,
     )
 
     assert executor.calls == []
-    assert result.results[0].is_error is True
-    assert result.results[0].error is not None
-    assert result.results[0].error.code == "TOOL_NOT_ALLOWED"
-    assert result.messages[0].tool_results[0].content == (
-        "Error[TOOL_NOT_ALLOWED]: 工具未暴露给当前模型: hidden"
-    )
-    assert store.load_tool_events("session-1")[0]["status"] == "error"
-    assert store.load_tool_events("session-1")[0]["error"] == {
-        "code": "TOOL_NOT_ALLOWED",
-        "message": "工具未暴露给当前模型: hidden",
-        "retryable": False,
-        "details": {},
-    }
+    assert results[0].is_error is True
+    assert results[0].error is not None
+    assert results[0].error.code == "TOOL_NOT_ALLOWED"
+    assert results[0].model_content == ("Error[TOOL_NOT_ALLOWED]: 工具未暴露给当前模型: hidden")
 
 
 @pytest.mark.asyncio
@@ -175,12 +131,9 @@ async def test_tool_bridge_rejects_missing_executor_results(tmp_path: Path) -> N
         await bridge.execute_once(
             assistant_message=assistant_message,
             session_id="session-1",
-            run_id="run-1",
-            step_index=0,
             agent_id="agent-1",
             workspace_root=tmp_path,
             permission_mode="default",
-            session_store=InMemorySessionStore(),
             metadata=None,
         )
 
@@ -205,47 +158,11 @@ async def test_tool_bridge_rejects_extra_executor_results(tmp_path: Path) -> Non
         await bridge.execute_once(
             assistant_message=assistant_message,
             session_id="session-1",
-            run_id="run-1",
-            step_index=0,
             agent_id="agent-1",
             workspace_root=tmp_path,
             permission_mode="default",
-            session_store=InMemorySessionStore(),
             metadata=None,
         )
-
-
-@pytest.mark.asyncio
-async def test_tool_bridge_rejects_non_json_event_metadata(tmp_path: Path) -> None:
-    def echo() -> str:
-        return "ok"
-
-    registry = ToolRegistry()
-    registry.register_function(echo, description="回显")
-    bridge = ToolBridge(
-        tool_view=registry.view(),
-        tool_executor=ToolExecutor(registry),
-    )
-    assistant_message = Msg.assistant([ToolUseBlock(id="call_1", name="echo", input={})])
-
-    with pytest.raises(
-        IrisToolExecutionError,
-        match="session 工具事件包含非 JSON 可序列化值",
-    ) as exc_info:
-        await bridge.execute_once(
-            assistant_message=assistant_message,
-            session_id="session-1",
-            run_id="run-1",
-            step_index=0,
-            agent_id="agent-1",
-            workspace_root=tmp_path,
-            permission_mode="default",
-            session_store=InMemorySessionStore(),
-            metadata={"path": tmp_path},
-        )
-    assert exc_info.value.context["reason"] == (
-        f"Object of type {type(tmp_path).__name__} is not JSON serializable"
-    )
 
 
 @pytest.mark.asyncio

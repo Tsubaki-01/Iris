@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import iris.runtime.resume as resume_module
 from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import (
     HumanInteraction,
@@ -15,7 +16,8 @@ from iris.hitl import (
     QuestionPrompt,
     ToolCallSnapshot,
 )
-from iris.message import TextBlock, ToolUseBlock
+from iris.message import Msg, TextBlock, ToolUseBlock
+from iris.runtime.models import ToolResultCommit
 from iris.runtime.resume import (
     append_resumed_result,
     commit_ready_interaction,
@@ -160,6 +162,73 @@ def test_append_resumed_result_writes_message_and_event() -> None:
     assert session_store.load_tool_events("session-1")[0]["event_id"] == (
         "tool_result:run-1:call-1"
     )
+
+
+def test_append_resumed_result_delegates_to_committer(monkeypatch: pytest.MonkeyPatch) -> None:
+    session_store = InMemorySessionStore()
+    result = ToolResult(
+        tool_use_id="call-1",
+        tool_name="ask_question",
+        content=[TextBlock(text="继续")],
+    )
+    observed: dict[str, object] = {}
+    message = Msg.tool_result(tool_use_id="call-1", content="继续", name="ask_question")
+
+    def commit(**kwargs: object) -> ToolResultCommit:
+        observed.update(kwargs)
+        return ToolResultCommit(results=[result], messages=[message])
+
+    monkeypatch.setattr(resume_module, "commit_tool_results", commit)
+
+    actual = append_resumed_result(
+        result=result,
+        session_store=session_store,
+        session_id="session-1",
+        run_id="run-1",
+        step_index=0,
+        agent_id="agent-1",
+    )
+
+    assert actual == message
+    assert observed["results"] == [result]
+    assert observed["deduplicate_messages"] is False
+
+
+@pytest.mark.asyncio
+async def test_commit_ready_interaction_delegates_to_idempotent_committer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = ToolResult(
+        tool_use_id="call-1",
+        tool_name="ask_question",
+        content=[TextBlock(text="继续")],
+    )
+    session_store, service, ready = _ready_interaction(
+        pending_result=result,
+        all_tool_results=[result],
+    )
+    observed: dict[str, object] = {}
+
+    def commit(**kwargs: object) -> ToolResultCommit:
+        observed.update(kwargs)
+        return ToolResultCommit(
+            results=[result],
+            messages=[Msg.tool_result(tool_use_id="call-1", content="继续")],
+        )
+
+    monkeypatch.setattr(resume_module, "commit_tool_results", commit)
+
+    committed = await commit_ready_interaction(
+        interaction=ready,
+        session_store=session_store,
+        interaction_service=service,
+        agent_id="agent-1",
+    )
+
+    assert committed.tool_results == [result]
+    assert observed["results"] == [result]
+    assert observed["deduplicate_messages"] is True
+    assert service.get(ready.interaction_id).resume_phase is InteractionResumePhase.RESULT_COMMITTED
 
 
 @pytest.mark.asyncio

@@ -19,8 +19,8 @@ from iris.runtime.models import (
     RuntimeStatus,
     RuntimeTurnInput,
     RuntimeTurnResult,
-    ToolBridgeResult,
     ToolErrorPolicy,
+    ToolResultCommit,
 )
 
 
@@ -189,7 +189,7 @@ def test_turn_and_error_models_accept_minimal_runtime_data() -> None:
         source="provider",
         details={"status_code": 500},
     )
-    bridge_result = ToolBridgeResult(
+    tool_commit = ToolResultCommit(
         messages=[Msg.tool_result(tool_use_id="tool-1", content="done")],
         events=[{"tool_use_id": "tool-1", "status": "ok"}],
     )
@@ -199,13 +199,13 @@ def test_turn_and_error_models_accept_minimal_runtime_data() -> None:
         status=RuntimeStatus.ERROR,
         steps=1,
         error=error,
-        tool_result_messages=bridge_result.messages,
+        tool_result_messages=tool_commit.messages,
     )
 
     assert turn_input.user_input == "你好"
-    assert bridge_result.results == []
-    assert bridge_result.messages[0].text == ""
-    assert bridge_result.events == [{"tool_use_id": "tool-1", "status": "ok"}]
+    assert tool_commit.results == []
+    assert tool_commit.messages[0].text == ""
+    assert tool_commit.events == [{"tool_use_id": "tool-1", "status": "ok"}]
     assert turn_result.status == RuntimeStatus.ERROR
     assert turn_result.error == error
 

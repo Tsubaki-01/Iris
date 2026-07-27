@@ -145,11 +145,11 @@ class RuntimeTurnInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ToolBridgeResult(BaseModel):
-    """一次工具桥接阶段的结果快照。
+class ToolResultCommit(BaseModel):
+    """一次工具结果提交的结果快照。
 
-    `ToolBridge` 会同时生成面向程序、模型和 session 的三份视图，调用方按使用场景
-    选择对应字段，而不需要重新转换工具结果。
+    committer 会同时生成面向程序、模型和 session 的三份视图，调用方按使用场景选择
+    对应字段，而不需要重新转换工具结果。
 
     Attributes:
         results (list[ToolResult]): 程序侧可读取的结构化工具执行结果。
@@ -271,6 +271,6 @@ __all__ = [
     "RuntimeStatus",
     "RuntimeTurnInput",
     "RuntimeTurnResult",
-    "ToolBridgeResult",
     "ToolErrorPolicy",
+    "ToolResultCommit",
 ]

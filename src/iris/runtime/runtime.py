@@ -16,7 +16,7 @@ Example:
 # region imports
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -60,8 +60,8 @@ from .models import (
     RuntimeOptions,
     RuntimeStatus,
     RuntimeTurnResult,
-    ToolBridgeResult,
     ToolErrorPolicy,
+    ToolResultCommit,
 )
 from .resume import (
     append_resumed_result,
@@ -70,6 +70,7 @@ from .resume import (
     resolve_interaction_result,
 )
 from .tool_bridge import ToolBridge
+from .tool_result_committer import commit_tool_results
 
 # endregion
 
@@ -685,6 +686,37 @@ class AgentRuntime:
             read_state=self.tool_bridge.read_state(options.session_id),
         )
 
+    async def _execute_and_commit_tool_results(
+        self,
+        *,
+        assistant_message: Msg,
+        session_id: str,
+        run_id: str,
+        step_index: int,
+        metadata: Mapping[str, Any] | None,
+        tools_enabled: bool,
+    ) -> ToolResultCommit:
+        """执行 assistant 工具调用并统一提交结果。"""
+        results = await self.tool_bridge.execute_once(
+            assistant_message=assistant_message,
+            session_id=session_id,
+            agent_id=self.agent_config.name,
+            workspace_root=self.workspace_root,
+            permission_mode=self.agent_config.permissions.writes,
+            metadata=metadata,
+            tools_enabled=tools_enabled,
+        )
+        return commit_tool_results(
+            results=results,
+            session_store=self.session_store,
+            session_id=session_id,
+            run_id=run_id,
+            step_index=step_index,
+            agent_id=self.agent_config.name,
+            metadata=metadata,
+            deduplicate_messages=False,
+        )
+
     async def _continue_resumed_loop(
         self,
         committed: RuntimeTurnResult,
@@ -741,24 +773,16 @@ class AgentRuntime:
                         "pending_interaction": pending,
                     }
                 )
-            bridge = await self.tool_bridge.execute_once(
+            bridge = await self._execute_and_commit_tool_results(
                 assistant_message=assistant,
                 session_id=committed.session_id,
                 run_id=committed.run_id,
                 step_index=committed.steps,
-                agent_id=self.agent_config.name,
-                workspace_root=self.workspace_root,
-                permission_mode=self.agent_config.permissions.writes,
-                session_store=self.session_store,
                 metadata=options.metadata,
                 tools_enabled=options.include_tools,
             )
             if bridge.messages:
                 history.extend(bridge.messages)
-                self.session_store.save_messages(
-                    committed.session_id,
-                    [item.model_dump(mode="json") for item in history],
-                )
             continued = committed.model_copy(
                 update={
                     "assistant_message": assistant,
@@ -767,7 +791,7 @@ class AgentRuntime:
                     "steps": committed.steps + 1,
                 }
             )
-            if _should_stop_on_tool_error(options, bridge):
+            if _should_stop_on_tool_error(options, bridge.results):
                 return RuntimeTurnResult(
                     session_id=continued.session_id,
                     run_id=continued.run_id,
@@ -776,7 +800,7 @@ class AgentRuntime:
                     tool_results=continued.tool_results,
                     tool_result_messages=continued.tool_result_messages,
                     steps=continued.steps,
-                    error=tool_error_info(bridge),
+                    error=tool_error_info(bridge.results),
                     metadata=continued.metadata,
                 )
             if continued.steps >= options.loop.max_steps:
@@ -914,24 +938,16 @@ class AgentRuntime:
                     pending_interaction=pending_interaction,
                     metadata=run_metadata,
                 )
-            bridge_result = await self.tool_bridge.execute_once(
+            bridge_result = await self._execute_and_commit_tool_results(
                 assistant_message=assistant_message,
                 session_id=session_id,
                 run_id=run_id,
                 step_index=0,
-                agent_id=self.agent_config.name,
-                workspace_root=self.workspace_root,
-                permission_mode=self.agent_config.permissions.writes,
-                session_store=self.session_store,
                 metadata=run_metadata,
                 tools_enabled=runtime_options.include_tools,
             )
             if bridge_result.messages:
                 messages.extend(bridge_result.messages)
-                self.session_store.save_messages(
-                    session_id,
-                    [message.model_dump(mode="json") for message in messages],
-                )
             self.session_store.save_run_metadata(
                 session_id,
                 build_run_metadata(
@@ -1132,23 +1148,15 @@ class AgentRuntime:
                         metadata=run_metadata,
                     )
 
-                bridge_result = await self.tool_bridge.execute_once(
+                bridge_result = await self._execute_and_commit_tool_results(
                     assistant_message=latest_assistant,
                     session_id=session_id,
                     run_id=run_id,
                     step_index=step_index,
-                    agent_id=self.agent_config.name,
-                    workspace_root=self.workspace_root,
-                    permission_mode=self.agent_config.permissions.writes,
-                    session_store=self.session_store,
                     metadata=run_metadata,
                     tools_enabled=runtime_options.include_tools,
                 )
                 messages.extend(bridge_result.messages)
-                self.session_store.save_messages(
-                    session_id,
-                    [message.model_dump(mode="json") for message in messages],
-                )
             except Exception as exc:
                 return error_result(
                     session_id=session_id,
@@ -1162,8 +1170,8 @@ class AgentRuntime:
             all_tool_results.extend(bridge_result.results)
             all_tool_messages.extend(bridge_result.messages)
 
-            if _should_stop_on_tool_error(runtime_options, bridge_result):
-                error = tool_error_info(bridge_result)
+            if _should_stop_on_tool_error(runtime_options, bridge_result.results):
+                error = tool_error_info(bridge_result.results)
                 try:
                     self.session_store.save_run_metadata(
                         session_id,
@@ -1293,11 +1301,11 @@ def _apply_tool_schemas(
 
 def _should_stop_on_tool_error(
     options: RuntimeOptions,
-    bridge_result: ToolBridgeResult,
+    results: Sequence[ToolResult],
 ) -> bool:
     """判断 loop 是否应在工具错误后停止。"""
     return options.loop.tool_error_policy == ToolErrorPolicy.STOP and any(
-        result.is_error for result in bridge_result.results
+        result.is_error for result in results
     )
 
 

@@ -24,7 +24,7 @@ from ..tools import (
     ToolResult,
 )
 from .models import RuntimeStatus, RuntimeTurnResult
-from .tool_results import build_tool_result_event, build_tool_result_message
+from .tool_result_committer import commit_tool_results, project_tool_result_messages
 
 
 def load_resumable_interaction(
@@ -141,22 +141,17 @@ def append_resumed_result(
     Returns:
         Msg: 写入 session history 的 tool-result message。
     """
-    message = build_tool_result_message(result)
-    history = [Msg.from_dict(item) for item in session_store.load_messages(session_id)]
-    history.append(message)
-    session_store.save_messages(
-        session_id,
-        [item.model_dump(mode="json") for item in history],
-    )
-    event = build_tool_result_event(
-        result,
+    committed = commit_tool_results(
+        results=[result],
+        session_store=session_store,
+        session_id=session_id,
         run_id=run_id,
         step_index=step_index,
         agent_id=agent_id,
         metadata=None,
+        deduplicate_messages=False,
     )
-    session_store.append_tool_event(session_id, event)
-    return message
+    return committed.messages[0]
 
 
 def _validate_ready_results(
@@ -214,26 +209,16 @@ async def commit_ready_interaction(
     """
     checkpoint = interaction.checkpoint
     result, all_tool_results = _validate_ready_results(interaction)
-    message = build_tool_result_message(result)
-    messages = [Msg.from_dict(item) for item in session_store.load_messages(interaction.session_id)]
-    if not any(
-        block.tool_use_id == result.tool_use_id
-        for existing in messages
-        for block in existing.tool_results
-    ):
-        messages.append(message)
-        session_store.save_messages(
-            interaction.session_id,
-            [item.model_dump(mode="json") for item in messages],
-        )
-    event = build_tool_result_event(
-        result,
+    commit_tool_results(
+        results=[result],
+        session_store=session_store,
+        session_id=interaction.session_id,
         run_id=interaction.run_id,
         step_index=interaction.step_index,
         agent_id=agent_id,
         metadata=None,
+        deduplicate_messages=True,
     )
-    session_store.append_tool_event(interaction.session_id, event)
     if interaction.resume_phase is not InteractionResumePhase.RESULT_COMMITTED:
         interaction = interaction_service.update_consumed(
             interaction.interaction_id,
@@ -246,7 +231,7 @@ async def commit_ready_interaction(
         session_id=interaction.session_id,
         run_id=interaction.run_id,
         status=RuntimeStatus.OK,
-        tool_result_messages=[build_tool_result_message(item) for item in all_tool_results],
+        tool_result_messages=project_tool_result_messages(all_tool_results),
         tool_results=all_tool_results,
         steps=interaction.step_index + 1,
     )

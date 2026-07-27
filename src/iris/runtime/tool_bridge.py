@@ -1,8 +1,7 @@
 """Runtime 工具桥接。
 
-本模块只把 assistant tool calls 连接到 `ToolExecutor`，并把执行结果转换为
-可回灌模型的 `Msg.tool_result()` 与 session 工具事件；它不调用 provider，也不决定
-后续 loop 行为。
+本模块只把 assistant tool calls 连接到 `ToolExecutor` 并返回有序工具结果；它不调用
+provider、不写入 session，也不决定后续 loop 行为。
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from typing import Any, cast
 
 from ..exceptions import IrisToolExecutionError
 from ..message import Msg, ToolUseBlock
-from ..session import SessionStore
 from ..tools import (
     ReadFileState,
     ToolBatchPlan,
@@ -23,8 +21,6 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
-from .models import ToolBridgeResult
-from .tool_results import build_tool_result_event, build_tool_result_message
 
 
 class ToolBridge:
@@ -86,35 +82,29 @@ class ToolBridge:
         *,
         assistant_message: Msg,
         session_id: str,
-        run_id: str,
-        step_index: int,
         agent_id: str,
         workspace_root: Path,
         permission_mode: str,
-        session_store: SessionStore,
         metadata: Mapping[str, Any] | None,
         tools_enabled: bool = True,
-    ) -> ToolBridgeResult:
-        """执行助手消息中的工具调用并追加 session 工具事件。
+    ) -> list[ToolResult]:
+        """执行助手消息中的工具调用并按原始顺序返回结果。
 
         Args:
             assistant_message (Msg): Provider 返回的 assistant 消息。
             session_id (str): 当前会话 ID。
-            run_id (str): 当前 runtime run ID。
-            step_index (int): 当前 loop 步骤序号；本阶段固定由调用方传入 0。
             agent_id (str): 发起工具调用的 agent 标识。
             workspace_root (Path): 工具执行工作区根目录。
             permission_mode (str): 工具权限模式。
-            session_store (SessionStore): 工具事件写入目标。
             metadata (Mapping[str, Any] | None): 运行态追踪元数据。
             tools_enabled (bool): 本轮是否允许执行工具调用。
 
         Returns:
-            ToolBridgeResult: 工具结果、模型回灌消息和事件快照。
+            list[ToolResult]: 与 assistant tool call 顺序一致的工具结果。
         """
         tool_calls = assistant_message.tool_calls
         if not tool_calls:
-            return ToolBridgeResult()
+            return []
 
         active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
         active_calls: list[ToolUseBlock] = []
@@ -141,21 +131,7 @@ class ToolBridge:
             _merge_active_results(result_slots, active_results)
 
         results = [cast(ToolResult, result) for result in result_slots]
-        messages = [build_tool_result_message(result) for result in results]
-        events = [
-            build_tool_result_event(
-                result,
-                run_id=run_id,
-                step_index=step_index,
-                agent_id=agent_id,
-                metadata=metadata,
-            )
-            for result in results
-        ]
-        for event in events:
-            session_store.append_tool_event(session_id, event)
-
-        return ToolBridgeResult(results=results, messages=messages, events=events)
+        return results
 
 
 def _active_tool_names(tool_view: ToolRegistryView) -> set[str]:

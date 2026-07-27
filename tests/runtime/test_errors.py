@@ -17,7 +17,7 @@ from iris.runtime import (
     normalize_runtime_error,
 )
 from iris.runtime.errors import error_result, tool_error_info
-from iris.runtime.models import RuntimeErrorInfo, RuntimeStatus, ToolBridgeResult
+from iris.runtime.models import RuntimeErrorInfo, RuntimeStatus
 from iris.tools import ToolErrorInfo, ToolResult
 
 
@@ -71,23 +71,21 @@ def test_error_result_preserves_runtime_error_context() -> None:
 
 
 def test_tool_error_info_uses_first_structured_error_or_fallback() -> None:
-    bridge = ToolBridgeResult(
-        results=[
-            ToolResult(
-                tool_use_id="call-1",
-                tool_name="write_note",
-                is_error=True,
-                error=ToolErrorInfo(
-                    code="PERMISSION_ERROR",
-                    message="denied",
-                    details={"effect": "deny"},
-                ),
-            )
-        ]
-    )
+    results = [
+        ToolResult(
+            tool_use_id="call-1",
+            tool_name="write_note",
+            is_error=True,
+            error=ToolErrorInfo(
+                code="PERMISSION_ERROR",
+                message="denied",
+                details={"effect": "deny"},
+            ),
+        )
+    ]
 
-    error = tool_error_info(bridge)
-    fallback = tool_error_info(ToolBridgeResult())
+    error = tool_error_info(results)
+    fallback = tool_error_info([])
 
     assert error.model_dump() == {
         "code": "PERMISSION_ERROR",
