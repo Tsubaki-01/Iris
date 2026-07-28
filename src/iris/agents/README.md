@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 # iris.agents
 
 `iris.agents` 提供 config-first agent 的配置加载和工具注册入口。它负责把
@@ -202,4 +204,17 @@ YAML 中不支持 inline Python 脚本。Python 扩展必须通过可导入的�
 from iris.runtime import RuntimeFactory
 
 runtime = RuntimeFactory.from_config_path("agent.yaml")
+```
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| YAML 字段、默认值与校验 | `config/base.py` | `tests/agents/test_agent_config.py` |
+| 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
+| runtime 配置消费与路径解析 | `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+
+```bash
+uv run pytest tests/agents tests/runtime/test_factory.py
+uv run ruff check src/iris/agents tests/agents
 ```

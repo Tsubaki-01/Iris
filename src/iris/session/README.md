@@ -1,4 +1,6 @@
-# iris.session
+[English](README.en.md)
+
+# `iris.session`
 
 `iris.session` 提供轻量 session 存储协议和进程内实现，用于保存消息、run metadata 与
 工具事件。具体 SQLite 实现位于 `iris.store`。
@@ -57,3 +59,13 @@ Session store 边界使用 `IrisSessionError`。runtime 将其归一化为
 ## 边界
 
 本模块不负责具体 SQLite schema、长期记忆、检索增强或跨进程并发写入协调。
+
+## 维护与验证
+
+修改 `SessionStore` 协议时要同步更新 `iris.store.SQLiteStore`；修改 event 幂等语义时应同时
+覆盖内存与 SQLite backend。
+
+```bash
+uv run pytest tests/session tests/store
+uv run ruff check src/iris/session src/iris/store tests/session tests/store
+```

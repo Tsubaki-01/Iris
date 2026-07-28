@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 # iris.context
 
 `iris.context` 把声明式 YAML 或 Python 对象渲染为三条固定位置的 context
@@ -290,7 +292,7 @@ actual = len(rendered_text)
 ## YAML 加载规则
 
 ```python
-load_context_build_input(path: str | Path) -> ContextBuildInput
+def load_context_build_input(path: str | Path) -> ContextBuildInput: ...
 ```
 
 该函数只有 `path` 一个参数：
@@ -376,3 +378,17 @@ class ContextTemplateRenderer:
 - 查询 memory store。
 - `token estimator`、跨 section 总预算或自动比例分配。
 - 为历史契约提供兼容层。
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| slot/section 数据约束 | `models.py` | `tests/context/test_context_models.py` |
+| YAML 与模板路径解析 | `config.py` | `tests/context/test_context_config.py` |
+| section 顺序、角色与字符上限 | `builder.py` | `tests/context/test_context_builder.py` |
+| XML/Jinja2 渲染 | `renderer.py` | `tests/context/test_context_templates.py` |
+
+```bash
+uv run pytest tests/context
+uv run ruff check src/iris/context tests/context
+```

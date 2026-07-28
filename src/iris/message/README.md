@@ -1,76 +1,119 @@
-# Iris Message
+[English](README.en.md)
 
-为 agent、LLM 与工具之间的通信提供统一消息模型和厂商无关（provider-neutral）的调用边界定义。
+# `iris.message`
 
-## Quick Start
+`iris.message` 定义 Iris 在 agent、runtime、工具和 provider 之间传递的厂商无关消息契约。
+它负责消息块、会话快照以及一次 LLM 请求/响应的数据形状，不负责 provider wire format、
+网络调用、工具执行或 session 持久化。
+
+## 运行要求与快速开始
+
+本包随 Iris 一起安装，要求 Python `>=3.12`。从受支持的顶层入口导入：
 
 ```python
 from iris.message import Conversation, Msg
 
-conv = Conversation()
-conv.add(Msg.system("你是一个得力助手。"))
-conv.add(Msg.user("你好"))
-
-# 转换为供 provider 消费的请求对象
-request = conv.to_llm_request(model="gpt-4o", temperature=0.7)
+conversation = Conversation(
+    messages=[
+        Msg.system("你是一个简洁的助手。"),
+        Msg.user("介绍一下 Iris。"),
+    ]
+)
+request = conversation.to_llm_request("gpt-4o", temperature=0.2)
 ```
 
-## Important Definitions
+`to_llm_request()` 会复制当前消息列表，因此之后修改 `Conversation` 不会改变已经创建的
+`LLMRequest`。
 
-在 `iris.message` 内的核心内容块类型及枚举定义：
+## 数据流
 
-*   **`Role`**: 包含了 `USER`、`ASSISTANT`、`SYSTEM`、`TOOL` 四种常见角色的枚举。
-*   **`ContentBlock`**: 等同于 `TextBlock | ToolUseBlock | ToolResultBlock` 的联合类型。
-*   **`TextBlock`**: 包含简单的纯文本内容 (`text`)。
-*   **`ToolUseBlock`**: LLM 发起的工具调用块，包含 `id`、`name`（工具名称）和 `input`（参数内容）。
-*   **`ToolResultBlock`**: 工具执行的返回结果序列块，包含对应的 `tool_use_id`、`content` 和 `is_error` 报错标识。
+```mermaid
+flowchart LR
+    App["Agent / Runtime"] --> Msg["Msg + ContentBlock"]
+    Msg --> Conversation["Conversation"]
+    Conversation --> Request["LLMRequest"]
+    Request --> Provider["iris.providers"]
+    Provider --> Response["LLMResponse"]
+    Response --> Assistant["response.to_msg()"]
+```
 
-## API
+provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 LiteLLM/OpenAI 原始对象。
+
+## 公开接口
+
+`iris.message.__all__` 只包含以下九项：
+
+- `Role`: `system`、`user`、`assistant`、`tool` 角色枚举。
+- `TextBlock`: 文本内容块。
+- `ToolUseBlock`: 工具调用的 `id`、`name` 与结构化 `input`。
+- `ToolResultBlock`: 工具结果的调用 ID、名称、文本、错误标记和元数据。
+- `ContentBlock`: 上述三类 block 的联合类型。
+- `Msg`: 一条统一消息。
+- `Conversation`: 有序消息集合。
+- `LLMRequest`: 一次 provider-neutral 模型请求。
+- `LLMResponse`: 一次 provider-neutral 模型响应。
 
 ### `Msg`
-表示一次通用且统一的消息单元（如用户输入、LLM 回复或工具结果），在系统内保持格式一致性。推荐使用其内置的工厂方法创建：
 
-*   `Msg.system(content: str, **kwargs)`: 创建系统提示消息。
-*   `Msg.user(content: str, **kwargs)`: 创建用户消息。
-*   `Msg.assistant(content: str | list[ContentBlock], **kwargs)`: 创建包含纯文本或内容块列表（如工具调用）的助手消息。
-*   `Msg.tool_result(tool_use_id: str, content: str = "", is_error: bool = False, **kwargs)`: 创建给 LLM 返回的工具执行结果（按照主流 API 习惯其底层角色实为 `USER` 角色）。
-*   `text` (property): 拼接并返回消息包含的所有有效文本内容。
-*   `tool_calls` / `tool_results` (property): 便捷过滤并返回当前消息下的工具调用块或结果块列表。
+推荐使用 `Msg.system()`、`Msg.user()`、`Msg.assistant()` 和 `Msg.tool_result()` 创建消息。
+`text`、`tool_calls`、`tool_results` 与 `has_tool_calls` 提供只读投影视图。
 
-### `Conversation`
-组成会话的有序消息集合，负责会话管理与 API 请求的构造转换。
-
-*   `add(msg: Msg)`: 会话末尾追加一条消息。
-*   `add_many(msgs: Sequence[Msg])`: 一次性追加多条消息。
-*   `system_prompt` (property): 提取并返回会话中的首条系统引导文本。
-*   `non_system_messages` (property): 过滤掉系统提示的全部用户、助手消息清单。
-*   `to_llm_request(model: str, **options)`: 将会话历史转换为一次厂商无关的调用请求 `LLMRequest`。
-
-### `LLMRequest`
-一次完整的 LLM 请求级上下文抽象对象（导入自 `iris.message.llm`，统一向外暴露）。
-
-*   **主要属性**: `model`、`messages`（已发送的消息历史）、`temperature`、`max_tokens`、`tools`、`response_format` 等。
-*   `system_prompt()` / `non_system_messages()`: 协助外部 Adapter 将 system 拆分的便捷方法（比如兼容 Anthropic 把 system 单独抽离顶层字段的场景）。
-*   `from_conversation(conversation: Conversation, model: str, **options)`: 使用当前会话快照进行初始化构建。
-
-### `LLMResponse`
-Provider-neutral 返回模型抽象，负责标准化接受并解析厂商 Raw Response。
-
-*   **重要属性**: `provider`、`content`（模型输出的正文/工具块集）、`input_tokens` 与 `output_tokens` 相关的 token 计数等。
-*   `to_msg() -> Msg`: 将大模型响应安全转换为内部系统的助手消息。厂商特有字段（包括模型名、停止原因和用量开销等）会被自动折叠进 `Msg.metadata` 内部以便上层做日志观测而不污染消息结构。
-
-## Examples
-
-### 建立与回传包含工具调用的消息通信
+工具结果在 Iris 内部仍使用 `Role.USER`，由 provider mapper 在 wire format 阶段转换成对应的
+tool message。不要根据内部 role 自行拼接厂商请求。
 
 ```python
 from iris.message import Msg, TextBlock, ToolUseBlock
 
-# 1. 产生一条携带了具体工具调用信息（也可能有附加文本）的助手回复
-tool_call = ToolUseBlock(id="call_abc123", name="search", input={"query": "Iris 框架文档"})
-assistant_msg = Msg.assistant(content=[TextBlock(text="让我查一下相关的资料"), tool_call])
-assert assistant_msg.has_tool_calls
+call = ToolUseBlock(id="call_1", name="search", input={"query": "Iris"})
+assistant = Msg.assistant([TextBlock(text="我来查询。"), call])
+result = Msg.tool_result(call.id, "查询完成", name=call.name)
+```
 
-# 2. 将工具执行完毕的结果再次组装并传回上下文中
-result_msg = Msg.tool_result(tool_use_id=tool_call.id, content="查询成功：文档链接...", is_error=False)
+`ToolResultBlock.metadata` 会保留标准字段，并把未知扩展收纳到 `extra`，避免与后续标准字段冲突。
+
+### `Conversation`
+
+`Conversation` 提供 `add()`、`add_many()`、`last`、`turn_count`、`system_prompt`、
+`non_system_messages`、`slice_recent()`、`clear()`、`estimate_tokens()` 与
+`to_llm_request()`。`estimate_tokens()` 只是按字符数估算，不是模型 tokenizer。
+
+### `LLMRequest`
+
+请求字段包括 `model`、`messages`、采样参数、`tools`、`tool_choice`、
+`response_format`、`stream`、`timeout`、`provider_options` 和 `metadata`。
+`from_conversation()`、`system_prompt()` 与 `non_system_messages()` 用于构建和读取请求快照。
+
+`provider_options` 只承载少量明确支持的 provider 选项；当前 active provider path 只读取
+`api_style` 和 `reasoning_effort`。
+
+### `LLMResponse`
+
+响应字段包括 provider、响应/模型标识、内容块、结束原因、token 用量、reasoning 与 metadata。
+`to_msg()` 创建 assistant `Msg`，并把 provider、model、finish reason 与 usage 放入消息元数据。
+原始厂商响应到 `LLMResponse` 的解析由 provider client 完成，不属于该模型的方法。
+
+## 错误与边界
+
+这些对象是 Pydantic 模型；直接构造时的字段错误表现为 `pydantic.ValidationError`。
+`Msg.from_dict()` 遇到未知内容块类型时抛出 `ValueError`。runtime 会在自己的公开执行边界
+归一化运行期错误，但本包不会主动包装模型构造错误。
+
+本包不负责：
+
+- LiteLLM/OpenAI/Anthropic 消息格式映射；
+- 网络请求、重试、流式传输或错误映射；
+- 工具 schema 生成与执行；
+- history 持久化或上下文预算管理。
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| 消息块、工厂方法与会话行为 | `message.py` | `tests/test_message_models.py` |
+| 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_message_models.py`, `tests/test_provider_client.py` |
+| provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
+
+```bash
+uv run pytest tests/test_message_models.py tests/test_provider_client.py
+uv run ruff check src/iris/message tests/test_message_models.py
 ```

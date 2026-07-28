@@ -1,4 +1,6 @@
-# iris.templates
+[English](README.en.md)
+
+# `iris.templates`
 
 `iris.templates` 提供官方 agent 配置模板的 scaffold 能力。它把 Iris 包内置的模板文件复制到
 用户指定目录，供 CLI 或调用方复用。
@@ -17,6 +19,7 @@ written = scaffold_template("file-agent", "./my-agent")
 
 - `agent.yaml`
 - `README.md`
+- `README.en.md`
 
 生成的 `agent.yaml` 可以交给 `iris.agents.load_agent_config()` 读取。
 
@@ -56,3 +59,14 @@ sdist/wheel，并至少包含：
 
 - `agent.yaml`
 - `README.md`
+- `README.en.md`
+
+## 维护与验证
+
+`pyproject.toml` 通过 `iris = ["templates/builtin/*/*"]` 打包模板文件。新增或修改模板时，
+应验证 scaffold 结果能被 `load_agent_config()` 加载且工具注册成功。
+
+```bash
+uv run pytest tests/templates/test_scaffold.py
+uv run ruff check src/iris/templates tests/templates
+```

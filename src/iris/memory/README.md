@@ -1,160 +1,176 @@
-# Iris 记忆系统 (Memory)
+[English](README.en.md)
 
-长期记忆内核及其 Python SDK 门面。提供具有细粒度隔离范围（Scope）的分层记忆模型，涵盖观察片段（L1）、候选提取和长期知识（L2）的全生命周期管理，支持底层存储与本地文件系统的自动镜像投射（Mirror）和渐进式的记忆编排流程（Orchestrator）。
+# `iris.memory`
 
-## 架构设计
+`iris.memory` 是 Iris 的本地长期记忆 SDK：它定义隔离 scope、L1 episode、候选记忆、L2
+长期条目、审计事件、SQLite 存储、文件镜像、显式编排和只读工具。SQLite 是权威数据源；
+`.iris/memory/` 下的 Markdown/JSON 是便于人工查看的投影。
 
-记忆模块采用事件溯源（Event Sourcing）与分离责任（CQRS）思想设计，内部采用存储接口契约（Store Protocol）承载权限和防腐设计。包含原始观察记录（L1）和语义提炼总结（L2），并提供一套灵活的编排管道用于自动候选抽取和显式晋升。同时向大模型工具层面仅暴露受限读端访问。
+Memory 当前不是 `AgentConfig` 的 YAML 字段，也不会被 runtime 自动启用或自动召回。
+调用方需要显式构造 `MemoryService`，注入 `RuntimeFactory`，并在每次运行的
+`RuntimeOptions.memory_query` 或 `memory_results` 中选择要注入的内容。
 
-```mermaid
-graph TD
-    Client[客户端 / Agent] -->|直接显式读写| Service[MemoryService]
-    Client -->|流水线加工 / 提取| Orch[MemoryOrchestrator]
+## 运行要求与快速开始
 
-    Orch -->|借用基础操作| Service
-    Orch -.->|依赖| Extractor[MemoryExtractor]
-    Orch -.->|依赖| Policy[MemoryPolicy]
-
-    Service -->|权威数据存取 / 持久化| Store[MemoryStore]
-    Service -.->|可选双写 / 只读投影| Mirror[FileMemoryMirror]
-
-    Store -.-> DB[(SQLite DB)]
-    Mirror -.-> FS["文件系统 (.iris/memory)"]
-
-    Tools[Agent 工具系统] -->|Search/List/Get| Service
-    Service -.->|查询召回结果| Builder(MemoryContextBuilder)
-    Builder -.->|转换为带预算限制片段| Tools
-```
-
-核心流向生命周期：
-1. **L1**：`MemoryEpisode` （记录发生过的基础客观事件）。
-2. **候选**：经由 `MemoryExtractor` 从 L1 中产生的 `MemoryCandidate` （存疑 / 可信待定态）。
-3. **L2**：满足 `MemoryPolicy` 阈值或被明确接受后晋升处理得到的 `MemoryItem` （稳态活跃或已删除状态知识）。
-
-## 快速入门
+本包随 Iris 安装，使用标准库 SQLite；FTS5 可用时用于检索，不可用或无 Unicode 命中时回退
+到确定性的文本搜索。
 
 ```python
 from pathlib import Path
+
 from iris.memory import (
     MemoryConfig,
+    MemoryQuery,
     MemoryScope,
     MemoryWriteInput,
-    MemoryQuery,
-    build_memory_service_from_config
+    build_memory_service_from_config,
 )
 
-# 1. 依据声明式配置及 Workspace 路径安全地创建包含底层存储与镜像的统一 Service
-config = MemoryConfig(backend="sqlite", path=".iris/memory/memory.db")
-service = build_memory_service_from_config(config, workspace_root=Path("/path/to/project"))
-
-# 2. 划定目标边界作用域
-scope = MemoryScope(
-    workspace_id="test-workspace",
-    agent_id="python-agent",
-    visibility="agent"
+workspace = Path(".").resolve()
+service = build_memory_service_from_config(
+    MemoryConfig(backend="sqlite"),
+    workspace,
 )
+assert service is not None
 
-# 3. 显式记录直接形成的长期知识点 (自动关联审计事件)
+scope = MemoryScope(workspace_id=str(workspace), agent_id="notes-agent")
 item = service.remember(
     MemoryWriteInput(
         scope=scope,
-        text="代码约定：所有的内部核心组件日志要输出至 stdout",
-        reason="用户在 PR review 时提出要求的系统级规范"
+        text="用户偏好简洁中文回答",
+        reason="用户显式说明",
     )
 )
-
-# 4. 根据相关性或自然语言查询进行搜索
-query = MemoryQuery(scope=scope, text="日志输出要求", limit=3)
-
-# 5. 生成供注入 Prompt 的安全截断上下文片段包
-context_bundle = service.build_context(query, max_chars=4000)
-for fragment in context_bundle.fragments:
-    print(f"[{fragment.category}/{fragment.kind}] {fragment.text}")
+results = service.recall(MemoryQuery(scope=scope, text="回答偏好"))
+bundle = service.build_context(
+    MemoryQuery(scope=scope, text="回答偏好"),
+    max_chars=1000,
+)
 ```
 
-## 重要定义
+`backend="none"` 返回 `None` 且不创建文件。memory root 和 database path 必须解析在调用方给定
+的 workspace 内。
 
-### 数据流结构与模型
-- **`MemoryScope`**: 核心访问与隔离边界。由 `workspace_id`、`agent_id`、`collection`、`visibility` 与规范化后的 `session_id` 共同限定读写范围；工具入参不能覆盖 scope 字段。
+## 架构与数据流
 
-| visibility | 含义 | session_id | agent_id |
-| ---- | ---- | ---- | ---- |
-| session | 当前会话/任务临时记忆 | 必须有 | 执行 agent |
-| agent | 某个稳定 agent 的长期记忆 | 必须为 None | 稳定 agent id |
-| workspace | 项目共享记忆 | 必须为 None | 建议固定为 __workspace__ |
-
-`MemoryScopeConfig.to_scope()` 会在 `visibility != session` 时忽略运行时 `session_id`，保证 agent/workspace 级记忆不会被会话上下文意外切分。
-项目共享记忆使用 `workspace_shared_scope(workspace_id)` 构造，内部固定采用 `agent_id="__workspace__"`、`collection="shared"`、`visibility=workspace`。
-
-`collection` 当前是 scope 内的命名空间字段，用于为未来的用途分区预留隔离边界；它已经参与 SQLite 硬过滤，但还不是一等业务对象。当前不提供 collection registry、collection 管理 API、跨 collection 查询或由工具入参切换 collection 的能力。现阶段建议只使用少量约定值：
-
-| collection | 当前定位 |
-| ---- | ---- |
-| default | 默认长期记忆 |
-| shared | workspace 共享记忆 |
-| scratch | 临时工作记忆 / subagent 草稿 |
-
-除非 runtime 或上层策略显式授权，查询默认不跨 collection。
-
-- **`MemoryAccessPolicy`**: 工具执行期的访问策略。`actor_agent_id` 表示谁在执行，`write_scope` 表示默认写入位置，`read_scopes` 表示只读工具允许读取的范围。subagent 不应通过工具入参决定 scope，而应由 runtime 创建时注入 `access_policy_factory`。
-- **`MemoryEpisode`**: 基础观察片段模型（L1）。通常为 LLM 推理响应的快照或工具行为日志。
-- **`MemoryCandidate`**: 从基础片段提取出的未确认候选组，携有原始置信度与重要度的评分。需经历判断验证阶段 `pending`/`accepted`/`rejected` 等才能最终变更为真实长期项；pending 候选晋升通过 `promote_candidate()` 在单个 SQLite 事务内完成。
-- **`MemoryItem`**: 标准的终态持久化知识条目结构（L2）。具备多状态管控及其相关的事件追溯 `episode_id` 标记。
-- **`MemoryEvent`**: 一套伴随系统操作发生记录的操作事件日志实体，提供基于该实体进行的审计。
-- **`MemoryQuery`**: 将文本匹配、元数据和限制边界统合到一次请求查询中配置的数据对象结构。
-- **`MemoryContextBundle`**: `builder` 基于字符限制预算返回的 prompt/context 输入候选包。它面向上层 context 或 runtime 组装使用，片段保留 `category`、`kind`、`level`、`reason`、`confidence` 和 `importance` 等记忆语义；`score`、`source` 属于 `MemorySearchResult` 的召回排序与调试信息，不默认进入 prompt-facing fragment。
-
-### 元数据枚举集
-- **`MemoryVisibility`**: 可见度分级（`session`, `agent`, `workspace`）。
-- **`MemoryActor`**: 操作动作来源（例如：`SDK`）。
-- **`MemoryLevel`**: 记忆等级（`l1`：情境与短时；`l2`：语义化知识）。
-- **`MemoryItemKind`**: 功能性细分标识（事实 `fact`、偏好 `preference`、笔记 `note`、订正 `correction` 等）。
-- **`MemoryCandidateStatus`**: 候选管控流转状态（`pending`, `accepted`, `rejected`, `merged`）。
-
-## API 模块划分
-
-### `iris.memory.MemoryService`
-基础与显式的增删查改内核服务，对存储机制执行持久化（双写）并处理所有的审计派发逻辑。
-- `observe(input: MemoryObserveInput) -> MemoryEpisode`: 忠实记录不可变更的 L1 事件片段作为发生来源备查验证并发布给投影器。
-- `remember(input: MemoryWriteInput) -> MemoryItem`: 单步直写模式，强制产生一条活跃状态的 L2 记忆。
-- `promote_candidate(candidate_id: str, scope: MemoryScope, kind: MemoryItemKind, actor: MemoryActor, reason: str) -> MemoryItem`: 原子晋升 pending 候选，单事务写入 L2 item、ADD event、candidate accepted 状态和 CANDIDATE_ACCEPT event；已接受候选重试时返回既有 item，不重复生成。
-- `recall(query: MemoryQuery) -> list[MemorySearchResult]`: 返回根据参数结构命中的排序记录。
-- `forget(item_id: str, scope: MemoryScope, actor: MemoryActor, reason: str) -> bool`: 为指定记忆打上删除审计标签及清理标识标记；返回是否实际删除了 active item，未命中时不写 DELETE event 也不重建 mirror。
-- `build_context(query: MemoryQuery, max_chars: int) -> MemoryContextBundle`: 以最安全的姿态集成请求和防暴涨截断控制生成最终的上下文组。
-
-### `iris.memory.MemoryOrchestrator`
-基于可注入抽取规则实现的系统智能调度流，对自动化提取与归档候选处理流水线的包装外壳。
-- `observe(input: MemoryObserveInput) -> list[MemoryCandidate]`: 首先记录基础 L1 片段，然后依据 `Extractor` 在该请求期直接抽出可能的待处理候选。
-- `process_candidates(scope: MemoryScope, limit: int) -> list[MemoryItem]`: 批处理 Pending 队列。依凭指定的自动控制 `Policy` （重要性或信度阈值决断），将允许的数据落盘 L2。
-
-### 配置与构造 (`config.py`)
-- **`build_memory_service_from_config(config: MemoryConfig, workspace_root: Path) -> MemoryService | None`**:
-  将声明式的纯 Pydantic 参数绑定转换。支持判断存储类型并选择挂载（或关闭）SQLite 以及建立防逃离拦截的文件系统 Mirror。
-
-### Pydantic 数据存储协议 (`MemoryStore`)
-系统允许自建 Backend 来适配外部持久服务要求。需实现对实体和相关联的 `Event` 操作审计处理支持。自带 `SQLiteMemoryStore` 并已集成简略版 FTS 全文搜索。
-
-`MemoryItem.id` 与 `MemoryCandidate.id` 作为全局实体 ID 使用；新增 item/candidate 时如果 ID 已存在，SQLite store 会拒绝写入，避免跨 scope 静默覆盖。更新和删除必须通过 `id + scope` 命中目标实体。
-
-SQLite 连接通过 store 内部 helper 管理事务并在退出时显式关闭，避免 Windows 临时数据库文件被连接句柄占用。
-
-`MemoryStore.list_items(scope, limit=50, include_deleted=False, categories=None, kinds=None)` 会在存储层先应用 `categories` / `kinds` 过滤，再排序并执行 `limit`。因此 `memory_list(category=user, limit=10)` 表示“最近 10 条 user 记忆”，不是“最近 10 条记忆中筛 user”。`limit=None` 仅用于 mirror 全量 active item 投影。
-
-`MemoryStore.delete_item(...) -> bool` 只在命中 active item 时写 tombstone 和 DELETE event。`MemoryStore.promote_candidate(...) -> MemoryItem` 是 candidate 到 L2 item 的原子事务入口，避免 `remember()` 与 `accept_candidate()` 两步之间失败后留下 item 已创建但 candidate 仍 pending 的不一致状态。
-
-### 文件镜像 (`FileMemoryMirror`)
-`FileMemoryMirror` 保持单一 `.iris/memory/` 文件树，便于用户人工查找；它不会按 scope 拆出隐藏目录。为避免跨 scope rebuild 互相清理，Markdown generated block 的 marker 会包含稳定 `scope_hash`：
-
-```md
-<!-- iris-memory-item:{scope_hash}:{item_id} -->
-...
-<!-- /iris-memory-item:{scope_hash}:{item_id} -->
+```mermaid
+flowchart LR
+    Input["MemoryObserveInput / MemoryWriteInput"] --> Service["MemoryService"]
+    Service --> Store["MemoryStore"]
+    Store --> SQLite["SQLiteMemoryStore 权威数据"]
+    Service --> Mirror["FileMemoryMirror 人类可读投影"]
+    Episode["L1 MemoryEpisode"] --> Orchestrator["MemoryOrchestrator 显式调用"]
+    Orchestrator --> Candidate["MemoryCandidate"]
+    Candidate --> Item["L2 MemoryItem"]
+    Query["MemoryQuery"] --> Service
+    Service --> Context["MemoryContextBundle"]
+    Context --> Runtime["RuntimeOptions 显式注入"]
 ```
 
-`rebuild_from_store(store, scope)` 只删除当前 scope 的 generated blocks，然后从 SQLite 重建当前 scope 的投影；其它 scope 的 blocks 会保留。`Tasks/task.json` 同样通过 `scope_hash` 区分不同 scope 的结构化任务条目。
+### Scope 与隔离
 
-`Sessions/recent_events.md` 是最近事件投影，只保留每个 scope 最近 100 条事件，并在文件头说明完整审计日志以 SQLite `memory_events` 为准。其它 Markdown item mirror 是 active item 的全量投影，不再限制为最近 100 条。block 替换会以字面字符串写入内容，避免 Windows 路径或正则片段中的 `\1`、`\g<name>` 被 `re.sub` 当作替换语法解释。
+`MemoryScope` 由 `workspace_id`、`agent_id`、`collection`、`visibility` 与可选
+`session_id` 组成。`visibility=session` 必须提供 session ID；agent/workspace scope 会忽略
+运行时 session，以保持跨会话可见。
 
-### 工具和其它组件 (`tools.py` 与 `context.py`)
-- **`MemoryContextBuilder`**: 用于保障不宕机超出 LLM 负载上下文的安全封装生成器。如未超出阈值按原样传递，溢出尾部做预定剪断标记并丢入警示常量。它只把召回结果转换为带预算和语义字段的片段，不决定 XML 标签；后续 runtime/context 层应将片段映射为固定 `<memory>` 标签，并按需把 `category`、`kind`、`level` 放入属性或分组。
-- **`register_memory_tools(...)`**: 构建并挂载记忆 `Search`、`Get` 及 `List` 读取组件给大语境框架交互体系使用，保持严格沙箱安全仅读操作。推荐传入 `access_policy_factory`，让 runtime 显式挂载 `write_scope` 与多个 `read_scopes`；旧 `scope_factory` 会被包装成读写同 scope 的默认策略。`memory_search`、`memory_list`、`memory_get` 会遍历 policy 授权的 read scopes，工具输入仍不能传入或覆盖 `workspace_id`、`agent_id`、`visibility`、`session_id`。`memory_list` 的 category 过滤会下推到 store，再应用 limit。
+`workspace_shared_scope(workspace_id)` 使用固定的 `agent_id="__workspace__"`、
+`collection="shared"` 和 workspace 可见性。SQLite 的 get/list/search/update/delete 都执行
+完整 scope 过滤；错误 scope 不会泄露条目是否存在。
+
+### 记忆生命周期
+
+- `observe()` 保存 L1 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
+- `remember()` 显式写入 L2 `MemoryItem` 与 `ADD` 事件。
+- `recall()` 返回带排序分数和来源的 `MemorySearchResult`。
+- `forget()` 使用 tombstone，不物理删除；默认查询不返回 deleted 条目。
+- `MemoryOrchestrator.observe()` 通过可注入 extractor/classifier 生成候选。
+- `process_candidates()` 才会按 policy 接受、拒绝或晋升候选；默认
+  `NoOpMemoryExtractor` 不产生候选，也不存在后台自动提取。
+
+候选晋升在 SQLite 中以单事务完成，重复晋升保持幂等；条目、候选和事件 ID 在所有 scope
+中全局唯一。
+
+### Context 注入
+
+`MemoryContextBuilder` 保持检索顺序，在 `max_chars` 预算内生成
+`MemoryContextBundle.fragments`，必要时只截断首个片段并记录 `omitted_count`。片段保留
+category、kind、level、reason、confidence 和 importance，但不会把 store source 或检索
+score 默认写进 prompt。
+
+runtime 只有在调用方显式提供 memory 时才执行：
+
+```python
+from iris.runtime import RuntimeFactory
+from iris.runtime.models import RuntimeOptions
+
+runtime = RuntimeFactory.from_config_path(
+    "agent.yaml",
+    memory_service=service,
+)
+result = await runtime.run_loop(
+    "继续上次任务",
+    options=RuntimeOptions(memory_query=MemoryQuery(scope=scope, text="上次任务")),
+)
+```
+
+## 公开接口分组
+
+`iris.memory` 顶层导出较大，按能力分为：
+
+- 模型与枚举：`MemoryScope`、`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
+  `MemoryEvent`、`MemoryQuery`、`MemorySearchResult`、`MemoryContextBundle` 等；
+- 服务与协议：`MemoryService`、`MemoryStore`、`SQLiteMemoryStore`；
+- 配置：`MemoryConfig` 及其子配置、`build_memory_service_from_config()`、
+  `resolve_memory_path()`；
+- 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
+  rule/no-op 实现；
+- 投影：`FileMemoryMirror`、`MemoryContextBuilder`；
+- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、access policy factory 与
+  `register_memory_tools()`。
+
+完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
+接口：SQLite 私有 SQL helper、mirror marker 格式和工具 payload helper。
+
+## 只读 memory 工具
+
+`register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
+`READ` 能力。当前没有模型可见的 remember/forget 工具；写入仍须通过 SDK 或上层策略显式完成。
+
+工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；默认
+可同时读取自身 scope 和约定的 workspace-shared scope，并按 item ID 去重。
+
+## 文件镜像与持久化
+
+`FileMemoryMirror.initialize_layout()` 创建固定的 `Memory.md`、User、Feedback、Reference、
+Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成功写入 store 后同步镜像；
+`rebuild_from_store()` 可按 scope 确定性重建 active 条目和最近 100 条事件。
+
+镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
+以及可选 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
+
+## 限制与非目标
+
+- 不提供向量数据库、embedding、语义 reranker 或远程后端。
+- 不自动从 session 消息提取记忆，不启动后台任务。
+- `MemoryOrchestratorConfig.enabled` 目前只是配置形状，
+  `build_memory_service_from_config()` 不会据此构造 orchestrator。
+- `MemoryWritePolicyConfig` 只表达当前 `sdk_only` / `tombstone` 契约，不是通用策略引擎。
+- `WorkingMemoryFrame` 是预留数据模型，当前 runtime active path 不消费它。
+- `collection` 参与 SQLite 硬隔离，但当前不是独立的业务管理对象。
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| scope、条目、候选与事件约束 | `models.py` | `tests/memory/test_models.py` |
+| SDK 生命周期与审计 | `service.py` | `tests/memory/test_service.py` |
+| SQLite schema、隔离、FTS 与事务 | `sqlite.py` | `tests/memory/test_sqlite_store.py` |
+| 候选提取/分类/晋升 | `orchestrator.py` | `tests/memory/test_orchestrator.py` |
+| 文件投影 | `mirror.py` | `tests/memory/test_mirror.py` |
+| 只读工具与 access policy | `tools.py` | `tests/memory/test_tools.py` |
+| runtime 显式注入 | `../runtime/memory_context.py` | `tests/runtime/test_memory_context.py` |
+
+```bash
+uv run pytest tests/memory tests/runtime/test_memory_context.py
+uv run ruff check src/iris/memory tests/memory
+```

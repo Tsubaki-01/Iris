@@ -1,4 +1,6 @@
-# iris.tools
+[English](README.en.md)
+
+# `iris.tools`
 
 `iris.tools` 是 Iris 的工具内核，负责把 Python 函数或 `BaseTool` 子类包装成模型可见的工具 schema，并在执行时统一处理参数校验、权限、结果归一化、超长输出落盘、middleware 和熔断。
 
@@ -334,4 +336,18 @@ ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 register_file_tools, schema_from_callable, schema_from_pydantic_model,
 to_anthropic_tool_schema, to_openai_chat_tool_schema,
 to_openai_responses_tool_schema, tool
+```
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| 基础模型与 callable 适配 | `base.py`, `schema.py` | `tests/tools/test_schema.py`, `test_executor.py` |
+| 注册、过滤与 deferred 检索 | `registry.py`, `discovery.py` | `test_registry.py`, `test_discovery.py` |
+| 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `test_executor.py`, `test_executor_preflight.py` |
+| 文件工具安全边界 | `builtin/file.py` | `test_file_tools.py`, `test_file_registry.py` |
+
+```bash
+uv run pytest tests/tools
+uv run ruff check src/iris/tools tests/tools
 ```

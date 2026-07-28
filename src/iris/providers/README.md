@@ -1,78 +1,86 @@
-# iris.providers
+[English](README.en.md)
 
-`iris.providers` 是 Iris 框架的底层模型 API 交互模块。该模块将内部的统一数据结构请求通过 LiteLLM Chat Completion bridge 发送至对应的 LLM 厂商，并将返回内容解析为 Iris 的标准响应模型。
+# `iris.providers`
 
-## Quick Start
+`iris.providers` 是 Iris 的模型调用边界。它把 `iris.message.LLMRequest` 映射为 LiteLLM
+Chat Completion 调用，并把响应与异常归一化回 Iris 类型。runtime、message 和 tools 不需要
+了解厂商 wire format。
 
-以下示例展示了如何使用 `ProviderClient` 发送 `LLMRequest`：
+当前 active path 只支持非流式 Chat Completion；Responses API、streaming、可注入 HTTP
+client、历史 adapter API 与 `close()` 都不是公开能力。
+
+## 快速开始
 
 ```python
 import asyncio
-from iris.message import Msg
-from iris.message.llm import LLMRequest
-from iris.providers import ProviderClient
 
-async def main():
-    # 1. 实例化所需要的 Provider Client
-    client = ProviderClient(provider="openai", api_key="your-api-key")
+from iris.message import LLMRequest, Msg
+from iris.providers import create_provider_client
 
-    # 2. 构造通用的 LLMRequest（模型定义位于 iris.message.llm 中）
-    request = LLMRequest(model="gpt-4o", messages=[Msg.user("你好")])
 
-    # 3. 发送请求并获取 LLMResponse
-    response = await client.complete(request)
+async def main() -> None:
+    client = create_provider_client("openai/gpt-4o", api_key="sk-...")
+    response = await client.complete(
+        LLMRequest(model="gpt-4o", messages=[Msg.user("你好")])
+    )
     print(response.to_msg().text)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+asyncio.run(main())
 ```
 
-## Important Definitions
+## 调用链
 
-- **Provider 隔离原则**: 该包下的所有类仅处理通信层与协议内容构造。LLM 的公共模型（如 `LLMRequest` 和 `LLMResponse`）与消息类型（如 `Msg`, `Role`, `TextBlock`）均由外部 `iris.message.llm` 输入和构造，不在此模块定义。
+```mermaid
+flowchart LR
+    Route["provider/model"] --> Factory["create_provider_client"]
+    Config["iris.config"] --> Factory
+    Factory --> Client["ProviderClient"]
+    Request["LLMRequest"] --> Client
+    Client --> Mapper["OpenAIChatMapper 内部实现"]
+    Mapper --> LiteLLM["litellm.acompletion"]
+    LiteLLM --> Response["LLMResponse / IrisProviderError"]
+```
 
-## API
+`OpenAIChatMapper` 是内部实现，不从 `iris.providers` 顶层导出，调用方不应依赖它。
 
-### `class ProviderClient`
-Provider Chat Completion 调用层的实体。只负责将 `LLMRequest` 转换为 LiteLLM chat kwargs，并把 LiteLLM 响应和错误映射回 `LLMResponse` 与 `IrisProviderError` 等 Iris 自定义异常。
+## 公开接口
 
-- **构造参数:**
-  - `provider: str`: Iris provider id，例如 `"openai"` 或用户注册的 `"siliconflow"`。
-  - `litellm_provider: str | None = None`: 实际传给 LiteLLM 的 provider 名称；未传时使用 `provider`。
-  - `api_key: str`: 厂商鉴权所需的 API Key。
-  - `base_url: str | None = None`: 覆盖原本的 Base URL。
-  - `timeout: float | None = None`: 请求超时时间。
-  - `headers: dict[str, str]`: 透传给 LiteLLM 的额外 headers。
+`iris.providers.__all__` 只导出：
 
-- **`async def complete(request: LLMRequest) -> LLMResponse`**
-    发起非流式 Chat Completion 请求。包含完整的报错映射流程。不支持 `stream=True` 与 Responses API 风格。
+- `ModelRoute(provider, model)`：冻结的路由模型。
+- `parse_model_route(model)`：按第一个 `/` 解析 `provider/model`。
+- `create_provider_client(...)`：根据路由、配置与显式参数装配 client。
+- `ProviderClient`：执行一次非流式 Chat Completion。
 
-`ProviderClient` 不暴露可注入的 HTTP client；测试和 SDK 调用方应通过 monkeypatch
-`litellm.acompletion()` 或注入 runtime provider 边界来控制调用行为。
-构造器会拒绝未知参数，避免不受支持的输入被静默忽略。
+### 路由与配置
 
-### `ModelRoute` / `parse_model_route()` / `create_provider_client()`
-Provider factory 负责把高层 `provider/model` 路由转换为具体 `ProviderClient`。
+内置 Iris provider id 为 `openai`、`anthropic` 和 `deepseek`。自定义 provider 只有在已初始化
+`Config.providers` 且包含 `base_url` 时才进入注册表；只配置 API key 不会注册 provider。
 
-- `ModelRoute`: 保存 `provider` 与 provider 内部模型名。
-- `parse_model_route(model: str) -> ModelRoute`: 解析 `openai/gpt-4o` 这类路由字符串。
-- `create_provider_client(...) -> ProviderClient`: 从内置 provider 与 `Config.providers`
-  组成的注册表中解析 provider，从显式参数或 `Config.provider_api_keys` 中解析 API key，
-  并构造 `ProviderClient(provider=...)`。
+API key 优先级：
 
-Factory 只做 provider client 装配，不直接读取 `os.environ` 或 `.env` 文件。环境变量解析
-集中在 `iris.config.init_config()`，其中 `IRIS_PROVIDER_API_KEYS__OPENAI` 这类 nested env
-会进入 `Config.provider_api_keys`。新代码应从 `iris.providers` 导入这些对象。
+1. `create_provider_client(..., api_key=...)`；
+2. `Config.provider_api_keys[provider]`；
+3. `Config.api_key`。
 
-OpenAI-compatible 中转站通过 `Config.providers` 注册，例如：
+factory 不直接读取 `os.environ` 或 dotenv 文件。先通过 `iris.init_config()` 初始化：
 
-```env
+```python
+import iris
+from iris.providers import create_provider_client
+
+iris.init_config(env_file=".env.local")
+client = create_provider_client("deepseek/deepseek-chat")
+```
+
+OpenAI-compatible 中转站使用 Iris provider id 与 LiteLLM provider id 两层配置：
+
+```dotenv
 IRIS_PROVIDER_API_KEYS__SILICONFLOW=sk-xxx
 IRIS_PROVIDERS__SILICONFLOW__LITELLM_PROVIDER=openai
 IRIS_PROVIDERS__SILICONFLOW__BASE_URL=https://api.siliconflow.cn/v1
 ```
-
-然后在 `agent.yaml` 中使用 Iris provider id：
 
 ```yaml
 model:
@@ -80,11 +88,45 @@ model:
   name: deepseek-ai/DeepSeek-V3
 ```
 
-这里 `provider: siliconflow` 是 Iris 内部 provider id，用于查找 `Config.providers` 和
-`Config.provider_api_keys`。`litellm_provider: openai` 表示让 LiteLLM 使用 OpenAI
-Chat Completions adapter 组包，并将 `base_url` 指向中转站；它不会作为请求体字段传给中转站。
-最终中转站收到的是 OpenAI-compatible 请求，其中 `model` 为 `deepseek-ai/DeepSeek-V3`。
+`siliconflow` 用于 Iris 本地配置查找；`openai` 选择 LiteLLM adapter。请求体不包含这两个
+provider 字段，发送给中转站的 `model` 是 `deepseek-ai/DeepSeek-V3`。
 
-如果某个 provider 已经作为 LiteLLM 原生 provider 注册并可由 LiteLLM 识别，可以把
-`litellm_provider` 配成该 LiteLLM provider 名称；这时 LiteLLM 模型名前缀会变为
-`<litellm_provider>/<model>`。
+### `ProviderClient`
+
+构造字段为 `provider`、`litellm_provider`、`api_key`、`base_url`、`timeout` 和 `headers`；
+Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
+
+`complete(request)`：
+
+- 把 Iris 消息映射成 OpenAI Chat message/tool schema 形状；
+- 用 `<litellm_provider>/<model>` 调用 `litellm.acompletion()`，并避免重复前缀；
+- 只透传当前实现支持的请求选项；
+- 返回 provider-neutral `LLMResponse`。
+
+即使 Iris provider id 是 Anthropic 或 DeepSeek，runtime 当前仍挂载 OpenAI Chat function
+schema，由 LiteLLM chat bridge 处理。这是 active path 的明确限制。
+
+## 错误映射
+
+- `401` / `403` 或认证类异常 → `IrisAuthenticationError`；
+- `429` → `IrisRateLimitExceededError`；
+- `408`、连接或超时类异常 → `IrisAPIConnectionError`；
+- 其他 provider 异常 → `IrisProviderError`；
+- 缺少 API key → `IrisConfigError`；
+- 无效 route string → `IrisValidationError`。
+
+`stream=True` 或 `provider_options["api_style"] != "chat"` 会在网络调用前被拒绝。
+
+## 维护与验证
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| provider 注册、路由与密钥优先级 | `factory.py` | `tests/providers/test_provider_factory.py` |
+| LiteLLM kwargs、响应与异常映射 | `client.py` | `tests/test_provider_client.py` |
+| Chat message/tool 映射 | `openai.py` | `tests/test_provider_client.py` |
+| 环境变量与配置归一化 | `../config.py` | `tests/test_config.py` |
+
+```bash
+uv run pytest tests/providers tests/test_provider_client.py tests/test_provider_exports.py tests/test_config.py
+uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
+```
