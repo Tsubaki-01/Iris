@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 import iris.runtime.runtime as runtime_module
 from iris.agents import AgentConfig
@@ -82,7 +82,7 @@ def _runtime_with_remaining_echo(
     registry.register(AskQuestionTool())
     registry.register_function(echo, description="回显")
     interaction_store = InMemoryInteractionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -162,7 +162,7 @@ async def test_resume_question_returns_answer_without_another_provider_call() ->
             )
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -229,7 +229,7 @@ async def test_resume_approved_permission_executes_only_matching_call_once() -> 
         [_tool_response(ToolUseBlock(id="call_write", name="write_note", input={"value": "ok"}))]
     )
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -272,7 +272,7 @@ async def test_resume_rejected_permission_does_not_execute_tool() -> None:
     registry.register_function(
         write_note, description="写入笔记", capabilities={ToolCapability.WRITE}
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -304,7 +304,7 @@ async def test_resume_pauses_again_for_second_gate_in_same_batch() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -358,7 +358,7 @@ async def test_resume_supports_question_then_permission_in_the_same_batch() -> N
         capabilities={ToolCapability.WRITE},
     )
     policy = DefaultPermissionPolicy(write_mode="confirm")
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -420,7 +420,7 @@ async def test_resume_permission_fails_closed_when_policy_changes_to_deny() -> N
         capabilities={ToolCapability.WRITE},
     )
     policy = DefaultPermissionPolicy(write_mode="confirm")
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -453,7 +453,7 @@ async def test_resume_rejects_tampered_tool_call_fingerprint(
 ) -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -475,7 +475,7 @@ async def test_resume_rejects_tampered_tool_call_fingerprint(
     )
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
-    resolved = runtime.interaction_service.resolve(
+    resolved = runtime.environment.interaction_service.resolve(
         waiting.pending_interaction.interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
@@ -483,7 +483,7 @@ async def test_resume_rejects_tampered_tool_call_fingerprint(
     tampered = resolved.model_copy(
         update={"request": resolved.request.model_copy(update={"tool_call": tool_call})}
     )
-    monkeypatch.setattr(runtime.interaction_service, "get", lambda _: tampered)
+    monkeypatch.setattr(runtime.environment.interaction_service, "get", lambda _: tampered)
 
     resumed = await runtime.resume(resolved.interaction_id)
 
@@ -496,7 +496,7 @@ async def test_resume_rejects_tampered_tool_call_fingerprint(
 async def test_resume_rejects_v1_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -518,14 +518,14 @@ async def test_resume_rejects_v1_checkpoint(monkeypatch: pytest.MonkeyPatch) -> 
     )
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
-    resolved = runtime.interaction_service.resolve(
+    resolved = runtime.environment.interaction_service.resolve(
         waiting.pending_interaction.interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
     checkpoint = dict(resolved.checkpoint)
     checkpoint["checkpoint_version"] = 1
     legacy = resolved.model_copy(update={"checkpoint": checkpoint})
-    monkeypatch.setattr(runtime.interaction_service, "get", lambda _: legacy)
+    monkeypatch.setattr(runtime.environment.interaction_service, "get", lambda _: legacy)
 
     resumed = await runtime.resume(resolved.interaction_id)
 
@@ -539,7 +539,7 @@ async def test_resume_claimed_interaction_without_result_fails_closed() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -559,12 +559,12 @@ async def test_resume_claimed_interaction_without_result_fails_closed() -> None:
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
-    resolved = runtime.interaction_service.resolve(
+    resolved = runtime.environment.interaction_service.resolve(
         interaction_id, QuestionInteractionResponse(answer="是")
     )
     assert resolved.status is InteractionStatus.RESOLVED
     assert runtime.load_resumable_interaction("default") == resolved
-    claimed = runtime.interaction_service.claim(
+    claimed = runtime.environment.interaction_service.claim(
         interaction_id, waiting.pending_interaction.checkpoint
     )
     assert claimed.resume_phase is InteractionResumePhase.CLAIMED
@@ -586,7 +586,7 @@ async def test_resume_claimed_interaction_without_result_fails_closed() -> None:
 async def test_resolved_interaction_can_be_loaded_and_resumed_without_response() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -605,7 +605,7 @@ async def test_resolved_interaction_can_be_loaded_and_resumed_without_response()
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
-    resolved = runtime.interaction_service.resolve(
+    resolved = runtime.environment.interaction_service.resolve(
         interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
@@ -624,7 +624,7 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -670,7 +670,7 @@ async def test_result_ready_interaction_can_be_loaded_and_resumed(
     recovered = await runtime.resume(interaction_id)
 
     assert recovered.status is RuntimeStatus.OK
-    ready_event = runtime.session_store.load_tool_events("default")[0]
+    ready_event = runtime.environment.session_store.load_tool_events("default")[0]
     _assert_tool_result_event_schema(ready_event)
     assert str(ready_event["event_id"]).endswith(":call")
 
@@ -681,7 +681,7 @@ async def test_result_committed_marker_yields_different_orphan_pending() -> None
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -728,7 +728,7 @@ async def test_resume_result_committed_is_idempotent() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -771,7 +771,7 @@ async def test_resume_executes_calls_before_gate_in_original_order() -> None:
         capabilities={ToolCapability.READ},
     )
     registry.register(AskQuestionTool())
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -830,7 +830,7 @@ async def test_resumed_loop_persists_tool_result_for_next_provider_request() -> 
             ),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input_with_before_current_input(),
         provider=provider,
@@ -883,7 +883,7 @@ async def test_result_committed_resume_continues_remaining_batch(
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     registry.register_function(echo, description="回显")
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -929,13 +929,13 @@ async def test_result_committed_resume_continues_remaining_batch(
 
     assert recovered.status is RuntimeStatus.OK
     assert executed == ["echo"]
-    message_count = len(runtime.session_store.load_messages("default"))
+    message_count = len(runtime.environment.session_store.load_messages("default"))
 
     retried = await runtime.resume(interaction_id)
 
     assert retried.status is RuntimeStatus.OK
     assert executed == ["echo"]
-    assert len(runtime.session_store.load_messages("default")) == message_count
+    assert len(runtime.environment.session_store.load_messages("default")) == message_count
 
 
 @pytest.mark.asyncio
@@ -987,12 +987,16 @@ async def test_resume_fails_closed_after_claim_before_tool(
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
-    execute_prepared = runtime.tool_executor.execute_prepared
+    execute_prepared = runtime.environment.tool_bridge.tool_executor.execute_prepared
 
     async def fail_before_tool(*_: object, **__: object) -> object:
         raise RuntimeError("模拟 claim 后、工具执行前崩溃")
 
-    monkeypatch.setattr(runtime.tool_executor, "execute_prepared", fail_before_tool)
+    monkeypatch.setattr(
+        runtime.environment.tool_bridge.tool_executor,
+        "execute_prepared",
+        fail_before_tool,
+    )
     interrupted = await runtime.resume(
         interaction_id,
         QuestionInteractionResponse(answer="继续"),
@@ -1004,7 +1008,11 @@ async def test_resume_fails_closed_after_claim_before_tool(
     assert stored is not None
     assert stored.checkpoint["continuation_claim"]["tool_call_id"] == "echo"
 
-    monkeypatch.setattr(runtime.tool_executor, "execute_prepared", execute_prepared)
+    monkeypatch.setattr(
+        runtime.environment.tool_bridge.tool_executor,
+        "execute_prepared",
+        execute_prepared,
+    )
     retried = await runtime.resume(interaction_id)
 
     assert retried.status is RuntimeStatus.ERROR
@@ -1038,8 +1046,8 @@ async def test_resume_fails_closed_after_result_append_before_cursor(
     stored = interaction_store.load_interaction(interaction_id)
     assert stored is not None
     assert stored.checkpoint["continuation_claim"]["tool_call_id"] == "echo"
-    message_count = len(runtime.session_store.load_messages("default"))
-    event_count = len(runtime.session_store.load_tool_events("default"))
+    message_count = len(runtime.environment.session_store.load_messages("default"))
+    event_count = len(runtime.environment.session_store.load_tool_events("default"))
 
     monkeypatch.setattr(runtime, "_complete_resumed_continuation", complete)
     retried = await runtime.resume(interaction_id)
@@ -1048,8 +1056,8 @@ async def test_resume_fails_closed_after_result_append_before_cursor(
     assert retried.error is not None
     assert retried.error.code == "HITL_EXECUTION_OUTCOME_UNKNOWN"
     assert executed == ["echo"]
-    assert len(runtime.session_store.load_messages("default")) == message_count
-    assert len(runtime.session_store.load_tool_events("default")) == event_count
+    assert len(runtime.environment.session_store.load_messages("default")) == message_count
+    assert len(runtime.environment.session_store.load_tool_events("default")) == event_count
 
 
 @pytest.mark.asyncio
@@ -1077,7 +1085,7 @@ async def test_resumed_loop_claim_prevents_provider_and_tool_replay(
             _tool_response(ToolUseBlock(id="echo", name="echo", input={})),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -1090,13 +1098,13 @@ async def test_resumed_loop_claim_prevents_provider_and_tool_replay(
     waiting = await runtime.run_loop("开始")
     assert waiting.pending_interaction is not None
     interaction_id = waiting.pending_interaction.interaction_id
-    execute_once = runtime.tool_bridge.execute_once
+    execute_once = runtime.environment.tool_bridge.execute_once
 
     async def crash_after_loop_tool(**kwargs: object) -> object:
         await execute_once(**kwargs)
         raise SimulatedProcessCrash
 
-    monkeypatch.setattr(runtime.tool_bridge, "execute_once", crash_after_loop_tool)
+    monkeypatch.setattr(runtime.environment.tool_bridge, "execute_once", crash_after_loop_tool)
     with pytest.raises(SimulatedProcessCrash):
         await runtime.resume(
             interaction_id,
@@ -1113,7 +1121,7 @@ async def test_resumed_loop_claim_prevents_provider_and_tool_replay(
     assert executed == ["echo"]
     assert len(provider.requests) == 2
 
-    monkeypatch.setattr(runtime.tool_bridge, "execute_once", execute_once)
+    monkeypatch.setattr(runtime.environment.tool_bridge, "execute_once", execute_once)
     retried = await runtime.resume(interaction_id)
 
     assert retried.status is RuntimeStatus.ERROR
@@ -1128,7 +1136,7 @@ async def test_resumed_loop_clears_claim_after_followup_gate() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -1175,7 +1183,7 @@ async def test_followup_gate_remains_discoverable_before_old_claim_clear(
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -1213,7 +1221,7 @@ async def test_followup_gate_remains_discoverable_before_old_claim_clear(
             QuestionInteractionResponse(answer="一"),
         )
 
-    pending = runtime.interaction_service.list_pending("default")
+    pending = runtime.environment.interaction_service.list_pending("default")
     assert len(pending) == 1
     monkeypatch.setattr(runtime, "_complete_resumed_continuation", complete)
     assert runtime.load_resumable_interaction("default") == pending[0]
@@ -1231,7 +1239,7 @@ async def test_resumed_loop_honors_stop_tool_error_policy() -> None:
             _tool_response(ToolUseBlock(id="missing", name="missing", input={})),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -1267,7 +1275,7 @@ async def test_resume_rejects_question_checkpoint_from_another_workspace() -> No
     interaction_store = InMemoryInteractionStore()
     first_workspace = Path.cwd()
     second_workspace = Path.cwd() / "src"
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -1289,7 +1297,7 @@ async def test_resume_rejects_question_checkpoint_from_another_workspace() -> No
     )
     waiting = await runtime.run_turn("开始")
     assert waiting.pending_interaction is not None
-    restarted = AgentRuntime(
+    restarted = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider([]),
@@ -1323,7 +1331,7 @@ async def test_resumed_loop_saves_terminal_max_steps_metadata() -> None:
         capabilities={ToolCapability.READ},
     )
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -1375,7 +1383,7 @@ async def test_resume_metadata_save_failure_returns_session_error() -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     session_store = FailingRunMetadataStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(

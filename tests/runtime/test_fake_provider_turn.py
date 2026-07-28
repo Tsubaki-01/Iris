@@ -3,14 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisAuthenticationError, IrisError, IrisSessionError
 from iris.message import LLMResponse, Msg, Role, TextBlock
 from iris.providers.openai import OpenAIChatMapper
-from iris.runtime import AgentRuntime, normalize_runtime_error
+from iris.runtime import AgentRuntime, RuntimeEnvironment, normalize_runtime_error
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
 
@@ -88,17 +88,29 @@ def test_normalize_runtime_error_reads_iris_error_runtime_metadata() -> None:
     assert error.source == "memory"
 
 
+def test_agent_runtime_rejects_legacy_constructor_keywords() -> None:
+    with pytest.raises(TypeError):
+        AgentRuntime(
+            agent_config=_agent_config(),
+            context_input=_context_input(),
+            provider=FakeProvider([_assistant_response()]),
+        )
+
+
 @pytest.mark.asyncio
 async def test_run_turn_calls_fake_provider_once_and_saves_assistant_message() -> None:
     store = InMemorySessionStore()
     store.save_messages("default", [Msg.user("历史问题").model_dump(mode="json")])
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    environment = RuntimeEnvironment(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
         session_store=store,
     )
+    runtime = AgentRuntime(environment)
+
+    assert runtime.environment is environment
 
     result = await runtime.run_turn(
         "当前问题",
@@ -151,7 +163,7 @@ async def test_run_turn_calls_fake_provider_once_and_saves_assistant_message() -
 async def test_run_turn_persists_before_input_snapshot_for_next_request() -> None:
     store = InMemorySessionStore()
     provider = FakeProvider([_assistant_response("第一答复"), _assistant_response("第二答复")])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input_with_before_current_input(),
         provider=provider,
@@ -191,7 +203,7 @@ async def test_run_turn_persists_before_input_snapshot_for_next_request() -> Non
 async def test_run_metadata_keeps_user_metadata_nested(tmp_path: Path) -> None:
     store = InMemorySessionStore()
     provider = FakeProvider([_assistant_response("ok")])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -219,7 +231,7 @@ async def test_run_turn_uses_session_id_and_request_options() -> None:
     store = InMemorySessionStore()
     store.save_messages("session-1", [Msg.user("历史问题").model_dump(mode="json")])
     provider = FakeProvider([_assistant_response("收到。")])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -256,7 +268,7 @@ async def test_run_turn_uses_session_id_and_request_options() -> None:
 async def test_run_turn_normalizes_provider_failure_without_saving_assistant() -> None:
     store = InMemorySessionStore()
     provider = FakeProvider([])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -278,7 +290,7 @@ async def test_run_turn_normalizes_provider_failure_without_saving_assistant() -
 async def test_run_turn_does_not_turn_untyped_provider_exception_into_provider_error() -> None:
     store = InMemorySessionStore()
     provider = BrokenProvider()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -298,7 +310,7 @@ async def test_run_turn_does_not_turn_untyped_provider_exception_into_provider_e
 @pytest.mark.asyncio
 async def test_run_turn_returns_session_error_after_save_failure() -> None:
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,

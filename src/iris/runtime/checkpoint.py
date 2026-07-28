@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from ..exceptions import HITLCheckpointInvalidError
 from ..hitl import HumanInteraction
@@ -19,7 +19,7 @@ from .models import (
 
 def build_hitl_checkpoint(
     *,
-    run_mode: str,
+    run_mode: Literal["turn", "loop"],
     agent_name: str,
     runtime_options: RuntimeOptions,
     assistant_message: Msg,

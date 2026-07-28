@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from fakes import build_runtime
 from rich.console import Console
 
 import iris.runtime.runtime as runtime_module
@@ -115,7 +116,7 @@ def _make_runtime(
         TracingRuntimeProvider(delegate, trace_store) if trace_store is not None else delegate
     )
     store = SQLiteStore(database)
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -133,7 +134,7 @@ def _make_runtime(
 
 
 def _persist_waiting(runtime: AgentRuntime, response: LLMResponse) -> HumanInteraction:
-    provider = runtime.provider
+    provider = runtime.environment.provider
     assert isinstance(provider, RecordingProvider)
     provider.responses.append(response)
     waiting = asyncio.run(
@@ -292,7 +293,7 @@ def test_resolved_interaction_recovers_without_prompting_again(tmp_path: Path) -
             )
         ),
     )
-    first.interaction_service.resolve(
+    first.environment.interaction_service.resolve(
         interaction.interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
@@ -426,11 +427,11 @@ def test_claimed_unknown_outcome_fails_closed_without_reading_input(tmp_path: Pa
             )
         ),
     )
-    first.interaction_service.resolve(
+    first.environment.interaction_service.resolve(
         interaction.interaction_id,
         QuestionInteractionResponse(answer="继续"),
     )
-    first.interaction_service.claim(interaction.interaction_id, interaction.checkpoint)
+    first.environment.interaction_service.claim(interaction.interaction_id, interaction.checkpoint)
     restarted, provider, _ = _make_runtime(database, [])
     console = Console(record=True, width=120, color_system=None)
 

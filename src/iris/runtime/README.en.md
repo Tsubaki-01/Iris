@@ -3,7 +3,7 @@
 # `iris.runtime`
 
 `iris.runtime` is Iris's single-agent execution orchestration layer. It turns a parsed
-`AgentConfig` into an `AgentRuntime`, builds provider requests, maintains session history, runs
+`AgentConfig` into a `RuntimeEnvironment` and an `AgentRuntime`, builds provider requests, maintains session history, runs
 tools, and persists resumable HITL checkpoints for permission confirmation or `human.ask`.
 
 It does not own provider wire formats, tool business logic, long-term memory storage/retrieval,
@@ -40,7 +40,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The package exports `AgentRuntime`, `RuntimeFactory`, `RuntimeProvider`,
+The package exports `AgentRuntime`, `RuntimeEnvironment`, `RuntimeFactory`, `RuntimeProvider`,
 `RuntimeMessageAssembler`, `ToolBridge`, and `normalize_runtime_error`. Import runtime option,
 status, and result models from the explicit `iris.runtime.models` submodule;
 they are not re-exported at the `iris.runtime` package root. `_resume_batch()` and
@@ -51,12 +51,32 @@ application APIs.
 integrations can inject `provider=`, `session_store=`, `interaction_store=`, or `memory_service=`.
 The factory only assembles local dependencies; construction never calls the provider.
 
+Advanced SDK callers can construct an environment explicitly. It holds only live dependencies
+shared by one runtime instance; it neither parses process environment variables nor enters a HITL
+checkpoint:
+
+```python
+from iris.runtime import AgentRuntime, RuntimeEnvironment
+
+environment = RuntimeEnvironment(
+    agent_config=config,
+    context_input=context_input,
+    provider=provider,
+)
+runtime = AgentRuntime(environment)
+result = await runtime.run_turn("Current question")
+```
+
+`RuntimeOptions` remains the call-scoped input for session, run, memory, request, and loop
+options. It is checkpoint-serializable; `RuntimeEnvironment` is not.
+
 ## Component relationships
 
 ```mermaid
 flowchart LR
     Config["agent.yaml / AgentConfig"] --> Factory["RuntimeFactory"]
-    Factory --> Runtime["AgentRuntime"]
+    Factory --> Environment["RuntimeEnvironment"]
+    Environment --> Runtime["AgentRuntime"]
     Runtime --> Context["ContextBuilder + Assembler"]
     Runtime --> Provider["RuntimeProvider"]
     Runtime --> Bridge["ToolBridge / ToolExecutor"]
@@ -67,8 +87,10 @@ flowchart LR
     Commit --> Session
 ```
 
-- `RuntimeFactory` assembles the runtime, tool registry, permission policy, provider, and stores
-  from a YAML path or validated `AgentConfig`.
+- `RuntimeFactory` assembles a coherent environment, including the tool bridge, HITL service,
+  provider, and stores from a YAML path or validated `AgentConfig`.
+- `RuntimeEnvironment` holds runtime-instance live dependencies. Tools enter through
+  `ToolBridge` and HITL through `HumanInteractionService`, avoiding duplicate sources of truth.
 - `AgentRuntime` calls the provider, orchestrates tools/HITL, and writes session state. It is the
   primary application entry point.
 - `SessionStore` persists message history, run metadata, and tool events.

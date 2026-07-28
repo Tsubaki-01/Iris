@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisSessionError, IrisToolExecutionError
 from iris.message import LLMResponse, Msg, TextBlock, ToolUseBlock
-from iris.runtime import AgentRuntime, ToolBridge
+from iris.runtime import ToolBridge
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 from iris.session import InMemorySessionStore
 from iris.tools import (
@@ -176,7 +176,7 @@ async def test_run_turn_bridges_tool_calls_without_second_provider_call(
     registry.register_function(echo, description="回显")
     store = InMemorySessionStore()
     provider = FakeProvider([_assistant_tool_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -222,7 +222,7 @@ async def test_run_turn_uses_openai_chat_tool_schema_for_anthropic_config(
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")
     provider = FakeProvider([_assistant_tool_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_anthropic_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -255,7 +255,7 @@ async def test_run_turn_rejects_tool_call_when_tools_disabled(
     registry.register_function(echo, description="回显")
     store = InMemorySessionStore()
     provider = FakeProvider([_assistant_tool_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -288,7 +288,7 @@ async def test_run_turn_normalizes_tool_event_append_failure(
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")
     provider = FakeProvider([_assistant_tool_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -307,7 +307,7 @@ async def test_run_turn_normalizes_tool_event_append_failure(
     assert result.error.source == "session"
     assert result.assistant_message is not None
     assert len(provider.requests) == 1
-    metadata = runtime.session_store.load_run_metadata("default")
+    metadata = runtime.environment.session_store.load_run_metadata("default")
     assert metadata["latest_run"]["status"] == "error"
     assert metadata["latest_run"]["error"]["code"] == "SESSION_ERROR"
 

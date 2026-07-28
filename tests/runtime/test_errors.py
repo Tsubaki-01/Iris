@@ -10,6 +10,7 @@ from iris.exceptions import (
 )
 from iris.runtime import (
     AgentRuntime,
+    RuntimeEnvironment,
     RuntimeFactory,
     RuntimeMessageAssembler,
     RuntimeProvider,
@@ -43,6 +44,7 @@ def test_domain_exceptions_map_to_stable_runtime_error_info() -> None:
 def test_runtime_public_exports_include_stable_surface() -> None:
     assert AgentRuntime.__name__ == "AgentRuntime"
     assert RuntimeFactory.__name__ == "RuntimeFactory"
+    assert RuntimeEnvironment.__name__ == "RuntimeEnvironment"
     assert RuntimeMessageAssembler.__name__ == "RuntimeMessageAssembler"
     assert RuntimeProvider.__name__ == "RuntimeProvider"
     assert ToolBridge.__name__ == "ToolBridge"
