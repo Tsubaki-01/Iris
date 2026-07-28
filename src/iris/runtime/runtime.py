@@ -5,11 +5,7 @@
 memory 只支持显式 opt-in 注入；工具执行只做一次 bridge，bounded loop 留给后续阶段组合。
 
 Example:
-    runtime = AgentRuntime(
-        agent_config=config,
-        context_input=context_input,
-        provider=fake_provider,
-    )
+    runtime = AgentRuntime(environment)
     result = await runtime.run_turn("你好")
 """
 
@@ -17,11 +13,8 @@ Example:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Literal
 
-from ..agents import AgentConfig
-from ..context import ContextBuilder, ContextBuildInput
 from ..exceptions import (
     HITLCheckpointInvalidError,
     HITLExecutionOutcomeUnknownError,
@@ -29,28 +22,21 @@ from ..exceptions import (
 )
 from ..hitl import (
     HumanInteraction,
-    HumanInteractionService,
-    InMemoryInteractionStore,
     InteractionResumePhase,
     InteractionStatus,
-    InteractionStore,
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..message import LLMRequest, LLMResponse, Msg, ToolUseBlock
-from ..session import InMemorySessionStore, SessionStore
+from ..message import ContentBlock, LLMRequest, LLMResponse, Msg, ToolUseBlock
+from ..session import SessionStore
 from ..tools import (
-    DefaultPermissionPolicy,
-    PermissionPolicy,
     PreparedToolCall,
     ToolExecutionContext,
-    ToolExecutor,
-    ToolRegistry,
     ToolRegistryView,
     ToolResult,
 )
-from .assembler import RuntimeMessageAssembler
 from .checkpoint import build_hitl_checkpoint, validate_hitl_checkpoint
+from .environment import RuntimeEnvironment
 from .errors import error_result, normalize_runtime_error, tool_error_info
 from .memory_context import prepare_memory_context_input
 from .metadata import build_run_metadata, synchronize_resume_metadata
@@ -69,35 +55,9 @@ from .resume import (
     load_resumable_interaction,
     resolve_interaction_result,
 )
-from .tool_bridge import ToolBridge
 from .tool_result_committer import commit_tool_results
 
 # endregion
-
-if TYPE_CHECKING:
-    from ..memory import MemoryContextBuilder, MemoryService
-
-
-class RuntimeProvider(Protocol):
-    """Runtime 调用的 provider 最小协议。
-
-    运行时只依赖 provider-neutral 的 `LLMRequest` / `LLMResponse`，这样测试可注入
-    FakeProvider，生产路径也可复用真实 provider client，而不让 runtime 读取厂商
-    raw payload。
-
-    Example:
-        response = await provider.complete(request)
-    """
-
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """执行一次非流式 LLM 请求。
-
-        Args:
-            request (LLMRequest): Runtime 已组装完成的 provider-neutral 请求。
-
-        Returns:
-            LLMResponse: Provider 适配层归一化后的响应。
-        """
 
 
 class AgentRuntime:
@@ -108,86 +68,22 @@ class AgentRuntime:
     后续 memory、工具桥和 loop 可以在同一边界上继续组合。
 
     Example:
-        runtime = AgentRuntime(
-            agent_config=config,
-            context_input=context_input,
-            provider=fake_provider,
-        )
+        runtime = AgentRuntime(environment)
         result = await runtime.run_turn("当前问题")
     """
 
-    def __init__(
-        self,
-        *,
-        agent_config: AgentConfig,
-        context_input: ContextBuildInput,
-        provider: RuntimeProvider,
-        session_store: SessionStore | None = None,
-        context_builder: ContextBuilder | None = None,
-        assembler: RuntimeMessageAssembler | None = None,
-        tool_registry: ToolRegistry | None = None,
-        tool_view: ToolRegistryView | None = None,
-        tool_executor: ToolExecutor | None = None,
-        workspace_root: Path | None = None,
-        permission_policy: PermissionPolicy | None = None,
-        interaction_store: InteractionStore | None = None,
-        interaction_service: HumanInteractionService | None = None,
-        memory_service: MemoryService | None = None,
-        memory_context_builder: MemoryContextBuilder | None = None,
-    ) -> None:
-        """创建单轮 runtime。
+    def __init__(self, environment: RuntimeEnvironment) -> None:
+        """创建绑定完整构造期环境的 Agent runtime。
 
         Args:
-            agent_config (AgentConfig): 已加载并通过配置校验的 Agent 配置。
-            context_input (ContextBuildInput): ContextBuilder 的输入数据。
-            provider (RuntimeProvider): 本轮调用使用的 provider 实现。
-            session_store (SessionStore | None): 可选会话存储；默认使用内存 store。
-            context_builder (ContextBuilder | None): 可选 context 构建器，便于测试注入。
-            assembler (RuntimeMessageAssembler | None): 可选消息装配器，便于测试注入。
-            tool_registry (ToolRegistry | None): 可选工具注册表，供后续工具桥阶段复用。
-            tool_view (ToolRegistryView | None): 可选工具视图，默认由注册表创建。
-            tool_executor (ToolExecutor | None): 可选工具执行器，默认使用同一注册表和权限策略。
-            workspace_root (Path | None): 工具执行时使用的 workspace 根路径。
-            permission_policy (PermissionPolicy | None): 工具权限策略。
-            interaction_store (InteractionStore | None): 人工交互的持久化存储。
-            interaction_service (HumanInteractionService | None): 人工交互生命周期服务。
-            memory_service (MemoryService | None): 显式 memory 阶段复用的可选服务。
-            memory_context_builder (MemoryContextBuilder | None): 显式 memory 结果裁剪器。
+            environment (RuntimeEnvironment): 已装配且与 runtime 同生命周期的依赖环境。
         """
-        from ..memory import MemoryContextBuilder
-
-        self.agent_config = agent_config
-        self.context_input = context_input
-        self.provider = provider
-        self.session_store = session_store or InMemorySessionStore()
-        self.context_builder = context_builder or ContextBuilder()
-        self.assembler = assembler or RuntimeMessageAssembler()
-        base_registry = tool_registry
-        if base_registry is None and tool_view is not None:
-            base_registry = tool_view.registry
-        self.tool_registry = base_registry or ToolRegistry()
-        self.tool_view = tool_view or self.tool_registry.view()
-        self.workspace_root = (workspace_root or Path.cwd()).resolve()
-        self.permission_policy = permission_policy or DefaultPermissionPolicy()
-        self.tool_executor = tool_executor or ToolExecutor(
-            self.tool_registry,
-            permission_policy=self.permission_policy,
-        )
-        self.tool_bridge = ToolBridge(
-            tool_view=self.tool_view,
-            tool_executor=self.tool_executor,
-        )
-        self.interaction_store = interaction_store or InMemoryInteractionStore()
-        self.interaction_service = interaction_service or HumanInteractionService(
-            self.interaction_store
-        )
-        self.memory_service = memory_service
-        self.memory_context_builder = memory_context_builder or MemoryContextBuilder()
+        self.environment = environment
 
     def _create_waiting_interaction(
         self,
         *,
-        run_mode: str,
+        run_mode: Literal["turn", "loop"],
         assistant_message: Msg,
         response: LLMResponse,
         runtime_options: RuntimeOptions,
@@ -196,13 +92,13 @@ class AgentRuntime:
         all_tool_results: list[ToolResult],
     ) -> HumanInteraction | None:
         """预检工具批次，并在第一处人工 gate 创建持久化 interaction。"""
-        plan = self.tool_bridge.preflight_once(
+        plan = self.environment.tool_bridge.preflight_once(
             assistant_message=assistant_message,
             session_id=runtime_options.session_id,
             run_id=runtime_options.run_id,
-            agent_id=self.agent_config.name,
-            workspace_root=self.workspace_root,
-            permission_mode=self.agent_config.permissions.writes,
+            agent_id=self.environment.agent_config.name,
+            workspace_root=self.environment.workspace_root,
+            permission_mode=self.environment.agent_config.permissions.writes,
             metadata=metadata,
             tools_enabled=runtime_options.include_tools,
         )
@@ -212,7 +108,7 @@ class AgentRuntime:
 
         checkpoint = build_hitl_checkpoint(
             run_mode=run_mode,
-            agent_name=self.agent_config.name,
+            agent_name=self.environment.agent_config.name,
             runtime_options=runtime_options,
             assistant_message=assistant_message,
             response=response,
@@ -220,7 +116,7 @@ class AgentRuntime:
             next_tool_index=0,
             batch_results=[],
             all_tool_results=all_tool_results,
-            read_state=self.tool_bridge.read_state(runtime_options.session_id),
+            read_state=self.environment.tool_bridge.read_state(runtime_options.session_id),
         )
         return self._create_interaction(
             prepared=gate,
@@ -242,7 +138,7 @@ class AgentRuntime:
         """通过统一 service 路径持久化一处人工 gate。"""
         if prepared.human_request is None:
             raise HITLCheckpointInvalidError("预检工具调用缺少 HITL interaction 请求")
-        return self.interaction_service.create(
+        return self.environment.interaction_service.create(
             prepared.human_request,
             session_id=session_id,
             run_id=run_id,
@@ -266,8 +162,8 @@ class AgentRuntime:
             HITLCheckpointInvalidError: marker 缺失目标、跨 session 或与 pending 状态冲突。
         """
         return load_resumable_interaction(
-            session_store=self.session_store,
-            interaction_service=self.interaction_service,
+            session_store=self.environment.session_store,
+            interaction_service=self.environment.interaction_service,
             session_id=session_id,
         )
 
@@ -278,18 +174,18 @@ class AgentRuntime:
     ) -> RuntimeTurnResult:
         """恢复已等待人工响应的一次工具调用。"""
         try:
-            interaction = self.interaction_service.get(interaction_id)
+            interaction = self.environment.interaction_service.get(interaction_id)
             if interaction.status is InteractionStatus.PENDING:
                 if response is None:
                     raise HITLResponseRequiredError("HITL interaction 尚未收到 response")
-                interaction = self.interaction_service.resolve(interaction_id, response)
+                interaction = self.environment.interaction_service.resolve(interaction_id, response)
             elif interaction.status is InteractionStatus.RESOLVED and response is not None:
-                interaction = self.interaction_service.resolve(interaction_id, response)
+                interaction = self.environment.interaction_service.resolve(interaction_id, response)
             checkpoint, options = validate_hitl_checkpoint(
                 interaction,
-                agent_name=self.agent_config.name,
+                agent_name=self.environment.agent_config.name,
             )
-            self.tool_bridge.restore_read_state(
+            self.environment.tool_bridge.restore_read_state(
                 interaction.session_id,
                 (
                     checkpoint.get("read_state")
@@ -297,14 +193,16 @@ class AgentRuntime:
                     else None
                 ),
             )
-            calls = [ToolUseBlock.model_validate(item) for item in checkpoint["tool_calls"]]
-            plan = self.tool_bridge.preflight_once(
+            calls: list[ContentBlock] = [
+                ToolUseBlock.model_validate(item) for item in checkpoint["tool_calls"]
+            ]
+            plan = self.environment.tool_bridge.preflight_once(
                 assistant_message=Msg.assistant(calls),
                 session_id=interaction.session_id,
                 run_id=interaction.run_id,
-                agent_id=self.agent_config.name,
-                workspace_root=self.workspace_root,
-                permission_mode=self.agent_config.permissions.writes,
+                agent_id=self.environment.agent_config.name,
+                workspace_root=self.environment.workspace_root,
+                permission_mode=self.environment.agent_config.permissions.writes,
                 metadata=options.metadata,
                 tools_enabled=options.include_tools,
             )
@@ -329,18 +227,18 @@ class AgentRuntime:
                     )
                 committed = await commit_ready_interaction(
                     interaction=interaction,
-                    session_store=self.session_store,
-                    interaction_service=self.interaction_service,
-                    agent_id=self.agent_config.name,
+                    session_store=self.environment.session_store,
+                    interaction_service=self.environment.interaction_service,
+                    agent_id=self.environment.agent_config.name,
                 )
-                interaction = self.interaction_service.get(interaction_id)
+                interaction = self.environment.interaction_service.get(interaction_id)
                 if checkpoint.get("continuation_complete") is True:
                     return synchronize_resume_metadata(
-                        session_store=self.session_store,
+                        session_store=self.environment.session_store,
                         result=committed,
                     )
                 return synchronize_resume_metadata(
-                    session_store=self.session_store,
+                    session_store=self.environment.session_store,
                     result=await self._resume_batch(
                         committed=committed,
                         interaction=interaction,
@@ -351,7 +249,7 @@ class AgentRuntime:
                     ),
                 )
 
-            interaction = self.interaction_service.claim(interaction_id, checkpoint)
+            interaction = self.environment.interaction_service.claim(interaction_id, checkpoint)
             current_index = plan.calls.index(prepared)
             next_index = int(checkpoint["next_tool_index"])
             if next_index > current_index:
@@ -366,7 +264,7 @@ class AgentRuntime:
             result = await resolve_interaction_result(
                 interaction=interaction,
                 prepared=prepared,
-                tool_executor=self.tool_executor,
+                tool_executor=self.environment.tool_bridge.tool_executor,
                 tool_context=self._tool_context(options),
             )
             ready_checkpoint = dict(checkpoint)
@@ -381,7 +279,7 @@ class AgentRuntime:
                 batch_results=[item.model_dump(mode="json") for item in batch_results],
                 all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
             )
-            interaction = self.interaction_service.update_consumed(
+            interaction = self.environment.interaction_service.update_consumed(
                 interaction_id,
                 InteractionResumePhase.RESULT_READY,
                 ready_checkpoint,
@@ -390,13 +288,13 @@ class AgentRuntime:
             )
             committed = await commit_ready_interaction(
                 interaction=interaction,
-                session_store=self.session_store,
-                interaction_service=self.interaction_service,
-                agent_id=self.agent_config.name,
+                session_store=self.environment.session_store,
+                interaction_service=self.environment.interaction_service,
+                agent_id=self.environment.agent_config.name,
             )
-            interaction = self.interaction_service.get(interaction_id)
+            interaction = self.environment.interaction_service.get(interaction_id)
             return synchronize_resume_metadata(
-                session_store=self.session_store,
+                session_store=self.environment.session_store,
                 result=await self._resume_batch(
                     committed=committed,
                     interaction=interaction,
@@ -407,7 +305,9 @@ class AgentRuntime:
                 ),
             )
         except Exception as exc:
-            loaded_interaction = self.interaction_store.load_interaction(interaction_id)
+            loaded_interaction = self.environment.interaction_service.store.load_interaction(
+                interaction_id
+            )
             failed_result = error_result(
                 session_id=(
                     loaded_interaction.session_id if loaded_interaction is not None else "default"
@@ -418,7 +318,7 @@ class AgentRuntime:
             if loaded_interaction is None:
                 return failed_result
             return synchronize_resume_metadata(
-                session_store=self.session_store,
+                session_store=self.environment.session_store,
                 result=failed_result,
             )
 
@@ -470,16 +370,16 @@ class AgentRuntime:
                     tool_call_id=prepared.tool_use.id,
                 ),
             )
-            result = await self.tool_executor.execute_prepared(
+            result = await self.environment.tool_bridge.tool_executor.execute_prepared(
                 prepared, self._tool_context(options)
             )
             message = append_resumed_result(
                 result=result,
-                session_store=self.session_store,
+                session_store=self.environment.session_store,
                 session_id=interaction.session_id,
                 run_id=interaction.run_id,
                 step_index=interaction.step_index,
-                agent_id=self.agent_config.name,
+                agent_id=self.environment.agent_config.name,
             )
             results.append(result)
             messages.append(message)
@@ -539,17 +439,17 @@ class AgentRuntime:
                 raise HITLCheckpointInvalidError("HITL checkpoint 跳过了未处理的人工 gate")
             result = prepared.preflight_result
             if result is None:
-                result = await self.tool_executor.execute_prepared(
+                result = await self.environment.tool_bridge.tool_executor.execute_prepared(
                     prepared,
                     self._tool_context(options),
                 )
             append_resumed_result(
                 result=result,
-                session_store=self.session_store,
+                session_store=self.environment.session_store,
                 session_id=interaction.session_id,
                 run_id=interaction.run_id,
                 step_index=interaction.step_index,
-                agent_id=self.agent_config.name,
+                agent_id=self.environment.agent_config.name,
             )
             results.append(result)
         return results
@@ -572,12 +472,13 @@ class AgentRuntime:
             all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
             read_state=(
                 state.model_dump(mode="json")
-                if (state := self.tool_bridge.read_state(interaction.session_id)) is not None
+                if (state := self.environment.tool_bridge.read_state(interaction.session_id))
+                is not None
                 else None
             ),
             continuation_complete=continuation_complete,
         )
-        interaction = self.interaction_service.update_consumed(
+        interaction = self.environment.interaction_service.update_consumed(
             interaction.interaction_id,
             InteractionResumePhase.RESULT_COMMITTED,
             updated,
@@ -603,7 +504,7 @@ class AgentRuntime:
             raise HITLExecutionOutcomeUnknownError("HITL continuation 执行结果未知，拒绝重放")
         updated = dict(checkpoint)
         updated["continuation_claim"] = claim.model_dump(mode="json")
-        interaction = self.interaction_service.update_consumed(
+        interaction = self.environment.interaction_service.update_consumed(
             interaction.interaction_id,
             InteractionResumePhase.RESULT_COMMITTED,
             updated,
@@ -632,13 +533,14 @@ class AgentRuntime:
             all_tool_results=[item.model_dump(mode="json") for item in all_tool_results],
             read_state=(
                 state.model_dump(mode="json")
-                if (state := self.tool_bridge.read_state(interaction.session_id)) is not None
+                if (state := self.environment.tool_bridge.read_state(interaction.session_id))
+                is not None
                 else None
             ),
             continuation_claim=None,
             continuation_complete=continuation_complete,
         )
-        interaction = self.interaction_service.update_consumed(
+        interaction = self.environment.interaction_service.update_consumed(
             interaction.interaction_id,
             InteractionResumePhase.RESULT_COMMITTED,
             updated,
@@ -657,7 +559,7 @@ class AgentRuntime:
         results: list[ToolResult],
     ) -> HumanInteraction:
         """为批次中下一处人工 gate 创建独立 interaction。"""
-        read_state = self.tool_bridge.read_state(interaction.session_id)
+        read_state = self.environment.tool_bridge.read_state(interaction.session_id)
         next_checkpoint = dict(checkpoint)
         next_checkpoint.update(
             next_tool_index=next_index,
@@ -678,12 +580,12 @@ class AgentRuntime:
     def _tool_context(self, options: RuntimeOptions) -> ToolExecutionContext:
         """从 checkpoint 还原执行工具所需的最小上下文。"""
         return ToolExecutionContext(
-            workspace_root=self.workspace_root,
+            workspace_root=self.environment.workspace_root,
             session_id=options.session_id,
-            agent_id=self.agent_config.name,
-            permission_mode=self.agent_config.permissions.writes,
+            agent_id=self.environment.agent_config.name,
+            permission_mode=self.environment.agent_config.permissions.writes,
             metadata={**options.metadata, "run_id": options.run_id},
-            read_state=self.tool_bridge.read_state(options.session_id),
+            read_state=self.environment.tool_bridge.read_state(options.session_id),
         )
 
     async def _execute_and_commit_tool_results(
@@ -697,22 +599,22 @@ class AgentRuntime:
         tools_enabled: bool,
     ) -> ToolResultCommit:
         """执行 assistant 工具调用并统一提交结果。"""
-        results = await self.tool_bridge.execute_once(
+        results = await self.environment.tool_bridge.execute_once(
             assistant_message=assistant_message,
             session_id=session_id,
-            agent_id=self.agent_config.name,
-            workspace_root=self.workspace_root,
-            permission_mode=self.agent_config.permissions.writes,
+            agent_id=self.environment.agent_config.name,
+            workspace_root=self.environment.workspace_root,
+            permission_mode=self.environment.agent_config.permissions.writes,
             metadata=metadata,
             tools_enabled=tools_enabled,
         )
         return commit_tool_results(
             results=results,
-            session_store=self.session_store,
+            session_store=self.environment.session_store,
             session_id=session_id,
             run_id=run_id,
             step_index=step_index,
-            agent_id=self.agent_config.name,
+            agent_id=self.environment.agent_config.name,
             metadata=metadata,
             deduplicate_messages=False,
         )
@@ -724,17 +626,17 @@ class AgentRuntime:
     ) -> RuntimeTurnResult:
         """将已提交的工具结果回灌 provider，继续被暂停的 loop。"""
         try:
-            history = _load_history(self.session_store, committed.session_id)
-            context_output = self.context_builder.build(
+            history = _load_history(self.environment.session_store, committed.session_id)
+            context_output = self.environment.context_builder.build(
                 prepare_memory_context_input(
-                    self.context_input,
+                    self.environment.context_input,
                     options=options,
-                    memory_service=self.memory_service,
-                    memory_context_builder=self.memory_context_builder,
+                    memory_service=self.environment.memory_service,
+                    memory_context_builder=self.environment.memory_context_builder,
                 )
             )
-            request = self.assembler.build_request(
-                agent_config=self.agent_config,
+            request = self.environment.assembler.build_request(
+                agent_config=self.environment.agent_config,
                 context_output=context_output,
                 history=history,
                 current_input=None,
@@ -742,13 +644,13 @@ class AgentRuntime:
             request = _apply_tool_schemas(
                 _apply_request_options(request, options.request_options),
                 include_tools=options.include_tools,
-                tool_view=self.tool_view,
-                provider=self.agent_config.model.provider,
+                tool_view=self.environment.tool_bridge.tool_view,
+                provider=self.environment.agent_config.model.provider,
             )
-            response = await self.provider.complete(request)
+            response = await self.environment.provider.complete(request)
             assistant = response.to_msg()
             history.append(assistant)
-            self.session_store.save_messages(
+            self.environment.session_store.save_messages(
                 committed.session_id, [item.model_dump(mode="json") for item in history]
             )
             if not assistant.has_tool_calls:
@@ -851,21 +753,21 @@ class AgentRuntime:
 
         # --- 1. Build request ---
         try:
-            history = _load_history(self.session_store, session_id)
+            history = _load_history(self.environment.session_store, session_id)
             context_input = prepare_memory_context_input(
-                self.context_input,
+                self.environment.context_input,
                 options=runtime_options,
-                memory_service=self.memory_service,
-                memory_context_builder=self.memory_context_builder,
+                memory_service=self.environment.memory_service,
+                memory_context_builder=self.environment.memory_context_builder,
             )
-            context_output = self.context_builder.build(context_input)
+            context_output = self.environment.context_builder.build(context_input)
             current_input = Msg.user(user_input)
-            turn_messages = self.assembler.build_turn_messages(
+            turn_messages = self.environment.assembler.build_turn_messages(
                 context_output=context_output,
                 current_input=current_input,
             )
-            request = self.assembler.build_request(
-                agent_config=self.agent_config,
+            request = self.environment.assembler.build_request(
+                agent_config=self.environment.agent_config,
                 context_output=context_output,
                 history=history,
                 current_input=current_input,
@@ -874,8 +776,8 @@ class AgentRuntime:
             request = _apply_tool_schemas(
                 request,
                 include_tools=runtime_options.include_tools,
-                tool_view=self.tool_view,
-                provider=self.agent_config.model.provider,
+                tool_view=self.environment.tool_bridge.tool_view,
+                provider=self.environment.agent_config.model.provider,
             )
         except Exception as exc:
             return error_result(
@@ -887,7 +789,7 @@ class AgentRuntime:
 
         # --- 2. Call provider ---
         try:
-            response = await self.provider.complete(request)
+            response = await self.environment.provider.complete(request)
             assistant_message = response.to_msg()
         except Exception as exc:
             return error_result(
@@ -900,7 +802,7 @@ class AgentRuntime:
         # --- 3. Persist result ---
         messages = [*history, *turn_messages, assistant_message]
         try:
-            self.session_store.save_messages(
+            self.environment.session_store.save_messages(
                 session_id,
                 [message.model_dump(mode="json") for message in messages],
             )
@@ -914,14 +816,14 @@ class AgentRuntime:
                 all_tool_results=[],
             )
             if pending_interaction is not None:
-                self.session_store.save_run_metadata(
+                self.environment.session_store.save_run_metadata(
                     session_id,
                     build_run_metadata(
-                        existing=self.session_store.load_run_metadata(session_id),
+                        existing=self.environment.session_store.load_run_metadata(session_id),
                         session_id=session_id,
                         run_id=run_id,
                         status=RuntimeStatus.WAITING_HUMAN,
-                        provider=self.agent_config.model.provider,
+                        provider=self.environment.agent_config.model.provider,
                         response=response,
                         message_count=len(messages),
                         metadata=run_metadata,
@@ -948,14 +850,14 @@ class AgentRuntime:
             )
             if bridge_result.messages:
                 messages.extend(bridge_result.messages)
-            self.session_store.save_run_metadata(
+            self.environment.session_store.save_run_metadata(
                 session_id,
                 build_run_metadata(
-                    existing=self.session_store.load_run_metadata(session_id),
+                    existing=self.environment.session_store.load_run_metadata(session_id),
                     session_id=session_id,
                     run_id=run_id,
                     status=RuntimeStatus.OK,
-                    provider=self.agent_config.model.provider,
+                    provider=self.environment.agent_config.model.provider,
                     response=response,
                     message_count=len(messages),
                     metadata=run_metadata,
@@ -965,14 +867,14 @@ class AgentRuntime:
         except Exception as exc:
             error = normalize_runtime_error(exc)
             try:
-                self.session_store.save_run_metadata(
+                self.environment.session_store.save_run_metadata(
                     session_id,
                     build_run_metadata(
-                        existing=self.session_store.load_run_metadata(session_id),
+                        existing=self.environment.session_store.load_run_metadata(session_id),
                         session_id=session_id,
                         run_id=run_id,
                         status=RuntimeStatus.ERROR,
-                        provider=self.agent_config.model.provider,
+                        provider=self.environment.agent_config.model.provider,
                         response=response,
                         message_count=len(messages),
                         metadata=run_metadata,
@@ -1034,20 +936,20 @@ class AgentRuntime:
             step_number = step_index + 1
             current_input = Msg.user(user_input) if step_index == 0 else None
             try:
-                history = _load_history(self.session_store, session_id)
+                history = _load_history(self.environment.session_store, session_id)
                 context_input = prepare_memory_context_input(
-                    self.context_input,
+                    self.environment.context_input,
                     options=runtime_options,
-                    memory_service=self.memory_service,
-                    memory_context_builder=self.memory_context_builder,
+                    memory_service=self.environment.memory_service,
+                    memory_context_builder=self.environment.memory_context_builder,
                 )
-                context_output = self.context_builder.build(context_input)
-                turn_messages = self.assembler.build_turn_messages(
+                context_output = self.environment.context_builder.build(context_input)
+                turn_messages = self.environment.assembler.build_turn_messages(
                     context_output=context_output,
                     current_input=current_input,
                 )
-                request = self.assembler.build_request(
-                    agent_config=self.agent_config,
+                request = self.environment.assembler.build_request(
+                    agent_config=self.environment.agent_config,
                     context_output=context_output,
                     history=history,
                     current_input=current_input,
@@ -1059,10 +961,10 @@ class AgentRuntime:
                 request = _apply_tool_schemas(
                     request,
                     include_tools=runtime_options.include_tools,
-                    tool_view=self.tool_view,
-                    provider=self.agent_config.model.provider,
+                    tool_view=self.environment.tool_bridge.tool_view,
+                    provider=self.environment.agent_config.model.provider,
                 )
-                latest_response = await self.provider.complete(request)
+                latest_response = await self.environment.provider.complete(request)
                 latest_assistant = latest_response.to_msg()
             except Exception as exc:
                 return error_result(
@@ -1077,20 +979,20 @@ class AgentRuntime:
             messages = [*history, *turn_messages, latest_assistant]
 
             try:
-                self.session_store.save_messages(
+                self.environment.session_store.save_messages(
                     session_id,
                     [message.model_dump(mode="json") for message in messages],
                 )
 
                 if not latest_assistant.has_tool_calls:
-                    self.session_store.save_run_metadata(
+                    self.environment.session_store.save_run_metadata(
                         session_id,
                         build_run_metadata(
-                            existing=self.session_store.load_run_metadata(session_id),
+                            existing=self.environment.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
                             status=RuntimeStatus.OK,
-                            provider=self.agent_config.model.provider,
+                            provider=self.environment.agent_config.model.provider,
                             response=latest_response,
                             message_count=len(messages),
                             metadata=run_metadata,
@@ -1119,14 +1021,14 @@ class AgentRuntime:
                     all_tool_results=all_tool_results,
                 )
                 if pending_interaction is not None:
-                    self.session_store.save_run_metadata(
+                    self.environment.session_store.save_run_metadata(
                         session_id,
                         build_run_metadata(
-                            existing=self.session_store.load_run_metadata(session_id),
+                            existing=self.environment.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
                             status=RuntimeStatus.WAITING_HUMAN,
-                            provider=self.agent_config.model.provider,
+                            provider=self.environment.agent_config.model.provider,
                             response=latest_response,
                             message_count=len(messages),
                             metadata=run_metadata,
@@ -1173,14 +1075,14 @@ class AgentRuntime:
             if _should_stop_on_tool_error(runtime_options, bridge_result.results):
                 error = tool_error_info(bridge_result.results)
                 try:
-                    self.session_store.save_run_metadata(
+                    self.environment.session_store.save_run_metadata(
                         session_id,
                         build_run_metadata(
-                            existing=self.session_store.load_run_metadata(session_id),
+                            existing=self.environment.session_store.load_run_metadata(session_id),
                             session_id=session_id,
                             run_id=run_id,
                             status=RuntimeStatus.ERROR,
-                            provider=self.agent_config.model.provider,
+                            provider=self.environment.agent_config.model.provider,
                             response=latest_response,
                             message_count=len(messages),
                             metadata=run_metadata,
@@ -1218,16 +1120,16 @@ class AgentRuntime:
         )
         max_step_metadata = {**run_metadata, "max_steps": max_steps}
         try:
-            self.session_store.save_run_metadata(
+            self.environment.session_store.save_run_metadata(
                 session_id,
                 build_run_metadata(
-                    existing=self.session_store.load_run_metadata(session_id),
+                    existing=self.environment.session_store.load_run_metadata(session_id),
                     session_id=session_id,
                     run_id=run_id,
                     status=RuntimeStatus.MAX_STEPS,
-                    provider=self.agent_config.model.provider,
+                    provider=self.environment.agent_config.model.provider,
                     response=latest_response,
-                    message_count=len(self.session_store.load_messages(session_id)),
+                    message_count=len(self.environment.session_store.load_messages(session_id)),
                     metadata=max_step_metadata,
                     steps=max_steps,
                     tool_count=len(all_tool_results),
@@ -1309,4 +1211,4 @@ def _should_stop_on_tool_error(
     )
 
 
-__all__ = ["AgentRuntime", "RuntimeProvider", "normalize_runtime_error"]
+__all__ = ["AgentRuntime", "normalize_runtime_error"]

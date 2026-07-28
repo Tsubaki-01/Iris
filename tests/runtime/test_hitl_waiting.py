@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -72,7 +72,7 @@ def _question_runtime(
 ) -> AgentRuntime:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
-    return AgentRuntime(
+    return build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(responses),
@@ -91,7 +91,7 @@ async def test_run_turn_waits_and_persists_question_interaction_before_execution
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
     session_store = InMemorySessionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider([_question_response()]),
@@ -145,7 +145,7 @@ async def test_run_loop_waits_before_executing_earlier_read_only_tool() -> None:
         capabilities={ToolCapability.READ},
     )
     registry.register(AskQuestionTool())
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -186,7 +186,7 @@ async def test_permission_gate_creates_permission_interaction() -> None:
         description="写入探针",
         capabilities={ToolCapability.WRITE},
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(
@@ -218,7 +218,7 @@ async def test_invalid_checkpoint_returns_structured_error_without_interaction()
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     interaction_store = InMemoryInteractionStore()
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider([_question_response()]),
@@ -344,7 +344,7 @@ async def test_load_resumable_interaction_rejects_conflicting_pending_target(
         options=RuntimeOptions(session_id="session-1", run_id="run-1"),
     )
     assert waiting.pending_interaction is not None
-    runtime.interaction_service.resolve(
+    runtime.environment.interaction_service.resolve(
         waiting.pending_interaction.interaction_id,
         QuestionInteractionResponse(answer="测试"),
     )
@@ -352,7 +352,7 @@ async def test_load_resumable_interaction_rejects_conflicting_pending_target(
         update={"interaction_id": "int_11111111111111111111111111111111"}
     )
     monkeypatch.setattr(
-        runtime.interaction_service,
+        runtime.environment.interaction_service,
         "list_pending",
         lambda session_id=None: [other_pending],
     )
@@ -375,7 +375,7 @@ async def test_run_turn_keeps_non_hitl_tool_execution_compatible() -> None:
         description="记录只读调用",
         capabilities={ToolCapability.READ},
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=FakeProvider(

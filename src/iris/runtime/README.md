@@ -3,7 +3,7 @@
 # `iris.runtime`
 
 `iris.runtime` 是 Iris 的单 Agent 执行编排层：它将已解析的 `AgentConfig` 组装为
-`AgentRuntime`，构建 provider 请求、维护 session history、执行工具，并在权限确认或
+`RuntimeEnvironment` 和 `AgentRuntime`，构建 provider 请求、维护 session history、执行工具，并在权限确认或
 `human.ask` 时保存可恢复的 HITL checkpoint。
 
 它不负责 provider wire format、工具业务逻辑、长期记忆存储/检索，也不提供 graph runtime、
@@ -40,7 +40,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`iris.runtime` 包级导出：`AgentRuntime`、`RuntimeFactory`、`RuntimeProvider`、
+`iris.runtime` 包级导出：`AgentRuntime`、`RuntimeEnvironment`、`RuntimeFactory`、`RuntimeProvider`、
 `RuntimeMessageAssembler`、`ToolBridge` 与 `normalize_runtime_error`。
 运行选项、状态和结果模型从明确的 `iris.runtime.models` 子模块导入；它们当前不在
 `iris.runtime` 顶层重导出。
@@ -51,12 +51,31 @@ asyncio.run(main())
 `provider=`、`session_store=`、`interaction_store=`、`memory_service=` 注入依赖。Factory
 只做本地装配，构造时不会发起 provider 请求。
 
+高级 SDK 调用方可显式构造 environment；它只保存同一 runtime 实例复用的 live object，
+不解析环境变量，也不进入 HITL checkpoint：
+
+```python
+from iris.runtime import AgentRuntime, RuntimeEnvironment
+
+environment = RuntimeEnvironment(
+    agent_config=config,
+    context_input=context_input,
+    provider=provider,
+)
+runtime = AgentRuntime(environment)
+result = await runtime.run_turn("当前问题")
+```
+
+`RuntimeOptions` 仍是调用级输入，负责 session、run、memory、request 和 loop 选项；它可被
+checkpoint 序列化，而 `RuntimeEnvironment` 不可序列化。
+
 ## 组件关系
 
 ```mermaid
 flowchart LR
     Config["agent.yaml / AgentConfig"] --> Factory["RuntimeFactory"]
-    Factory --> Runtime["AgentRuntime"]
+    Factory --> Environment["RuntimeEnvironment"]
+    Environment --> Runtime["AgentRuntime"]
     Runtime --> Context["ContextBuilder + Assembler"]
     Runtime --> Provider["RuntimeProvider"]
     Runtime --> Bridge["ToolBridge / ToolExecutor"]
@@ -67,8 +86,10 @@ flowchart LR
     Commit --> Session
 ```
 
-- `RuntimeFactory`：从 YAML 路径或已校验的 `AgentConfig` 装配 runtime、工具注册表、
-  权限策略、provider 与存储。
+- `RuntimeFactory`：从 YAML 路径或已校验的 `AgentConfig` 装配一致的 environment，包括工具桥接、
+  HITL service、provider 与存储。
+- `RuntimeEnvironment`：保存 runtime 实例级的 live dependencies；工具通过 `ToolBridge`、HITL
+  通过 `HumanInteractionService` 进入，避免重复依赖来源。
 - `AgentRuntime`：调用 provider、编排工具/HITL、写入 session，是应用侧的主要入口。
 - `SessionStore`：持久化消息 history、run metadata 和 tool events。
 - `InteractionStore`：持久化人工交互及其 checkpoint；使用 SQLite session backend 时默认与

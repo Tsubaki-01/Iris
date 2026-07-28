@@ -90,7 +90,7 @@ def run_chat(
     chat_renderer.render_header(
         agent_config=agent_config,
         session_id=options.session_id,
-        workspace=str(runtime.workspace_root),
+        workspace=str(runtime.environment.workspace_root),
         trace_mode=options.trace_mode,
     )
     return run_chat_loop(

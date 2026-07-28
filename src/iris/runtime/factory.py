@@ -25,7 +25,9 @@ from ..providers import create_provider_client
 from ..session import InMemorySessionStore, SessionStore
 from ..store import SQLiteStore
 from ..tools import DefaultPermissionPolicy, ToolExecutor
-from .runtime import AgentRuntime, RuntimeProvider
+from .environment import RuntimeEnvironment, RuntimeProvider
+from .runtime import AgentRuntime
+from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
     from ..memory import MemoryService
@@ -133,20 +135,22 @@ class RuntimeFactory:
             base_dir=base_dir,
         )
 
-        return AgentRuntime(
+        tool_bridge = ToolBridge(
+            tool_view=tool_view,
+            tool_executor=tool_executor,
+        )
+        interaction_service = HumanInteractionService(resolved_interaction_store)
+        environment = RuntimeEnvironment(
             agent_config=config,
             context_input=context_input,
             provider=resolved_provider,
             session_store=resolved_session_store,
-            tool_registry=tool_registry,
-            tool_view=tool_view,
-            tool_executor=tool_executor,
+            tool_bridge=tool_bridge,
             workspace_root=workspace_root,
-            permission_policy=permission_policy,
-            interaction_store=resolved_interaction_store,
-            interaction_service=HumanInteractionService(resolved_interaction_store),
+            interaction_service=interaction_service,
             memory_service=memory_service,
         )
+        return AgentRuntime(environment)
 
 
 def _base_dir(config_path: Path | None) -> Path:

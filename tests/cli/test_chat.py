@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes import build_runtime
 from rich.console import Console
 
 import iris.cli.chat as chat_module
@@ -132,7 +133,7 @@ def _runtime(trace_store: ChatTraceStore) -> AgentRuntime:
         FakeProvider([_response("第一答复"), _response("第二答复")]),
         trace_store,
     )
-    return AgentRuntime(
+    return build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -514,7 +515,7 @@ def test_chat_loop_real_runtime_handles_permission_question_and_trace_once() -> 
             _response("全部完成"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=TracingRuntimeProvider(provider, trace_store),
@@ -579,7 +580,7 @@ def test_chat_compact_trace_latest_uses_real_request_tail() -> None:
             _response("完成"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input_with_before_current_input(),
         provider=TracingRuntimeProvider(provider, trace_store),
@@ -632,7 +633,7 @@ def test_chat_loop_real_runtime_rejects_permission_without_side_effect() -> None
             _response("拒绝后继续"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=TracingRuntimeProvider(provider, trace_store),

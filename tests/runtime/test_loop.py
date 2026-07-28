@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -89,7 +89,7 @@ def _runtime(
     tmp_path: Path,
 ) -> AgentRuntime:
     tool_registry = registry or ToolRegistry()
-    return AgentRuntime(
+    return build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -179,7 +179,7 @@ async def test_run_loop_replays_before_input_snapshot_without_reinjection(
             _assistant_text_response("最终回答"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input_with_before_current_input(),
         provider=provider,
@@ -247,7 +247,7 @@ async def test_run_loop_preserves_file_read_state_between_steps(
             _assistant_text_response("完成"),
         ]
     )
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=AgentConfig(
             name="runtime-agent",
             model={"provider": "openai", "name": "gpt-4o-mini"},

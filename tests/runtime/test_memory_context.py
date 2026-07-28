@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from fakes import FakeProvider
+from fakes import FakeProvider, build_runtime
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -17,7 +17,6 @@ from iris.memory import (
     MemorySearchResult,
 )
 from iris.message import LLMResponse, Role, TextBlock
-from iris.runtime import AgentRuntime
 from iris.runtime.models import RuntimeOptions, RuntimeStatus
 
 
@@ -78,7 +77,7 @@ async def test_run_turn_does_not_call_memory_service_by_default() -> None:
         MemoryContextBundle(fragments=[], total_chars=0, omitted_count=0, max_chars=100)
     )
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -99,7 +98,7 @@ async def test_run_turn_does_not_call_memory_service_by_default() -> None:
 @pytest.mark.asyncio
 async def test_run_turn_injects_explicit_memory_results_as_context_slots() -> None:
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -153,7 +152,7 @@ async def test_run_turn_uses_memory_service_for_explicit_memory_query() -> None:
     )
     memory_service = SpyMemoryService(bundle)
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
@@ -177,7 +176,7 @@ async def test_run_turn_uses_memory_service_for_explicit_memory_query() -> None:
 @pytest.mark.asyncio
 async def test_run_turn_returns_memory_error_when_query_has_no_service() -> None:
     provider = FakeProvider([_assistant_response()])
-    runtime = AgentRuntime(
+    runtime = build_runtime(
         agent_config=_agent_config(),
         context_input=_context_input(),
         provider=provider,
