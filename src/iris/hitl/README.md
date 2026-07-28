@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 # iris.hitl
 
 `iris.hitl` 定义持久化 human-in-the-loop gate 协议：人工权限确认与问题回答共用请求信封、
@@ -58,3 +60,21 @@ resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved res
 模型可见的 `AskQuestionTool` 不属于 HITL 状态机，定义在
 `iris.tools.builtin.human` 并由 `iris.tools` 顶层导出；本包只拥有 typed request/response、
 checkpoint 生命周期和存储协议。
+
+## 公开接口与维护
+
+`iris.hitl` 顶层导出领域模型、`InteractionStore` 协议、
+`InMemoryInteractionStore`、`HumanInteractionService` 和 `make_call_fingerprint()`。
+SQLite 实现从 `iris.store` 导入。
+
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| JSON-safe 模型与状态约束 | `models.py` | `tests/hitl/test_models.py` |
+| resolve/claim/update 转换 | `service.py` | `tests/hitl/test_service.py` |
+| CAS store 契约 | `store.py`, `in_memory.py` | `tests/hitl/test_store_contract.py` |
+| runtime 等待与恢复 | `../runtime/runtime.py`, `../runtime/resume.py` | `tests/runtime/test_hitl_waiting.py`, `test_hitl_resume.py` |
+
+```bash
+uv run pytest tests/hitl tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
+uv run ruff check src/iris/hitl tests/hitl
+```

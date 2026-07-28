@@ -41,7 +41,9 @@ asyncio.run(main())
 ```
 
 The package exports `AgentRuntime`, `RuntimeFactory`, `RuntimeProvider`,
-`RuntimeMessageAssembler`, `ToolBridge`, and `normalize_runtime_error`. `_resume_batch()` and
+`RuntimeMessageAssembler`, `ToolBridge`, and `normalize_runtime_error`. Import runtime option,
+status, and result models from the explicit `iris.runtime.models` submodule;
+they are not re-exported at the `iris.runtime` package root. `_resume_batch()` and
 `_continue_resumed_loop()` are internal `AgentRuntime` implementation details and are not
 application APIs.
 
@@ -241,6 +243,6 @@ the factory is assembled.
 After a change, run checks that match its scope, for example:
 
 ```bash
-UV_CACHE_DIR=/private/tmp/iris-uv-cache uv run pytest tests/runtime/test_loop.py tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
-UV_CACHE_DIR=/private/tmp/iris-uv-cache uv run ruff check src/iris/runtime tests/runtime
+uv run pytest tests/runtime/test_loop.py tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
+uv run ruff check src/iris/runtime tests/runtime
 ```

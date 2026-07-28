@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 # Iris Demo
 
 这个目录提供一个可直接用于本地试用的 Iris CLI Agent 配置。它展示了 Iris 的
@@ -137,3 +139,12 @@ SQLite backend 支持这种跨进程恢复；`session.backend: none` 的内存 s
   `--env-file` 是否指向正确文件。
 - 如果模型没有使用工具，可以尝试用更明确的问题要求它读取或搜索 `workspace/`。
 - 如果不想暴露工具，可加 `--no-tools` 启动，只验证纯对话链路。
+
+## 维护与验证
+
+这个目录是 CLI/runtime 的集成示例，不是独立 Python 包。修改时应同步核对
+`agent.yaml`、`context.yaml`、`src/iris/cli/main.py` 的参数以及 HITL 恢复测试。
+
+```bash
+uv run pytest tests/cli tests/context tests/agents
+```

@@ -42,6 +42,8 @@ asyncio.run(main())
 
 `iris.runtime` 包级导出：`AgentRuntime`、`RuntimeFactory`、`RuntimeProvider`、
 `RuntimeMessageAssembler`、`ToolBridge` 与 `normalize_runtime_error`。
+运行选项、状态和结果模型从明确的 `iris.runtime.models` 子模块导入；它们当前不在
+`iris.runtime` 顶层重导出。
 `_resume_batch()`、`_continue_resumed_loop()` 等下划线方法是 `AgentRuntime` 的内部实现，
 不应被应用直接调用。
 
@@ -232,6 +234,6 @@ runtime 不会默认自动召回 memory。只有在 `RuntimeOptions` 显式给�
 修改后可运行与变更范围相符的测试；例如：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/iris-uv-cache uv run pytest tests/runtime/test_loop.py tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
-UV_CACHE_DIR=/private/tmp/iris-uv-cache uv run ruff check src/iris/runtime tests/runtime
+uv run pytest tests/runtime/test_loop.py tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
+uv run ruff check src/iris/runtime tests/runtime
 ```

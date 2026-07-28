@@ -1,4 +1,6 @@
-# iris.store
+[English](README.en.md)
+
+# `iris.store`
 
 `iris.store` 提供 Iris 的具体持久化实现。当前仅包含基于标准库 `sqlite3` 的
 `SQLiteStore`；存储协议仍分别由 `iris.session.SessionStore` 与
@@ -38,3 +40,13 @@ no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。
 
 本包只承载具体持久化实现，不定义 session/HITL 领域协议，不做长期记忆、ORM、连接池或
 跨进程写入协调。`iris.memory` 的持久化实现仍由 memory 包自行管理。
+
+## 维护与验证
+
+HITL schema 判断是 fail-closed 契约。修改 `human_interactions` 表、索引或反序列化时，
+必须覆盖精确 signature、旧/未知 schema 拒绝以及“不修改原库”的测试。
+
+```bash
+uv run pytest tests/store tests/hitl/test_store_contract.py
+uv run ruff check src/iris/store tests/store
+```
