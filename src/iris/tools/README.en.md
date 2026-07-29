@@ -81,6 +81,11 @@ human request where required. `execute_prepared()` begins a new stage, revalidat
 accepts an approval only for the exact tool-call ID, and optionally accepts a `ToolEffectGuard`.
 Historical approval never overrides current deny, schema, workspace, or stale-read checks.
 
+`PermissionPolicy.fingerprint_payload()` is the lifecycle resumability contract for permission
+state. It must return deterministic JSON-safe data; custom policies must implement it explicitly
+rather than relying on object representations. `DefaultPermissionPolicy` includes its policy type,
+payload version, and `write_mode`.
+
 Preflight precedence is: deny returns `PERMISSION_ERROR`; a human tool under allow creates its own
 question; a human tool under require-human fails closed to prevent nested gates; only an ordinary
 require-human call creates a permission prompt.

@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from ..exceptions import IrisToolValidationError
+from ..exceptions import IrisConfigError, IrisToolValidationError
 from .base import BaseTool, ToolCapability, ToolExecutionContext
 
 
@@ -105,6 +105,13 @@ class PermissionPolicy:
         """返回工具调用权限裁决。"""
         raise NotImplementedError
 
+    def fingerprint_payload(self) -> dict[str, object]:
+        """返回决定恢复兼容性的确定性 JSON-safe 策略状态。"""
+        raise IrisConfigError(
+            "自定义权限策略必须实现 fingerprint_payload()",
+            policy_type=type(self).__qualname__,
+        )
+
 
 class DefaultPermissionPolicy(PermissionPolicy):
     """保守默认权限策略。"""
@@ -146,3 +153,11 @@ class DefaultPermissionPolicy(PermissionPolicy):
             reason="工具调用需要用户确认",
             metadata={"tool": tool.name, "params": params},
         )
+
+    def fingerprint_payload(self) -> dict[str, object]:
+        """返回默认权限策略影响工具执行的稳定状态。"""
+        return {
+            "type": "default",
+            "version": 1,
+            "write_mode": self.write_mode,
+        }
