@@ -6,7 +6,8 @@ from fakes import FakeProvider
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
-from iris.hitl import HumanInteractionService, InMemoryInteractionStore
+from iris.hitl import InMemoryInteractionStore
+from iris.hitl._legacy_service import HumanInteractionService
 from iris.message import LLMResponse, TextBlock
 from iris.runtime import RuntimeEnvironment, ToolBridge
 from iris.session import InMemorySessionStore

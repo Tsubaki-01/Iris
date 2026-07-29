@@ -16,7 +16,7 @@ from iris.hitl import (
     PermissionPrompt,
     ToolCallSnapshot,
 )
-from iris.store import SQLiteStore
+from iris.store._legacy_sqlite import SQLiteStore
 
 
 class _StoreFactory(Protocol):

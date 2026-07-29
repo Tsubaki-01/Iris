@@ -9,13 +9,13 @@ from iris.exceptions import HITLCheckpointInvalidError
 from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
-    HumanInteractionService,
     InMemoryInteractionStore,
     InteractionResumePhase,
     QuestionInteractionResponse,
     QuestionPrompt,
     ToolCallSnapshot,
 )
+from iris.hitl._legacy_service import HumanInteractionService
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.runtime.models import ToolResultCommit
 from iris.runtime.resume import (

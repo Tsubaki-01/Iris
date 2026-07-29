@@ -144,6 +144,7 @@ def _pending_interaction() -> HumanInteraction:
         session_id="session-1",
         run_id="run-1",
         step_index=0,
+        tool_call_id="call-question",
         status=InteractionStatus.PENDING,
         request=request,
         response=None,
@@ -159,6 +160,20 @@ def _pending_interaction() -> HumanInteraction:
 
 def _suspend_run(lifecycle: ModuleType, store: Any, active: Any) -> Any:
     """把固定 active run 原子转换为 waiting。"""
+    interaction = _pending_interaction()
+    prepared = lifecycle.RunToolCallRecord(
+        run_id="run-1",
+        step_index=0,
+        ordinal=1,
+        tool_call_id=interaction.tool_call_id,
+        tool_name=interaction.request.tool_call.tool_name,
+        arguments=interaction.request.tool_call.arguments,
+        fingerprint=interaction.request.tool_call.fingerprint,
+        phase="prepared",
+        version=1,
+        created_at=_T1,
+        updated_at=_T1,
+    )
     return store.suspend_run(
         lifecycle.SuspendRun(
             run_id="run-1",
@@ -166,14 +181,14 @@ def _suspend_run(lifecycle: ModuleType, store: Any, active: Any) -> Any:
             activation_id="activation-1",
             expected_session_revision=0,
             message_delta=[],
-            prepared_tool_calls=[],
+            prepared_tool_calls=[prepared],
             checkpoint=_checkpoint(
                 lifecycle,
                 sequence=2,
                 activation_id="activation-1",
                 session_revision=0,
             ),
-            pending_interaction=_pending_interaction(),
+            pending_interaction=interaction,
             assistant_message=None,
             usage=active.run.usage,
             now=_T1,

@@ -20,7 +20,8 @@ from typing import Protocol
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
-from ..hitl import HumanInteractionService, InMemoryInteractionStore
+from ..hitl.in_memory import InMemoryInteractionStore
+from ..hitl._legacy_service import HumanInteractionService
 from ..memory import MemoryContextBuilder, MemoryService
 from ..message import LLMRequest, LLMResponse
 from ..session import InMemorySessionStore, SessionStore

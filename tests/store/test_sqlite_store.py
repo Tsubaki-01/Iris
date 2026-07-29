@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import IrisSessionError
-from iris.store import SQLiteStore
+from iris.store._legacy_sqlite import SQLiteStore
 
 _V1_COLUMNS = [
     "interaction_id TEXT PRIMARY KEY",

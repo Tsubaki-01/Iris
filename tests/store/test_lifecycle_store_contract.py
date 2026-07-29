@@ -17,6 +17,8 @@ from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
     InteractionStatus,
+    PermissionInteractionResponse,
+    PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
     ToolCallSnapshot,
@@ -45,7 +47,7 @@ from iris.lifecycle import (
     project_result,
 )
 from iris.message import Msg, TextBlock, ToolUseBlock
-from iris.store import InMemoryLifecycleStore
+from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolErrorInfo, ToolResult
 
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
@@ -61,11 +63,12 @@ class _StoreFactory(Protocol):
     def __call__(self) -> LifecycleStore: ...
 
 
-@pytest.fixture(params=[InMemoryLifecycleStore], ids=["memory"])
-def lifecycle_store(request: pytest.FixtureRequest) -> LifecycleStore:
-    """参数化可复用 contract 当前已实现的 concrete stores。"""
-    factory: _StoreFactory = request.param
-    return factory()
+@pytest.fixture(params=["memory", "sqlite"])
+def lifecycle_store(request: pytest.FixtureRequest, tmp_path: Path) -> LifecycleStore:
+    """让进程内与 SQLite 实现运行完全相同的 aggregate contract。"""
+    if request.param == "sqlite":
+        return SQLiteStore(tmp_path / "lifecycle.db")
+    return InMemoryLifecycleStore()
 
 
 def _checkpoint(
@@ -147,6 +150,19 @@ def _interaction() -> HumanInteraction:
 
 
 def _suspend(store: LifecycleStore, created: RunCommit) -> RunCommit:
+    prepared = RunToolCallRecord(
+        run_id="run-1",
+        step_index=0,
+        ordinal=1,
+        tool_call_id="call-question",
+        tool_name="ask_question",
+        arguments={"question": "继续吗？"},
+        fingerprint=_TOOL_FINGERPRINT,
+        phase="prepared",
+        version=1,
+        created_at=_T1,
+        updated_at=_T1,
+    )
     return store.suspend_run(
         SuspendRun(
             run_id="run-1",
@@ -154,7 +170,7 @@ def _suspend(store: LifecycleStore, created: RunCommit) -> RunCommit:
             activation_id="activation-1",
             expected_session_revision=0,
             message_delta=[],
-            prepared_tool_calls=[],
+            prepared_tool_calls=[prepared],
             checkpoint=_checkpoint(
                 run_id="run-1",
                 sequence=2,
@@ -550,6 +566,202 @@ def test_begin_activation_rebinds_checkpoint_and_clears_waiting_result(
     assert resumed.checkpoint.sequence == resolved.checkpoint.sequence + 1
     assert resumed.interaction.status == "closed"
     assert lifecycle_store.load_result("run-1") is None
+
+
+def test_suspend_rejects_interaction_subject_that_differs_from_prepared_call(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    created = _create(lifecycle_store)
+    interaction = _interaction()
+    mismatched_subject = interaction.request.tool_call.model_copy(
+        update={"arguments": {"question": "另一个问题"}}
+    )
+    interaction = interaction.model_copy(
+        update={"request": interaction.request.model_copy(update={"tool_call": mismatched_subject})}
+    )
+    prepared = RunToolCallRecord(
+        run_id="run-1",
+        step_index=0,
+        ordinal=1,
+        tool_call_id="call-question",
+        tool_name="ask_question",
+        arguments={"question": "继续吗？"},
+        fingerprint=_TOOL_FINGERPRINT,
+        phase="prepared",
+        version=1,
+        created_at=_T1,
+        updated_at=_T1,
+    )
+
+    with pytest.raises(IrisRunConflictError, match="subject"):
+        lifecycle_store.suspend_run(
+            SuspendRun(
+                run_id="run-1",
+                expected_run_revision=created.run.revision,
+                activation_id="activation-1",
+                expected_session_revision=0,
+                prepared_tool_calls=[prepared],
+                checkpoint=_checkpoint(
+                    run_id="run-1",
+                    sequence=2,
+                    activation_id="activation-1",
+                    session_revision=0,
+                ),
+                pending_interaction=interaction,
+                usage=created.run.usage,
+                now=_T1,
+            )
+        )
+
+
+def test_approved_permission_cannot_commit_rejection_without_claim(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """若只看 USER_REJECTED error code，approve 可绕过 required effect claim。"""
+    created = _create(lifecycle_store)
+    interaction = HumanInteraction(
+        interaction_id=_INTERACTION_ID,
+        session_id="session-1",
+        run_id="run-1",
+        step_index=0,
+        status=InteractionStatus.PENDING,
+        request=HumanInteractionRequest(
+            tool_call=ToolCallSnapshot(
+                tool_call_id="call-write",
+                tool_name="write",
+                arguments={"value": "x"},
+                workspace_root="workspace",
+                fingerprint=_TOOL_FINGERPRINT,
+            ),
+            prompt=PermissionPrompt(reason="写入"),
+        ),
+        expires_at=_NOW + timedelta(minutes=5),
+        created_at=_T1,
+    )
+    prepared = RunToolCallRecord(
+        run_id="run-1",
+        step_index=0,
+        ordinal=1,
+        tool_call_id="call-write",
+        tool_name="write",
+        arguments={"value": "x"},
+        fingerprint=_TOOL_FINGERPRINT,
+        phase="prepared",
+        version=1,
+        created_at=_T1,
+        updated_at=_T1,
+    )
+    waiting = lifecycle_store.suspend_run(
+        SuspendRun(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            prepared_tool_calls=[prepared],
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=0,
+            ),
+            pending_interaction=interaction,
+            usage=created.run.usage,
+            now=_T1,
+        )
+    )
+    resolved = lifecycle_store.resolve_interaction(
+        ResolveInteraction(
+            run_id="run-1",
+            expected_run_revision=waiting.run.revision,
+            interaction_id=_INTERACTION_ID,
+            expected_interaction_version=1,
+            response=PermissionInteractionResponse(decision="approve"),
+            expected_fingerprint=_TOOL_FINGERPRINT,
+            now=_T2,
+        )
+    )
+    begun = lifecycle_store.begin_activation(
+        BeginActivation(
+            run_id="run-1",
+            expected_run_revision=resolved.run.revision,
+            new_activation_id="activation-resume",
+            kind="resume",
+            expected_checkpoint_sequence=2,
+            now=_T3,
+        )
+    )
+    assert begun.checkpoint is not None
+
+    with pytest.raises(IrisRunStateError, match="claim"):
+        lifecycle_store.commit_tool_result(
+            CommitToolResult(
+                run_id="run-1",
+                expected_run_revision=begun.run.revision,
+                activation_id="activation-resume",
+                expected_session_revision=0,
+                tool_call_id="call-write",
+                expected_tool_version=1,
+                result=ToolResult(
+                    tool_use_id="call-write",
+                    tool_name="write",
+                    is_error=True,
+                    error=ToolErrorInfo(
+                        code="USER_REJECTED",
+                        message="用户拒绝了工具调用",
+                    ),
+                ),
+                checkpoint=_checkpoint(
+                    run_id="run-1",
+                    sequence=begun.checkpoint.sequence + 1,
+                    activation_id="activation-resume",
+                    session_revision=0,
+                ),
+                now=_T3,
+            )
+        )
+
+
+def test_question_projection_must_match_exact_durable_answer(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    waiting = _suspend(lifecycle_store, _create(lifecycle_store))
+    _, resolved = _resolve(lifecycle_store, waiting)
+    begun = lifecycle_store.begin_activation(
+        BeginActivation(
+            run_id="run-1",
+            expected_run_revision=resolved.run.revision,
+            new_activation_id="activation-resume",
+            kind="resume",
+            expected_checkpoint_sequence=2,
+            now=_T3,
+        )
+    )
+    assert begun.checkpoint is not None
+
+    with pytest.raises(IrisRunStateError, match="claim"):
+        lifecycle_store.commit_tool_result(
+            CommitToolResult(
+                run_id="run-1",
+                expected_run_revision=begun.run.revision,
+                activation_id="activation-resume",
+                expected_session_revision=0,
+                tool_call_id="call-question",
+                expected_tool_version=1,
+                result=ToolResult(
+                    tool_use_id="call-question",
+                    tool_name="ask_question",
+                    content=[TextBlock(text="伪造答案")],
+                    data={"answer": "伪造答案"},
+                ),
+                checkpoint=_checkpoint(
+                    run_id="run-1",
+                    sequence=begun.checkpoint.sequence + 1,
+                    activation_id="activation-resume",
+                    session_revision=0,
+                ),
+                now=_T3,
+            )
+        )
 
 
 def test_cancellation_request_is_once_only_and_does_not_release_active_lane(

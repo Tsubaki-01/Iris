@@ -20,10 +20,12 @@ from ..context import (
     ContextSlot,
     load_context_build_input,
 )
-from ..hitl import HumanInteractionService, InMemoryInteractionStore, InteractionStore
+from ..hitl.in_memory import InMemoryInteractionStore
+from ..hitl.store import InteractionStore
+from ..hitl._legacy_service import HumanInteractionService
 from ..providers import create_provider_client
 from ..session import InMemorySessionStore, SessionStore
-from ..store import SQLiteStore
+from ..store._legacy_sqlite import SQLiteStore
 from ..tools import DefaultPermissionPolicy, ToolExecutor
 from .environment import RuntimeEnvironment, RuntimeProvider
 from .runtime import AgentRuntime

@@ -2,62 +2,74 @@
 
 # `iris.store`
 
-`iris.store` 提供 Iris 的具体持久化实现。当前公开基于标准库 `sqlite3` 的
-`SQLiteStore`，以及实现 `iris.lifecycle.LifecycleStore` 的
-`InMemoryLifecycleStore`。旧 session/HITL 存储协议仍分别由
-`iris.session.SessionStore` 与 `iris.hitl.InteractionStore` 定义。
+`iris.store` 提供 `iris.lifecycle.LifecycleStore` 的两个同步实现：进程内的
+`InMemoryLifecycleStore` 和基于 Python 标准库 `sqlite3` 的 `SQLiteStore`。它们共享同一个
+logical-run aggregate 契约，统一管理 session revision、run、activation、checkpoint、tool
+call、interaction 和 event。
+
+本包只负责具体存储；领域模型和 command/read 协议定义在 `iris.lifecycle`。它不调用
+provider、不执行工具，也不承担 `iris.memory` 的长期记忆。运行要求 Python 3.12+。
 
 ## 快速入门
 
 ```python
 from iris.store import SQLiteStore
 
-store = SQLiteStore(".iris/session.db")
-store.save_messages("default", [{"role": "user", "content": "hello"}])
-messages = store.load_messages("default")
+store = SQLiteStore(".iris/lifecycle.db")
+session = store.load_session("default")
+print(session.revision, session.messages)
 ```
 
-## InMemoryLifecycleStore
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v1 的
+文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
+任何写入前抛出 `IrisLifecycleSchemaError`，不迁移、重置或修改原文件。
 
-`InMemoryLifecycleStore()` 是 logical run aggregate 的进程内 reference implementation。
-它在一把 `RLock` 下原子处理 run、session lane、activation、checkpoint、tool call、
-interaction、result 和 event sequence，并对 command 输入与 read/commit 返回值做深拷贝隔离。
+## 实现架构
 
-它实现 `iris.lifecycle.LifecycleStore` 的全部同步 command/read 方法，不调用 provider、
-不执行工具，也不访问文件系统或网络。数据随进程退出而丢失；当前 `SQLiteStore` 尚未实现
-该 lifecycle protocol，持久化 hard cutover 属于后续阶段。
+`InMemoryLifecycleStore` 是语义参考实现。它在一把 `RLock` 下校验 CAS、activation fence、
+session lane、effect claim 和 interaction 绑定，并对输入/输出做深拷贝隔离。数据随进程退出
+丢失。
 
-## SQLiteStore
+`SQLiteStore` 在每次操作中打开独立连接并启用 foreign keys。读取是无写入的纯操作；
+变更使用 `BEGIN IMMEDIATE`，把 durable rows 还原到进程内语义实现、执行一个 command，
+再在同一事务中写回全部 aggregate facts。任一 SQL 失败都会整体回滚，不会暴露
+半更新状态。
 
-`SQLiteStore(path)` 使用同一个 SQLite 文件实现 `SessionStore` 与
-`InteractionStore`：
+schema v1 只包含：
 
-- `sessions` 保存 messages、run metadata 和 tool events JSON；
-- `human_interactions` 独立保存 HITL request、response、checkpoint 和恢复状态；
-- interaction 状态更新使用 version compare-and-set；
-- 部分唯一索引保证每个 session 最多存在一个 active interaction。
+- `lifecycle_schema`、`sessions`、`agent_runs`、`session_run_lanes`；
+- `run_activations`、`run_checkpoints`、`run_tool_calls`；
+- `run_interactions`、`run_events`；
+- partial unique index `one_open_interaction_per_run`。
 
-构造时会创建父目录，并用完整有序 `PRAGMA table_info` signature 识别 HITL schema：无表时
-创建 current v2，精确 v2 时补齐索引。精确 v1 与其他未知 schema 都会拒绝初始化，
-不删除表、不迁移 interaction JSON，也不清理 session recovery marker。
+SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` context 的
+`IrisRunPersistenceError`；预期 facts 已变化或数据库约束竞争使用 lifecycle conflict/state
+错误。
 
-除精确 v1/v2 外的缺列、额外列、列顺序、类型、nullability、default 或 primary-key 差异均
-视为未知 schema，初始化抛出 `IrisSessionError` 且不会修改原表。
+## 公开接口
 
-`append_tool_event(session_id, event)` 从 event 内读取 `event_id` 幂等追加：相同 payload 是
-no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。
+`iris.store` 顶层只导出：
 
-## 边界
+- `InMemoryLifecycleStore`：用于测试和单进程运行；
+- `SQLiteStore`：持久化 `LifecycleStore` 实现。
 
-本包只承载具体持久化实现，不定义 lifecycle/session/HITL 领域协议，不做长期记忆、ORM、
-连接池或跨进程写入协调。`iris.memory` 的持久化实现仍由 memory 包自行管理。
+两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
+finish/recover/cancel commands 及 run/session/checkpoint/tool/interaction/event/result reads。应通过
+`iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
+
+Phase 4 临时保留的 `_legacy_sqlite.py` 只服务于分支内旧 runtime 表征测试，不是公开
+API，不与 lifecycle store 双写，将在 Phase 5 删除。
 
 ## 维护与验证
 
-HITL schema 判断是 fail-closed 契约。修改 `human_interactions` 表、索引或反序列化时，
-必须覆盖精确 signature、旧/未知 schema 拒绝以及“不修改原库”的测试。
+| 修改内容 | 主要位置 | 对应测试 |
+| --- | --- | --- |
+| aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| schema、row projection 和事务 | `sqlite.py` | `test_lifecycle_sqlite_schema.py`, `test_lifecycle_sqlite_faults.py` |
+| 公开导出 | `__init__.py` | store contract/import tests |
 
 ```bash
-uv run pytest tests/store tests/hitl/test_store_contract.py tests/harness/test_lifecycle_transitions.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
+uv run mypy src/iris/store
 ```

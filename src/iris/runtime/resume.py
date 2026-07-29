@@ -8,12 +8,12 @@ from ..exceptions import (
 )
 from ..hitl import (
     HumanInteraction,
-    HumanInteractionService,
     InteractionResumePhase,
     InteractionStatus,
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
+from ..hitl._legacy_service import HumanInteractionService
 from ..message import Msg, TextBlock
 from ..session import SessionStore
 from ..tools import (

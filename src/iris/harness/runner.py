@@ -12,21 +12,35 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from ..exceptions import (
+    HITLConflictError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunPersistenceError,
+    IrisRunRecoveryError,
     IrisRunStateError,
 )
+from ..hitl import (
+    ApprovedToolCall,
+    HumanInteraction,
+    HumanInteractionResponse,
+    HumanInteractionService,
+    InteractionStatus,
+)
 from ..lifecycle import (
+    ActivationKind,
     AgentRunOptions,
     AgentRunRequest,
+    BeginActivation,
+    CheckpointResumability,
     CreateRun,
     FinishRun,
     LifecycleStore,
+    ResolveInteraction,
     RunCheckpoint,
     RunErrorInfo,
     RunEvent,
     RunPhase,
+    RunRecord,
     RunResult,
     RunSnapshot,
     RunStopReason,
@@ -38,6 +52,7 @@ from ..runtime import (
     RuntimeActivationInput,
     RuntimeActivationOutcome,
     RuntimeActivationResult,
+    RuntimeApprovedToolCall,
     RuntimeCursor,
 )
 from ..tools import CancellationRequestedError, CancellationSignal
@@ -112,11 +127,18 @@ class AgentRunner:
         store: LifecycleStore,
         observers: Sequence[RunEventObserver] = (),
         clock: Clock | None = None,
+        interaction_service: HumanInteractionService | None = None,
     ) -> None:
         self.runtime = runtime
         self.store = store
         self.observers = tuple(observers)
         self.clock = clock or _SystemClock()
+        self.interaction_service = interaction_service or HumanInteractionService()
+        if hasattr(self.interaction_service, "store") or any(
+            not callable(getattr(self.interaction_service, name, None))
+            for name in ("create_pending", "validate_response", "project_response")
+        ):
+            raise IrisRunStateError("runner interaction service 必须是无状态领域服务")
         self.environment_fingerprint = compute_environment_fingerprint(runtime)
         self._active: dict[str, ActiveActivation] = {}
 
@@ -172,6 +194,7 @@ class AgentRunner:
             activation_id=activation_id,
             clock=self._now,
             event_sink=active.events,
+            interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
             run_id=run_id,
@@ -184,6 +207,252 @@ class AgentRunner:
         )
         self._register(active, created.run.current_activation_id)
         return await self._run_activation(active, activation=activation, port=port)
+
+    async def resume(
+        self,
+        run_id: str,
+        *,
+        interaction_id: str,
+        response: HumanInteractionResponse,
+    ) -> RunResult:
+        """从 durable waiting checkpoint 创建一个新的 resume activation。"""
+        normalized_run_id = self._required_id(run_id)
+        normalized_interaction_id = self._required_id(interaction_id)
+        run = self.store.load_run(normalized_run_id)
+        if run is None:
+            raise IrisRunNotFoundError("run 不存在", run_id=normalized_run_id)
+        interaction = self.store.load_interaction(normalized_interaction_id)
+        if interaction is None:
+            raise IrisRunNotFoundError(
+                "interaction 不存在",
+                interaction_id=normalized_interaction_id,
+            )
+        if interaction.run_id != normalized_run_id:
+            raise IrisRunConflictError("interaction 不属于目标 run")
+        if interaction.status is InteractionStatus.CLOSED:
+            return self._closed_retry_result(run, interaction, response)
+        if run.phase is RunPhase.TERMINAL:
+            raise IrisRunStateError("terminal run 不接受 resume", run_id=run.run_id)
+        if run.phase is RunPhase.ACTIVE:
+            raise IrisRunStateError("active run 必须通过 recover 处理", run_id=run.run_id)
+        if run.pending_interaction_id != interaction.interaction_id:
+            raise IrisRunConflictError("waiting run 的 interaction identity 已变化")
+
+        event_cursor = run.last_event_sequence
+        now = self._now()
+        settled = self._settle_waiting_if_due(run, interaction, now=now)
+        if settled is not None:
+            await self._deliver_events(self.store.list_events(run.run_id, event_cursor))
+            return settled
+
+        checkpoint = self.store.load_checkpoint(run.run_id)
+        if checkpoint is None:
+            raise IrisRunRecoveryError(
+                "waiting run 缺少 durable checkpoint",
+                run_id=run.run_id,
+            )
+        cursor = self._validate_resume_checkpoint(run, interaction, checkpoint)
+        self.interaction_service.validate_response(
+            interaction,
+            run=snapshot_run(run),
+            response=response,
+            now=now,
+            environment_fingerprint=self.environment_fingerprint,
+        )
+        if interaction.status is InteractionStatus.PENDING:
+            resolved = self.store.resolve_interaction(
+                ResolveInteraction(
+                    run_id=run.run_id,
+                    expected_run_revision=run.revision,
+                    interaction_id=interaction.interaction_id,
+                    expected_interaction_version=interaction.version,
+                    response=response,
+                    expected_fingerprint=interaction.request.tool_call.fingerprint,
+                    now=now,
+                )
+            )
+            run = resolved.run
+            if resolved.interaction is None:
+                raise IrisRunStateError("resolve commit 缺少 interaction")
+            interaction = resolved.interaction
+            events = list(resolved.events)
+        else:
+            events = []
+        projection = self.interaction_service.project_response(interaction, response)
+        activation_id = f"act_{uuid.uuid4().hex}"
+        begun = self.store.begin_activation(
+            BeginActivation(
+                run_id=run.run_id,
+                expected_run_revision=run.revision,
+                new_activation_id=activation_id,
+                kind=ActivationKind.RESUME,
+                expected_checkpoint_sequence=checkpoint.sequence,
+                now=self._now(),
+            )
+        )
+        self._record_events(events, begun.events)
+        if begun.checkpoint is None:
+            raise IrisRunStateError("begin activation 缺少 rebound checkpoint")
+        if begun.checkpoint.engine_cursor != checkpoint.engine_cursor:
+            raise IrisRunConflictError("rebound checkpoint cursor 与 waiting checkpoint 不匹配")
+        runtime_projection = (
+            RuntimeApprovedToolCall.model_validate(projection.model_dump())
+            if isinstance(projection, ApprovedToolCall)
+            else projection
+        )
+        active = ActiveActivation(
+            run_id=run.run_id,
+            activation_id=activation_id,
+            signal=_MutableCancellationSignal(),
+            events=events,
+        )
+        port = StoreRuntimeCommitPort(
+            store=self.store,
+            run=begun.run,
+            activation_id=activation_id,
+            clock=self._now,
+            event_sink=active.events,
+            interaction_service=self.interaction_service,
+        )
+        activation = RuntimeActivationInput(
+            run_id=run.run_id,
+            activation_id=activation_id,
+            session_id=run.session_id,
+            kind="resume",
+            input=None,
+            cursor=cursor,
+            options=run.options.runtime,
+            interaction_projection=runtime_projection,
+        )
+        self._register(active, begun.run.current_activation_id)
+        return await self._run_activation(active, activation=activation, port=port)
+
+    def _validate_resume_checkpoint(
+        self,
+        run: RunRecord,
+        interaction: HumanInteraction,
+        checkpoint: RunCheckpoint,
+    ) -> RuntimeCursor:
+        """在消费人工响应前验证 waiting checkpoint 的交叉事实。"""
+        session = self.store.load_session(run.session_id)
+        if (
+            checkpoint.run_id != run.run_id
+            or checkpoint.sequence != run.checkpoint_sequence
+            or checkpoint.session_revision != session.revision
+            or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
+            or checkpoint.model_steps_committed != run.usage.model_steps_committed
+            or checkpoint.environment_fingerprint != run.environment_fingerprint
+            or checkpoint.environment_fingerprint != self.environment_fingerprint
+            or checkpoint.resumability is not CheckpointResumability.SAFE
+        ):
+            raise IrisRunRecoveryError(
+                "waiting checkpoint 与 durable run/session facts 不匹配",
+                run_id=run.run_id,
+            )
+        try:
+            cursor = RuntimeCursor.model_validate(checkpoint.engine_cursor)
+        except (TypeError, ValueError) as exc:
+            raise IrisRunRecoveryError(
+                "waiting checkpoint cursor 无法恢复",
+                run_id=run.run_id,
+            ) from exc
+        if cursor.position != "tool_batch" or cursor.next_tool_index >= len(cursor.tool_calls):
+            raise IrisRunRecoveryError(
+                "waiting checkpoint cursor 不在可恢复 interaction 位置",
+                run_id=run.run_id,
+            )
+        current_call = cursor.tool_calls[cursor.next_tool_index]
+        subject = interaction.request.tool_call
+        current_record = next(
+            (
+                item
+                for item in self.store.list_tool_calls(run.run_id)
+                if item.tool_call_id == subject.tool_call_id
+            ),
+            None,
+        )
+        if (
+            cursor.step_index != interaction.step_index
+            or current_call.id != subject.tool_call_id
+            or current_call.name != subject.tool_name
+            or current_record is None
+            or current_record.step_index != interaction.step_index
+            or current_record.tool_name != subject.tool_name
+            or current_record.arguments != subject.arguments
+            or current_record.fingerprint != subject.fingerprint
+            or current_record.interaction_id != interaction.interaction_id
+            or current_record.phase is not ToolCallPhase.PREPARED
+        ):
+            raise IrisRunRecoveryError(
+                "waiting checkpoint cursor 与 interaction subject 不匹配",
+                run_id=run.run_id,
+            )
+        return cursor
+
+    def _closed_retry_result(
+        self,
+        run: RunRecord,
+        interaction: HumanInteraction,
+        response: HumanInteractionResponse,
+    ) -> RunResult:
+        if interaction.response is not None and interaction.response != response:
+            raise HITLConflictError("interaction 已由不同 response 解决")
+        result = self.store.load_result(run.run_id)
+        if result is None:
+            raise IrisRunStateError(
+                "response 已提交但 run 仍 active；需要 recover",
+                run_id=run.run_id,
+            )
+        return result
+
+    def _settle_waiting_if_due(
+        self,
+        run: RunRecord,
+        interaction: HumanInteraction,
+        *,
+        now: datetime,
+    ) -> RunResult | None:
+        stop_reason: RunStopReason | None = None
+        close_reason: str | None = None
+        if run.cancellation_requested_at is not None:
+            stop_reason = RunStopReason.CANCELLED
+            close_reason = "cancelled"
+        else:
+            deadline = run.options.limits.deadline_at
+            expiry = (
+                interaction.expires_at if interaction.status is InteractionStatus.PENDING else None
+            )
+            deadline_due = deadline is not None and now >= deadline
+            expiry_due = expiry is not None and now >= expiry
+            if deadline_due and expiry_due:
+                if deadline is None or expiry is None:  # pragma: no cover - 已由 due facts 收窄
+                    raise IrisRunStateError("waiting due facts 不完整")
+                stop_reason = (
+                    RunStopReason.DEADLINE_EXCEEDED
+                    if deadline <= expiry
+                    else RunStopReason.INTERACTION_EXPIRED
+                )
+                close_reason = stop_reason.value
+            elif deadline_due:
+                stop_reason = RunStopReason.DEADLINE_EXCEEDED
+                close_reason = "deadline_exceeded"
+            elif expiry_due:
+                stop_reason = RunStopReason.INTERACTION_EXPIRED
+                close_reason = "interaction_expired"
+        if stop_reason is None:
+            return None
+        committed = self.store.finish_run(
+            FinishRun(
+                run_id=run.run_id,
+                expected_run_revision=run.revision,
+                stop_reason=stop_reason,
+                interaction_close_reason=close_reason,
+                now=now,
+            )
+        )
+        if committed.result is None:
+            raise IrisRunStateError("waiting settlement 缺少 durable result", run_id=run.run_id)
+        return committed.result
 
     def get_run(self, run_id: str) -> RunSnapshot:
         """读取一个 logical run 的 durable snapshot。"""

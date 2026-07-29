@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from ..exceptions import HITLConflictError, HITLResponseMismatchError
@@ -78,7 +78,7 @@ class InMemoryInteractionStore:
             interaction,
             status=InteractionStatus.RESOLVED,
             response=response,
-            resolved_at=datetime.now(),
+            resolved_at=datetime.now(UTC),
             version=interaction.version + 1,
         )
         self._interactions[interaction_id] = updated
@@ -106,7 +106,7 @@ class InMemoryInteractionStore:
             status=InteractionStatus.CONSUMED,
             resume_phase=InteractionResumePhase.CLAIMED,
             checkpoint=checkpoint,
-            consumed_at=datetime.now(),
+            consumed_at=datetime.now(UTC),
             version=interaction.version + 1,
         )
         self._interactions[interaction_id] = updated

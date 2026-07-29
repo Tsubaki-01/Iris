@@ -24,7 +24,12 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..hitl.models import HumanInteraction, InteractionStatus
+from ..hitl.models import (
+    HumanInteraction,
+    InteractionStatus,
+    PermissionInteractionResponse,
+    QuestionInteractionResponse,
+)
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -59,8 +64,8 @@ from ..lifecycle.store import (
     RunCommit,
     SuspendRun,
 )
-from ..message.message import Msg
-from ..tools.base import ToolResult
+from ..message.message import Msg, TextBlock
+from ..tools.base import ToolErrorInfo, ToolResult
 
 
 class _ActiveCommand(Protocol):
@@ -455,8 +460,10 @@ class InMemoryLifecycleStore:
                 raise IrisRunConflictError(
                     "tool result name 不匹配", tool_call_id=command.tool_call_id
                 )
-            if tool_call.phase is ToolCallPhase.PREPARED and not self._is_preflight_result(
-                command.result
+            if (
+                tool_call.phase is ToolCallPhase.PREPARED
+                and not self._is_preflight_result(command.result)
+                and not self._is_interaction_result(tool_call, command.result)
             ):
                 raise IrisRunStateError("可能包含副作用的工具结果必须先 claim")
             if tool_call.phase not in {ToolCallPhase.PREPARED, ToolCallPhase.CLAIMED}:
@@ -545,6 +552,27 @@ class InMemoryLifecycleStore:
             ):
                 raise IrisRunConflictError("run 已存在 open interaction", run_id=run.run_id)
             prepared = self._validate_prepared_calls(run, command.prepared_tool_calls)
+            interaction_tool = next(
+                (item for item in prepared if item.tool_call_id == interaction.tool_call_id),
+                self._tool_calls.get((run.run_id, interaction.tool_call_id)),
+            )
+            if interaction_tool is None or interaction_tool.phase is not ToolCallPhase.PREPARED:
+                raise IrisRunConflictError("interaction 缺少对应 prepared tool call")
+            subject = interaction.request.tool_call
+            if (
+                interaction.tool_call_id != interaction_tool.tool_call_id
+                or interaction.step_index != interaction_tool.step_index
+                or subject.tool_call_id != interaction_tool.tool_call_id
+                or subject.tool_name != interaction_tool.tool_name
+                or subject.arguments != interaction_tool.arguments
+                or subject.fingerprint != interaction_tool.fingerprint
+            ):
+                raise IrisRunConflictError("interaction 与 prepared tool call subject 不匹配")
+            if interaction_tool.interaction_id not in {None, interaction.interaction_id}:
+                raise IrisRunConflictError("prepared tool call 已绑定其他 interaction")
+            bound_interaction_tool = interaction_tool.model_copy(
+                update={"interaction_id": interaction.interaction_id}
+            )
             activation = self._require_activation(command.activation_id)
             settled = ActivationRecord.model_validate(
                 activation.model_dump()
@@ -592,6 +620,9 @@ class InMemoryLifecycleStore:
             self._interactions[interaction.interaction_id] = deepcopy(interaction)
             for tool_call in prepared:
                 self._tool_calls[(run.run_id, tool_call.tool_call_id)] = deepcopy(tool_call)
+            self._tool_calls[(run.run_id, interaction.tool_call_id)] = deepcopy(
+                bound_interaction_tool
+            )
             self._events[run.run_id].append(deepcopy(event))
             self._results[run.run_id] = deepcopy(result)
             return self._store_replay("suspend_run", command, commit)
@@ -1232,6 +1263,54 @@ class InMemoryLifecycleStore:
             "TOOL_NOT_ALLOWED",
             "VALIDATION_ERROR",
         }
+
+    def _is_interaction_result(
+        self,
+        tool_call: RunToolCallRecord,
+        result: ToolResult,
+    ) -> bool:
+        if tool_call.interaction_id is None:
+            return False
+        interaction = self._interactions.get(tool_call.interaction_id)
+        if (
+            interaction is None
+            or interaction.status is not InteractionStatus.CLOSED
+            or interaction.response is None
+            or interaction.close_reason != "resumed"
+        ):
+            return False
+        response = interaction.response
+        subject = interaction.request.tool_call
+        if (
+            interaction.run_id != tool_call.run_id
+            or interaction.tool_call_id != tool_call.tool_call_id
+            or interaction.step_index != tool_call.step_index
+            or subject.tool_call_id != tool_call.tool_call_id
+            or subject.tool_name != tool_call.tool_name
+            or subject.arguments != tool_call.arguments
+            or subject.fingerprint != tool_call.fingerprint
+        ):
+            return False
+        if isinstance(response, QuestionInteractionResponse):
+            expected = ToolResult(
+                tool_use_id=subject.tool_call_id,
+                tool_name=subject.tool_name,
+                content=[TextBlock(text=response.answer)],
+                data={"answer": response.answer},
+            )
+            return result == expected
+        if not isinstance(response, PermissionInteractionResponse) or response.decision != "reject":
+            return False
+        expected = ToolResult(
+            tool_use_id=subject.tool_call_id,
+            tool_name=subject.tool_name,
+            is_error=True,
+            error=ToolErrorInfo(
+                code="USER_REJECTED",
+                message="用户拒绝了工具调用",
+            ),
+        )
+        return result == expected
 
     def _current_commit(
         self,
