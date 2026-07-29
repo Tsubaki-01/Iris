@@ -71,6 +71,45 @@ checkpoint 序列化，而 `RuntimeEnvironment` 不可序列化。
 `BoundedLoopOptions.tool_error_policy` 使用的 `ToolErrorPolicy` 权威定义位于纯数据模块
 `iris.lifecycle.models`；`iris.runtime.models` 暂时以同名导入继续兼容旧入口，loop 行为不变。
 
+### 事务化 inner engine
+
+生命周期 runner 使用低层 `AgentRuntime.execute(activation, *, commits, cancellation)` 推进一次
+activation。`execute()` 在内部完成完整的 model/tool 循环；start、resume 与 recover 只通过不同的
+`RuntimeCursor` 进入同一算法。它返回 `RuntimeActivationResult` engine fact，不创建完整
+`RunResult`，也不决定公开 stop reason。
+
+新路径的 session history、model-step reservation/commit、tool claim/result 与 HITL suspension
+全部经过必需的 `RuntimeCommitPort`。工具在权限重新校验之后、middleware、tool body、artifact
+和 after hook 之前调用 `ToolEffectGuard` 完成 durable claim；普通工具与人工批准工具共享同一
+claim/result 路径。claim 后若没有可提交的明确结果，engine 返回 `outcome_unknown`，不会自动重放
+工具 effect。
+
+resume/recover 不会根据 activation kind 猜测用户是否批准。Lifecycle owner 必须通过
+`RuntimeActivationInput.interaction_projection` 提供已验证的响应投影：question answer 与
+permission rejection 使用精确 `ToolResult`，permission approval 使用
+`RuntimeApprovedToolCall(interaction_id, tool_call_id, tool_name, fingerprint)`。Engine 会在批次
+任何 effect 之前把该投影绑定到第一处未提交 gate；批准仍须重新鉴权并走 durable claim，且
+`interaction_id` 会写入 `RuntimeToolCall`。不匹配或无法消费的投影会作为冲突拒绝，消费完成后
+同批次下一处 gate 会再次挂起。Phase 4 的 lifecycle/HITL owner 负责从 durable interaction
+记录构造这个纯数据投影。
+
+`RuntimeActivationInput`、`RuntimeActivationResult`、`RuntimeActivationOutcome`、`RuntimeCursor`、
+`RuntimeApprovedToolCall`、`RuntimeCommitPort` 及其 commit DTO 从 `iris.runtime` 包级导出。`execute()` 的调用方必须提供
+runner-owned commit port 和 activation-scope `CancellationSignal`；当前 `run_turn()`、
+`run_loop()`、`resume()` 作为迁移期旧入口暂时保留，但不会与 `execute()` 相互包装或双写旧存储。
+
+```mermaid
+flowchart LR
+    Runner["Lifecycle runner"] --> Execute["AgentRuntime.execute"]
+    Execute --> Provider["RuntimeProvider"]
+    Execute --> Port["RuntimeCommitPort"]
+    Execute --> Preflight["Tool preflight"]
+    Preflight --> Guard["Durable effect claim"]
+    Guard --> Effect["Middleware / tool / artifact / after hook"]
+    Signal["CancellationSignal"] --> Execute
+    Signal --> Effect
+```
+
 ## 组件关系
 
 ```mermaid
@@ -244,6 +283,10 @@ interaction 另外保存 JSON-safe checkpoint，其中 `run_mode` 只有 `turn` 
 
 runtime 不会默认自动召回 memory。只有在 `RuntimeOptions` 显式给出 `memory_results` 或
 `memory_query` 时才会注入 memory context；后者要求 factory 装配时传入 `memory_service`。
+
+显式的动态 memory 每个 logical run 只在第一次 model step 注入一次；后续工具循环或 HITL
+resume 产生的 provider 请求不会再次附加同一条动态 memory。新的用户输入会创建新的 run，
+因此可以重新注入一次。`context.yaml` 中声明的静态 memory slot 不受此规则影响。
 
 ## 维护定位与验证
 

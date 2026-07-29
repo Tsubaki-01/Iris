@@ -14,12 +14,12 @@ import inspect
 import json
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, Self, runtime_checkable
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ..exceptions import IrisToolExecutionError, IrisToolValidationError
 from ..message import TextBlock
@@ -49,6 +49,22 @@ class ToolExecutionMode(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
     STREAM = "stream"
+
+
+class CancellationRequestedError(Exception):
+    """Activation cooperative cancellation 的内部控制流异常。"""
+
+
+@runtime_checkable
+class CancellationSignal(Protocol):
+    """工具与 runtime 共享的 activation-scope 取消信号。"""
+
+    @property
+    def requested(self) -> bool:
+        """返回当前 activation 是否已收到取消请求。"""
+
+    def raise_if_requested(self) -> None:
+        """已请求取消时抛出 cooperative cancellation 异常。"""
 
 
 class ToolDefinition(BaseModel):
@@ -194,6 +210,21 @@ class ToolExecutionContext(BaseModel):
     permission_mode: str = "default"
     metadata: dict[str, Any] = Field(default_factory=dict)
     read_state: Any | None = None
+    cancellation: CancellationSignal | None = Field(default=None, exclude=True)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def model_copy(
+        self,
+        *,
+        update: Mapping[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        """复制 context，同时保持 live cancellation signal identity。"""
+        copied = super().model_copy(update=update, deep=deep)
+        if update is None or "cancellation" not in update:
+            copied.cancellation = self.cancellation
+        return copied
 
 
 class ToolErrorInfo(BaseModel):
@@ -725,6 +756,8 @@ class CallableTool(BaseTool):
             value = self.func(**kwargs)
             if inspect.isawaitable(value):
                 value = await value
+        except CancellationRequestedError:
+            raise
         except IrisToolValidationError:
             raise
         except Exception as exc:

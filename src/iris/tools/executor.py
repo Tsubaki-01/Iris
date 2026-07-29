@@ -15,7 +15,7 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Sequence
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -33,7 +33,13 @@ from ..hitl.models import (
 )
 from ..message import ToolUseBlock
 from .artifacts import ToolArtifactStore
-from .base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
+from .base import (
+    BaseTool,
+    CancellationRequestedError,
+    ToolErrorInfo,
+    ToolExecutionContext,
+    ToolResult,
+)
 from .circuit import CircuitBreaker
 from .permissions import (
     DefaultPermissionPolicy,
@@ -43,6 +49,13 @@ from .permissions import (
     ReadFileState,
 )
 from .registry import ToolRegistry
+
+
+class ToolEffectGuard(Protocol):
+    """工具进入 middleware/body/artifact 生命周期前的 required guard。"""
+
+    def before_effect(self, prepared: PreparedToolCall) -> None:
+        """仅在 durable effect claim 成功后返回。"""
 
 
 class PreparedToolCall(BaseModel):
@@ -196,6 +209,7 @@ class ToolExecutor:
         context: ToolExecutionContext,
         *,
         approved_tool_call_id: str | None = None,
+        effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
         """重新验证当前权限后执行一条预检调用。"""
         current = self._prepare_call(prepared.tool_use, context)
@@ -203,6 +217,7 @@ class ToolExecutor:
             current,
             context,
             approved_tool_call_id=approved_tool_call_id,
+            effect_guard=effect_guard,
         )
 
     async def _execute_current(
@@ -211,6 +226,7 @@ class ToolExecutor:
         context: ToolExecutionContext,
         *,
         approved_tool_call_id: str | None = None,
+        effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
         """执行当前阶段已完成 lookup、校验与鉴权的调用。"""
         permission_error = self._permission_error(
@@ -219,7 +235,11 @@ class ToolExecutor:
         )
         if permission_error is not None:
             return permission_error
-        return await self._execute_authorized(prepared, context)
+        return await self._execute_authorized(
+            prepared,
+            context,
+            effect_guard=effect_guard,
+        )
 
     # endregion
 
@@ -355,6 +375,8 @@ class ToolExecutor:
         self,
         prepared: PreparedToolCall,
         context: ToolExecutionContext,
+        *,
+        effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
         """执行已通过当前鉴权的调用及其生命周期。"""
         tool_use = prepared.tool_use
@@ -362,23 +384,31 @@ class ToolExecutor:
         params = prepared.validated_params
         context.call_id = tool_use.id
         context.tool_name = tool_use.name
+        if self.circuit_breaker is not None:
+            try:
+                self.circuit_breaker.before_call(tool.name)
+            except IrisToolExecutionError as exc:
+                return self._error_result(
+                    tool_use,
+                    str(exc.context.get("code", "CIRCUIT_OPEN")),
+                    exc.message,
+                    details=exc.context,
+                )
+        if context.cancellation is not None:
+            context.cancellation.raise_if_requested()
+        if effect_guard is not None:
+            effect_guard.before_effect(prepared)
+        if context.cancellation is not None:
+            context.cancellation.raise_if_requested()
         try:
-            if self.circuit_breaker is not None:
-                try:
-                    self.circuit_breaker.before_call(tool.name)
-                except IrisToolExecutionError as exc:
-                    return self._error_result(
-                        tool_use,
-                        str(exc.context.get("code", "CIRCUIT_OPEN")),
-                        exc.message,
-                        details=exc.context,
-                    )
             middleware_error = await self._run_before_call(tool, params, context)
             if middleware_error is not None:
                 self._record_breaker_result(tool.name, middleware_error)
                 return middleware_error
             try:
                 result = await tool.arun(params, context)
+            except CancellationRequestedError:
+                raise
             except Exception as exc:
                 handled = await self._run_on_error(tool, exc, context)
                 if handled is None:
@@ -404,6 +434,8 @@ class ToolExecutor:
             )
             self._record_breaker_result(tool.name, final_result)
             return final_result
+        except CancellationRequestedError:
+            raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
             self._record_breaker_result(tool.name, result)
@@ -659,6 +691,7 @@ def _copy_context_for_parallel_call(
     """复制并发调用上下文，同时共享文件读取状态。"""
     child_context = context.model_copy(deep=True)
     child_context.read_state = context.read_state
+    child_context.cancellation = context.cancellation
     return child_context
 
 

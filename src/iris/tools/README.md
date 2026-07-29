@@ -64,7 +64,7 @@ assert result.model_content == "你好，Iris"
 - `ToolCapability`: 能力标签，包含 `READ`、`WRITE`、`EXECUTE`、`NETWORK`、`MCP`、`AGENT`。
 - `ToolExecutionMode`: 执行模式枚举，包含 `SYNC`、`ASYNC`、`STREAM`。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`metadata`。
-- `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`。
+- `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview`。
@@ -136,17 +136,22 @@ executor = ToolExecutor(
 - `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
   `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(tool_call, prompt)`，
   不会运行 middleware、circuit breaker、artifact 或工具本体。
-- `execute_prepared(prepared, context, approved_tool_call_id=None)`: 重新校验当前状态后执行
-  一条预检调用，供 runtime 的 HITL 恢复路径使用。
+- `execute_prepared(prepared, context, approved_tool_call_id=None, effect_guard=None)`: 重新校验
+  当前状态后执行一条预检调用；lifecycle runtime 会注入 required effect guard。
 
 预检阶段由唯一 `_prepare_call()` 完成 registry lookup、输入校验和 policy check，不运行工具
 生命周期。`execute_many()` 按输入顺序流式 prepare，每条调用在当前执行阶段只 lookup、校验和
 鉴权一次，再使用 `PreparedToolCall.tool` 与 `validated_params` 判断连续只读并发批次；
 classifier 异常会保守降级为串行执行。`execute_prepared()` 属于新的恢复执行阶段，因此会重新
 `_prepare_call()`，再按 `preflight_result` / `DENY`、human protocol guard、精确 approve 的
-优先级授权；通过后才进入 circuit breaker → middleware `before_call` → `tool.arun()` →
-artifact → middleware after hooks → breaker 记录。一次阶段内 policy 只检查一次，历史
-approve 不能覆盖当前 `DENY`。
+优先级授权；通过后依次检查 circuit breaker、cancellation、effect guard、cancellation，随后才
+进入 middleware `before_call` → `tool.arun()` → artifact → middleware after hooks → breaker
+记录。guard 失败时不会进入任何工具 effect；claim 后取消会作为独立控制流向 runtime 传播。
+一次阶段内 policy 只检查一次，历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
+guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
+
+并发 context copy 会共享原始 `read_state` 和 `cancellation` live object；signal 不会进入
+`model_dump()` 或 checkpoint。`CallableTool` 不会把协作式取消归一化为普通工具错误。
 
 文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
 
@@ -323,6 +328,7 @@ registry.register(ToolSearchTool(registry))
 
 ```text
 AskQuestionInput, AskQuestionTool, BaseTool, CallableTool,
+CancellationRequestedError, CancellationSignal,
 CircuitBreaker, CircuitBreakerState,
 DeferredToolIndex, DocstringInfo, DocstringSchemaExtractor,
 DefaultPermissionPolicy, EditFileInput, FILE_TOOL_CLASSES, FileTool,
@@ -330,7 +336,7 @@ GrepSearchInput, ListFilesInput, PermissionDecision, PermissionEffect,
 PermissionPolicy, PreparedToolCall,
 ReadFileInput, ReadFileRecord, ReadFileState, ToolArtifact,
 ToolArtifactStore, ToolCapability, ToolDefinition, ToolErrorInfo,
-ToolBatchPlan, ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
+ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 register_file_tools, schema_from_callable, schema_from_pydantic_model,
