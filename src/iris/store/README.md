@@ -2,9 +2,10 @@
 
 # `iris.store`
 
-`iris.store` 提供 Iris 的具体持久化实现。当前仅包含基于标准库 `sqlite3` 的
-`SQLiteStore`；存储协议仍分别由 `iris.session.SessionStore` 与
-`iris.hitl.InteractionStore` 定义。
+`iris.store` 提供 Iris 的具体持久化实现。当前公开基于标准库 `sqlite3` 的
+`SQLiteStore`，以及实现 `iris.lifecycle.LifecycleStore` 的
+`InMemoryLifecycleStore`。旧 session/HITL 存储协议仍分别由
+`iris.session.SessionStore` 与 `iris.hitl.InteractionStore` 定义。
 
 ## 快速入门
 
@@ -15,6 +16,16 @@ store = SQLiteStore(".iris/session.db")
 store.save_messages("default", [{"role": "user", "content": "hello"}])
 messages = store.load_messages("default")
 ```
+
+## InMemoryLifecycleStore
+
+`InMemoryLifecycleStore()` 是 logical run aggregate 的进程内 reference implementation。
+它在一把 `RLock` 下原子处理 run、session lane、activation、checkpoint、tool call、
+interaction、result 和 event sequence，并对 command 输入与 read/commit 返回值做深拷贝隔离。
+
+它实现 `iris.lifecycle.LifecycleStore` 的全部同步 command/read 方法，不调用 provider、
+不执行工具，也不访问文件系统或网络。数据随进程退出而丢失；当前 `SQLiteStore` 尚未实现
+该 lifecycle protocol，持久化 hard cutover 属于后续阶段。
 
 ## SQLiteStore
 
@@ -38,8 +49,8 @@ no-op，相同 event ID 的不同 payload 会抛出 `IrisSessionError`。
 
 ## 边界
 
-本包只承载具体持久化实现，不定义 session/HITL 领域协议，不做长期记忆、ORM、连接池或
-跨进程写入协调。`iris.memory` 的持久化实现仍由 memory 包自行管理。
+本包只承载具体持久化实现，不定义 lifecycle/session/HITL 领域协议，不做长期记忆、ORM、
+连接池或跨进程写入协调。`iris.memory` 的持久化实现仍由 memory 包自行管理。
 
 ## 维护与验证
 
@@ -47,6 +58,6 @@ HITL schema 判断是 fail-closed 契约。修改 `human_interactions` 表、索
 必须覆盖精确 signature、旧/未知 schema 拒绝以及“不修改原库”的测试。
 
 ```bash
-uv run pytest tests/store tests/hitl/test_store_contract.py
+uv run pytest tests/store tests/hitl/test_store_contract.py tests/harness/test_lifecycle_transitions.py
 uv run ruff check src/iris/store tests/store
 ```

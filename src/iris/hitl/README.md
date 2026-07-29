@@ -18,9 +18,12 @@ terminal host adapter，但 request、response 和 checkpoint 的权威模型仍
 - `HumanInteractionRequest`：唯一的 `tool_call + typed prompt` 请求信封；旧 `subject` 字段
   不兼容。
 - `HumanInteraction`：持久化记录，含 request、response 与 JSON-safe checkpoint。
-- `InteractionStatus`：`pending`、`resolved`、`consumed` 表示人工响应生命周期。
+- `InteractionStatus`：`pending`、`resolved`、`closed` 表示 target logical run 的人工响应生命
+  周期；`consumed` 暂留给旧 runtime continuation 路径。
 - `InteractionResumePhase`：`waiting`、`claimed`、`result_ready`、`result_committed`
   表示 runtime 恢复与结果提交进度；它不同于人工响应状态。
+- `expires_at` 声明 target interaction 的过期时刻；`closed_at` / `close_reason` 只在
+  `closed` 时存在。字段本身不代表旧 runtime 已实现超时或取消调度。
 
 ## 服务与存储
 
@@ -34,6 +37,11 @@ resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved res
 `session.backend: none`，进程退出即丢失。
 `iris.store.SQLiteStore` 同时实现 `InteractionStore`，将 interaction 保存到独立的
 `human_interactions` 表，可跨 runtime 重建恢复。
+
+新的 `iris.lifecycle.LifecycleStore` 将 `pending -> resolved -> closed` 与 logical run
+mutation 放在同一 aggregate transaction；`InMemoryLifecycleStore` 是当前 reference backend。
+旧 `InteractionStore` 的 `consumed` / resume phase 路径仍用于分支内 runtime 表征，尚未迁移到
+SQLite lifecycle schema。
 
 ## Runtime 边界
 

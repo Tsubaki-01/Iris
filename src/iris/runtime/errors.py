@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from ..exceptions import IrisError
 from ..message import Msg
@@ -71,7 +71,7 @@ def tool_error_info(results: Sequence[ToolResult]) -> RuntimeErrorInfo:
 def _classify_runtime_error(error: Exception) -> tuple[str, RuntimeErrorSource]:
     """从 Iris 异常实例读取 runtime 错误映射。"""
     if isinstance(error, IrisError):
-        return error.runtime_code, error.runtime_source
+        return error.runtime_code, cast(RuntimeErrorSource, error.runtime_source)
     return "RUNTIME_ERROR", "runtime"
 
 

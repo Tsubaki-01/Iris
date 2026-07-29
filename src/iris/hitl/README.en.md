@@ -24,9 +24,13 @@ stateDiagram-v2
 - `PermissionPrompt` and `PermissionInteractionResponse` model approve/reject.
 - `QuestionPrompt` and `QuestionInteractionResponse` model a question, options, and free-text answer.
 - `HumanInteractionRequest` is the only `tool_call + typed prompt` envelope.
-- `InteractionStatus` tracks human response: pending, resolved, consumed.
+- `InteractionStatus` tracks the target logical-run lifecycle as pending, resolved, and closed.
+  `consumed` temporarily remains for the legacy runtime continuation path.
 - `InteractionResumePhase` separately tracks runtime progress: waiting, claimed, result_ready,
   result_committed.
+- `expires_at` declares the target interaction expiry. `closed_at` and `close_reason` exist only for
+  closed interactions. These fields do not mean the legacy runtime already schedules timeout or
+  cancellation work.
 
 All arguments and checkpoints must be JSON-safe. Model construction may raise Pydantic
 `ValidationError`; service operations use stable HITL domain exceptions.
@@ -42,6 +46,11 @@ snapshots.
 `InMemoryInteractionStore` is suitable for tests and `session.backend: none` but is lost on process
 exit. `iris.store.SQLiteStore` persists interactions in `human_interactions` and supports durable
 recovery.
+
+The new `iris.lifecycle.LifecycleStore` commits `pending -> resolved -> closed` together with the
+logical-run aggregate; `InMemoryLifecycleStore` is the current reference backend. The legacy
+`InteractionStore` consumed/resume-phase path remains for branch-local runtime characterization and
+has not yet moved to a SQLite lifecycle schema.
 
 ## Runtime boundary
 

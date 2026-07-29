@@ -69,6 +69,9 @@ result = await runtime.run_turn("Current question")
 
 `RuntimeOptions` remains the call-scoped input for session, run, memory, request, and loop
 options. It is checkpoint-serializable; `RuntimeEnvironment` is not.
+The authoritative `ToolErrorPolicy` used by `BoundedLoopOptions.tool_error_policy` now lives in the
+pure-data `iris.lifecycle.models` module. `iris.runtime.models` temporarily imports it under the
+same name to preserve the legacy entry point; loop behavior is unchanged.
 
 ## Component relationships
 

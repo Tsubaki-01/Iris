@@ -20,6 +20,8 @@ from .exceptions import (
     IrisError,
     IrisExecutionError,
     IrisHITLError,
+    # Lifecycle / Run
+    IrisLifecycleSchemaError,
     IrisMCPConnectionError,
     # MCP
     IrisMCPError,
@@ -30,6 +32,13 @@ from .exceptions import (
     # Provider
     IrisProviderError,
     IrisRateLimitExceededError,
+    IrisRunConflictError,
+    IrisRunError,
+    IrisRunNotFoundError,
+    IrisRunObservationTimeoutError,
+    IrisRunPersistenceError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
     # Session
     IrisSessionError,
     # Template
@@ -75,6 +84,14 @@ __all__ = [
     "IrisAgentError",
     "IrisAgentExecutionError",
     "IrisMemoryError",
+    "IrisLifecycleSchemaError",
+    "IrisRunConflictError",
+    "IrisRunNotFoundError",
+    "IrisRunObservationTimeoutError",
+    "IrisRunPersistenceError",
+    "IrisRunRecoveryError",
+    "IrisRunError",
+    "IrisRunStateError",
     "IrisSessionError",
     "IrisTemplateError",
     "IrisTemplateNotFoundError",
