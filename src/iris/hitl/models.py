@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -187,6 +188,22 @@ HumanInteractionResponse = Annotated[
 ]
 
 
+class ApprovedToolCall(BaseModel):
+    """人工批准后返回给 lifecycle owner 的纯工具调用投影。"""
+
+    interaction_id: str
+    tool_call_id: str
+    tool_name: str
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("interaction_id", "tool_call_id", "tool_name", "fingerprint")
+    @classmethod
+    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _trim_required(value, field_name=str(info.field_name))
+
+
 class HumanInteractionRequest(BaseModel):
     """所有人工 gate 共用的工具调用与提示信封。"""
 
@@ -203,11 +220,12 @@ class HumanInteraction(BaseModel):
     session_id: str
     run_id: str
     step_index: int = Field(ge=0)
+    tool_call_id: str
     status: InteractionStatus = InteractionStatus.PENDING
     resume_phase: InteractionResumePhase = InteractionResumePhase.WAITING
     request: HumanInteractionRequest
     response: HumanInteractionResponse | None = None
-    checkpoint: dict[str, Any]
+    checkpoint: dict[str, Any] = Field(default_factory=dict)
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=_now)
     expires_at: datetime | None = None
@@ -218,7 +236,21 @@ class HumanInteraction(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
 
-    @field_validator("interaction_id", "session_id", "run_id")
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_legacy_tool_call_id(cls, value: Any) -> Any:
+        """让 Phase 5 删除前的旧构造路径自动补齐显式 subject identity。"""
+        if not isinstance(value, Mapping) or value.get("tool_call_id") is not None:
+            return value
+        request = value.get("request")
+        tool_call = getattr(request, "tool_call", None)
+        tool_call_id = getattr(tool_call, "tool_call_id", None)
+        if tool_call_id is None and isinstance(request, Mapping):
+            tool_call = request.get("tool_call")
+            tool_call_id = tool_call.get("tool_call_id") if isinstance(tool_call, Mapping) else None
+        return dict(value) | ({"tool_call_id": tool_call_id} if tool_call_id is not None else {})
+
+    @field_validator("interaction_id", "session_id", "run_id", "tool_call_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -233,7 +265,7 @@ class HumanInteraction(BaseModel):
     def _validate_close_reason(cls, value: str | None) -> str | None:
         return None if value is None else _trim_required(value, field_name="close_reason")
 
-    @field_validator("expires_at", "closed_at")
+    @field_validator("created_at", "expires_at", "resolved_at", "consumed_at", "closed_at")
     @classmethod
     def _validate_target_times(
         cls, value: datetime | None, info: ValidationInfo
@@ -244,6 +276,15 @@ class HumanInteraction(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> HumanInteraction:
+        request = getattr(self, "request", None)
+        tool_call_id = getattr(self, "tool_call_id", None)
+        expected_tool_call_id = getattr(
+            getattr(request, "tool_call", None),
+            "tool_call_id",
+            None,
+        )
+        if request is not None and tool_call_id != expected_tool_call_id:
+            raise ValueError("interaction tool_call_id 必须匹配 request subject")
         if self.response is not None and self.response.kind != self.request.prompt.kind:
             raise ValueError("interaction prompt kind 必须匹配 response kind")
         if self.status is InteractionStatus.PENDING and self.response is not None:
@@ -272,6 +313,7 @@ class HumanInteraction(BaseModel):
 
 
 __all__ = [
+    "ApprovedToolCall",
     "HumanInteraction",
     "HumanInteractionPrompt",
     "HumanInteractionRequest",

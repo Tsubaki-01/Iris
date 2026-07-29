@@ -14,7 +14,7 @@ from iris.providers import ProviderClient
 from iris.runtime import AgentRuntime, RuntimeFactory
 from iris.runtime.models import RuntimeStatus
 from iris.session import InMemorySessionStore
-from iris.store import SQLiteStore
+from iris.store._legacy_sqlite import SQLiteStore
 from iris.tools import (
     DefaultPermissionPolicy,
     PermissionEffect,

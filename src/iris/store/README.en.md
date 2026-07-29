@@ -2,57 +2,77 @@
 
 # `iris.store`
 
-`iris.store` contains concrete persistence backends. It publicly exports `SQLiteStore`, which uses
-the standard library `sqlite3` module, and `InMemoryLifecycleStore`, which implements
-`iris.lifecycle.LifecycleStore`. The legacy session/HITL protocols remain in
-`iris.session.SessionStore` and `iris.hitl.InteractionStore`.
+`iris.store` provides two synchronous implementations of `iris.lifecycle.LifecycleStore`: the
+process-local `InMemoryLifecycleStore` and the standard-library `sqlite3`-based `SQLiteStore`. Both
+implement the same logical-run aggregate contract for session revisions, runs, activations,
+checkpoints, tool calls, interactions, and events.
+
+This package owns concrete storage only. Domain models and command/read protocols live in
+`iris.lifecycle`. It does not call providers, execute tools, or own the long-term memory managed by
+`iris.memory`. Iris requires Python 3.12 or newer.
 
 ## Quick start
 
 ```python
 from iris.store import SQLiteStore
 
-store = SQLiteStore(".iris/session.db")
-store.save_messages("default", [{"role": "user", "content": "hello"}])
-messages = store.load_messages("default")
+store = SQLiteStore(".iris/lifecycle.db")
+session = store.load_session("default")
+print(session.revision, session.messages)
 ```
 
-## InMemoryLifecycleStore
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v1
+database. A new database gets its parent directory and complete schema. An old schema, missing or
+extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
+any write; the store never migrates, resets, or changes that file.
 
-`InMemoryLifecycleStore()` is the process-local reference implementation for the logical-run
-aggregate. Under one `RLock`, it atomically updates the run, session lane, activation, checkpoint,
-tool calls, interaction, result, and event sequence. Command inputs and read/commit return values
-are deep-copy isolated.
+## Architecture
 
-It implements every synchronous command/read method in `iris.lifecycle.LifecycleStore`. It never
-calls a provider, executes a tool, or accesses the filesystem or network. State is lost when the
-process exits. `SQLiteStore` does not yet implement this lifecycle protocol; the persistent hard
-cutover belongs to a later phase.
+`InMemoryLifecycleStore` is the semantic reference implementation. Under one `RLock`, it enforces
+CAS, activation fences, session lanes, effect claims, and exact interaction binding. Inputs and
+outputs are deep-copy isolated. All state disappears with the process.
 
-## Storage model
+`SQLiteStore` opens a scoped connection and enables foreign keys for every operation. Reads are
+write-free. Mutations use `BEGIN IMMEDIATE`, hydrate durable rows into the in-memory semantic
+implementation, run one command, and replace all aggregate facts in the same transaction. Any SQL
+failure rolls the complete transaction back, so readers never observe half-committed facts.
 
-- `sessions` stores messages, run metadata, and tool-event JSON.
-- `human_interactions` separately stores HITL requests, responses, checkpoints, and resume state.
-- interaction transitions use version compare-and-set.
-- a partial unique index permits at most one active interaction per session.
+Schema v1 contains only:
 
-Construction creates the parent directory and checks the complete ordered `PRAGMA table_info`
-signature. No table creates the current v2 schema; exact v2 restores missing indexes. Exact v1 and
-all unknown shapes fail closed without dropping tables, migrating interaction JSON, or clearing
-session recovery markers.
+- `lifecycle_schema`, `sessions`, `agent_runs`, and `session_run_lanes`;
+- `run_activations`, `run_checkpoints`, and `run_tool_calls`;
+- `run_interactions` and `run_events`;
+- the partial unique index `one_open_interaction_per_run`.
 
-Tool events use the shared `event_id` idempotency rules documented by `iris.session`.
+Connection, serialization, and corrupt-row failures map to `IrisRunPersistenceError` with `path`
+and `operation` context. Stale expected facts and database constraint races use lifecycle
+conflict/state errors.
 
-This package does not define lifecycle/session/HITL protocols and does not implement long-term
-memory, an ORM, a connection pool, or cross-process write coordination. `iris.memory` owns its
-separate memory database.
+## Public API
 
-## Maintenance
+The `iris.store` package exports only:
 
-Schema changes must preserve tests for exact signatures, rejection of old/unknown schemas, and the
-guarantee that rejected databases are not modified.
+- `InMemoryLifecycleStore` for tests and process-local execution;
+- `SQLiteStore` as the durable `LifecycleStore` implementation.
+
+Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
+resolve/finish/recover/cancel commands and run/session/checkpoint/tool/interaction/event/result
+reads. Construct commands and models through `iris.lifecycle`; do not depend on underscored
+`iris.store` modules.
+
+The Phase 4 `_legacy_sqlite.py` module exists only for branch-local characterization of the old
+runtime. It is not public, does not dual-write with the lifecycle store, and is removed in Phase 5.
+
+## Maintenance and verification
+
+| Change | Main location | Tests |
+| --- | --- | --- |
+| Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| Schema, row projection, transactions | `sqlite.py` | schema and fault-injection store tests |
+| Public exports | `__init__.py` | store contract/import tests |
 
 ```bash
-uv run pytest tests/store tests/hitl/test_store_contract.py tests/harness/test_lifecycle_transitions.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
+uv run mypy src/iris/store
 ```

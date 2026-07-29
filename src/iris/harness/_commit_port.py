@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from ..exceptions import IrisRunConflictError, IrisRunNotFoundError, IrisRunStateError
-from ..hitl import HumanInteraction
+from ..hitl import HumanInteraction, HumanInteractionService
 from ..lifecycle import (
     CheckpointResumability,
     ClaimToolCall,
@@ -25,6 +24,7 @@ from ..lifecycle import (
     SessionSnapshot,
     SuspendRun,
     ToolCallPhase,
+    snapshot_run,
 )
 from ..runtime import (
     ModelStepReservation,
@@ -50,6 +50,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         activation_id: str,
         clock: Callable[[], datetime],
         event_sink: list[RunEvent],
+        interaction_service: HumanInteractionService | None = None,
     ) -> None:
         if run.phase is not RunPhase.ACTIVE or run.current_activation_id != activation_id:
             raise IrisRunStateError("commit port 必须绑定当前 active activation")
@@ -63,6 +64,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._activation_id = activation_id
         self._clock = clock
         self._event_sink = event_sink
+        self._interaction_service = interaction_service or HumanInteractionService()
         self._event_keys = {(event.run_id, event.sequence) for event in event_sink}
         self._writable = True
 
@@ -228,6 +230,16 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             checkpoint=checkpoint,
             now=now,
         )
+        prepared_tool_calls = self._new_prepared_records(
+            suspension.prepared_tool_calls,
+            now=now,
+        )
+        prepared_tool_calls = [
+            record.model_copy(update={"interaction_id": interaction.interaction_id})
+            if record.tool_call_id == interaction.tool_call_id
+            else record
+            for record in prepared_tool_calls
+        ]
         stored = self._store.suspend_run(
             SuspendRun(
                 run_id=self._run.run_id,
@@ -235,10 +247,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 activation_id=self._activation_id,
                 expected_session_revision=self._session_revision,
                 message_delta=list(suspension.message_delta),
-                prepared_tool_calls=self._new_prepared_records(
-                    suspension.prepared_tool_calls,
-                    now=now,
-                ),
+                prepared_tool_calls=prepared_tool_calls,
                 checkpoint=checkpoint,
                 pending_interaction=interaction,
                 assistant_message=suspension.assistant_message,
@@ -425,14 +434,11 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             timeout = self._run.options.limits.interaction_timeout_seconds
             if timeout is not None:
                 expires_at = now + timedelta(seconds=timeout)
-        return HumanInteraction(
-            interaction_id=f"int_{uuid.uuid4().hex}",
-            session_id=self._run.session_id,
-            run_id=self._run.run_id,
+        run = snapshot_run(self._run).model_copy(update={"updated_at": now})
+        return self._interaction_service.create_pending(
+            suspension.interaction_request,
+            run=run,
             step_index=suspension.cursor.step_index,
-            request=suspension.interaction_request,
-            checkpoint=checkpoint.model_dump(mode="json"),
-            created_at=now,
             expires_at=expires_at,
         )
 

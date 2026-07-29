@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 from .models import (
+    ApprovedToolCall,
     HumanInteraction,
     HumanInteractionPrompt,
     HumanInteractionRequest,
@@ -50,6 +51,7 @@ def __dir__() -> list[str]:
 
 
 __all__ = [
+    "ApprovedToolCall",
     "HumanInteraction",
     "HumanInteractionPrompt",
     "HumanInteractionRequest",

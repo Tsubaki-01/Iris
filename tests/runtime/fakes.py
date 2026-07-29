@@ -8,12 +8,12 @@ from iris.context import ContextBuilder, ContextBuildInput
 from iris.exceptions import IrisProviderError, IrisRunConflictError, IrisRunPersistenceError
 from iris.hitl import (
     HumanInteraction,
-    HumanInteractionService,
     InMemoryInteractionStore,
     InteractionStore,
     PermissionPrompt,
     QuestionPrompt,
 )
+from iris.hitl._legacy_service import HumanInteractionService
 from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
@@ -185,9 +185,9 @@ class FakeRuntimeCommitPort:
             interaction_kind = "permission"
         else:
             raise IrisRunConflictError("fake port 收到未知 interaction prompt")
-        self._interaction_kinds[
-            suspension.interaction_request.tool_call.tool_call_id
-        ] = interaction_kind
+        self._interaction_kinds[suspension.interaction_request.tool_call.tool_call_id] = (
+            interaction_kind
+        )
         self.messages.extend(suspension.message_delta)
         self.cursor = suspension.cursor
         self._revision += 1
@@ -316,9 +316,7 @@ class FakeRuntimeCommitPort:
         start: int = 1,
     ) -> bool:
         return len(prepared) == len(calls) and all(
-            fact.ordinal == ordinal
-            and fact.tool_call_id == call.id
-            and fact.tool_name == call.name
+            fact.ordinal == ordinal and fact.tool_call_id == call.id and fact.tool_name == call.name
             for ordinal, fact, call in zip(
                 range(start, start + len(calls)),
                 prepared,

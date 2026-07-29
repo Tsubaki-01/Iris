@@ -1,88 +1,85 @@
 [English](README.en.md)
 
-# iris.hitl
+# `iris.hitl`
 
-`iris.hitl` 定义持久化 human-in-the-loop gate 协议：人工权限确认与问题回答共用请求信封、
-interaction 生命周期及存储契约，同时保留两者不同的领域语义。
+`iris.hitl` 定义 human-in-the-loop gate 的 JSON-safe 领域模型和无状态投影服务。权限
+确认和人工问答共享精确的 tool-call identity，但保留不同的 prompt/response 语义。
 
-它不实现 UI、provider 调用、工具执行或普通 session 消息存储；宿主应用负责呈现
-interaction，`iris.runtime.AgentRuntime` 负责创建、等待与恢复。`iris chat` 是当前首个
-terminal host adapter，但 request、response 和 checkpoint 的权威模型仍在本包与 runtime。
+本包不实现 UI、provider 调用、工具执行或持久化事务。新 lifecycle 路径中，
+`iris.lifecycle.LifecycleStore` 是 run、checkpoint、tool call 和 interaction 写入的唯一权威；
+`HumanInteractionService` 只构造、校验和投影值。
 
 ## 核心模型
 
-- `ToolCallSnapshot`：两类 gate 共用的精确工具调用身份，包含工具名、参数、workspace 与稳定
-  `fingerprint`。
-- `PermissionPrompt`：权限策略产生的批准/拒绝提示；批准只绑定当前 tool call snapshot。
-- `QuestionPrompt`：`human.ask` 的单个问题与可选选项。
-- `HumanInteractionRequest`：唯一的 `tool_call + typed prompt` 请求信封；旧 `subject` 字段
-  不兼容。
-- `HumanInteraction`：持久化记录，含 request、response 与 JSON-safe checkpoint。
-- `InteractionStatus`：`pending`、`resolved`、`closed` 表示 target logical run 的人工响应生命
-  周期；`consumed` 暂留给旧 runtime continuation 路径。
-- `InteractionResumePhase`：`waiting`、`claimed`、`result_ready`、`result_committed`
-  表示 runtime 恢复与结果提交进度；它不同于人工响应状态。
-- `expires_at` 声明 target interaction 的过期时刻；`closed_at` / `close_reason` 只在
-  `closed` 时存在。字段本身不代表旧 runtime 已实现超时或取消调度。
+- `ToolCallSnapshot`：工具 ID、名称、参数、workspace 和稳定 SHA-256 `fingerprint`。
+- `PermissionPrompt` / `PermissionInteractionResponse`：精确一次工具权限的 approve/reject。
+- `QuestionPrompt` / `QuestionInteractionResponse`：一个问题、可选选项和非空回答。
+- `HumanInteractionRequest`：唯一的 `tool_call + typed prompt` 信封。
+- `HumanInteraction`：绑定 run/session/step/tool call 的 durable fact，状态为
+  `pending -> resolved -> closed`，并可声明 aware `expires_at`。
+- `ApprovedToolCall`：权限批准的 frozen 投影 DTO；它不授权直接执行副作用。
 
-## 服务与存储
+`consumed` 状态和 `InteractionResumePhase` 仍为 Phase 5 删除前的旧 runtime 表征路径保留，
+不属于新 `AgentRunner` 的 interaction 流程。
 
-`HumanInteractionService` 在 `InteractionStore` 上通过唯一 `create(request, ...)` 入口以及
-resolve、claim 和 `update_consumed` 的 CAS 状态转换。相同 resolved response 是幂等的，
-不同 response 会产生冲突。更新 consumed interaction 时，调用方必须传入读取快照中的
-`expected_phase` 与 `expected_version`；内存和 SQLite backend 都同时比较 status、phase
-和 version，任一变化都会冲突，Service 不会用重新读取的版本替换调用方快照。
+## 无状态服务
 
-`InMemoryInteractionStore` 位于 `src/iris/hitl/in_memory.py`，适合测试和
-`session.backend: none`，进程退出即丢失。
-`iris.store.SQLiteStore` 同时实现 `InteractionStore`，将 interaction 保存到独立的
-`human_interactions` 表，可跨 runtime 重建恢复。
+```python
+from iris.hitl import HumanInteractionService
 
-新的 `iris.lifecycle.LifecycleStore` 将 `pending -> resolved -> closed` 与 logical run
-mutation 放在同一 aggregate transaction；`InMemoryLifecycleStore` 是当前 reference backend。
-旧 `InteractionStore` 的 `consumed` / resume phase 路径仍用于分支内 runtime 表征，尚未迁移到
-SQLite lifecycle schema。
+service = HumanInteractionService()
+```
 
-## Runtime 边界
+`HumanInteractionService` 是零参构造，不持有 store 或 clock，提供：
 
-当 runtime 返回 `RuntimeStatus.WAITING_HUMAN` 时，调用方读取
-`RuntimeTurnResult.pending_interaction` 并通过 host adapter 收集响应；随后调用
-`await runtime.resume(interaction_id, response)`。
+- `create_pending(request, *, run, step_index, expires_at)`：从 active run snapshot 构造未持久化
+  interaction；
+- `validate_response(interaction, *, run, response, now, environment_fingerprint)`：校验
+  waiting identity、response kind、expiry 和 environment fingerprint；
+- `project_response(interaction, response)`：把已解决的 question 投影为答案
+  `ToolResult`，reject 投影为 `USER_REJECTED` 结果，approve 投影为
+  `ApprovedToolCall`。
 
-`iris chat` 当前支持：
+所有方法都无持久化副作用。批准后 runtime 仍必须根据当前环境重新鉴权，并在工具
+effect 前通过 lifecycle store claim 精确 prepared call。
 
-- permission 使用 `[y/N]`；空输入表示 reject，approve 只覆盖展示的精确调用一次。
-- `human.ask` 可按编号选择 option，也可输入自由文本。
-- 同一个 run 连续出现多个 gate 时，adapter 按 runtime 返回顺序逐个恢复。
-- Ctrl+C 或 EOF 只退出当前 adapter，不等于 reject/cancel，pending interaction 保持不变。
-- SQLite backend 会在相同 session 下自动发现并恢复 interaction；内存 backend 不承诺跨进程。
-- `claimed` 或 checkpoint 中存在未清除的 `continuation_claim` 时 fail closed，不自动重放
-  工具或 provider continuation。
+## Resume 执行链
 
-权限策略先于 host 输入，`DENY` 具有最高优先级且不可由人工回答覆盖。human tool 仅在
-`ALLOW` 时产生 question；若策略对 human tool 返回 `REQUIRE_HUMAN`，executor 会以
-`PERMISSION_ERROR` fail closed，避免同一调用形成嵌套双 gate。普通工具只有在
-`REQUIRE_HUMAN` 时产生 permission。当前没有 TUI 或 Web adapter，也不提供超时、取消或
-长期授权规则。
+Host 展示 `RunResult.pending_interaction` 并收集 typed response，然后调用：
 
-模型可见的 `AskQuestionTool` 不属于 HITL 状态机，定义在
-`iris.tools.builtin.human` 并由 `iris.tools` 顶层导出；本包只拥有 typed request/response、
-checkpoint 生命周期和存储协议。
+```python
+result = await runner.resume(
+    run_id,
+    interaction_id=interaction.interaction_id,
+    response=response,
+)
+```
+
+`AgentRunner.resume()` 先加载 waiting run 和精确 interaction，惰性结算已到期的 run deadline/
+interaction expiry，再调用无状态服务校验 response。Lifecycle store 以 CAS 持久化
+resolved response，关闭旧 interaction，并为同一 `run_id` 创建新 activation。之后从
+checkpoint v1 恢复同一 engine。纯 read 不会隐式结算 expiry。
+
+相同 response 的 durable resolve 可幂等重试；不同 response、错误 run/interaction/kind/version/
+fingerprint 或环境漂移均 fail closed。Same-batch 中的后续 gate 按原顺序逐个暴露，
+一个 run 同时最多一个 open interaction。
 
 ## 公开接口与维护
 
-`iris.hitl` 顶层导出领域模型、`InteractionStore` 协议、
-`InMemoryInteractionStore`、`HumanInteractionService` 和 `make_call_fingerprint()`。
-SQLite 实现从 `iris.store` 导入。
+`iris.hitl` 顶层导出 typed prompts/responses、`HumanInteraction`、`ApprovedToolCall`、
+`HumanInteractionService` 和 `make_call_fingerprint()`。`InteractionStore` 与
+`InMemoryInteractionStore` 目前仍为旧 runtime 兼容而导出，新代码应使用 `iris.lifecycle.LifecycleStore`，
+不要将两个存储路径组合或双写。
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | JSON-safe 模型与状态约束 | `models.py` | `tests/hitl/test_models.py` |
-| resolve/claim/update 转换 | `service.py` | `tests/hitl/test_service.py` |
-| CAS store 契约 | `store.py`, `in_memory.py` | `tests/hitl/test_store_contract.py` |
-| runtime 等待与恢复 | `../runtime/runtime.py`, `../runtime/resume.py` | `tests/runtime/test_hitl_waiting.py`, `test_hitl_resume.py` |
+| create/validate/project 语义 | `service.py` | `tests/hitl/test_service.py` |
+| aggregate interaction 事务 | `../store/in_memory.py`, `../store/sqlite.py` | lifecycle store contract |
+| durable resume 与 expiry | `../harness/runner.py` | runner resume/expiry tests |
 
 ```bash
-uv run pytest tests/hitl tests/runtime/test_hitl_waiting.py tests/runtime/test_hitl_resume.py
+uv run pytest tests/hitl/test_service.py tests/harness/test_runner_resume.py tests/harness/test_runner_interaction_expiry.py
 uv run ruff check src/iris/hitl tests/hitl
+uv run mypy src/iris/hitl
 ```
