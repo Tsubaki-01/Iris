@@ -243,8 +243,11 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 - `PermissionEffect`: `ALLOW`、`DENY`、`REQUIRE_HUMAN` 三态权限裁决。
 - `PermissionDecision(effect, reason="", metadata={})`: 权限裁决结果；拒绝或等待人工时必须有 `reason`。
 - `PermissionPolicy.check(tool, params, context)`: 权限策略接口。
+- `PermissionPolicy.fingerprint_payload()`: 返回决定 lifecycle 恢复兼容性的确定性、
+  JSON-safe 策略状态；自定义策略必须显式实现，基类不会按对象表示猜测状态。
 - `DefaultPermissionPolicy(write_mode="confirm"|"allow"|"deny")`: 只读工具允许；写工具按
-  配置等待人工、直接允许或直接拒绝。
+  配置等待人工、直接允许或直接拒绝；其指纹 payload 固定包含策略类型、版本和
+  `write_mode`。
 - `WorkspacePolicy`: 路径边界策略，用于文件工具。
 - `ReadFileState` / `ReadFileRecord`: 文件读后写入的乐观锁状态。
 
