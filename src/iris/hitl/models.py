@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -32,6 +32,7 @@ class InteractionStatus(StrEnum):
     PENDING = "pending"
     RESOLVED = "resolved"
     CONSUMED = "consumed"
+    CLOSED = "closed"
 
 
 class InteractionResumePhase(StrEnum):
@@ -48,7 +49,7 @@ def _new_interaction_id() -> str:
 
 
 def _now() -> datetime:
-    return datetime.now()
+    return datetime.now(UTC)
 
 
 def _validate_json_safe(value: Any, *, field_name: str) -> Any:
@@ -198,7 +199,7 @@ class HumanInteractionRequest(BaseModel):
 class HumanInteraction(BaseModel):
     """持久化的一次人工 gate 与其恢复状态。"""
 
-    interaction_id: str = Field(default_factory=_new_interaction_id, pattern=r"^int_[0-9a-f]{32}$")
+    interaction_id: str = Field(default_factory=_new_interaction_id)
     session_id: str
     run_id: str
     step_index: int = Field(ge=0)
@@ -209,10 +210,13 @@ class HumanInteraction(BaseModel):
     checkpoint: dict[str, Any]
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=_now)
+    expires_at: datetime | None = None
     resolved_at: datetime | None = None
     consumed_at: datetime | None = None
+    closed_at: datetime | None = None
+    close_reason: str | None = None
 
-    model_config = ConfigDict(extra="forbid", use_enum_values=False)
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
 
     @field_validator("interaction_id", "session_id", "run_id")
     @classmethod
@@ -223,6 +227,20 @@ class HumanInteraction(BaseModel):
     @classmethod
     def _validate_checkpoint(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _validate_json_safe(value, field_name="checkpoint")
+
+    @field_validator("close_reason")
+    @classmethod
+    def _validate_close_reason(cls, value: str | None) -> str | None:
+        return None if value is None else _trim_required(value, field_name="close_reason")
+
+    @field_validator("expires_at", "closed_at")
+    @classmethod
+    def _validate_target_times(
+        cls, value: datetime | None, info: ValidationInfo
+    ) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError(f"{info.field_name} 必须包含时区")
+        return value
 
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> HumanInteraction:
@@ -245,6 +263,11 @@ class HumanInteraction(BaseModel):
             and self.resume_phase is InteractionResumePhase.WAITING
         ):
             raise ValueError("consumed interaction 的 resume_phase 不能是 waiting")
+        if self.status is InteractionStatus.CLOSED:
+            if self.closed_at is None or self.close_reason is None:
+                raise ValueError("closed interaction 必须包含 closed_at 与 close_reason")
+        elif self.closed_at is not None or self.close_reason is not None:
+            raise ValueError("非 closed interaction 不能包含关闭事实")
         return self
 
 

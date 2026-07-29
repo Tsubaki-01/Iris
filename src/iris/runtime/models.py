@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..context import ContextBuildOutput
 from ..hitl import HumanInteraction
+from ..lifecycle.models import ToolErrorPolicy
 from ..memory import MemoryQuery, MemorySearchResult
 from ..message import Conversation, LLMRequest, Msg
 from ..tools import ToolResult
@@ -41,13 +42,6 @@ class RuntimeStatus(StrEnum):
     ERROR = "error"
     MAX_STEPS = "max_steps"
     WAITING_HUMAN = "waiting_human"
-
-
-class ToolErrorPolicy(StrEnum):
-    """Loop 遇到工具错误时的处理策略。"""
-
-    RETURN_TO_MODEL = "return_to_model"
-    STOP = "stop"
 
 
 class BoundedLoopOptions(BaseModel):

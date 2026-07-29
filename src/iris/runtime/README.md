@@ -68,6 +68,8 @@ result = await runtime.run_turn("当前问题")
 
 `RuntimeOptions` 仍是调用级输入，负责 session、run、memory、request 和 loop 选项；它可被
 checkpoint 序列化，而 `RuntimeEnvironment` 不可序列化。
+`BoundedLoopOptions.tool_error_policy` 使用的 `ToolErrorPolicy` 权威定义位于纯数据模块
+`iris.lifecycle.models`；`iris.runtime.models` 暂时以同名导入继续兼容旧入口，loop 行为不变。
 
 ## 组件关系
 
