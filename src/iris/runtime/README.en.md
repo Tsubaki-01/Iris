@@ -73,6 +73,49 @@ The authoritative `ToolErrorPolicy` used by `BoundedLoopOptions.tool_error_polic
 pure-data `iris.lifecycle.models` module. `iris.runtime.models` temporarily imports it under the
 same name to preserve the legacy entry point; loop behavior is unchanged.
 
+### Transactional inner engine
+
+The lifecycle runner advances one activation through
+`AgentRuntime.execute(activation, *, commits, cancellation)`. `execute()` owns the complete inner
+model/tool loop; start, resume, and recover enter the same algorithm through different
+`RuntimeCursor` values. It returns a `RuntimeActivationResult` engine fact rather than creating a
+complete `RunResult` or choosing a public stop reason.
+
+On this path, session history, model-step reservation/commit, tool claim/result, and HITL suspension
+all pass through the required `RuntimeCommitPort`. After current permission revalidation and before
+middleware, the tool body, artifact persistence, or after hooks, `ToolEffectGuard` durably claims
+the call. Ordinary and human-approved tools share this claim/result path. If a claim exists without
+an explicit committable result, the engine returns `outcome_unknown` and never automatically
+replays the tool effect.
+
+Resume and recover never infer approval from the activation kind. The lifecycle owner must pass a
+validated response through `RuntimeActivationInput.interaction_projection`: an exact `ToolResult`
+for a question answer or permission rejection, or
+`RuntimeApprovedToolCall(interaction_id, tool_call_id, tool_name, fingerprint)` for approval. Before
+any batch effect, the engine binds that projection to the first uncommitted gate. Approval still
+undergoes current permission validation and a durable claim, and its `interaction_id` is recorded on
+the `RuntimeToolCall`. A mismatched or unconsumable projection is rejected as a conflict; after one
+projection is consumed, a later gate in the same batch suspends again. The Phase 4 lifecycle/HITL
+owner constructs this pure-data projection from the durable interaction record.
+
+`RuntimeActivationInput`, `RuntimeActivationResult`, `RuntimeActivationOutcome`, `RuntimeCursor`,
+`RuntimeApprovedToolCall`, `RuntimeCommitPort`, and its commit DTOs are exported from `iris.runtime`. Callers of `execute()`
+must provide a runner-owned commit port and an activation-scoped `CancellationSignal`. The legacy
+`run_turn()`, `run_loop()`, and `resume()` entry points remain temporarily during migration, but
+they neither wrap `execute()` nor dual-write its new persistence boundary.
+
+```mermaid
+flowchart LR
+    Runner["Lifecycle runner"] --> Execute["AgentRuntime.execute"]
+    Execute --> Provider["RuntimeProvider"]
+    Execute --> Port["RuntimeCommitPort"]
+    Execute --> Preflight["Tool preflight"]
+    Preflight --> Guard["Durable effect claim"]
+    Guard --> Effect["Middleware / tool / artifact / after hook"]
+    Signal["CancellationSignal"] --> Execute
+    Signal --> Effect
+```
+
 ## Component relationships
 
 ```mermaid
@@ -255,6 +298,11 @@ history instead of reinjecting it.
 Runtime never recalls memory by default. It injects memory context only when `RuntimeOptions`
 explicitly provides `memory_results` or `memory_query`; the latter requires `memory_service` when
 the factory is assembled.
+
+Explicit dynamic memory is injected only on the first model step of each logical run; provider
+requests caused by later tool-loop steps or HITL resume do not append the same dynamic memory again.
+A new user input creates a new run and can inject memory once again. Static memory slots declared in
+`context.yaml` are not affected by this rule.
 
 ## Maintenance map and verification
 

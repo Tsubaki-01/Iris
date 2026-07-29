@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
     BaseTool,
+    CancellationRequestedError,
     PermissionDecision,
     PermissionEffect,
     ToolDefinition,
@@ -18,6 +19,45 @@ from iris.tools import (
     ToolRegistry,
     ToolResult,
 )
+
+
+class _SharedCancellationSignal:
+    """验证工具 context copy identity 的最小 signal。"""
+
+    requested = False
+
+    def raise_if_requested(self) -> None:
+        return None
+
+
+def test_tool_execution_context_excludes_and_shares_cancellation_signal(
+    tmp_path: Path,
+) -> None:
+    signal = _SharedCancellationSignal()
+    context = ToolExecutionContext(workspace_root=tmp_path, cancellation=signal)
+
+    copied = context.model_copy(deep=True)
+
+    assert "cancellation" not in context.model_dump(mode="json")
+    assert copied.cancellation is signal
+
+
+@pytest.mark.asyncio
+async def test_callable_tool_does_not_normalize_cooperative_cancellation(
+    tmp_path: Path,
+) -> None:
+    def cancelled() -> str:
+        raise CancellationRequestedError("activation 已取消")
+
+    registry = ToolRegistry()
+    registry.register_function(cancelled, description="触发取消")
+    executor = ToolExecutor(registry)
+
+    with pytest.raises(CancellationRequestedError):
+        await executor.execute_one(
+            ToolUseBlock(id="cancel-1", name="cancelled", input={}),
+            ToolExecutionContext(workspace_root=tmp_path),
+        )
 
 
 class ExplodingPermissionPolicy:

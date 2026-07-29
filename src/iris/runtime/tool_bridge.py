@@ -13,8 +13,11 @@ from typing import Any, cast
 from ..exceptions import IrisToolExecutionError
 from ..message import Msg, ToolUseBlock
 from ..tools import (
+    CancellationSignal,
+    PreparedToolCall,
     ReadFileState,
     ToolBatchPlan,
+    ToolEffectGuard,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
@@ -53,19 +56,35 @@ class ToolBridge:
         permission_mode: str,
         metadata: Mapping[str, Any] | None,
         tools_enabled: bool = True,
+        cancellation: CancellationSignal | None = None,
     ) -> ToolBatchPlan:
         """无副作用预检当前 assistant 消息中的所有活动工具调用。"""
         active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
-        active_calls = [call for call in assistant_message.tool_calls if call.name in active_names]
-        context = ToolExecutionContext(
-            workspace_root=workspace_root,
+        context = self._execution_context(
             session_id=session_id,
+            run_id=run_id,
             agent_id=agent_id,
+            workspace_root=workspace_root,
             permission_mode=permission_mode,
-            metadata={**dict(metadata or {}), "run_id": run_id},
-            read_state=self._read_states.get(session_id),
+            metadata=metadata,
+            cancellation=cancellation,
         )
-        return self.tool_executor.prepare_many(active_calls, context)
+        active_calls = [
+            call for call in assistant_message.tool_calls if call.name in active_names
+        ]
+        prepared = iter(self.tool_executor.prepare_many(active_calls, context).calls)
+        calls: list[PreparedToolCall] = []
+        for call in assistant_message.tool_calls:
+            if call.name in active_names:
+                calls.append(next(prepared))
+            else:
+                calls.append(
+                    PreparedToolCall(
+                        tool_use=call,
+                        preflight_result=_not_allowed_result(call),
+                    )
+                )
+        return ToolBatchPlan(calls=calls)
 
     def read_state(self, session_id: str) -> Any | None:
         """返回 session 当前保存的文件读取状态。"""
@@ -74,8 +93,65 @@ class ToolBridge:
     def restore_read_state(self, session_id: str, state: dict[str, Any] | None) -> None:
         """从 checkpoint 恢复 session 的文件读取状态。"""
         if state is None:
+            self._read_states.pop(session_id, None)
             return
         self._read_states[session_id] = ReadFileState.model_validate(state)
+
+    async def execute_prepared(
+        self,
+        prepared: PreparedToolCall,
+        *,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        cancellation: CancellationSignal,
+        effect_guard: ToolEffectGuard,
+        approved_tool_call_id: str | None = None,
+    ) -> ToolResult:
+        """用 shared signal 与 required effect guard 执行一条预检调用。"""
+        context = self._execution_context(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            metadata=metadata,
+            cancellation=cancellation,
+        )
+        result = await self.tool_executor.execute_prepared(
+            prepared,
+            context,
+            approved_tool_call_id=approved_tool_call_id,
+            effect_guard=effect_guard,
+        )
+        if context.read_state is not None:
+            self._read_states[session_id] = context.read_state
+        return result
+
+    def _execution_context(
+        self,
+        *,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        cancellation: CancellationSignal | None,
+    ) -> ToolExecutionContext:
+        """构造复用同一 read state 与 cancellation 的工具上下文。"""
+        return ToolExecutionContext(
+            workspace_root=workspace_root,
+            session_id=session_id,
+            agent_id=agent_id,
+            permission_mode=permission_mode,
+            metadata={**dict(metadata or {}), "run_id": run_id},
+            read_state=self._read_states.get(session_id),
+            cancellation=cancellation,
+        )
 
     async def execute_once(
         self,

@@ -48,9 +48,10 @@ result = await executor.execute_one(
 
 `ToolDefinition` holds the validated name, description, object JSON schema, capabilities, group,
 aliases, deferred flag, output limits, and metadata. `ToolExecutionContext` carries call, workspace,
-session, agent, permission, metadata, and shared read-state information. `ToolResult` is the single
-result boundary; `model_content` produces model-facing text and `to_block_metadata()` keeps the
-supported metadata subset.
+session, agent, permission, metadata, shared read-state information, and a shared live
+`cancellation` signal that serialization excludes. `ToolResult` is the single result boundary;
+`model_content` produces model-facing text and `to_block_metadata()` keeps the supported metadata
+subset.
 
 `BaseTool` defines `validate_input()`, read/destructive/concurrency classification, and async
 `arun()`. `CallableTool` derives a schema from signatures, annotations, docstrings, or an explicit
@@ -76,16 +77,21 @@ result order and shared file read state. Classification failure conservatively f
 
 `prepare_many()` performs registry lookup, validation, and policy checks without running middleware,
 the breaker, artifact persistence, or tool side effects. It returns `PreparedToolCall` objects and a
-human request where required. `execute_prepared()` begins a new stage, revalidates current state, and
-accepts an approval only for the exact tool-call ID. Historical approval never overrides current
-deny, schema, workspace, or stale-read checks.
+human request where required. `execute_prepared()` begins a new stage, revalidates current state,
+accepts an approval only for the exact tool-call ID, and optionally accepts a `ToolEffectGuard`.
+Historical approval never overrides current deny, schema, workspace, or stale-read checks.
 
 Preflight precedence is: deny returns `PERMISSION_ERROR`; a human tool under allow creates its own
 question; a human tool under require-human fails closed to prevent nested gates; only an ordinary
 require-human call creates a permission prompt.
 
-The execution lifecycle after approval is circuit breaker, middleware `before_call`, tool `arun`,
-artifact handling, middleware after hooks, then breaker accounting.
+After approval, execution checks the circuit breaker, cancellation, the effect guard, and
+cancellation again before entering middleware `before_call`, tool `arun`, artifact handling,
+middleware after hooks, and breaker accounting. A guard failure starts no tool effect. Cancellation
+after a claim propagates as control flow to runtime instead of becoming a normal tool error.
+Low-level executor callers may omit the guard; lifecycle execution requires it through
+`ToolBridge`. Parallel context copies preserve identity for both shared read state and cancellation,
+and `CallableTool` never normalizes cooperative cancellation.
 
 ## Built-in file tools
 

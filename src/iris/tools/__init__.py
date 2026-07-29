@@ -4,6 +4,8 @@ from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
     CallableTool,
+    CancellationRequestedError,
+    CancellationSignal,
     ToolArtifact,
     ToolCapability,
     ToolDefinition,
@@ -28,7 +30,7 @@ from .builtin import (
 from .circuit import CircuitBreaker, CircuitBreakerState
 from .decorators import tool
 from .discovery import DeferredToolIndex, ToolSearchInput, ToolSearchTool
-from .executor import PreparedToolCall, ToolBatchPlan, ToolExecutor
+from .executor import PreparedToolCall, ToolBatchPlan, ToolEffectGuard, ToolExecutor
 from .middleware import ToolMiddleware
 from .permissions import (
     DefaultPermissionPolicy,
@@ -54,6 +56,8 @@ __all__ = [
     "AskQuestionInput",
     "AskQuestionTool",
     "BaseTool",
+    "CancellationRequestedError",
+    "CancellationSignal",
     "CallableTool",
     "CircuitBreaker",
     "CircuitBreakerState",
@@ -80,6 +84,7 @@ __all__ = [
     "ToolErrorInfo",
     "ToolExecutionContext",
     "ToolExecutionMode",
+    "ToolEffectGuard",
     "ToolExecutor",
     "PreparedToolCall",
     "ToolMiddleware",
