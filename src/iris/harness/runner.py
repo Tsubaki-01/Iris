@@ -9,12 +9,15 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
+from ..agents import AgentConfig, load_agent_config
 from ..exceptions import (
     HITLConflictError,
     IrisRunConflictError,
     IrisRunNotFoundError,
+    IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
@@ -35,6 +38,9 @@ from ..lifecycle import (
     CreateRun,
     FinishRun,
     LifecycleStore,
+    RecoverActiveRun,
+    RecoveryDisposition,
+    RequestCancellation,
     ResolveInteraction,
     RunCheckpoint,
     RunErrorInfo,
@@ -47,6 +53,7 @@ from ..lifecycle import (
     ToolCallPhase,
     snapshot_run,
 )
+from ..memory import MemoryService
 from ..runtime import (
     AgentRuntime,
     RuntimeActivationInput,
@@ -54,7 +61,10 @@ from ..runtime import (
     RuntimeActivationResult,
     RuntimeApprovedToolCall,
     RuntimeCursor,
+    RuntimeFactory,
+    RuntimeProvider,
 )
+from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationRequestedError, CancellationSignal
 from ._commit_port import StoreRuntimeCommitPort
 from ._fingerprint import compute_environment_fingerprint
@@ -114,6 +124,7 @@ class ActiveActivation:
     signal: _MutableCancellationSignal
     task: asyncio.Task[RuntimeActivationResult] | None = None
     deadline_task: asyncio.Task[None] | None = None
+    settled: asyncio.Event = field(default_factory=asyncio.Event)
     events: list[RunEvent] = field(default_factory=list)
 
 
@@ -141,6 +152,62 @@ class AgentRunner:
             raise IrisRunStateError("runner interaction service 必须是无状态领域服务")
         self.environment_fingerprint = compute_environment_fingerprint(runtime)
         self._active: dict[str, ActiveActivation] = {}
+
+    @classmethod
+    def from_config_path(
+        cls,
+        path: str | Path,
+        *,
+        provider: RuntimeProvider | None = None,
+        memory_service: MemoryService | None = None,
+        store: LifecycleStore | None = None,
+        observers: Sequence[RunEventObserver] = (),
+        clock: Clock | None = None,
+        api_key: str | None = None,
+    ) -> AgentRunner:
+        """从 agent 配置路径装配 engine 与唯一 lifecycle store。"""
+        config_path = Path(path)
+        return cls.from_config(
+            load_agent_config(config_path),
+            config_path=config_path,
+            provider=provider,
+            memory_service=memory_service,
+            store=store,
+            observers=observers,
+            clock=clock,
+            api_key=api_key,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        config: AgentConfig,
+        *,
+        config_path: Path | None = None,
+        provider: RuntimeProvider | None = None,
+        memory_service: MemoryService | None = None,
+        store: LifecycleStore | None = None,
+        observers: Sequence[RunEventObserver] = (),
+        clock: Clock | None = None,
+        api_key: str | None = None,
+    ) -> AgentRunner:
+        """从已校验配置装配 engine；durable ownership 只属于 harness。"""
+        runtime = RuntimeFactory.from_config(
+            config,
+            config_path=config_path,
+            provider=provider,
+            memory_service=memory_service,
+            api_key=api_key,
+        )
+        resolved_store = (
+            store if store is not None else _build_lifecycle_store(config, config_path=config_path)
+        )
+        return cls(
+            runtime=runtime,
+            store=resolved_store,
+            observers=observers,
+            clock=clock,
+        )
 
     async def start(
         self,
@@ -327,6 +394,262 @@ class AgentRunner:
         self._register(active, begun.run.current_activation_id)
         return await self._run_activation(active, activation=activation, port=port)
 
+    def request_cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str | None = None,
+    ) -> RunSnapshot:
+        """持久化首次 cancellation request，再 signal 当前进程 activation。"""
+        normalized = self._required_id(run_id)
+        normalized_reason = "cancel requested" if reason is None else reason.strip()
+        if not normalized_reason:
+            raise IrisRunStateError("cancellation reason 不能为空")
+        run = self.store.load_run(normalized)
+        if run is None:
+            raise IrisRunNotFoundError("run 不存在", run_id=normalized)
+        if run.phase is RunPhase.TERMINAL:
+            return snapshot_run(run)
+        if run.cancellation_requested_at is None:
+            committed = self.store.request_cancellation(
+                RequestCancellation(
+                    run_id=run.run_id,
+                    expected_run_revision=run.revision,
+                    activation_id=(
+                        run.current_activation_id if run.phase is RunPhase.ACTIVE else None
+                    ),
+                    reason=normalized_reason,
+                    settle_waiting=run.phase is RunPhase.WAITING,
+                    now=self._now(),
+                )
+            )
+            run = committed.run
+            active = self._active.get(run.run_id)
+            if active is not None:
+                self._record_events(active.events, committed.events)
+        active = self._active.get(run.run_id)
+        if (
+            active is not None
+            and run.phase is RunPhase.ACTIVE
+            and run.current_activation_id == active.activation_id
+        ):
+            self._interrupt_active(active)
+        return snapshot_run(run)
+
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str | None = None,
+        settlement_timeout: float | None = None,
+    ) -> RunResult:
+        """请求取消并只观察 durable settlement；超时不写入新事实。"""
+        if settlement_timeout is not None and settlement_timeout <= 0:
+            raise IrisRunStateError("settlement_timeout 必须大于 0")
+        normalized = self._required_id(run_id)
+        before = self.store.load_run(normalized)
+        if before is None:
+            raise IrisRunNotFoundError("run 不存在", run_id=normalized)
+        snapshot = self.request_cancel(normalized, reason=reason)
+        if snapshot.phase is RunPhase.TERMINAL:
+            await self._deliver_events(
+                self.store.list_events(normalized, before.last_event_sequence)
+            )
+            return self._require_result(normalized)
+        return await self._observe_settlement(
+            normalized,
+            settlement_timeout=settlement_timeout,
+        )
+
+    async def recover(
+        self,
+        run_id: str,
+        *,
+        expected_activation_id: str | None = None,
+    ) -> RunResult:
+        """根据精确 activation fence 与 durable facts 显式恢复 run。"""
+        normalized = self._required_id(run_id)
+        run = self.store.load_run(normalized)
+        if run is None:
+            raise IrisRunNotFoundError("run 不存在", run_id=normalized)
+        if run.phase is RunPhase.TERMINAL:
+            return self._require_result(normalized)
+        if run.phase is RunPhase.WAITING:
+            interaction = self.store.load_interaction(run.pending_interaction_id or "")
+            if interaction is None:
+                raise IrisRunRecoveryError(
+                    "waiting run 缺少 durable interaction", run_id=run.run_id
+                )
+            cursor = run.last_event_sequence
+            settled = self._settle_waiting_if_due(run, interaction, now=self._now())
+            if settled is not None:
+                await self._deliver_events(self.store.list_events(run.run_id, cursor))
+                return settled
+            raise IrisRunStateError(
+                "waiting run 必须通过 resume 继续",
+                run_id=run.run_id,
+            )
+        if expected_activation_id is None or not expected_activation_id.strip():
+            raise IrisRunConflictError("active recovery 必须提供 expected_activation_id")
+        expected = expected_activation_id.strip()
+        if run.current_activation_id != expected:
+            raise IrisRunConflictError("activation fence 已变化", run_id=run.run_id)
+        if normalized in self._active:
+            raise IrisRunStateError("当前进程仍拥有 live activation，不能 takeover")
+        checkpoint = self.store.load_checkpoint(run.run_id)
+        if checkpoint is None:
+            raise IrisRunRecoveryError("active run 缺少 durable checkpoint", run_id=run.run_id)
+        claimed = [
+            record
+            for record in self.store.list_tool_calls(run.run_id)
+            if record.phase is ToolCallPhase.CLAIMED
+        ]
+        if claimed:
+            disposition = RecoveryDisposition.OUTCOME_UNKNOWN
+            recovered_cursor = None
+        else:
+            recovered_cursor = self._validate_recovery_checkpoint(run, checkpoint)
+            if (
+                checkpoint.resumability is CheckpointResumability.OUTCOME_READY
+                and recovered_cursor.position == "outcome_ready"
+            ):
+                disposition = RecoveryDisposition.FINALIZE
+            elif (
+                checkpoint.resumability is CheckpointResumability.SAFE
+                and recovered_cursor.position != "outcome_ready"
+            ):
+                disposition = RecoveryDisposition.RESUME
+            else:
+                raise IrisRunRecoveryError(
+                    "checkpoint resumability 与 cursor position 不匹配",
+                    run_id=run.run_id,
+                )
+        new_activation_id = (
+            f"act_{uuid.uuid4().hex}" if disposition is RecoveryDisposition.RESUME else None
+        )
+        recovered = self.store.recover_active_run(
+            RecoverActiveRun(
+                run_id=run.run_id,
+                expected_run_revision=run.revision,
+                expected_activation_id=expected,
+                expected_checkpoint_sequence=checkpoint.sequence,
+                recovery_disposition=disposition,
+                new_activation_id=new_activation_id,
+                now=self._now(),
+            )
+        )
+        if recovered.run.phase is RunPhase.TERMINAL:
+            await self._deliver_events(list(recovered.events))
+            return self._require_result(run.run_id)
+        if recovered.checkpoint is None or recovered_cursor is None or new_activation_id is None:
+            raise IrisRunRecoveryError("recover commit 缺少 rebound activation facts")
+        if RuntimeCursor.model_validate(recovered.checkpoint.engine_cursor) != recovered_cursor:
+            raise IrisRunConflictError("recover rebound checkpoint cursor 已变化")
+        active = ActiveActivation(
+            run_id=run.run_id,
+            activation_id=new_activation_id,
+            signal=_MutableCancellationSignal(),
+            events=list(recovered.events),
+        )
+        port = StoreRuntimeCommitPort(
+            store=self.store,
+            run=recovered.run,
+            activation_id=new_activation_id,
+            clock=self._now,
+            event_sink=active.events,
+            interaction_service=self.interaction_service,
+        )
+        activation = RuntimeActivationInput(
+            run_id=run.run_id,
+            activation_id=new_activation_id,
+            session_id=run.session_id,
+            kind="recover",
+            input=None,
+            cursor=recovered_cursor,
+            options=run.options.runtime,
+        )
+        self._register(active, recovered.run.current_activation_id)
+        return await self._run_activation(active, activation=activation, port=port)
+
+    def _validate_recovery_checkpoint(
+        self,
+        run: RunRecord,
+        checkpoint: RunCheckpoint,
+    ) -> RuntimeCursor:
+        """验证 safe/outcome-ready recovery 的交叉 durable facts。"""
+        session = self.store.load_session(run.session_id)
+        if (
+            checkpoint.run_id != run.run_id
+            or checkpoint.sequence != run.checkpoint_sequence
+            or checkpoint.activation_id != run.current_activation_id
+            or checkpoint.session_revision != session.revision
+            or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
+            or checkpoint.model_steps_committed != run.usage.model_steps_committed
+            or checkpoint.environment_fingerprint != run.environment_fingerprint
+            or checkpoint.environment_fingerprint != self.environment_fingerprint
+        ):
+            raise IrisRunRecoveryError(
+                "active checkpoint 与 durable run/session facts 不匹配",
+                run_id=run.run_id,
+            )
+        try:
+            return RuntimeCursor.model_validate(checkpoint.engine_cursor)
+        except (TypeError, ValueError) as exc:
+            raise IrisRunRecoveryError(
+                "active checkpoint cursor 无法恢复",
+                run_id=run.run_id,
+            ) from exc
+
+    def _interrupt_active(
+        self,
+        active: ActiveActivation,
+        *,
+        deadline: bool = False,
+    ) -> None:
+        """先标记 signal；仅在尚无 durable claim 时中断 async operation。"""
+        if deadline:
+            active.signal.request_deadline()
+        else:
+            active.signal.request()
+        claimed = any(
+            record.phase is ToolCallPhase.CLAIMED
+            and record.claim_activation_id == active.activation_id
+            for record in self.store.list_tool_calls(active.run_id)
+        )
+        task = active.task
+        if claimed or task is None or task.done():
+            return
+        task.get_loop().call_soon_threadsafe(task.cancel)
+
+    async def _observe_settlement(
+        self,
+        run_id: str,
+        *,
+        settlement_timeout: float | None,
+    ) -> RunResult:
+        """优先等待本地 settlement，并以纯读取覆盖跨进程 run。"""
+        loop = asyncio.get_running_loop()
+        deadline = None if settlement_timeout is None else loop.time() + settlement_timeout
+        while True:
+            result = self.store.load_result(run_id)
+            if result is not None and result.run.phase is RunPhase.TERMINAL:
+                return result
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                raise IrisRunObservationTimeoutError(
+                    "等待 run cancellation settlement 超时",
+                    run_id=run_id,
+                )
+            interval = 0.05 if remaining is None else min(0.05, remaining)
+            active = self._active.get(run_id)
+            if active is None:
+                await asyncio.sleep(interval)
+                continue
+            try:
+                await asyncio.wait_for(active.settled.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+
     def _validate_resume_checkpoint(
         self,
         run: RunRecord,
@@ -480,7 +803,7 @@ class AgentRunner:
         port: StoreRuntimeCommitPort,
     ) -> RunResult:
         try:
-            active.deadline_task = self._start_deadline_task(active.signal, port)
+            active.deadline_task = self._start_deadline_task(active, port)
             active.task = asyncio.create_task(
                 self.runtime.execute(
                     activation,
@@ -491,6 +814,10 @@ class AgentRunner:
             try:
                 engine_result = await active.task
                 self._settle_engine_result(active, engine_result, port)
+            except asyncio.CancelledError:
+                if not active.signal.requested:
+                    raise
+                self._finish_cancelled_task(active, port)
             except (
                 IrisRunConflictError,
                 IrisRunNotFoundError,
@@ -508,8 +835,53 @@ class AgentRunner:
                 current = self._active.get(active.run_id)
                 if current is active:
                     self._active.pop(active.run_id, None)
+                active.settled.set()
             await self._deliver_events(active.events)
         return self._require_result(active.run_id)
+
+    def _finish_cancelled_task(
+        self,
+        active: ActiveActivation,
+        port: StoreRuntimeCommitPort,
+    ) -> None:
+        """把被中断的 async operation 映射为可证明的 durable outcome。"""
+        del port
+        current = self.store.load_run(active.run_id)
+        if current is None:
+            raise IrisRunNotFoundError("run 在 cancellation 期间消失", run_id=active.run_id)
+        if current.phase is RunPhase.TERMINAL:
+            return
+        claimed = [
+            record
+            for record in self.store.list_tool_calls(active.run_id)
+            if record.phase is ToolCallPhase.CLAIMED
+            and record.claim_activation_id == active.activation_id
+        ]
+        if claimed:
+            stop_reason = RunStopReason.OUTCOME_UNKNOWN
+            error = RunErrorInfo(
+                code="TOOL_OUTCOME_UNKNOWN",
+                message="工具 claim 后 activation 被中断，effect 结果不可证明",
+                source="tool",
+                details={"tool_call_ids": [record.tool_call_id for record in claimed]},
+            )
+        elif active.signal.deadline_requested:
+            stop_reason = RunStopReason.DEADLINE_EXCEEDED
+            error = None
+        else:
+            stop_reason = RunStopReason.CANCELLED
+            error = None
+        committed = self.store.finish_run(
+            FinishRun(
+                run_id=active.run_id,
+                expected_run_revision=current.revision,
+                activation_id=active.activation_id,
+                stop_reason=stop_reason,
+                error=error,
+                now=self._now(),
+            )
+        )
+        self._record_events(active.events, committed.events)
 
     def _settle_engine_result(
         self,
@@ -535,11 +907,7 @@ class AgentRunner:
         if current.phase is not RunPhase.ACTIVE:
             raise IrisRunStateError("non-suspended engine outcome 遇到非 active run")
         outcome = result.outcome
-        if (
-            outcome is RuntimeActivationOutcome.CANCELLED
-            and active.signal.deadline_requested
-            and port.remaining_deadline_seconds() == 0
-        ):
+        if outcome is RuntimeActivationOutcome.CANCELLED and active.signal.deadline_requested:
             outcome = RuntimeActivationOutcome.DEADLINE_EXCEEDED
         stop_reason = {
             RuntimeActivationOutcome.COMPLETED: RunStopReason.COMPLETED,
@@ -612,7 +980,7 @@ class AgentRunner:
 
     def _start_deadline_task(
         self,
-        signal: _MutableCancellationSignal,
+        active: ActiveActivation,
         port: StoreRuntimeCommitPort,
     ) -> asyncio.Task[None] | None:
         remaining = port.remaining_deadline_seconds()
@@ -621,7 +989,7 @@ class AgentRunner:
 
         async def request_at_deadline() -> None:
             await asyncio.sleep(remaining)
-            signal.request_deadline()
+            self._interrupt_active(active, deadline=True)
 
         return asyncio.create_task(request_at_deadline())
 
@@ -679,6 +1047,21 @@ class AgentRunner:
     def _record_events(target: list[RunEvent], events: tuple[RunEvent, ...]) -> None:
         keys = {(event.run_id, event.sequence) for event in target}
         target.extend(event for event in events if (event.run_id, event.sequence) not in keys)
+
+
+def _build_lifecycle_store(
+    config: AgentConfig,
+    *,
+    config_path: Path | None,
+) -> LifecycleStore:
+    """按 session 配置选择 harness-owned lifecycle store。"""
+    if config.session.backend == "none":
+        return InMemoryLifecycleStore()
+    base_dir = Path.cwd() if config_path is None else Path(config_path).parent
+    path = Path(config.session.path or ".iris/session.db")
+    if not path.is_absolute():
+        path = base_dir / path
+    return SQLiteStore(path.resolve())
 
 
 __all__ = ["AgentRunner", "Clock"]

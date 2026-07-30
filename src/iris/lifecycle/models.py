@@ -99,7 +99,8 @@ class CheckpointResumability(StrEnum):
     """Checkpoint 是否允许安全恢复。"""
 
     SAFE = "safe"
-    OUTCOME_UNKNOWN = "outcome_unknown"
+    OUTCOME_READY = "outcome_ready"
+    BLOCKED_UNKNOWN = "blocked_unknown"
 
 
 class ToolCallPhase(StrEnum):
@@ -115,6 +116,7 @@ class RecoveryDisposition(StrEnum):
     """活跃 run 恢复时对旧 activation 的处置。"""
 
     RESUME = "resume"
+    FINALIZE = "finalize"
     OUTCOME_UNKNOWN = "outcome_unknown"
 
 
@@ -127,6 +129,7 @@ class RunEventKind(StrEnum):
     MODEL_STEP_COMMITTED = "model_step.committed"
     TOOL_CALL_CLAIMED = "tool_call.claimed"
     TOOL_CALL_COMMITTED = "tool_call.committed"
+    TOOL_CALL_OUTCOME_UNKNOWN = "tool_call.outcome_unknown"
     INTERACTION_SUSPENDED = "interaction.suspended"
     INTERACTION_RESOLVED = "interaction.resolved"
     CANCELLATION_REQUESTED = "run.cancellation_requested"
@@ -385,8 +388,15 @@ class RunResult(_FrozenModel):
             return self
         if self.pending_interaction is not None:
             raise ValueError("terminal result 不能包含 pending interaction")
-        if self.run.stop_reason is RunStopReason.FAILED and self.error is None:
-            raise ValueError("failed result 必须包含 error")
+        if (
+            self.run.stop_reason
+            in {
+                RunStopReason.FAILED,
+                RunStopReason.OUTCOME_UNKNOWN,
+            }
+            and self.error is None
+        ):
+            raise ValueError("failed/outcome_unknown result 必须包含 error")
         if self.run.stop_reason is RunStopReason.COMPLETED and self.error is not None:
             raise ValueError("completed result 不能包含 error")
         return self

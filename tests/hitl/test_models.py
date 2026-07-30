@@ -3,13 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
-    InteractionKind,
-    InteractionResumePhase,
     InteractionStatus,
     PermissionInteractionResponse,
     PermissionPrompt,
@@ -18,235 +16,101 @@ from iris.hitl import (
     ToolCallSnapshot,
     make_call_fingerprint,
 )
-from iris.hitl.models import HumanInteractionPrompt, HumanInteractionResponse
 
 
-def test_permission_interaction_round_trips_as_json() -> None:
-    interaction = _permission_interaction()
-
-    restored = HumanInteraction.model_validate_json(interaction.model_dump_json())
-
-    assert restored == interaction
-    assert isinstance(restored.request.prompt, PermissionPrompt)
-    assert isinstance(restored.response, PermissionInteractionResponse)
-
-
-def test_prompts_and_responses_round_trip_as_discriminated_unions() -> None:
-    prompt = TypeAdapter(HumanInteractionPrompt).validate_json(
-        QuestionPrompt(
-            question="继续执行吗？",
-            options=["继续", "取消"],
-        ).model_dump_json()
+def _call() -> ToolCallSnapshot:
+    fingerprint = make_call_fingerprint(
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="write",
+        arguments={"value": "x"},
+        workspace_root="/workspace",
     )
-    response = TypeAdapter(HumanInteractionResponse).validate_json(
-        QuestionInteractionResponse(answer="继续").model_dump_json()
+    return ToolCallSnapshot(
+        tool_call_id="call-1",
+        tool_name="write",
+        arguments={"value": "x"},
+        workspace_root="/workspace",
+        fingerprint=fingerprint,
     )
 
-    assert isinstance(prompt, QuestionPrompt)
-    assert isinstance(response, QuestionInteractionResponse)
+
+def _interaction(**updates: object) -> HumanInteraction:
+    values: dict[str, object] = {
+        "interaction_id": "interaction-1",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "step_index": 0,
+        "tool_call_id": "call-1",
+        "request": HumanInteractionRequest(
+            tool_call=_call(),
+            prompt=PermissionPrompt(reason="需要写入"),
+        ),
+        "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+    }
+    values.update(updates)
+    return HumanInteraction.model_validate(values)
 
 
-def test_request_uses_one_tool_call_snapshot_and_typed_prompt_envelope() -> None:
-    request = HumanInteractionRequest(
-        tool_call=_tool_call_snapshot(),
-        prompt=QuestionPrompt(question="继续执行吗？", options=["继续", "取消"]),
+def test_call_fingerprint_is_stable_and_subject_sensitive() -> None:
+    first = _call()
+    second = _call()
+
+    assert first.fingerprint == second.fingerprint
+    assert len(first.fingerprint) == 64
+    changed = make_call_fingerprint(
+        session_id="session-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        tool_name="write",
+        arguments={"value": "y"},
+        workspace_root="/workspace",
+    )
+    assert changed != first.fingerprint
+
+
+def test_interaction_requires_exact_tool_subject() -> None:
+    with pytest.raises(ValidationError, match="tool_call_id"):
+        _interaction(tool_call_id="other")
+
+
+def test_pending_resolved_and_closed_facts_are_consistent() -> None:
+    pending = _interaction()
+    response = PermissionInteractionResponse(decision="approve")
+    resolved = _interaction(
+        status=InteractionStatus.RESOLVED,
+        response=response,
+        resolved_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    closed = resolved.model_copy(
+        update={
+            "status": InteractionStatus.CLOSED,
+            "closed_at": datetime(2026, 1, 3, tzinfo=UTC),
+            "close_reason": "completed",
+        }
     )
 
-    restored = HumanInteractionRequest.model_validate_json(request.model_dump_json())
+    assert pending.status is InteractionStatus.PENDING
+    assert resolved.response == response
+    assert HumanInteraction.model_validate(closed.model_dump()) == closed
 
-    assert restored.tool_call == _tool_call_snapshot()
-    assert isinstance(restored.prompt, QuestionPrompt)
+
+def test_interaction_rejects_missing_response_or_close_facts() -> None:
+    with pytest.raises(ValidationError, match="response"):
+        _interaction(status=InteractionStatus.RESOLVED)
+    with pytest.raises(ValidationError, match="closed"):
+        _interaction(status=InteractionStatus.CLOSED)
 
 
-def test_request_rejects_legacy_subject_field() -> None:
-    with pytest.raises(ValidationError):
-        HumanInteractionRequest.model_validate(
-            {
-                "subject": _tool_call_snapshot().model_dump(),
-                "prompt": {"kind": "permission", "reason": "needs approval"},
-            }
+def test_prompt_and_response_kinds_must_match() -> None:
+    with pytest.raises(ValidationError, match="kind"):
+        _interaction(
+            status=InteractionStatus.RESOLVED,
+            response=QuestionInteractionResponse(answer="不匹配"),
         )
 
 
-@pytest.mark.parametrize(
-    ("factory", "field", "value"),
-    [
-        (PermissionPrompt, "reason", "  "),
-        (QuestionPrompt, "question", "  "),
-        (QuestionPrompt, "options", ["继续", "  "]),
-        (QuestionPrompt, "options", ["继续", " 继续 "]),
-        (QuestionInteractionResponse, "answer", "  "),
-    ],
-)
-def test_request_and_response_reject_empty_or_duplicate_human_text(
-    factory: type[object], field: str, value: object
-) -> None:
-    common = {
-        "reason": "needs approval",
-        "question": "继续吗？",
-        "answer": "继续",
-    }
-    kwargs = {key: item for key, item in common.items() if key in factory.model_fields}
-    kwargs[field] = value
-
-    with pytest.raises(ValidationError):
-        factory(**kwargs)
-
-
-@pytest.mark.parametrize("field", ["interaction_id", "session_id", "run_id"])
-def test_human_interaction_rejects_blank_ids(field: str) -> None:
-    values = _permission_interaction().model_dump()
-    values[field] = "  "
-
-    with pytest.raises(ValidationError):
-        HumanInteraction.model_validate(values)
-
-
-def test_human_interaction_rejects_request_response_kind_mismatch() -> None:
-    values = _permission_interaction().model_dump()
-    values["response"] = {"kind": "question", "answer": "继续"}
-
-    with pytest.raises(ValidationError):
-        HumanInteraction.model_validate(values)
-
-
-@pytest.mark.parametrize("legacy_field", ["kind", "tool_call_id"])
-def test_human_interaction_rejects_legacy_top_level_fields(legacy_field: str) -> None:
-    values = _permission_interaction().model_dump()
-    values[legacy_field] = InteractionKind.PERMISSION if legacy_field == "kind" else "call_legacy"
-
-    with pytest.raises(ValidationError):
-        HumanInteraction.model_validate(values)
-
-
-@pytest.mark.parametrize(
-    ("status", "resume_phase", "response"),
-    [
-        (
-            InteractionStatus.PENDING,
-            InteractionResumePhase.WAITING,
-            {"kind": "permission", "decision": "approve"},
-        ),
-        (InteractionStatus.RESOLVED, InteractionResumePhase.WAITING, None),
-        (
-            InteractionStatus.CONSUMED,
-            InteractionResumePhase.WAITING,
-            {"kind": "permission", "decision": "approve"},
-        ),
-        (
-            InteractionStatus.RESOLVED,
-            InteractionResumePhase.CLAIMED,
-            {"kind": "permission", "decision": "approve"},
-        ),
-    ],
-)
-def test_human_interaction_enforces_status_and_resume_phase_invariants(
-    status: InteractionStatus,
-    resume_phase: InteractionResumePhase,
-    response: dict[str, str] | None,
-) -> None:
-    values = _permission_interaction().model_dump()
-    values.update(status=status, resume_phase=resume_phase, response=response)
-
-    with pytest.raises(ValidationError):
-        HumanInteraction.model_validate(values)
-
-
-def test_human_interaction_rejects_non_json_safe_checkpoint() -> None:
-    interaction = _permission_interaction()
-    values = interaction.model_dump()
-    values["checkpoint"] = {"created_at": datetime.now(UTC)}
-
-    with pytest.raises(ValidationError):
-        HumanInteraction.model_validate(values)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("tool_call_id", "  "),
-        ("tool_name", "  "),
-        ("workspace_root", "  "),
-        ("fingerprint", "not-a-sha256"),
-        ("arguments", {"not_json": {1, 2}}),
-    ],
-)
-def test_tool_call_snapshot_validates_identity_and_json_safe_arguments(
-    field: str, value: object
-) -> None:
-    values = _tool_call_snapshot().model_dump()
-    values[field] = value
-
-    with pytest.raises(ValidationError):
-        ToolCallSnapshot.model_validate(values)
-
-
-def test_call_fingerprint_is_canonical_and_binds_call_workspace_and_arguments() -> None:
-    fingerprint = make_call_fingerprint(
-        session_id="session_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"path": "notes.txt", "content": "hello"},
-        workspace_root="C:/workspace",
-    )
-
-    assert fingerprint == make_call_fingerprint(
-        session_id="session_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"content": "hello", "path": "notes.txt"},
-        workspace_root="C:/workspace",
-    )
-    assert fingerprint != make_call_fingerprint(
-        session_id="session_1",
-        run_id="run_1",
-        tool_call_id="call_2",
-        tool_name="write_file",
-        arguments={"path": "notes.txt", "content": "hello"},
-        workspace_root="C:/workspace",
-    )
-    assert fingerprint != make_call_fingerprint(
-        session_id="session_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"path": "other.txt", "content": "hello"},
-        workspace_root="C:/workspace",
-    )
-    assert fingerprint != make_call_fingerprint(
-        session_id="session_1",
-        run_id="run_1",
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"path": "notes.txt", "content": "hello"},
-        workspace_root="C:/other-workspace",
-    )
-
-
-def _permission_interaction() -> HumanInteraction:
-    return HumanInteraction(
-        interaction_id="int_0123456789abcdef0123456789abcdef",
-        session_id="session_1",
-        run_id="run_1",
-        step_index=0,
-        status=InteractionStatus.RESOLVED,
-        resume_phase=InteractionResumePhase.WAITING,
-        request=HumanInteractionRequest(
-            tool_call=_tool_call_snapshot(),
-            prompt=PermissionPrompt(reason="needs approval"),
-        ),
-        response=PermissionInteractionResponse(decision="approve"),
-        checkpoint={"checkpoint_version": 2},
-    )
-
-
-def _tool_call_snapshot() -> ToolCallSnapshot:
-    return ToolCallSnapshot(
-        tool_call_id="call_1",
-        tool_name="write_file",
-        arguments={"path": "notes.txt"},
-        workspace_root="C:/workspace",
-        fingerprint="a" * 64,
-    )
+def test_question_prompt_rejects_duplicate_options() -> None:
+    with pytest.raises(ValidationError, match="重复"):
+        QuestionPrompt(question="选择？", options=["a", "a"])

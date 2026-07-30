@@ -66,6 +66,9 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._event_sink = event_sink
         self._interaction_service = interaction_service or HumanInteractionService()
         self._event_keys = {(event.run_id, event.sequence) for event in event_sink}
+        self._reusable_model_reservation = (
+            checkpoint.model_steps_reserved == checkpoint.model_steps_committed + 1
+        )
         self._writable = True
 
     @property
@@ -87,6 +90,14 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         """在 provider effect 前通过 aggregate 预留一步预算。"""
         self._require_writable()
         self._require_cursor(cursor)
+        if self._reusable_model_reservation:
+            self._reusable_model_reservation = False
+            return ModelStepReservation(
+                granted=True,
+                step_index=cursor.step_index,
+                cursor=cursor,
+                remaining_deadline_seconds=self.remaining_deadline_seconds(),
+            )
         previous_reserved = self._run.usage.model_steps_reserved
         commit = self._store.reserve_model_step(
             ReserveModelStep(
@@ -293,6 +304,38 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
     def _require_writable(self) -> None:
         if not self._writable:
             raise IrisRunStateError("activation commit port 已结算或撤销")
+        current = self._store.load_run(self._run.run_id)
+        if current is None:
+            raise IrisRunNotFoundError("commit port 绑定的 run 不存在", run_id=self._run.run_id)
+        if current.revision == self._run.revision:
+            return
+        expected = self._run.model_copy(
+            update={
+                "revision": current.revision,
+                "cancellation_requested_at": current.cancellation_requested_at,
+                "cancellation_reason": current.cancellation_reason,
+                "last_event_sequence": current.last_event_sequence,
+                "updated_at": current.updated_at,
+            }
+        )
+        if (
+            self._run.cancellation_requested_at is not None
+            or current.cancellation_requested_at is None
+            or current.revision != self._run.revision + 1
+            or current.last_event_sequence != self._run.last_event_sequence + 1
+            or current != expected
+        ):
+            raise IrisRunConflictError("activation 期间出现非 cancellation mutation")
+        self._run = current
+        self._event_keys.update((event.run_id, event.sequence) for event in self._event_sink)
+        for event in self._store.list_events(
+            current.run_id,
+            self._run.last_event_sequence - 1,
+        ):
+            key = (event.run_id, event.sequence)
+            if key not in self._event_keys:
+                self._event_keys.add(key)
+                self._event_sink.append(event)
 
     def _require_cursor(self, cursor: RuntimeCursor) -> None:
         if RuntimeCursor.model_validate(self._checkpoint.engine_cursor) != cursor:

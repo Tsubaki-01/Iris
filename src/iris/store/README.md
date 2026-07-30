@@ -57,8 +57,9 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 finish/recover/cancel commands 及 run/session/checkpoint/tool/interaction/event/result reads。应通过
 `iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
 
-Phase 4 临时保留的 `_legacy_sqlite.py` 只服务于分支内旧 runtime 表征测试，不是公开
-API，不与 lifecycle store 双写，将在 Phase 5 删除。
+取消请求、waiting settlement、activation abandon/rebind、outcome-ready finalize 与 unresolved
+claim -> outcome unknown 都在 aggregate transaction 内完成。不存在旧 schema reader、migration、
+dual write 或 compatibility adapter。
 
 ## 维护与验证
 

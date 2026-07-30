@@ -38,6 +38,7 @@ from ..lifecycle.models import (
     CheckpointResumability,
     RecoveryDisposition,
     RunCheckpoint,
+    RunErrorInfo,
     RunEvent,
     RunEventKind,
     RunPhase,
@@ -302,6 +303,9 @@ class InMemoryLifecycleStore:
                 run.usage.model_dump()
                 | {"model_steps_reserved": run.usage.model_steps_reserved + 1}
             )
+            checkpoint = self._require_checkpoint(run.run_id).model_copy(
+                update={"model_steps_reserved": usage.model_steps_reserved}
+            )
             sequence = run.last_event_sequence + 1
             updated = self._replace_run(
                 run,
@@ -320,10 +324,11 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                checkpoint=self._checkpoints.get(run.run_id),
+                checkpoint=checkpoint,
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
+            self._checkpoints[run.run_id] = deepcopy(checkpoint)
             self._events[run.run_id].append(deepcopy(event))
             return self._store_replay("reserve_model_step", command, commit)
 
@@ -802,8 +807,15 @@ class InMemoryLifecycleStore:
                     raise IrisRunConflictError("activation fence 已变化", run_id=run.run_id)
             elif command.activation_id is not None:
                 raise IrisRunConflictError("waiting run 不应携带 activation fence")
-            if command.stop_reason is RunStopReason.FAILED and command.error is None:
-                raise IrisRunStateError("failed finish 必须包含 error")
+            if (
+                command.stop_reason
+                in {
+                    RunStopReason.FAILED,
+                    RunStopReason.OUTCOME_UNKNOWN,
+                }
+                and command.error is None
+            ):
+                raise IrisRunStateError("failed/outcome_unknown finish 必须包含 error")
             if command.stop_reason is RunStopReason.COMPLETED and command.error is not None:
                 raise IrisRunStateError("completed finish 不能包含 error")
 
@@ -825,7 +837,12 @@ class InMemoryLifecycleStore:
             else:
                 activation = None
                 settled = None
-            sequence = run.last_event_sequence + 1
+            unknown_calls = (
+                self._claimed_calls_as_outcome_unknown(run, command.now)
+                if command.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+                else []
+            )
+            sequence = run.last_event_sequence + len(unknown_calls) + 1
             updated = self._replace_run(
                 run,
                 phase=RunPhase.TERMINAL,
@@ -839,7 +856,19 @@ class InMemoryLifecycleStore:
                 updated_at=command.now,
                 finished_at=command.now,
             )
-            event = self._event(
+            unknown_events = tuple(
+                self._event(
+                    updated,
+                    RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
+                    command.now,
+                    sequence=run.last_event_sequence + index,
+                    activation_id=record.claim_activation_id,
+                    step_index=record.step_index,
+                    correlation_id=record.tool_call_id,
+                )
+                for index, record in enumerate(unknown_calls, start=1)
+            )
+            terminal_event = self._event(
                 updated,
                 RunEventKind.RUN_TERMINAL,
                 command.now,
@@ -852,7 +881,7 @@ class InMemoryLifecycleStore:
                 run=updated,
                 checkpoint=self._checkpoints.get(run.run_id),
                 interaction=interaction,
-                events=(event,),
+                events=(*unknown_events, terminal_event),
                 result=result,
             )
             self._runs[run.run_id] = deepcopy(updated)
@@ -861,7 +890,9 @@ class InMemoryLifecycleStore:
                 self._activations[activation.activation_id] = deepcopy(settled)
             if interaction is not None:
                 self._interactions[interaction.interaction_id] = deepcopy(interaction)
-            self._events[run.run_id].append(deepcopy(event))
+            for record in unknown_calls:
+                self._tool_calls[(run.run_id, record.tool_call_id)] = deepcopy(record)
+            self._events[run.run_id].extend(deepcopy(commit.events))
             self._results[run.run_id] = deepcopy(result)
             return self._store_replay("finish_run", command, commit)
 
@@ -917,27 +948,35 @@ class InMemoryLifecycleStore:
                     raise IrisRunRecoveryError(
                         "outcome_unknown recovery 缺少 unresolved durable claim", run_id=run.run_id
                     )
-                unknown_calls = [
-                    RunToolCallRecord.model_validate(
-                        item.model_dump()
-                        | {
-                            "phase": ToolCallPhase.OUTCOME_UNKNOWN,
-                            "version": item.version + 1,
-                            "updated_at": command.now,
-                        }
-                    )
-                    for item in claimed
-                ]
-                terminal_sequence = first_sequence + 1
+                unknown_calls = self._claimed_calls_as_outcome_unknown(run, command.now)
+                terminal_sequence = first_sequence + len(unknown_calls) + 1
                 updated = self._replace_run(
                     run,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.OUTCOME_UNKNOWN,
                     revision=run.revision + 1,
                     current_activation_id=None,
+                    error=RunErrorInfo(
+                        code="TOOL_OUTCOME_UNKNOWN",
+                        message="工具 claim 缺少可证明的 durable result",
+                        source="tool",
+                        details={"tool_call_ids": [item.tool_call_id for item in claimed]},
+                    ),
                     last_event_sequence=terminal_sequence,
                     updated_at=command.now,
                     finished_at=command.now,
+                )
+                unknown_events = tuple(
+                    self._event(
+                        updated,
+                        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
+                        command.now,
+                        sequence=first_sequence + index,
+                        activation_id=record.claim_activation_id,
+                        step_index=record.step_index,
+                        correlation_id=record.tool_call_id,
+                    )
+                    for index, record in enumerate(unknown_calls, start=1)
                 )
                 terminal_event = self._event(
                     updated,
@@ -946,7 +985,7 @@ class InMemoryLifecycleStore:
                     sequence=terminal_sequence,
                     payload={"stop_reason": RunStopReason.OUTCOME_UNKNOWN.value},
                 )
-                events = (abandoned_event, terminal_event)
+                events = (abandoned_event, *unknown_events, terminal_event)
                 result = project_result(updated)
                 commit = RunCommit(
                     run=updated,
@@ -958,6 +997,45 @@ class InMemoryLifecycleStore:
                 self._results[run.run_id] = deepcopy(result)
                 for item in unknown_calls:
                     self._tool_calls[(run.run_id, item.tool_call_id)] = deepcopy(item)
+            elif command.recovery_disposition is RecoveryDisposition.FINALIZE:
+                if claimed:
+                    raise IrisRunRecoveryError(
+                        "outcome-ready recovery 不能忽略 unresolved durable claim",
+                        run_id=run.run_id,
+                    )
+                if checkpoint.resumability is not CheckpointResumability.OUTCOME_READY:
+                    raise IrisRunRecoveryError(
+                        "finalize recovery 需要 outcome-ready checkpoint",
+                        run_id=run.run_id,
+                    )
+                terminal_sequence = first_sequence + 1
+                updated = self._replace_run(
+                    run,
+                    phase=RunPhase.TERMINAL,
+                    stop_reason=RunStopReason.COMPLETED,
+                    revision=run.revision + 1,
+                    current_activation_id=None,
+                    last_event_sequence=terminal_sequence,
+                    updated_at=command.now,
+                    finished_at=command.now,
+                )
+                terminal_event = self._event(
+                    updated,
+                    RunEventKind.RUN_TERMINAL,
+                    command.now,
+                    sequence=terminal_sequence,
+                    payload={"stop_reason": RunStopReason.COMPLETED.value},
+                )
+                events = (abandoned_event, terminal_event)
+                result = project_result(updated)
+                commit = RunCommit(
+                    run=updated,
+                    checkpoint=checkpoint,
+                    events=events,
+                    result=result,
+                )
+                self._lanes.pop(run.session_id, None)
+                self._results[run.run_id] = deepcopy(result)
             else:
                 if command.new_activation_id is None:
                     raise IrisRunRecoveryError("resume recovery 缺少 new activation identity")
@@ -1244,6 +1322,25 @@ class InMemoryLifecycleStore:
                 "close_reason": reason,
             },
         )
+
+    def _claimed_calls_as_outcome_unknown(
+        self,
+        run: RunRecord,
+        now: datetime,
+    ) -> list[RunToolCallRecord]:
+        """构造当前 run 所有 unresolved claim 的闭合事实。"""
+        return [
+            RunToolCallRecord.model_validate(
+                record.model_dump()
+                | {
+                    "phase": ToolCallPhase.OUTCOME_UNKNOWN,
+                    "version": record.version + 1,
+                    "updated_at": now,
+                }
+            )
+            for record in self._tool_calls.values()
+            if record.run_id == run.run_id and record.phase is ToolCallPhase.CLAIMED
+        ]
 
     @staticmethod
     def _activation_outcome(stop_reason: RunStopReason) -> ActivationOutcome:

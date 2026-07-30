@@ -198,12 +198,12 @@ YAML 中不支持 inline Python 脚本。Python 扩展必须通过可导入的�
 - 不提供长期记忆系统。
 - 不引入 Redis、向量数据库或 ORM。
 
-需要从 `agent.yaml` 创建可运行 agent 时，使用 `iris.runtime.RuntimeFactory`：
+需要从 `agent.yaml` 创建完整 logical-run agent 时，使用 `iris.harness.AgentRunner`：
 
 ```python
-from iris.runtime import RuntimeFactory
+from iris.harness import AgentRunner
 
-runtime = RuntimeFactory.from_config_path("agent.yaml")
+runner = AgentRunner.from_config_path("agent.yaml")
 ```
 
 ## 维护与验证
@@ -212,7 +212,7 @@ runtime = RuntimeFactory.from_config_path("agent.yaml")
 | --- | --- | --- |
 | YAML 字段、默认值与校验 | `config/base.py` | `tests/agents/test_agent_config.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
-| runtime 配置消费与路径解析 | `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| harness/runtime 配置消费与路径解析 | `../harness/runner.py`, `../runtime/factory.py` | composition/factory tests |
 
 ```bash
 uv run pytest tests/agents tests/runtime/test_factory.py

@@ -8,13 +8,10 @@ from iris.context import ContextBuilder, ContextBuildInput
 from iris.exceptions import IrisProviderError, IrisRunConflictError, IrisRunPersistenceError
 from iris.hitl import (
     HumanInteraction,
-    InMemoryInteractionStore,
-    InteractionStore,
     PermissionPrompt,
     QuestionPrompt,
 )
-from iris.hitl._legacy_service import HumanInteractionService
-from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
+from iris.lifecycle import RuntimeExecutionOptions, SessionSnapshot
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.runtime import (
@@ -34,7 +31,6 @@ from iris.runtime import (
     ToolBridge,
     ToolCallClaim,
 )
-from iris.session import InMemorySessionStore, SessionStore
 from iris.tools import (
     DefaultPermissionPolicy,
     PermissionPolicy,
@@ -196,12 +192,8 @@ class FakeRuntimeCommitPort:
             session_id=self.activation.session_id,
             run_id=self.activation.run_id,
             step_index=suspension.cursor.step_index,
+            tool_call_id=suspension.interaction_request.tool_call.tool_call_id,
             request=suspension.interaction_request,
-            checkpoint={
-                "checkpoint_version": 1,
-                "resumability": CheckpointResumability.SAFE.value,
-                "engine_cursor": suspension.cursor.model_dump(mode="json"),
-            },
             expires_at=suspension.expires_at,
         )
         return RuntimeSuspensionResult(cursor=self.cursor, interaction=interaction)
@@ -474,7 +466,6 @@ def build_runtime(
     agent_config: AgentConfig,
     context_input: ContextBuildInput,
     provider: RuntimeProvider,
-    session_store: SessionStore | None = None,
     context_builder: ContextBuilder | None = None,
     assembler: RuntimeMessageAssembler | None = None,
     tool_registry: ToolRegistry | None = None,
@@ -482,13 +473,10 @@ def build_runtime(
     tool_executor: ToolExecutor | None = None,
     workspace_root: Path | None = None,
     permission_policy: PermissionPolicy | None = None,
-    interaction_store: InteractionStore | None = None,
-    interaction_service: HumanInteractionService | None = None,
     memory_service: MemoryService | None = None,
     memory_context_builder: MemoryContextBuilder | None = None,
 ) -> AgentRuntime:
     """为测试构造包含一致依赖图的 runtime。"""
-    resolved_session_store = session_store or InMemorySessionStore()
     registry = tool_registry or (tool_view.registry if tool_view is not None else ToolRegistry())
     resolved_tool_view = tool_view or registry.view()
     resolved_policy = permission_policy or DefaultPermissionPolicy()
@@ -496,21 +484,16 @@ def build_runtime(
         registry,
         permission_policy=resolved_policy,
     )
-    resolved_interaction_service = interaction_service or HumanInteractionService(
-        interaction_store or InMemoryInteractionStore()
-    )
     environment = RuntimeEnvironment(
         agent_config=agent_config,
         context_input=context_input,
         provider=provider,
-        session_store=resolved_session_store,
         context_builder=context_builder or ContextBuilder(),
         assembler=assembler or RuntimeMessageAssembler(),
         tool_bridge=ToolBridge(
             tool_view=resolved_tool_view,
             tool_executor=resolved_tool_executor,
         ),
-        interaction_service=resolved_interaction_service,
         workspace_root=workspace_root or Path.cwd(),
         memory_service=memory_service,
         memory_context_builder=memory_context_builder or MemoryContextBuilder(),

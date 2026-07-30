@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Any, Literal
@@ -32,17 +31,7 @@ class InteractionStatus(StrEnum):
 
     PENDING = "pending"
     RESOLVED = "resolved"
-    CONSUMED = "consumed"
     CLOSED = "closed"
-
-
-class InteractionResumePhase(StrEnum):
-    """Runtime 消费人工响应后的恢复进度。"""
-
-    WAITING = "waiting"
-    CLAIMED = "claimed"
-    RESULT_READY = "result_ready"
-    RESULT_COMMITTED = "result_committed"
 
 
 def _new_interaction_id() -> str:
@@ -214,7 +203,7 @@ class HumanInteractionRequest(BaseModel):
 
 
 class HumanInteraction(BaseModel):
-    """持久化的一次人工 gate 与其恢复状态。"""
+    """持久化的一次人工 gate 与 response/close 状态。"""
 
     interaction_id: str = Field(default_factory=_new_interaction_id)
     session_id: str
@@ -222,50 +211,28 @@ class HumanInteraction(BaseModel):
     step_index: int = Field(ge=0)
     tool_call_id: str
     status: InteractionStatus = InteractionStatus.PENDING
-    resume_phase: InteractionResumePhase = InteractionResumePhase.WAITING
     request: HumanInteractionRequest
     response: HumanInteractionResponse | None = None
-    checkpoint: dict[str, Any] = Field(default_factory=dict)
     version: int = Field(default=1, ge=1)
     created_at: datetime = Field(default_factory=_now)
     expires_at: datetime | None = None
     resolved_at: datetime | None = None
-    consumed_at: datetime | None = None
     closed_at: datetime | None = None
     close_reason: str | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_legacy_tool_call_id(cls, value: Any) -> Any:
-        """让 Phase 5 删除前的旧构造路径自动补齐显式 subject identity。"""
-        if not isinstance(value, Mapping) or value.get("tool_call_id") is not None:
-            return value
-        request = value.get("request")
-        tool_call = getattr(request, "tool_call", None)
-        tool_call_id = getattr(tool_call, "tool_call_id", None)
-        if tool_call_id is None and isinstance(request, Mapping):
-            tool_call = request.get("tool_call")
-            tool_call_id = tool_call.get("tool_call_id") if isinstance(tool_call, Mapping) else None
-        return dict(value) | ({"tool_call_id": tool_call_id} if tool_call_id is not None else {})
 
     @field_validator("interaction_id", "session_id", "run_id", "tool_call_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
 
-    @field_validator("checkpoint")
-    @classmethod
-    def _validate_checkpoint(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return _validate_json_safe(value, field_name="checkpoint")
-
     @field_validator("close_reason")
     @classmethod
     def _validate_close_reason(cls, value: str | None) -> str | None:
         return None if value is None else _trim_required(value, field_name="close_reason")
 
-    @field_validator("created_at", "expires_at", "resolved_at", "consumed_at", "closed_at")
+    @field_validator("created_at", "expires_at", "resolved_at", "closed_at")
     @classmethod
     def _validate_target_times(
         cls, value: datetime | None, info: ValidationInfo
@@ -289,21 +256,8 @@ class HumanInteraction(BaseModel):
             raise ValueError("interaction prompt kind 必须匹配 response kind")
         if self.status is InteractionStatus.PENDING and self.response is not None:
             raise ValueError("pending interaction 不能包含 response")
-        if (
-            self.status in {InteractionStatus.RESOLVED, InteractionStatus.CONSUMED}
-            and self.response is None
-        ):
-            raise ValueError("resolved 或 consumed interaction 必须包含 response")
-        if (
-            self.status in {InteractionStatus.PENDING, InteractionStatus.RESOLVED}
-            and self.resume_phase is not InteractionResumePhase.WAITING
-        ):
-            raise ValueError("pending 或 resolved interaction 的 resume_phase 必须是 waiting")
-        if (
-            self.status is InteractionStatus.CONSUMED
-            and self.resume_phase is InteractionResumePhase.WAITING
-        ):
-            raise ValueError("consumed interaction 的 resume_phase 不能是 waiting")
+        if self.status is InteractionStatus.RESOLVED and self.response is None:
+            raise ValueError("resolved interaction 必须包含 response")
         if self.status is InteractionStatus.CLOSED:
             if self.closed_at is None or self.close_reason is None:
                 raise ValueError("closed interaction 必须包含 closed_at 与 close_reason")
@@ -319,7 +273,6 @@ __all__ = [
     "HumanInteractionRequest",
     "HumanInteractionResponse",
     "InteractionKind",
-    "InteractionResumePhase",
     "InteractionStatus",
     "PermissionPrompt",
     "PermissionInteractionResponse",
