@@ -8,7 +8,6 @@ from typing import Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from rich.table import Table
 
 from ..agents import AgentConfig
 from ..exceptions import HITLCheckpointInvalidError
@@ -17,8 +16,7 @@ from ..hitl import (
     PermissionPrompt,
     QuestionPrompt,
 )
-from ..runtime.models import RuntimeErrorInfo, RuntimeStatus, RuntimeTurnResult
-from ..tools import ToolResult
+from ..lifecycle import RunErrorInfo, RunPhase, RunResult
 from .trace import TraceStep
 
 
@@ -147,25 +145,9 @@ class ChatRenderer:
                 )
             )
 
-    def render_tool_results(self, result: RuntimeTurnResult) -> None:
-        """渲染工具执行结果。"""
-        if not result.tool_results:
-            return
-        table = Table(title="TOOL RESULTS", show_lines=False)
-        table.add_column("tool", style="cyan")
-        table.add_column("status")
-        table.add_column("preview")
-        for tool_result in result.tool_results:
-            table.add_row(
-                tool_result.tool_name,
-                "error" if tool_result.is_error else "ok",
-                _tool_preview(tool_result),
-            )
-        self.console.print(table)
-
-    def render_assistant(self, result: RuntimeTurnResult) -> None:
-        """渲染助手最终回复或 runtime 状态。"""
-        if result.status is RuntimeStatus.WAITING_HUMAN:
+    def render_assistant(self, result: RunResult) -> None:
+        """渲染 logical run 的最终助手回复或错误。"""
+        if result.run.phase is RunPhase.WAITING:
             return
         if result.error is not None:
             self.render_error(result.error)
@@ -174,9 +156,9 @@ class ChatRenderer:
         text = result.assistant_message.text or _assistant_tool_call_summary(result)
         self.console.print(Panel(text, title="ASSISTANT", border_style="green"))
 
-    def render_error(self, error: RuntimeErrorInfo | Exception) -> None:
+    def render_error(self, error: RunErrorInfo | Exception) -> None:
         """渲染结构化错误。"""
-        if isinstance(error, RuntimeErrorInfo):
+        if isinstance(error, RunErrorInfo):
             text = f"{error.source}:{error.code}\n{error.message}"
         else:
             text = f"{error.__class__.__name__}\n{error}"
@@ -247,13 +229,7 @@ def _latest_message_preview(messages: list[Any]) -> str:
     return ""
 
 
-def _tool_preview(tool_result: ToolResult) -> str:
-    """返回工具结果摘要。"""
-    text = tool_result.model_content
-    return text[:500]
-
-
-def _assistant_tool_call_summary(result: RuntimeTurnResult) -> str:
+def _assistant_tool_call_summary(result: RunResult) -> str:
     """在 assistant 只有工具调用时返回摘要。"""
     if result.assistant_message is None:
         return ""

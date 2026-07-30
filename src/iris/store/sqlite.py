@@ -23,7 +23,6 @@ from ..hitl.models import HumanInteraction, HumanInteractionRequest, HumanIntera
 from ..lifecycle.models import (
     ActivationOutcome,
     ActivationRecord,
-    ActivationStatus,
     AgentRunOptions,
     AgentRunRequest,
     RunCheckpoint,
@@ -31,7 +30,6 @@ from ..lifecycle.models import (
     RunEvent,
     RunPhase,
     RunRecord,
-    RunStopReason,
     RunToolCallRecord,
     RunUsage,
     SessionSnapshot,
@@ -133,7 +131,12 @@ _SCHEMA_STATEMENTS = (
         ordinal INTEGER NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('start', 'resume', 'recover')),
         status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'abandoned')),
-        outcome TEXT CHECK (outcome IN ('waiting', 'terminal')),
+        outcome TEXT CHECK (
+            outcome IN (
+                'completed', 'suspended', 'failed', 'cancelled', 'recovered',
+                'outcome_unknown'
+            )
+        ),
         started_at TEXT NOT NULL,
         ended_at TEXT,
         UNIQUE (run_id, ordinal)
@@ -173,6 +176,7 @@ _SCHEMA_STATEMENTS = (
         result_json TEXT,
         version INTEGER NOT NULL,
         prepared_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
         claimed_at TEXT,
         committed_at TEXT,
         PRIMARY KEY (run_id, tool_call_id)
@@ -438,7 +442,7 @@ def _load_memory(
             for row in connection.execute("SELECT session_id, run_id FROM session_run_lanes")
         }
         memory._activations = {
-            row["activation_id"]: _row_to_activation(row, memory._runs)
+            row["activation_id"]: _row_to_activation(row)
             for row in connection.execute("SELECT * FROM run_activations")
         }
         memory._checkpoints = {
@@ -516,32 +520,15 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
     )
 
 
-def _row_to_activation(
-    row: sqlite3.Row,
-    runs: dict[str, RunRecord],
-) -> ActivationRecord:
-    status = ActivationStatus(row["status"])
+def _row_to_activation(row: sqlite3.Row) -> ActivationRecord:
     stored_outcome = row["outcome"]
-    if stored_outcome is None:
-        outcome = None
-    elif stored_outcome == "waiting":
-        outcome = ActivationOutcome.SUSPENDED
-    elif status is ActivationStatus.ABANDONED:
-        outcome = ActivationOutcome.RECOVERED
-    else:
-        stop_reason = runs[row["run_id"]].stop_reason
-        outcome = {
-            RunStopReason.COMPLETED: ActivationOutcome.COMPLETED,
-            RunStopReason.CANCELLED: ActivationOutcome.CANCELLED,
-            RunStopReason.OUTCOME_UNKNOWN: ActivationOutcome.OUTCOME_UNKNOWN,
-        }.get(stop_reason, ActivationOutcome.FAILED)
     return ActivationRecord(
         activation_id=row["activation_id"],
         run_id=row["run_id"],
         ordinal=row["ordinal"],
         kind=row["kind"],
-        status=status,
-        outcome=outcome,
+        status=row["status"],
+        outcome=(ActivationOutcome(stored_outcome) if stored_outcome is not None else None),
         started_at=row["started_at"],
         ended_at=row["ended_at"],
     )
@@ -563,7 +550,6 @@ def _row_to_checkpoint(row: sqlite3.Row) -> RunCheckpoint:
 
 
 def _row_to_tool_call(row: sqlite3.Row) -> RunToolCallRecord:
-    updated_at = row["committed_at"] or row["claimed_at"] or row["prepared_at"]
     return RunToolCallRecord(
         run_id=row["run_id"],
         tool_call_id=row["tool_call_id"],
@@ -582,7 +568,7 @@ def _row_to_tool_call(row: sqlite3.Row) -> RunToolCallRecord:
         ),
         version=row["version"],
         created_at=row["prepared_at"],
-        updated_at=updated_at,
+        updated_at=row["updated_at"],
         claimed_at=row["claimed_at"],
         committed_at=row["committed_at"],
     )
@@ -732,8 +718,8 @@ _INSERT_RUN = """INSERT INTO agent_runs(
 _INSERT_TOOL_CALL = """INSERT INTO run_tool_calls(
     run_id, tool_call_id, step_index, ordinal, tool_name, arguments_json, fingerprint,
     interaction_id, phase, claim_activation_id, result_json, version, prepared_at,
-    claimed_at, committed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    updated_at, claimed_at, committed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _INSERT_INTERACTION = """INSERT INTO run_interactions(
     interaction_id, run_id, session_id, step_index, tool_call_id, status,
@@ -794,6 +780,7 @@ def _tool_call_values(call: RunToolCallRecord) -> tuple[object, ...]:
         _dump_json(call.result) if call.result is not None else None,
         call.version,
         call.created_at.isoformat(),
+        call.updated_at.isoformat(),
         _iso(call.claimed_at),
         _iso(call.committed_at),
     )
@@ -833,11 +820,7 @@ def _event_values(event: RunEvent) -> tuple[object, ...]:
 
 
 def _stored_activation_outcome(activation: ActivationRecord) -> str | None:
-    if activation.outcome is None:
-        return None
-    if activation.outcome is ActivationOutcome.SUSPENDED:
-        return "waiting"
-    return "terminal"
+    return activation.outcome.value if activation.outcome is not None else None
 
 
 def _dump_json(value: object) -> str:

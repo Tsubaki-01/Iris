@@ -3,12 +3,16 @@
 from ..lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
+    RunErrorInfo,
     RunEvent,
     RunEventKind,
     RunLimits,
+    RunPhase,
     RunResult,
     RunSnapshot,
+    RunStopReason,
     RuntimeExecutionOptions,
+    RunUsage,
 )
 from .observer import RunEventObserver
 from .runner import AgentRunner
@@ -20,8 +24,12 @@ __all__ = [
     "RunEvent",
     "RunEventKind",
     "RunEventObserver",
+    "RunErrorInfo",
     "RunLimits",
+    "RunPhase",
     "RunResult",
     "RunSnapshot",
+    "RunStopReason",
+    "RunUsage",
     "RuntimeExecutionOptions",
 ]

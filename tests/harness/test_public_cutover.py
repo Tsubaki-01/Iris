@@ -71,7 +71,6 @@ _OLD_WRITERS = (
     ("iris.store", "SQLiteStore", "save_run_metadata"),
     ("iris.store", "SQLiteStore", "append_tool_event"),
     ("iris.store", "SQLiteStore", "create_interaction"),
-    ("iris.store", "SQLiteStore", "resolve_interaction"),
     ("iris.store", "SQLiteStore", "claim_interaction"),
     ("iris.store", "SQLiteStore", "update_consumed_interaction"),
 )

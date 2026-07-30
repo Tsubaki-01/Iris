@@ -20,12 +20,7 @@ from ..context import (
     ContextSlot,
     load_context_build_input,
 )
-from ..hitl.in_memory import InMemoryInteractionStore
-from ..hitl.store import InteractionStore
-from ..hitl._legacy_service import HumanInteractionService
 from ..providers import create_provider_client
-from ..session import InMemorySessionStore, SessionStore
-from ..store._legacy_sqlite import SQLiteStore
 from ..tools import DefaultPermissionPolicy, ToolExecutor
 from .environment import RuntimeEnvironment, RuntimeProvider
 from .runtime import AgentRuntime
@@ -40,7 +35,7 @@ class RuntimeFactory:
     """从配置构造 `AgentRuntime`。
 
     Factory 只负责本地依赖装配，不调用 provider 网络接口。显式注入的 provider、
-    session store 和 memory service 优先于配置派生对象，便于测试和 SDK 用户接管边界。
+    provider 和 memory service 优先于配置派生对象，便于测试和 SDK 用户接管边界。
 
     Example:
         runtime = RuntimeFactory.from_config(config, provider=fake_provider)
@@ -53,8 +48,6 @@ class RuntimeFactory:
         *,
         provider: RuntimeProvider | None = None,
         memory_service: MemoryService | None = None,
-        session_store: SessionStore | None = None,
-        interaction_store: InteractionStore | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
@@ -63,8 +56,6 @@ class RuntimeFactory:
             path (str | Path): Agent YAML 配置文件路径。
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
-            session_store (SessionStore | None): 可选 session store 注入。
-            interaction_store (InteractionStore | None): 可选 HITL interaction store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -77,8 +68,6 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
-            session_store=session_store,
-            interaction_store=interaction_store,
             api_key=api_key,
         )
 
@@ -90,19 +79,15 @@ class RuntimeFactory:
         config_path: Path | None = None,
         provider: RuntimeProvider | None = None,
         memory_service: MemoryService | None = None,
-        session_store: SessionStore | None = None,
-        interaction_store: InteractionStore | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
 
         Args:
             config (AgentConfig): 已校验的 Agent 配置。
-            config_path (Path | None): 配置文件路径；存在时相对它解析 workspace/session。
+            config_path (Path | None): 配置文件路径；存在时相对它解析 workspace/context。
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
-            session_store (SessionStore | None): 可选 session store 注入。
-            interaction_store (InteractionStore | None): 可选 HITL interaction store 注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -116,15 +101,6 @@ class RuntimeFactory:
         tool_executor = ToolExecutor(
             tool_registry,
             permission_policy=permission_policy,
-        )
-        resolved_session_store = session_store or _build_session_store(
-            config,
-            base_dir=base_dir,
-        )
-        resolved_interaction_store = interaction_store or (
-            resolved_session_store
-            if isinstance(resolved_session_store, SQLiteStore)
-            else InMemoryInteractionStore()
         )
         resolved_provider = provider or create_provider_client(
             config.to_model_route(),
@@ -141,15 +117,12 @@ class RuntimeFactory:
             tool_view=tool_view,
             tool_executor=tool_executor,
         )
-        interaction_service = HumanInteractionService(resolved_interaction_store)
         environment = RuntimeEnvironment(
             agent_config=config,
             context_input=context_input,
             provider=resolved_provider,
-            session_store=resolved_session_store,
             tool_bridge=tool_bridge,
             workspace_root=workspace_root,
-            interaction_service=interaction_service,
             memory_service=memory_service,
         )
         return AgentRuntime(environment)
@@ -178,14 +151,6 @@ def _build_context_input(config: AgentConfig, *, base_dir: Path) -> ContextBuild
             ]
         )
     )
-
-
-def _build_session_store(config: AgentConfig, *, base_dir: Path) -> SessionStore:
-    """根据配置创建 session store。"""
-    if config.session.backend == "none":
-        return InMemorySessionStore()
-    session_path = config.session.path or ".iris/session.db"
-    return SQLiteStore(_resolve_relative_to_base(session_path, base_dir=base_dir))
 
 
 def _resolve_relative_to_base(path: str | Path, *, base_dir: Path) -> Path:

@@ -8,8 +8,8 @@ orchestration, and read-only model tools. SQLite is authoritative; Markdown/JSON
 `.iris/memory/` is a projection for humans.
 
 Memory is not currently an `AgentConfig` YAML field and runtime never enables or recalls it by
-default. Callers must build a `MemoryService`, inject it into `RuntimeFactory`, and explicitly pass
-`RuntimeOptions.memory_query` or `memory_results` for each run.
+default. Callers must build a `MemoryService`, inject it through `AgentRunner.from_config*()`, and
+explicitly pass `RuntimeExecutionOptions.memory_query` or `memory_results` for each run.
 
 ## Quick start
 
@@ -63,7 +63,7 @@ flowchart LR
     Candidate --> Item["L2 MemoryItem"]
     Query["MemoryQuery"] --> Service
     Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["explicit RuntimeOptions injection"]
+    Context --> Runtime["explicit RuntimeExecutionOptions injection"]
 ```
 
 `MemoryScope` combines workspace, agent, collection, visibility, and optional session. Session
@@ -88,16 +88,23 @@ the first fragment when necessary and counting omissions. Prompt fragments keep 
 but omit storage source and retrieval score by default.
 
 ```python
-from iris.runtime import RuntimeFactory
-from iris.runtime.models import RuntimeOptions
+from iris.harness import (
+    AgentRunOptions,
+    AgentRunRequest,
+    AgentRunner,
+    RuntimeExecutionOptions,
+)
 
-runtime = RuntimeFactory.from_config_path(
+runner = AgentRunner.from_config_path(
     "agent.yaml",
     memory_service=service,
 )
-result = await runtime.run_loop(
-    "Continue the previous task",
-    options=RuntimeOptions(memory_query=MemoryQuery(scope=scope, text="previous task")),
+query = MemoryQuery(scope=scope, text="previous task")
+result = await runner.start(
+    AgentRunRequest(input="Continue the previous task"),
+    options=AgentRunOptions(
+        runtime=RuntimeExecutionOptions(memory_query=query.model_dump(mode="json"))
+    ),
 )
 ```
 

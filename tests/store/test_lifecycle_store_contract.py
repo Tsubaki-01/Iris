@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ from iris.lifecycle import (
     ResolveInteraction,
     RunCheckpoint,
     RunCommit,
+    RunErrorInfo,
     RunLimits,
     RunToolCallRecord,
     RunUsage,
@@ -132,6 +134,7 @@ def _interaction() -> HumanInteraction:
         session_id="session-1",
         run_id="run-1",
         step_index=0,
+        tool_call_id="call-question",
         status=InteractionStatus.PENDING,
         request=HumanInteractionRequest(
             tool_call=ToolCallSnapshot(
@@ -143,7 +146,6 @@ def _interaction() -> HumanInteraction:
             ),
             prompt=QuestionPrompt(question="继续吗？"),
         ),
-        checkpoint={},
         expires_at=_NOW + timedelta(minutes=5),
         created_at=_T1,
     )
@@ -269,12 +271,13 @@ def test_protocol_exposes_every_required_operation() -> None:
     assert expected <= set(LifecycleStore.__dict__)
 
 
-def test_runtime_and_lifecycle_share_one_tool_error_policy_enum() -> None:
-    """两个旧/新入口必须解析到同一个 enum class。"""
-    from iris.lifecycle import ToolErrorPolicy as LifecycleToolErrorPolicy
-    from iris.runtime.models import ToolErrorPolicy as RuntimeToolErrorPolicy
+def test_tool_error_policy_is_owned_only_by_lifecycle_contract() -> None:
+    """Hard cutover 后 runtime models 不再重复导出 lifecycle option enum。"""
+    from iris.lifecycle import ToolErrorPolicy
+    from iris.runtime import models
 
-    assert RuntimeToolErrorPolicy is LifecycleToolErrorPolicy
+    assert ToolErrorPolicy.RETURN_TO_MODEL.value == "return_to_model"
+    assert not hasattr(models, "ToolErrorPolicy")
 
 
 def test_lifecycle_source_has_no_forbidden_dependency_edges() -> None:
@@ -624,6 +627,7 @@ def test_approved_permission_cannot_commit_rejection_without_claim(
         session_id="session-1",
         run_id="run-1",
         step_index=0,
+        tool_call_id="call-write",
         status=InteractionStatus.PENDING,
         request=HumanInteractionRequest(
             tool_call=ToolCallSnapshot(
@@ -823,6 +827,46 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
     assert next_run.run.phase == "active"
 
 
+def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Live settlement 必须在同一 transaction 闭合 unresolved claim。"""
+    prepared = _prepare_tool(lifecycle_store)
+    claimed = lifecycle_store.claim_tool_call(
+        ClaimToolCall(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            tool_call_id="call-tool",
+            fingerprint=_TOOL_FINGERPRINT,
+            expected_tool_version=1,
+            now=_T2,
+        )
+    )
+
+    terminal = lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=claimed.run.revision,
+            activation_id="activation-1",
+            stop_reason="outcome_unknown",
+            error=RunErrorInfo(
+                code="TOOL_OUTCOME_UNKNOWN",
+                message="工具结果不可证明",
+                source="tool",
+            ),
+            now=_T3,
+        )
+    )
+
+    [record] = lifecycle_store.list_tool_calls("run-1")
+    assert record.phase == "outcome_unknown"
+    assert [event.kind for event in terminal.events] == [
+        "tool_call.outcome_unknown",
+        "run.terminal",
+    ]
+
+
 def test_safe_recovery_abandons_old_fence_and_rebinds_checkpoint(
     lifecycle_store: LifecycleStore,
 ) -> None:
@@ -876,6 +920,54 @@ def test_safe_recovery_rejects_unresolved_durable_claim(
                 now=_T3,
             )
         )
+
+
+def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Recovery transaction 重开后不能压缩 activation outcome 或 tool 时间。"""
+    prepared = _prepare_tool(lifecycle_store)
+    claimed = lifecycle_store.claim_tool_call(
+        ClaimToolCall(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            tool_call_id="call-tool",
+            fingerprint=_TOOL_FINGERPRINT,
+            expected_tool_version=1,
+            now=_T2,
+        )
+    )
+
+    recovered = lifecycle_store.recover_active_run(
+        RecoverActiveRun(
+            run_id="run-1",
+            expected_run_revision=claimed.run.revision,
+            expected_activation_id="activation-1",
+            expected_checkpoint_sequence=claimed.checkpoint.sequence,
+            recovery_disposition=RecoveryDisposition.OUTCOME_UNKNOWN,
+            now=_T3,
+        )
+    )
+
+    assert [event.kind for event in recovered.events] == [
+        "activation.abandoned",
+        "tool_call.outcome_unknown",
+        "run.terminal",
+    ]
+    if not isinstance(lifecycle_store, SQLiteStore):
+        return
+    reopened = SQLiteStore(lifecycle_store.path)
+    [record] = reopened.list_tool_calls("run-1")
+    with sqlite3.connect(lifecycle_store.path) as connection:
+        activation_fact = connection.execute(
+            "SELECT status, outcome FROM run_activations WHERE activation_id = ?",
+            ("activation-1",),
+        ).fetchone()
+
+    assert activation_fact == ("abandoned", "outcome_unknown")
+    assert record.phase == "outcome_unknown"
+    assert record.updated_at == _T3
 
 
 def test_read_methods_apply_cursor_and_validation_contract(

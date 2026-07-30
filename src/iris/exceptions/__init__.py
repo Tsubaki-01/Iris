@@ -1,14 +1,8 @@
 from .exceptions import (
     # HITL
-    HITLAlreadyConsumedError,
     HITLCheckpointInvalidError,
     HITLConflictError,
-    HITLExecutionOutcomeUnknownError,
-    HITLNotFoundError,
     HITLResponseMismatchError,
-    HITLResponseRequiredError,
-    HITLResumeMismatchError,
-    HITLStoreUnavailableError,
     # Agent
     IrisAgentError,
     IrisAgentExecutionError,
@@ -39,8 +33,6 @@ from .exceptions import (
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
-    # Session
-    IrisSessionError,
     # Template
     IrisTemplateError,
     IrisTemplateNotFoundError,
@@ -61,15 +53,9 @@ __all__ = [
     "IrisParserError",
     "IrisValidationError",
     "IrisHITLError",
-    "HITLStoreUnavailableError",
-    "HITLNotFoundError",
-    "HITLResponseRequiredError",
     "HITLResponseMismatchError",
     "HITLConflictError",
     "HITLCheckpointInvalidError",
-    "HITLResumeMismatchError",
-    "HITLAlreadyConsumedError",
-    "HITLExecutionOutcomeUnknownError",
     "IrisProviderError",
     "IrisAPIConnectionError",
     "IrisRateLimitExceededError",
@@ -92,7 +78,6 @@ __all__ = [
     "IrisRunRecoveryError",
     "IrisRunError",
     "IrisRunStateError",
-    "IrisSessionError",
     "IrisTemplateError",
     "IrisTemplateNotFoundError",
     "IrisTemplateRenderError",

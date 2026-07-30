@@ -148,7 +148,6 @@ def _pending_interaction() -> HumanInteraction:
         status=InteractionStatus.PENDING,
         request=request,
         response=None,
-        checkpoint={},
         version=1,
         expires_at=_NOW + timedelta(minutes=5),
         created_at=_T1,

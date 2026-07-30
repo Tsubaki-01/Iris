@@ -7,8 +7,8 @@
 `.iris/memory/` 下的 Markdown/JSON 是便于人工查看的投影。
 
 Memory 当前不是 `AgentConfig` 的 YAML 字段，也不会被 runtime 自动启用或自动召回。
-调用方需要显式构造 `MemoryService`，注入 `RuntimeFactory`，并在每次运行的
-`RuntimeOptions.memory_query` 或 `memory_results` 中选择要注入的内容。
+调用方需要显式构造 `MemoryService`，注入 `AgentRunner.from_config*()`，并在每次运行的
+`RuntimeExecutionOptions.memory_query` 或 `memory_results` 中选择要注入的内容。
 
 ## 运行要求与快速开始
 
@@ -64,7 +64,7 @@ flowchart LR
     Candidate --> Item["L2 MemoryItem"]
     Query["MemoryQuery"] --> Service
     Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["RuntimeOptions 显式注入"]
+    Context --> Runtime["RuntimeExecutionOptions 显式注入"]
 ```
 
 ### Scope 与隔离
@@ -100,16 +100,23 @@ score 默认写进 prompt。
 runtime 只有在调用方显式提供 memory 时才执行：
 
 ```python
-from iris.runtime import RuntimeFactory
-from iris.runtime.models import RuntimeOptions
+from iris.harness import (
+    AgentRunOptions,
+    AgentRunRequest,
+    AgentRunner,
+    RuntimeExecutionOptions,
+)
 
-runtime = RuntimeFactory.from_config_path(
+runner = AgentRunner.from_config_path(
     "agent.yaml",
     memory_service=service,
 )
-result = await runtime.run_loop(
-    "继续上次任务",
-    options=RuntimeOptions(memory_query=MemoryQuery(scope=scope, text="上次任务")),
+query = MemoryQuery(scope=scope, text="上次任务")
+result = await runner.start(
+    AgentRunRequest(input="继续上次任务"),
+    options=AgentRunOptions(
+        runtime=RuntimeExecutionOptions(memory_query=query.model_dump(mode="json"))
+    ),
 )
 ```
 

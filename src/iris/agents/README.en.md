@@ -15,7 +15,7 @@ flowchart LR
     Config --> Route["ModelRoute"]
     Config --> Tools["build_tool_registry"]
     Tools --> Registry["ToolRegistry"]
-    Config --> Runtime["RuntimeFactory"]
+    Config --> Harness["AgentRunner.from_config"]
 ```
 
 ## Quick start
@@ -91,9 +91,9 @@ then loads Python functions and registrars; invalid names/references also become
 To build a runnable agent:
 
 ```python
-from iris.runtime import RuntimeFactory
+from iris.harness import AgentRunner
 
-runtime = RuntimeFactory.from_config_path("agent.yaml")
+runner = AgentRunner.from_config_path("agent.yaml")
 ```
 
 This package does not implement loops, automatic model calls, long-term memory, Redis, a vector
@@ -105,7 +105,7 @@ database, or an ORM.
 | --- | --- | --- |
 | YAML fields/defaults/validation | `config/base.py` | `tests/agents/test_agent_config.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
-| Runtime consumption and paths | `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| Harness/runtime consumption and paths | `../harness/runner.py`, `../runtime/factory.py` | composition/factory tests |
 
 ```bash
 uv run pytest tests/agents tests/runtime/test_factory.py

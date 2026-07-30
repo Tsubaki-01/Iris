@@ -60,8 +60,9 @@ resolve/finish/recover/cancel commands and run/session/checkpoint/tool/interacti
 reads. Construct commands and models through `iris.lifecycle`; do not depend on underscored
 `iris.store` modules.
 
-The Phase 4 `_legacy_sqlite.py` module exists only for branch-local characterization of the old
-runtime. It is not public, does not dual-write with the lifecycle store, and is removed in Phase 5.
+Cancellation requests, waiting settlement, activation abandon/rebind, outcome-ready finalization,
+and unresolved-claim-to-unknown transitions are aggregate transactions. There is no old-schema
+reader, migration, dual write, or compatibility adapter.
 
 ## Maintenance and verification
 

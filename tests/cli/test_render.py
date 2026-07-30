@@ -35,8 +35,8 @@ def _permission_interaction() -> HumanInteraction:
         session_id="session-1",
         run_id="run-1",
         step_index=0,
+        tool_call_id="call_write",
         request=request,
-        checkpoint={},
     )
 
 
@@ -56,8 +56,8 @@ def _question_interaction() -> HumanInteraction:
         session_id="session-1",
         run_id="run-1",
         step_index=0,
+        tool_call_id="call_question",
         request=request,
-        checkpoint={},
     )
 
 

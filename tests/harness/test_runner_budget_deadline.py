@@ -283,7 +283,7 @@ async def test_claimed_tool_deadline_maps_to_outcome_unknown(tmp_path: Path) -> 
     assert result.error is not None
     assert result.error.code == "TOOL_OUTCOME_UNKNOWN"
     [tool_call] = store.list_tool_calls("run-tool-deadline")
-    assert tool_call.phase is ToolCallPhase.CLAIMED
+    assert tool_call.phase is ToolCallPhase.OUTCOME_UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -334,4 +334,4 @@ async def test_claimed_tool_cancellation_maps_to_outcome_unknown(tmp_path: Path)
     assert result.error is not None
     assert result.error.code == "TOOL_OUTCOME_UNKNOWN"
     [tool_call] = store.list_tool_calls("run-tool-cancel")
-    assert tool_call.phase is ToolCallPhase.CLAIMED
+    assert tool_call.phase is ToolCallPhase.OUTCOME_UNKNOWN

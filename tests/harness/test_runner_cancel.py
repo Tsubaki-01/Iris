@@ -1,0 +1,291 @@
+"""AgentRunner durable cancellation 与 settlement observation 测试。"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from pathlib import Path
+
+import pytest
+from pydantic import BaseModel
+
+from iris.exceptions import IrisRunObservationTimeoutError, IrisRunStateError
+from iris.harness import AgentRunner
+from iris.lifecycle import (
+    AgentRunRequest,
+    RunEventKind,
+    RunPhase,
+    RunResult,
+    RunStopReason,
+    ToolCallPhase,
+)
+from iris.message import TextBlock, ToolUseBlock
+from iris.store import InMemoryLifecycleStore
+from iris.tools import (
+    BaseTool,
+    ToolCapability,
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolRegistry,
+    ToolResult,
+)
+
+from .fakes import BlockingProvider, StaticProvider, build_runtime, tool_response
+
+
+@pytest.mark.asyncio
+async def test_active_cancel_persists_first_reason_and_interrupts_provider(
+    tmp_path: Path,
+) -> None:
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="等待", run_id="run-cancel-provider"))
+    )
+    await provider.started.wait()
+
+    result = await runner.cancel(
+        "run-cancel-provider",
+        reason="用户停止",
+        settlement_timeout=1,
+    )
+    repeated = runner.request_cancel("run-cancel-provider", reason="后来原因")
+
+    assert result == await running
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+    assert repeated.cancellation_reason == "用户停止"
+    assert [event.kind for event in store.list_events("run-cancel-provider")].count(
+        RunEventKind.CANCELLATION_REQUESTED
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_waiting_cancel_closes_interaction_and_releases_lane(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register_function(
+        lambda: "写入",
+        name="write",
+        description="写入",
+        capabilities={ToolCapability.WRITE},
+    )
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="write-1", name="write", input={}))
+            ),
+        ),
+        store=store,
+    )
+    waiting = await runner.start(AgentRunRequest(input="写入", run_id="run-wait-cancel"))
+    assert waiting.pending_interaction is not None
+
+    result = await runner.cancel("run-wait-cancel", settlement_timeout=1)
+    closed = store.load_interaction(waiting.pending_interaction.interaction_id)
+
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+    assert closed is not None and closed.status.value == "closed"
+    assert result.run.pending_interaction_id is None
+    assert await runner.recover("run-wait-cancel") == result
+    next_result = await runner.start(
+        AgentRunRequest(input="继续", session_id="default", run_id="run-after-cancel")
+    )
+    assert next_result.run.phase is RunPhase.TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_remote_cancel_timeout_only_observes_and_adds_no_timeout_fact(
+    tmp_path: Path,
+) -> None:
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    owner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    observer = AgentRunner(runtime=build_runtime(tmp_path), store=store)
+    running = asyncio.create_task(
+        owner.start(AgentRunRequest(input="等待", run_id="run-remote-cancel"))
+    )
+    await provider.started.wait()
+
+    with pytest.raises(IrisRunObservationTimeoutError):
+        await observer.cancel("run-remote-cancel", settlement_timeout=0.01)
+    events_after_timeout = store.list_events("run-remote-cancel")
+    assert events_after_timeout[-1].kind is RunEventKind.CANCELLATION_REQUESTED
+    assert store.load_result("run-remote-cancel") is None
+
+    provider.release.set()
+    result = await running
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_tool_result_commits_before_cancelled_settlement(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedResultTool(BaseTool):
+        definition = ToolDefinition(
+            name="delayed",
+            description="延迟返回",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        async def arun(
+            self,
+            params: BaseModel | dict[str, object],
+            context: ToolExecutionContext,
+        ) -> ToolResult:
+            del params
+            started.set()
+            await release.wait()
+            return ToolResult(
+                tool_use_id=context.call_id,
+                tool_name=context.tool_name,
+                content=[TextBlock(text="effect-complete")],
+            )
+
+    registry = ToolRegistry()
+    registry.register(DelayedResultTool())
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="delayed-1", name="delayed", input={}))
+            ),
+        ),
+        store=store,
+    )
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="执行", run_id="run-result-before-cancel"))
+    )
+    await started.wait()
+
+    snapshot = runner.request_cancel("run-result-before-cancel")
+    assert snapshot.phase is RunPhase.ACTIVE
+    release.set()
+    result = await running
+
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+    [record] = store.list_tool_calls("run-result-before-cancel")
+    assert record.phase is ToolCallPhase.COMMITTED
+    assert record.result is not None and record.result.model_content == "effect-complete"
+
+
+@pytest.mark.asyncio
+async def test_public_cancel_after_claim_settles_outcome_unknown(tmp_path: Path) -> None:
+    started = asyncio.Event()
+
+    class CooperativeClaimedTool(BaseTool):
+        definition = ToolDefinition(
+            name="cooperative_claimed",
+            description="claim 后协作取消",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+        async def arun(
+            self,
+            params: BaseModel | dict[str, object],
+            context: ToolExecutionContext,
+        ) -> ToolResult:
+            del params
+            assert context.cancellation is not None
+            started.set()
+            while not context.cancellation.requested:
+                await asyncio.sleep(0)
+            context.cancellation.raise_if_requested()
+            raise AssertionError("取消后不应继续")
+
+    registry = ToolRegistry()
+    registry.register(CooperativeClaimedTool())
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="cooperative-1", name="cooperative_claimed", input={})
+                )
+            ),
+        ),
+        store=store,
+    )
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="执行", run_id="run-claimed-cancel"))
+    )
+    await started.wait()
+
+    result = await runner.cancel("run-claimed-cancel", settlement_timeout=1)
+
+    assert result == await running
+    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+    assert result.error is not None and result.error.code == "TOOL_OUTCOME_UNKNOWN"
+    [record] = store.list_tool_calls("run-claimed-cancel")
+    assert record.phase is ToolCallPhase.OUTCOME_UNKNOWN
+    assert RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN in {
+        event.kind for event in store.list_events("run-claimed-cancel")
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_cooperative_sync_tool_delays_cancel_settlement(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_effect() -> str:
+        started.set()
+        release.wait(timeout=2)
+        return "effect-complete"
+
+    registry = ToolRegistry()
+    registry.register_function(blocking_effect, description="同步阻塞工具")
+    store = InMemoryLifecycleStore()
+    owner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="blocking-1", name="blocking_effect", input={}))
+            ),
+        ),
+        store=store,
+    )
+    observer = AgentRunner(runtime=build_runtime(tmp_path), store=store)
+    outcomes: list[object] = []
+
+    def run_owner() -> None:
+        try:
+            outcomes.append(
+                asyncio.run(
+                    owner.start(AgentRunRequest(input="执行", run_id="run-sync-blocking-cancel"))
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - 失败时由主线程断言暴露
+            outcomes.append(exc)
+
+    thread = threading.Thread(target=run_owner)
+    thread.start()
+    assert await asyncio.to_thread(started.wait, 1)
+
+    with pytest.raises(IrisRunObservationTimeoutError):
+        await observer.cancel("run-sync-blocking-cancel", settlement_timeout=0.02)
+    assert store.load_result("run-sync-blocking-cancel") is None
+
+    release.set()
+    await asyncio.to_thread(thread.join, 2)
+    assert not thread.is_alive()
+    [result] = outcomes
+    assert not isinstance(result, BaseException)
+    assert isinstance(result, RunResult)
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+
+
+def test_cancel_validates_reason_and_observation_timeout(tmp_path: Path) -> None:
+    runner = AgentRunner(runtime=build_runtime(tmp_path), store=InMemoryLifecycleStore())
+
+    with pytest.raises(IrisRunStateError, match="reason"):
+        runner.request_cancel("missing", reason=" ")

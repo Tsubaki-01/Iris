@@ -16,9 +16,11 @@ from iris.lifecycle import (
     ClaimToolCall,
     FinishRun,
     RunCommit,
+    RunEventKind,
     RunLimits,
     RunPhase,
     RunStopReason,
+    ToolCallPhase,
 )
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
@@ -190,4 +192,9 @@ async def test_unexpected_exception_after_claim_is_outcome_unknown(tmp_path: Pat
     assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
     assert result.error is not None
     assert result.error.code == "TOOL_OUTCOME_UNKNOWN"
+    [record] = store.list_tool_calls("run-crash-after-claim")
+    assert record.phase is ToolCallPhase.OUTCOME_UNKNOWN
+    assert RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN in {
+        event.kind for event in store.list_events("run-crash-after-claim")
+    }
     _assert_settled(runner, "run-crash-after-claim")

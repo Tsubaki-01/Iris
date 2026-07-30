@@ -13,7 +13,6 @@ from .commit import (
     ToolCallClaim,
 )
 from .environment import RuntimeEnvironment, RuntimeProvider
-from .errors import normalize_runtime_error
 from .factory import RuntimeFactory
 from .models import (
     RuntimeActivationInput,
@@ -46,5 +45,4 @@ __all__ = [
     "RuntimeToolResultCommit",
     "ToolCallClaim",
     "ToolBridge",
-    "normalize_runtime_error",
 ]

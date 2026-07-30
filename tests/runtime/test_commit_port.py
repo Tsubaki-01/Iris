@@ -48,8 +48,8 @@ def _interaction() -> HumanInteraction:
         session_id="session_1",
         run_id="run_1",
         step_index=0,
+        tool_call_id="call_1",
         status=InteractionStatus.PENDING,
-        checkpoint={},
         request=HumanInteractionRequest(
             tool_call=ToolCallSnapshot(
                 tool_call_id="call_1",
@@ -162,9 +162,7 @@ def test_runtime_activation_interaction_projection_is_exact_and_json_safe() -> N
     activation = resume_activation(cursor, interaction_projection=approval)
 
     assert activation.interaction_projection == approval
-    assert RuntimeActivationInput.model_validate(
-        activation.model_dump(mode="json")
-    ) == activation
+    assert RuntimeActivationInput.model_validate(activation.model_dump(mode="json")) == activation
     with pytest.raises(ValidationError, match="start activation"):
         RuntimeActivationInput(
             run_id="run_1",

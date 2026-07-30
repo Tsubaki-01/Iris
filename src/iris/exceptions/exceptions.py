@@ -53,16 +53,6 @@ class IrisExecutionError(IrisError):
     """任务执行过程中发生异常时抛出。"""
 
 
-# ----- Session 领域 -----
-
-
-class IrisSessionError(IrisError):
-    """Session 存储和会话状态读写错误的基类。"""
-
-    runtime_error_source = "session"
-    runtime_error_code = "SESSION_ERROR"
-
-
 # ----- Lifecycle / Run 领域 -----
 
 
@@ -126,18 +116,6 @@ class IrisHITLError(IrisError):
     runtime_error_code = "HITL_ERROR"
 
 
-class HITLStoreUnavailableError(IrisHITLError):
-    runtime_error_code = "HITL_STORE_UNAVAILABLE"
-
-
-class HITLNotFoundError(IrisHITLError):
-    runtime_error_code = "HITL_NOT_FOUND"
-
-
-class HITLResponseRequiredError(IrisHITLError):
-    runtime_error_code = "HITL_RESPONSE_REQUIRED"
-
-
 class HITLResponseMismatchError(IrisHITLError):
     runtime_error_code = "HITL_RESPONSE_MISMATCH"
 
@@ -148,18 +126,6 @@ class HITLConflictError(IrisHITLError):
 
 class HITLCheckpointInvalidError(IrisHITLError):
     runtime_error_code = "HITL_CHECKPOINT_INVALID"
-
-
-class HITLResumeMismatchError(IrisHITLError):
-    runtime_error_code = "HITL_RESUME_MISMATCH"
-
-
-class HITLAlreadyConsumedError(IrisHITLError):
-    runtime_error_code = "HITL_ALREADY_CONSUMED"
-
-
-class HITLExecutionOutcomeUnknownError(IrisHITLError):
-    runtime_error_code = "HITL_EXECUTION_OUTCOME_UNKNOWN"
 
 
 # ----- Context 领域 -----
