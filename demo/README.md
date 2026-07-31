@@ -14,6 +14,8 @@ session，然后交给 `iris chat` 启动多轮交互。
 - `workspace/`: demo agent 可访问的本地工作区，内含一个简单的 `hello.py` 示例文件。
 - `.iris/demo-session.db`: SQLite session 文件，用于保存 demo 会话状态。
 - `trace.jsonl`: 可选的 provider request / response trace 输出文件。
+- `lifecycle-agent.yaml`: `iris run` 专用的 DeepSeek + SQLite 配置。
+- [`LIFECYCLE_SMOKE.md`](LIFECYCLE_SMOKE.md): 显式 lifecycle identity 的人工验收指南。
 
 ## 运行前提
 
@@ -109,20 +111,17 @@ uv run iris chat demo/agent.yaml `
 自由文本；空回答会重新询问。同一个 assistant response 若依次触发 permission/question，
 CLI 会按 runtime 返回的 gate 顺序处理，最后只渲染一次终态答复。
 
-### 重启恢复
+### 显式跨进程 lifecycle
 
-demo 使用 SQLite session。要验证恢复：
+`iris chat` 只承载当前进程内的交互循环，不会在重启后按 session 自动猜测或恢复 run。
+Ctrl+C/EOF 也不等于 reject、cancel 或 recover。需要跨进程操作 durable run 时，使用
+`iris run start/status/events/resume/cancel/recover` 并显式传递 run、interaction 和 activation
+identity。`events` 使用显式 run ID 和 exclusive `--after-sequence` cursor 做一次 provider-free
+durable read；它不 watch、不自动发现 run，也不修改 lifecycle 状态。
 
-1. 使用固定的 `--session-id demo` 触发 permission 或 question。
-2. 在 `[y/N]` 或 `回答>` prompt 处按 Ctrl+C；EOF 也可结束当前进程。
-3. 使用完全相同的 agent 配置和 session ID 重新运行命令。
-4. CLI 会先显示 `RECOVERY` 和同一个 `interaction_id`，完成它后才读取新的普通输入。
-5. interaction 完成后再次重启，确认不再显示该 recovery。
-
-Ctrl+C/EOF 不等于 reject 或 cancel，不会提交 response，interaction 仍保持 pending。
-SQLite backend 支持这种跨进程恢复；`session.backend: none` 的内存 store 不作此承诺。
-若 runtime 发现 interaction 已被领取但工具执行结果未知，会返回
-`HITL_EXECUTION_OUTCOME_UNKNOWN` 并退出，不会猜测结果或重放工具。
+完整的真实 DeepSeek + SQLite 三场景验收见
+[`LIFECYCLE_SMOKE.md`](LIFECYCLE_SMOKE.md)。它使用独立的 `lifecycle-agent.yaml` 和
+`.iris/lifecycle-smoke.db`，不会改变本页普通 chat demo 的工具面或数据库。
 
 `context.yaml` 要求只有在用户明确提出时才执行写入，并继续禁止删除、提交或权限提升。
 验证 approve/reject 时请给出明确的相对路径和内容，并检查 `demo/workspace/` 内的文件变化。
@@ -143,7 +142,7 @@ SQLite backend 支持这种跨进程恢复；`session.backend: none` 的内存 s
 ## 维护与验证
 
 这个目录是 CLI/runtime 的集成示例，不是独立 Python 包。修改时应同步核对
-`agent.yaml`、`context.yaml`、`src/iris/cli/main.py` 的参数以及 HITL 恢复测试。
+`agent.yaml`、`context.yaml`、lifecycle smoke 资产和 `src/iris/cli/main.py` 的参数。
 
 ```bash
 uv run pytest tests/cli tests/context tests/agents

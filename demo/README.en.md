@@ -13,6 +13,8 @@ session; `iris chat` hosts a multi-turn terminal session.
 - `workspace/`: the only filesystem area exposed to the demo agent.
 - `.iris/demo-session.db`: generated session and HITL persistence.
 - `trace.jsonl`: optional generated provider request/response trace.
+- `lifecycle-agent.yaml`: dedicated DeepSeek + SQLite configuration for `iris run`.
+- [`LIFECYCLE_SMOKE.en.md`](LIFECYCLE_SMOKE.en.md): manual acceptance with explicit lifecycle identities.
 
 ## Run
 
@@ -39,7 +41,7 @@ uv run iris chat demo/agent.yaml \
 Useful commands are `/help`, `/trace off|compact|full`, and `/exit` or `/quit`. `--no-tools`
 exercises the conversation path without exposing tool schemas.
 
-## Tools, permissions, and recovery
+## Tools, permissions, and explicit lifecycle operations
 
 The demo enables `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`, and
 `human.ask` (model-visible name `ask_question`). File access remains inside `demo/workspace/`.
@@ -52,10 +54,16 @@ The demo enables `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit
 Questions accept a one-based option number or free text. Multiple gates from one assistant response
 are resumed in runtime order before the terminal result is rendered.
 
-SQLite permits cross-process recovery. Interrupt the CLI while a permission or question prompt is
-pending, then restart with the same config and `--session-id demo`; the CLI discovers the durable
-interaction before accepting ordinary input. Ctrl+C/EOF does not mean reject or cancel. A claimed
-interaction with an unknown execution outcome fails closed and is not replayed.
+`iris chat` owns only its current interactive process and does not guess or recover a run by session
+after restart. Ctrl+C/EOF does not mean reject, cancel, or recover. For cross-process durable run
+operations, use `iris run start/status/events/resume/cancel/recover` and pass the run, interaction,
+and activation identities explicitly. `events` performs one provider-free durable read for an
+explicit run ID and exclusive `--after-sequence` cursor; it does not watch, discover runs, or mutate
+lifecycle state.
+
+See [`LIFECYCLE_SMOKE.en.md`](LIFECYCLE_SMOKE.en.md) for the real DeepSeek + SQLite three-scenario
+acceptance flow. It uses the separate `lifecycle-agent.yaml` and `.iris/lifecycle-smoke.db`, leaving
+the ordinary chat demo tool surface and database unchanged.
 
 ## Generated data and maintenance
 
