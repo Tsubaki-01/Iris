@@ -26,14 +26,20 @@ print(session.revision, session.messages)
 
 ## 实现架构
 
-`InMemoryLifecycleStore` 是语义参考实现。它在一把 `RLock` 下校验 CAS、activation fence、
-session lane、effect claim 和 interaction 绑定，并对输入/输出做深拷贝隔离。数据随进程退出
-丢失。
+`InMemoryLifecycleStore` 和 `SQLiteStore` 是两个独立、平级的 protocol 实现。内存实现以一把
+`RLock` 管理进程内 facts，并对输入/输出做深拷贝隔离；数据随进程退出丢失。SQLite 实现
+不导入或调用内存实现。
 
-`SQLiteStore` 在每次操作中打开独立连接并启用 foreign keys。读取是无写入的纯操作；
-变更使用 `BEGIN IMMEDIATE`，把 durable rows 还原到进程内语义实现、执行一个 command，
-再在同一事务中写回全部 aggregate facts。任一 SQL 失败都会整体回滚，不会暴露
-半更新状态。
+`SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
+读取目标 run、session、interaction、checkpoint、tool calls 或 events；跨多条查询的 read 在
+同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
+
+Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所需的 rows。run、session、
+checkpoint、tool call 与 interaction 更新分别使用 revision、sequence 或 version CAS
+predicates；lane、activation、interaction、tool facts 与 run 在同一事务中增量写入，events
+保持 append-only。任一 SQL 失败都会触发完整 transaction rollback，不暴露半更新状态。
+schema v1 的 `sessions.messages_json` 仍是单行 JSON 数组，因此追加消息会重写当前 session
+row，但不会读取或改写其他 aggregate。
 
 schema v1 只包含：
 
@@ -66,11 +72,11 @@ dual write 或 compatibility adapter。
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| schema、row projection 和事务 | `sqlite.py` | `test_lifecycle_sqlite_schema.py`, `test_lifecycle_sqlite_faults.py` |
+| schema、target row projection 和 CAS transaction | `sqlite.py` | `test_lifecycle_sqlite_schema.py`, `test_lifecycle_sqlite_incremental.py`, `test_lifecycle_sqlite_faults.py` |
 | 公开导出 | `__init__.py` | store contract/import tests |
 
 ```bash
-uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_incremental.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```

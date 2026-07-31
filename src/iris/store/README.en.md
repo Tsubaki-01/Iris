@@ -28,14 +28,23 @@ any write; the store never migrates, resets, or changes that file.
 
 ## Architecture
 
-`InMemoryLifecycleStore` is the semantic reference implementation. Under one `RLock`, it enforces
-CAS, activation fences, session lanes, effect claims, and exact interaction binding. Inputs and
-outputs are deep-copy isolated. All state disappears with the process.
+`InMemoryLifecycleStore` and `SQLiteStore` are independent, peer protocol implementations. The
+in-memory implementation protects process-local facts with one `RLock` and deep-copy isolates
+inputs and outputs; its state disappears with the process. The SQLite implementation neither
+imports nor calls the in-memory implementation.
 
-`SQLiteStore` opens a scoped connection and enables foreign keys for every operation. Reads are
-write-free. Mutations use `BEGIN IMMEDIATE`, hydrate durable rows into the in-memory semantic
-implementation, run one command, and replace all aggregate facts in the same transaction. Any SQL
-failure rolls the complete transaction back, so readers never observe half-committed facts.
+`SQLiteStore` opens a scoped connection and enables foreign keys for every operation. Public reads
+use targeted reads for the requested run, session, interaction, checkpoint, tool calls, or events.
+Reads that need multiple queries use one deferred transaction for a consistent snapshot and remain
+write-free.
+
+Mutations use `BEGIN IMMEDIATE` and load only the rows required to validate and apply the current
+command. Run, session, checkpoint, tool-call, and interaction updates use revision, sequence, or
+version CAS predicates. Lane, activation, interaction, tool, and run changes use incremental writes
+in the same transaction, while events remain append-only. Any SQL failure causes a complete
+transaction rollback, so readers never observe half-committed facts. Schema v1 still stores
+`sessions.messages_json` as one JSON array, so appending messages rewrites the current session row
+but does not read or modify other aggregates.
 
 Schema v1 contains only:
 
@@ -69,11 +78,11 @@ reader, migration, dual write, or compatibility adapter.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| Schema, row projection, transactions | `sqlite.py` | schema and fault-injection store tests |
+| Schema, target row projection, CAS transactions | `sqlite.py` | schema, incremental-write, and fault-injection store tests |
 | Public exports | `__init__.py` | store contract/import tests |
 
 ```bash
-uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_incremental.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```
