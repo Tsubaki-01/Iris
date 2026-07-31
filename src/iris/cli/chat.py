@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ..agents import AgentConfig, load_agent_config
-from ..config import init_config, is_config_initialized
+from ..agents import AgentConfig
 from ..exceptions import HITLCheckpointInvalidError
 from ..harness import (
     AgentRunner,
@@ -29,6 +28,7 @@ from ..hitl import (
     QuestionPrompt,
 )
 from ..providers import create_provider_client
+from ._config import load_cli_agent
 from .render import ChatRenderer
 from .trace import ChatTraceStore, TracingRuntimeProvider
 
@@ -65,7 +65,10 @@ def run_chat(
     """装配 harness 并启动 chat CLI。"""
     chat_renderer = renderer or ChatRenderer()
     try:
-        agent_config = _load_configured_agent(options)
+        agent_config = load_cli_agent(
+            options.config_path,
+            env_file=options.env_file,
+        )
         trace_store = ChatTraceStore(options.trace_file)
         provider = TracingRuntimeProvider(
             create_provider_client(
@@ -279,12 +282,6 @@ def _render_turn_result(
         renderer.render_warning(warning)
     trace_store.warnings.clear()
     renderer.render_assistant(result)
-
-
-def _load_configured_agent(options: ChatOptions) -> AgentConfig:
-    if not is_config_initialized():
-        init_config(env_file=str(options.env_file) if options.env_file is not None else None)
-    return load_agent_config(options.config_path)
 
 
 def _handle_command(user_input: str, trace_mode: TraceMode, renderer: ChatRenderer) -> str:
