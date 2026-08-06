@@ -27,7 +27,7 @@ from iris.hitl import (
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
-    BeginActivation,
+    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -249,7 +249,7 @@ def _prepare_tool(store: LifecycleStore) -> RunCommit:
 def test_protocol_exposes_every_required_operation() -> None:
     """删除任一 runner 所需 port method 都应破坏本 contract。"""
     expected = {
-        "begin_activation",
+        "resume_waiting_run",
         "claim_tool_call",
         "commit_model_step",
         "commit_tool_result",
@@ -549,14 +549,14 @@ def test_resolve_exact_response_replays_but_different_response_conflicts(
         )
 
 
-def test_begin_activation_rebinds_checkpoint_and_clears_waiting_result(
+def test_resume_waiting_run_rebinds_checkpoint_and_clears_waiting_result(
     lifecycle_store: LifecycleStore,
 ) -> None:
     """Resume 创建新 fence，并关闭旧 interaction 与 active result。"""
     waiting = _suspend(lifecycle_store, _create(lifecycle_store))
     _, resolved = _resolve(lifecycle_store, waiting)
-    resumed = lifecycle_store.begin_activation(
-        BeginActivation(
+    resumed = lifecycle_store.resume_waiting_run(
+        ResumeWaitingRun(
             run_id="run-1",
             expected_run_revision=resolved.run.revision,
             new_activation_id="activation-2",
@@ -684,8 +684,8 @@ def test_approved_permission_cannot_commit_rejection_without_claim(
             now=_T2,
         )
     )
-    begun = lifecycle_store.begin_activation(
-        BeginActivation(
+    begun = lifecycle_store.resume_waiting_run(
+        ResumeWaitingRun(
             run_id="run-1",
             expected_run_revision=resolved.run.revision,
             new_activation_id="activation-resume",
@@ -730,8 +730,8 @@ def test_question_projection_must_match_exact_durable_answer(
 ) -> None:
     waiting = _suspend(lifecycle_store, _create(lifecycle_store))
     _, resolved = _resolve(lifecycle_store, waiting)
-    begun = lifecycle_store.begin_activation(
-        BeginActivation(
+    begun = lifecycle_store.resume_waiting_run(
+        ResumeWaitingRun(
             run_id="run-1",
             expected_run_revision=resolved.run.revision,
             new_activation_id="activation-resume",

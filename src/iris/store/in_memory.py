@@ -52,7 +52,7 @@ from ..lifecycle.models import (
     project_result,
 )
 from ..lifecycle.store import (
-    BeginActivation,
+    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -204,11 +204,11 @@ class InMemoryLifecycleStore:
             self._events[run_id] = deepcopy(list(events))
             return deepcopy(commit)
 
-    def begin_activation(self, command: BeginActivation) -> RunCommit:
+    def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit:
         """从 resolved waiting run 建立新的 active fence。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("begin_activation", command)
+            replay = self._load_replay("resume_waiting_run", command)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -287,7 +287,7 @@ class InMemoryLifecycleStore:
             self._interactions[closed.interaction_id] = deepcopy(closed)
             self._events[run.run_id].append(deepcopy(event))
             self._results.pop(run.run_id, None)
-            return self._store_replay("begin_activation", command, commit)
+            return self._store_replay("resume_waiting_run", command, commit)
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
         """在 provider effect 前增加 durable model-step reservation。"""

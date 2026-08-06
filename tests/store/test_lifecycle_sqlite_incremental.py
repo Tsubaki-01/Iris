@@ -28,7 +28,7 @@ from iris.hitl import (
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
-    BeginActivation,
+    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -479,7 +479,7 @@ def test_reserve_model_step_updates_only_current_run(
     assert store.list_events("run-2") == unrelated_events
 
 
-def test_begin_activation_updates_only_waiting_run(
+def test_resume_waiting_run_updates_only_waiting_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -497,8 +497,8 @@ def test_begin_activation_updates_only_waiting_run(
     _, statements = _capture_sql(
         monkeypatch,
         store,
-        lambda: store.begin_activation(
-            BeginActivation(
+        lambda: store.resume_waiting_run(
+            ResumeWaitingRun(
                 run_id="run-1",
                 expected_run_revision=run.revision,
                 new_activation_id="activation-resume",

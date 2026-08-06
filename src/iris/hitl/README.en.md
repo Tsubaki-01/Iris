@@ -22,8 +22,8 @@ have been removed.
 
 `HumanInteractionService` only constructs a pending value, validates a response against exact
 run/interaction/environment facts, and projects the response to either `ToolResult` or
-`ApprovedToolCall`. It performs no persistence. Harness uses lifecycle commands for atomic state
-transitions.
+`ApprovedToolCall`. It performs no persistence. Harness uses lifecycle commands, including
+`ResumeWaitingRun`, for atomic state transitions.
 
 ## Fingerprint
 

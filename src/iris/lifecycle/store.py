@@ -78,7 +78,7 @@ class CreateRun(_Command):
         return self
 
 
-class BeginActivation(_Command):
+class ResumeWaitingRun(_Command):
     """为 resolved waiting run 创建新的 activation fence。"""
 
     run_id: str
@@ -343,7 +343,7 @@ class LifecycleStore(Protocol):
 
     def create_run(self, command: CreateRun) -> RunCommit: ...
 
-    def begin_activation(self, command: BeginActivation) -> RunCommit: ...
+    def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit: ...
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit: ...
 
@@ -379,7 +379,7 @@ class LifecycleStore(Protocol):
 
 
 __all__ = [
-    "BeginActivation",
+    "ResumeWaitingRun",
     "ClaimToolCall",
     "CommitModelStep",
     "CommitToolResult",

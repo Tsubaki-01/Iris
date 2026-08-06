@@ -33,7 +33,7 @@ from ..lifecycle import (
     ActivationKind,
     AgentRunOptions,
     AgentRunRequest,
-    BeginActivation,
+    ResumeWaitingRun,
     CheckpointResumability,
     CreateRun,
     FinishRun,
@@ -347,8 +347,8 @@ class AgentRunner:
             events = []
         projection = self.interaction_service.project_response(interaction, response)
         activation_id = f"act_{uuid.uuid4().hex}"
-        begun = self.store.begin_activation(
-            BeginActivation(
+        begun = self.store.resume_waiting_run(
+            ResumeWaitingRun(
                 run_id=run.run_id,
                 expected_run_revision=run.revision,
                 new_activation_id=activation_id,
