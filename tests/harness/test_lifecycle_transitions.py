@@ -276,8 +276,8 @@ def test_active_waiting_active_terminal_transition_matrix_target_contract() -> N
             now=_T2,
         )
     )
-    resumed = store.begin_activation(
-        lifecycle.BeginActivation(
+    resumed = store.resume_waiting_run(
+        lifecycle.ResumeWaitingRun(
             run_id="run-1",
             expected_run_revision=resolved.run.revision,
             new_activation_id="activation-2",

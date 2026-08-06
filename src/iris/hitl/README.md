@@ -26,7 +26,7 @@ interaction facts 由同一个 `LifecycleStore` 与 run aggregate 一起提交�
 - `project_response()`：把回答投影为 `ToolResult`，或把批准投影为 `ApprovedToolCall`。
 
 服务不做 persistence。Harness 通过 lifecycle `SuspendRun`、`ResolveInteraction`、
-`BeginActivation` 和 `FinishRun` commands 完成原子状态转换。
+`ResumeWaitingRun` 和 `FinishRun` commands 完成原子状态转换。
 
 ## Fingerprint
 

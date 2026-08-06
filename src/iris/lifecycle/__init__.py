@@ -31,7 +31,7 @@ from .models import (
     validate_json_safe,
 )
 from .store import (
-    BeginActivation,
+    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -53,7 +53,7 @@ __all__ = [
     "ActivationStatus",
     "AgentRunOptions",
     "AgentRunRequest",
-    "BeginActivation",
+    "ResumeWaitingRun",
     "CheckpointResumability",
     "ClaimToolCall",
     "CommitModelStep",

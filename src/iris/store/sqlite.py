@@ -54,7 +54,7 @@ from ..lifecycle.models import (
     project_result,
 )
 from ..lifecycle.store import (
-    BeginActivation,
+    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -281,11 +281,11 @@ class SQLiteStore:
             replayable=False,
         )
 
-    def begin_activation(self, command: BeginActivation) -> RunCommit:
+    def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit:
         return self._mutate(
-            "begin_activation",
+            "resume_waiting_run",
             command,
-            self._begin_activation,
+            self._resume_waiting_run,
         )
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
@@ -726,13 +726,13 @@ class SQLiteStore:
             operation=operation,
         )
 
-    def _begin_activation(
+    def _resume_waiting_run(
         self,
         connection: sqlite3.Connection,
-        command: BeginActivation,
+        command: ResumeWaitingRun,
     ) -> RunCommit:
         """从 resolved waiting run 增量建立新的 active fence。"""
-        operation = "begin_activation"
+        operation = "resume_waiting_run"
         run = self._require_run(connection, command.run_id, operation=operation)
         self._require_revision(run, command.expected_run_revision)
         if run.phase is not RunPhase.WAITING:
