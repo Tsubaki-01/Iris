@@ -38,6 +38,10 @@ result = await runtime.execute(
 frozen `RuntimeExecutionOptions`, and a JSON-safe cursor. `RuntimeActivationResult` is an engine
 fact only; the owner must reload the final `RunResult` from durable storage.
 
+`start` and initial `recover` activations at `before_model / step 0` carry the current user input;
+`resume` and later `recover` activations do not. The engine injects that field into the provider
+request exactly once when present, while later recovery relies on committed session history.
+
 Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provider response without
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the

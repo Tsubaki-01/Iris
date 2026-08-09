@@ -565,7 +565,11 @@ class AgentRunner:
             activation_id=new_activation_id,
             session_id=run.session_id,
             kind="recover",
-            input=None,
+            input=(
+                run.request.input
+                if recovered_cursor.position == "before_model" and recovered_cursor.step_index == 0
+                else None
+            ),
             cursor=recovered_cursor,
             options=run.options.runtime,
         )

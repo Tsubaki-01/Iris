@@ -229,6 +229,41 @@ def test_runtime_activation_input_enforces_start_and_resume_shape() -> None:
         )
 
 
+def test_runtime_activation_input_allows_only_initial_recovery_input() -> None:
+    initial_cursor = RuntimeCursor(position="before_model", step_index=0)
+    recovery = RuntimeActivationInput(
+        run_id="run_1",
+        activation_id="activation_2",
+        session_id="session_1",
+        kind="recover",
+        input="hello",
+        cursor=initial_cursor,
+        options=RuntimeExecutionOptions(),
+    )
+
+    assert recovery.input == "hello"
+    with pytest.raises(ValidationError, match="recover activation"):
+        RuntimeActivationInput(
+            run_id="run_1",
+            activation_id="activation_2",
+            session_id="session_1",
+            kind="recover",
+            input=None,
+            cursor=initial_cursor,
+            options=RuntimeExecutionOptions(),
+        )
+    with pytest.raises(ValidationError, match="recover activation"):
+        RuntimeActivationInput(
+            run_id="run_1",
+            activation_id="activation_2",
+            session_id="session_1",
+            kind="recover",
+            input="duplicate",
+            cursor=RuntimeCursor(position="before_model", step_index=1),
+            options=RuntimeExecutionOptions(),
+        )
+
+
 def test_runtime_activation_interaction_projection_is_exact_and_json_safe() -> None:
     assistant = Msg.assistant([_tool_call()])
     cursor = RuntimeCursor(

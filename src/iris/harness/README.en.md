@@ -63,6 +63,10 @@ Normal parent/control/infrastructure exit waits for runtime children to drain be
 commit port, preventing late child writes. Synchronous blocking callables have no concurrency
 speedup guarantee and may still delay settlement.
 
+Initial recovery at `before_model / step 0` reconstructs the uncommitted current-turn input from the
+durable `AgentRunRequest.input`. At later checkpoints, that input is already in session history from
+the provider commit and is not injected again.
+
 ## Public API
 
 `iris.harness` exports the runner; run request/options/limits/runtime options; phase, stop reason,
