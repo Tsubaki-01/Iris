@@ -67,6 +67,18 @@ finish/recover/cancel commands 及 run/session/checkpoint/tool/interaction/event
 claim -> outcome unknown 都在 aggregate transaction 内完成。不存在旧 schema reader、migration、
 dual write 或 compatibility adapter。
 
+同一 active activation 可以在提交任何 result 前持有多个 exact durable claims；每条 claim 仍绑定
+step、ordinal、call ID、fingerprint 和 version。durable cancellation 先提交时，store 拒绝新的
+claim 且不追加 claim event；claim 先提交时，该调用只能提交明确 result，或在 terminal/
+recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcome unknown，绝不重放。
+
+tool body 可以乱序完成，但 session message、checkpoint、cursor 与
+`TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
+correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v1、config、command、
+model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
+不能从当前多 claim 支持推导出来。
+
 ## 维护与验证
 
 | 修改内容 | 主要位置 | 对应测试 |

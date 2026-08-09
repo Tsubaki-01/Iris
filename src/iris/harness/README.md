@@ -44,8 +44,21 @@ settlement；runner 不会提前返回 cancelled。工具 result 若在请求后
 commit result，再结算 cancelled。claim 后 effect/result 无法证明时必须 fail closed 为
 `TOOL_OUTCOME_UNKNOWN`。
 
+Runner 的 live signal 与 store-backed commit port 使用
+`iris.exceptions.IrisCancellationRequestedError` 通知 runtime 协作式收口；该类型不属于
+`iris.tools` 公共错误面。
+
+runtime 的只读并发窗口使用固定内部上限 8；它不增加 public config/schema/API。窗口中每个
+调用都有独立 durable claim，body 可以乱序结束，但只有连续的已知 result prefix 会按 ordinal
+进入 history/cursor/checkpoint。claim telemetry 的 event 顺序不是 ordinal 契约。任一未提交
+claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown；现有 terminal
+settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
+
 active recovery 会验证 checkpoint v1、session revision、usage counters、environment fingerprint
-与 cursor。旧 activation 被原子 abandon/fence replacement 后才允许新 activation 写入。
+与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 会原子 abandon 旧 activation，
+把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
+infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
+继续写入。同步阻塞 callable 不保证并发加速，并且仍可能延迟 settlement。
 
 ## 公开接口
 

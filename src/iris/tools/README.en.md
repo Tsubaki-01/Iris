@@ -95,8 +95,18 @@ cancellation again before entering middleware `before_call`, tool `arun`, artifa
 middleware after hooks, and breaker accounting. A guard failure starts no tool effect. Cancellation
 after a claim propagates as control flow to runtime instead of becoming a normal tool error.
 Low-level executor callers may omit the guard; lifecycle execution requires it through
-`ToolBridge`. Parallel context copies preserve identity for both shared read state and cancellation,
-and `CallableTool` never normalizes cooperative cancellation.
+`ToolBridge`. Parallel context copies preserve identity for both shared read state and cancellation.
+Cooperative cancellation uses `IrisCancellationRequestedError` from `iris.exceptions`, and
+`CallableTool` propagates it instead of normalizing it as an ordinary tool error.
+
+`ToolExecutor` provides classification, revalidation, and per-call execution primitives only. The
+lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
+Only consecutive read-only and concurrency-safe calls can enter a window; STOP, HITL, preflight
+results, and unsafe calls remain barriers. Every call keeps its own durable claim. Body completion
+does not determine result order, and claim telemetry order is not an ordinal contract. Synchronous
+callables have no speedup guarantee. This scheduling adds no config, schema, or API. Future
+NETWORK/MCP or write concurrency must define a new effect and recovery protocol rather than merely
+changing the capability classifier.
 
 ## Built-in file tools
 

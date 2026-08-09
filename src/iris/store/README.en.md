@@ -73,6 +73,20 @@ Cancellation requests, waiting settlement, activation abandon/rebind, outcome-re
 and unresolved-claim-to-unknown transitions are aggregate transactions. There is no old-schema
 reader, migration, dual write, or compatibility adapter.
 
+One active activation may hold multiple exact durable claims before any result is committed. Every
+claim remains bound to its step, ordinal, call ID, fingerprint, and version. If durable cancellation
+commits first, the store rejects a new claim without appending a claim event. If a claim commits
+first, that call can only commit a proven result or be closed atomically with every other unresolved
+claim as outcome unknown during terminal settlement or recovery; it is never replayed.
+
+Tool bodies may finish out of order, while session messages, checkpoints, cursors, and
+`TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
+strictly monotonic with exact correlation identity. The ordinal order of multiple
+`TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
+belongs to runtime and is not persisted; lifecycle schema v1, config, commands, models, and public
+exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
+recovery protocol and cannot be inferred from current multiple-claim support.
+
 ## Maintenance and verification
 
 | Change | Main location | Tests |
