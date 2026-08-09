@@ -241,18 +241,26 @@ class CommitPortToolEffectGuard(ToolEffectGuard):
         cursor: RuntimeCursor,
         commits: RuntimeCommitPort,
         workspace_root: Path,
+        tool_index: int | None = None,
         interaction_id: str | None = None,
     ) -> None:
+        if tool_index is not None and (
+            cursor.position != "tool_batch"
+            or tool_index < cursor.next_tool_index
+            or tool_index >= len(cursor.tool_calls)
+        ):
+            raise IrisRunStateError("effect guard tool 索引不在未提交 batch 后缀中")
         self._activation = activation
         self._cursor = cursor
         self._commits = commits
         self._workspace_root = workspace_root.resolve()
+        self._tool_index = cursor.next_tool_index if tool_index is None else tool_index
         self._interaction_id = interaction_id
         self._claims: dict[str, tuple[RuntimeToolCall, ToolCallClaim]] = {}
 
     def before_effect(self, prepared: PreparedToolCall) -> None:
         """校验 cursor subject 并在任何执行生命周期前提交 claim。"""
-        index = self._cursor.next_tool_index
+        index = self._tool_index
         if self._cursor.position != "tool_batch" or index >= len(self._cursor.tool_calls):
             raise IrisRunStateError("effect guard cursor 不指向可执行工具")
         expected = self._cursor.tool_calls[index]
@@ -293,6 +301,7 @@ class CommitPortToolEffectGuard(ToolEffectGuard):
             cursor=self._cursor,
             prepared=prepared,
             workspace_root=self._workspace_root,
+            ordinal=self._tool_index + 1,
             interaction_id=self._interaction_id,
         )
 

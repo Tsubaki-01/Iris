@@ -20,6 +20,7 @@ from typing import Any, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..exceptions import (
+    IrisCancellationRequestedError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
     IrisToolValidationError,
@@ -35,7 +36,6 @@ from ..message import ToolUseBlock
 from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
-    CancellationRequestedError,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolResult,
@@ -407,7 +407,7 @@ class ToolExecutor:
                 return middleware_error
             try:
                 result = await tool.arun(params, context)
-            except CancellationRequestedError:
+            except IrisCancellationRequestedError:
                 raise
             except Exception as exc:
                 handled = await self._run_on_error(tool, exc, context)
@@ -434,7 +434,7 @@ class ToolExecutor:
             )
             self._record_breaker_result(tool.name, final_result)
             return final_result
-        except CancellationRequestedError:
+        except IrisCancellationRequestedError:
             raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))

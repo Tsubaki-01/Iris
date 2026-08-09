@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from iris.exceptions import IrisRunPersistenceError
+from iris.exceptions import (
+    IrisCancellationRequestedError,
+    IrisRunConflictError,
+    IrisRunPersistenceError,
+    IrisRunStateError,
+)
 from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import (
@@ -17,13 +22,13 @@ from iris.runtime import (
     ToolCallClaim,
 )
 from iris.tools import (
-    CancellationRequestedError,
     DefaultPermissionPolicy,
     PreparedToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolRegistry,
+    ToolResult,
 )
 
 
@@ -35,7 +40,7 @@ class MutableCancellationSignal:
 
     def raise_if_requested(self) -> None:
         if self.requested:
-            raise CancellationRequestedError("activation 已取消")
+            raise IrisCancellationRequestedError("activation 已取消")
 
 
 class RecordingGuard:
@@ -212,7 +217,7 @@ async def test_cancellation_after_claim_propagates_before_tool_body(tmp_path: Pa
         context,
     ).calls[0]
 
-    with pytest.raises(CancellationRequestedError):
+    with pytest.raises(IrisCancellationRequestedError):
         await executor.execute_prepared(
             prepared,
             context,
@@ -279,3 +284,84 @@ def test_commit_port_guard_claims_exact_subject_once(tmp_path: Path) -> None:
     assert claim is not None
     assert claim.tool_version == 2
     assert len(port.calls) == 1
+
+
+def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> None:
+    """显式索引只选择当前 batch 未提交后缀中的 exact subject。"""
+    executor, first, context = _prepared_call(tmp_path)
+    second_use = ToolUseBlock(id="call_2", name="echo", input={"value": "later"})
+    second = executor.prepare_many([second_use], context).calls[0]
+    cursor = RuntimeCursor(
+        position="tool_batch",
+        step_index=2,
+        next_tool_index=0,
+        tool_calls=(first.tool_use, second.tool_use),
+        assistant_message=Msg.assistant([first.tool_use, second.tool_use]),
+    )
+    activation = RuntimeActivationInput(
+        run_id="run_1",
+        activation_id="activation_1",
+        session_id="session_1",
+        kind="resume",
+        input=None,
+        cursor=cursor,
+        options=RuntimeExecutionOptions(),
+    )
+    port = ClaimOnlyPort()
+    guard = CommitPortToolEffectGuard(
+        activation=activation,
+        cursor=cursor,
+        commits=port,
+        workspace_root=tmp_path,
+        tool_index=1,
+    )
+
+    guard.before_effect(second)
+
+    call = port.calls[0]
+    assert isinstance(call, RuntimeToolCall)
+    assert call.tool_call_id == "call_2"
+    assert call.ordinal == 2
+    with pytest.raises(IrisRunConflictError, match="subject"):
+        guard.before_effect(first)
+
+
+def test_commit_port_guard_rejects_committed_or_out_of_batch_index(tmp_path: Path) -> None:
+    """显式索引不能回退到已提交 prefix，也不能跨出当前 batch。"""
+    _, prepared, _ = _prepared_call(tmp_path)
+    cursor = RuntimeCursor(
+        position="tool_batch",
+        step_index=2,
+        next_tool_index=1,
+        tool_calls=(prepared.tool_use, prepared.tool_use.model_copy(update={"id": "call_2"})),
+        tool_results=(ToolResult(tool_use_id="call_1", tool_name="echo"),),
+        assistant_message=Msg.assistant(
+            [prepared.tool_use, prepared.tool_use.model_copy(update={"id": "call_2"})]
+        ),
+    )
+    activation = RuntimeActivationInput(
+        run_id="run_1",
+        activation_id="activation_1",
+        session_id="session_1",
+        kind="resume",
+        input=None,
+        cursor=cursor,
+        options=RuntimeExecutionOptions(),
+    )
+
+    with pytest.raises(IrisRunStateError, match="索引"):
+        CommitPortToolEffectGuard(
+            activation=activation,
+            cursor=cursor,
+            commits=ClaimOnlyPort(),
+            workspace_root=tmp_path,
+            tool_index=0,
+        )
+    with pytest.raises(IrisRunStateError, match="索引"):
+        CommitPortToolEffectGuard(
+            activation=activation,
+            cursor=cursor,
+            commits=ClaimOnlyPort(),
+            workspace_root=tmp_path,
+            tool_index=2,
+        )

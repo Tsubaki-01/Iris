@@ -53,6 +53,15 @@ class IrisExecutionError(IrisError):
     """任务执行过程中发生异常时抛出。"""
 
 
+# ----- Runtime 控制流领域 -----
+
+
+class IrisCancellationRequestedError(IrisError):
+    """Activation 已请求协作式取消时使用的内部控制流异常。"""
+
+    runtime_error_code = "CANCELLATION_REQUESTED"
+
+
 # ----- Lifecycle / Run 领域 -----
 
 
