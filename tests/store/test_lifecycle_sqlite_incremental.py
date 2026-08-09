@@ -28,7 +28,6 @@ from iris.hitl import (
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
-    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -39,6 +38,7 @@ from iris.lifecycle import (
     RequestCancellation,
     ReserveModelStep,
     ResolveInteraction,
+    ResumeWaitingRun,
     RunCheckpoint,
     RunCommit,
     RunErrorInfo,

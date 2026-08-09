@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import iris.harness.runner as runner_module
 from iris.exceptions import IrisProviderError, IrisRunPersistenceError
 from iris.harness import AgentRunner
 from iris.harness.runner import ActiveActivation
@@ -26,7 +29,13 @@ from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import ToolCapability, ToolRegistry
 
-from .fakes import StaticProvider, build_runtime, text_response, tool_response
+from .fakes import (
+    StaticProvider,
+    build_runtime,
+    text_response,
+    tool_batch_response,
+    tool_response,
+)
 
 
 class TrackingRunner(AgentRunner):
@@ -198,3 +207,95 @@ async def test_unexpected_exception_after_claim_is_outcome_unknown(tmp_path: Pat
         event.kind for event in store.list_events("run-crash-after-claim")
     }
     _assert_settled(runner, "run-crash-after-claim")
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_drains_children_before_port_revoke(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """父 task 退出前受控 children 必须 done，recovery 后也不得出现迟到 commit。"""
+    entered: set[int] = set()
+    done: set[int] = set()
+    all_entered = asyncio.Event()
+    keep_running = asyncio.Event()
+
+    class TrackingCommitPort(runner_module.StoreRuntimeCommitPort):
+        instances: list[TrackingCommitPort] = []
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.revoked = False
+            self.post_revoke_mutations: list[str] = []
+            super().__init__(*args, **kwargs)
+            self.instances.append(self)
+
+        def _require_writable(self) -> None:
+            if self.revoked:
+                self.post_revoke_mutations.append("mutation")
+            super()._require_writable()
+
+        def revoke(self) -> None:
+            assert done == {1, 2}
+            self.revoked = True
+            super().revoke()
+
+    monkeypatch.setattr(runner_module, "StoreRuntimeCommitPort", TrackingCommitPort)
+
+    async def read_value(index: int) -> str:
+        entered.add(index)
+        if entered == {1, 2}:
+            all_entered.set()
+        try:
+            await keep_running.wait()
+            return f"value-{index}"
+        finally:
+            done.add(index)
+
+    registry = ToolRegistry()
+    registry.register_function(read_value, description="读取值")
+    store = InMemoryLifecycleStore()
+    runner = TrackingRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_batch_response(
+                    ToolUseBlock(id="read-1", name="read_value", input={"index": 1}),
+                    ToolUseBlock(id="read-2", name="read_value", input={"index": 2}),
+                )
+            ),
+        ),
+        store=store,
+    )
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="父任务取消", run_id="run-parent-cancel"))
+    )
+    await asyncio.wait_for(all_entered.wait(), timeout=1)
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    assert done == {1, 2}
+    _assert_settled(runner, "run-parent-cancel")
+    events_after_revoke = store.list_events("run-parent-cancel")
+    await asyncio.sleep(0)
+    assert store.list_events("run-parent-cancel") == events_after_revoke
+    crashed = store.load_run("run-parent-cancel")
+    assert crashed is not None and crashed.current_activation_id is not None
+
+    result = await AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry),
+        store=store,
+    ).recover(
+        "run-parent-cancel",
+        expected_activation_id=crashed.current_activation_id,
+    )
+
+    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+    assert all(
+        record.phase is ToolCallPhase.OUTCOME_UNKNOWN
+        for record in store.list_tool_calls("run-parent-cancel")
+    )
+    assert TrackingCommitPort.instances
+    assert all(not port.post_revoke_mutations for port in TrackingCommitPort.instances)

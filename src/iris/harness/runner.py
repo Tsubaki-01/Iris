@@ -15,6 +15,7 @@ from typing import Protocol
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import (
     HITLConflictError,
+    IrisCancellationRequestedError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunObservationTimeoutError,
@@ -33,7 +34,6 @@ from ..lifecycle import (
     ActivationKind,
     AgentRunOptions,
     AgentRunRequest,
-    ResumeWaitingRun,
     CheckpointResumability,
     CreateRun,
     FinishRun,
@@ -42,6 +42,7 @@ from ..lifecycle import (
     RecoveryDisposition,
     RequestCancellation,
     ResolveInteraction,
+    ResumeWaitingRun,
     RunCheckpoint,
     RunErrorInfo,
     RunEvent,
@@ -65,7 +66,7 @@ from ..runtime import (
     RuntimeProvider,
 )
 from ..store import InMemoryLifecycleStore, SQLiteStore
-from ..tools import CancellationRequestedError, CancellationSignal
+from ..tools import CancellationSignal
 from ._commit_port import StoreRuntimeCommitPort
 from ._fingerprint import compute_environment_fingerprint
 from .observer import RunEventObserver
@@ -112,7 +113,7 @@ class _MutableCancellationSignal(CancellationSignal):
 
     def raise_if_requested(self) -> None:
         if self.requested:
-            raise CancellationRequestedError("activation 已请求取消")
+            raise IrisCancellationRequestedError("activation 已请求取消")
 
 
 @dataclass(slots=True)

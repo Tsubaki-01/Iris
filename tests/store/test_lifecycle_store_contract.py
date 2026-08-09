@@ -13,7 +13,12 @@ from typing import Protocol
 
 import pytest
 
-from iris.exceptions import IrisRunConflictError, IrisRunRecoveryError, IrisRunStateError
+from iris.exceptions import (
+    IrisRunConflictError,
+    IrisRunNotFoundError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
+)
 from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
@@ -27,7 +32,6 @@ from iris.hitl import (
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
-    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -39,6 +43,7 @@ from iris.lifecycle import (
     RequestCancellation,
     ReserveModelStep,
     ResolveInteraction,
+    ResumeWaitingRun,
     RunCheckpoint,
     RunCommit,
     RunErrorInfo,
@@ -232,6 +237,61 @@ def _prepare_tool(store: LifecycleStore) -> RunCommit:
             message_delta=[assistant],
             usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
             prepared_tool_calls=[prepared],
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ),
+            assistant_message=assistant,
+            now=_T1,
+        )
+    )
+
+
+def _prepare_tool_batch(store: LifecycleStore) -> RunCommit:
+    """为 claim 顺序测试持久化三条同 batch prepared call。"""
+    created = _create(store)
+    reserved = store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            now=_T1,
+        )
+    )
+    uses = tuple(
+        ToolUseBlock(id=f"call-{ordinal}", name="probe", input={"value": ordinal})
+        for ordinal in range(1, 4)
+    )
+    assistant = Msg.assistant(uses)
+    prepared = [
+        RunToolCallRecord(
+            run_id="run-1",
+            step_index=0,
+            ordinal=ordinal,
+            tool_call_id=tool_use.id,
+            tool_name=tool_use.name,
+            arguments=dict(tool_use.input),
+            fingerprint=_TOOL_FINGERPRINT,
+            phase="prepared",
+            version=1,
+            created_at=_T1,
+            updated_at=_T1,
+        )
+        for ordinal, tool_use in enumerate(uses, start=1)
+    ]
+    return store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=reserved.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            message_delta=[assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            prepared_tool_calls=prepared,
             checkpoint=_checkpoint(
                 run_id="run-1",
                 sequence=2,
@@ -468,6 +528,124 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     assert committed.run.usage.tool_calls_committed == 1
     assert lifecycle_store.list_tool_calls("run-1")[0].result == result
     assert lifecycle_store.load_session("session-1").revision == 2
+
+
+def test_claim_batch_respects_durable_cancellation_fence(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """取消前可多 claim；取消后只允许 exact replay 与既有 claim result。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    first_command = ClaimToolCall(
+        run_id="run-1",
+        expected_run_revision=prepared.run.revision,
+        activation_id="activation-1",
+        tool_call_id="call-1",
+        fingerprint=_TOOL_FINGERPRINT,
+        expected_tool_version=1,
+        now=_T2,
+    )
+    first = lifecycle_store.claim_tool_call(first_command)
+    second = lifecycle_store.claim_tool_call(
+        first_command.model_copy(
+            update={
+                "expected_run_revision": first.run.revision,
+                "tool_call_id": "call-2",
+            }
+        )
+    )
+    cancelled = lifecycle_store.request_cancellation(
+        RequestCancellation(
+            run_id="run-1",
+            expected_run_revision=second.run.revision,
+            activation_id="activation-1",
+            reason="user requested",
+            now=_T3,
+        )
+    )
+    events_after_cancel = lifecycle_store.list_events("run-1")
+
+    replay = lifecycle_store.claim_tool_call(first_command)
+    assert replay.events == ()
+    with pytest.raises(IrisRunStateError, match="取消"):
+        lifecycle_store.claim_tool_call(
+            first_command.model_copy(
+                update={
+                    "expected_run_revision": cancelled.run.revision,
+                    "tool_call_id": "call-3",
+                }
+            )
+        )
+    assert lifecycle_store.list_events("run-1") == events_after_cancel
+    calls = {call.tool_call_id: call for call in lifecycle_store.list_tool_calls("run-1")}
+    assert calls["call-1"].phase == "claimed"
+    assert calls["call-2"].phase == "claimed"
+    assert calls["call-3"].phase == "prepared"
+
+    committed = lifecycle_store.commit_tool_result(
+        CommitToolResult(
+            run_id="run-1",
+            expected_run_revision=cancelled.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=1,
+            tool_call_id="call-1",
+            expected_tool_version=2,
+            result=ToolResult(tool_use_id="call-1", tool_name="probe"),
+            message_delta=[Msg.tool_result(tool_use_id="call-1", name="probe")],
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=3,
+                activation_id="activation-1",
+                session_revision=2,
+                reserved=1,
+                committed=1,
+            ),
+            now=_T3,
+        )
+    )
+    assert committed.run.usage.tool_calls_committed == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_call_id", "fingerprint", "error_type"),
+    [
+        ("missing-call", _TOOL_FINGERPRINT, IrisRunNotFoundError),
+        ("call-1", "b" * 64, IrisRunConflictError),
+    ],
+)
+def test_cancelled_claim_preserves_exact_subject_error_priority(
+    lifecycle_store: LifecycleStore,
+    tool_call_id: str,
+    fingerprint: str,
+    error_type: type[Exception],
+) -> None:
+    """Cancellation fence 不得遮蔽不存在或 fingerprint 错误。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    cancelled = lifecycle_store.request_cancellation(
+        RequestCancellation(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            reason="user requested",
+            now=_T2,
+        )
+    )
+    events_after_cancel = lifecycle_store.list_events("run-1")
+
+    with pytest.raises(error_type):
+        lifecycle_store.claim_tool_call(
+            ClaimToolCall(
+                run_id="run-1",
+                expected_run_revision=cancelled.run.revision,
+                activation_id="activation-1",
+                tool_call_id=tool_call_id,
+                fingerprint=fingerprint,
+                expected_tool_version=1,
+                now=_T3,
+            )
+        )
+
+    assert lifecycle_store.list_events("run-1") == events_after_cancel
+    assert all(call.phase == "prepared" for call in lifecycle_store.list_tool_calls("run-1"))
 
 
 def test_zero_tool_version_reaches_store_cas_boundary(
@@ -830,24 +1008,27 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
 def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """Live settlement 必须在同一 transaction 闭合 unresolved claim。"""
-    prepared = _prepare_tool(lifecycle_store)
-    claimed = lifecycle_store.claim_tool_call(
-        ClaimToolCall(
-            run_id="run-1",
-            expected_run_revision=prepared.run.revision,
-            activation_id="activation-1",
-            tool_call_id="call-tool",
-            fingerprint=_TOOL_FINGERPRINT,
-            expected_tool_version=1,
-            now=_T2,
+    """Live settlement 必须在同一 transaction 闭合全部 unresolved claims。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    claim_revision = prepared.run.revision
+    for tool_call_id in ("call-1", "call-2"):
+        claimed = lifecycle_store.claim_tool_call(
+            ClaimToolCall(
+                run_id="run-1",
+                expected_run_revision=claim_revision,
+                activation_id="activation-1",
+                tool_call_id=tool_call_id,
+                fingerprint=_TOOL_FINGERPRINT,
+                expected_tool_version=1,
+                now=_T2,
+            )
         )
-    )
+        claim_revision = claimed.run.revision
 
     terminal = lifecycle_store.finish_run(
         FinishRun(
             run_id="run-1",
-            expected_run_revision=claimed.run.revision,
+            expected_run_revision=claim_revision,
             activation_id="activation-1",
             stop_reason="outcome_unknown",
             error=RunErrorInfo(
@@ -859,12 +1040,23 @@ def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
         )
     )
 
-    [record] = lifecycle_store.list_tool_calls("run-1")
-    assert record.phase == "outcome_unknown"
+    records = lifecycle_store.list_tool_calls("run-1")
+    assert [record.phase for record in records] == [
+        "outcome_unknown",
+        "outcome_unknown",
+        "prepared",
+    ]
     assert [event.kind for event in terminal.events] == [
+        "tool_call.outcome_unknown",
         "tool_call.outcome_unknown",
         "run.terminal",
     ]
+    assert terminal.events[-1].kind == "run.terminal"
+    assert {
+        event.correlation_id
+        for event in terminal.events
+        if event.kind == "tool_call.outcome_unknown"
+    } == {"call-1", "call-2"}
 
 
 def test_safe_recovery_abandons_old_fence_and_rebinds_checkpoint(
@@ -925,14 +1117,25 @@ def test_safe_recovery_rejects_unresolved_durable_claim(
 def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """Recovery transaction 重开后不能压缩 activation outcome 或 tool 时间。"""
-    prepared = _prepare_tool(lifecycle_store)
-    claimed = lifecycle_store.claim_tool_call(
+    """Recovery 原子关闭多个 claim，重开后保留 activation/tool 精确事实。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    first_claimed = lifecycle_store.claim_tool_call(
         ClaimToolCall(
             run_id="run-1",
             expected_run_revision=prepared.run.revision,
             activation_id="activation-1",
-            tool_call_id="call-tool",
+            tool_call_id="call-1",
+            fingerprint=_TOOL_FINGERPRINT,
+            expected_tool_version=1,
+            now=_T2,
+        )
+    )
+    claimed = lifecycle_store.claim_tool_call(
+        ClaimToolCall(
+            run_id="run-1",
+            expected_run_revision=first_claimed.run.revision,
+            activation_id="activation-1",
+            tool_call_id="call-2",
             fingerprint=_TOOL_FINGERPRINT,
             expected_tool_version=1,
             now=_T2,
@@ -953,12 +1156,19 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     assert [event.kind for event in recovered.events] == [
         "activation.abandoned",
         "tool_call.outcome_unknown",
+        "tool_call.outcome_unknown",
         "run.terminal",
+    ]
+    records = lifecycle_store.list_tool_calls("run-1")
+    assert [record.phase for record in records] == [
+        "outcome_unknown",
+        "outcome_unknown",
+        "prepared",
     ]
     if not isinstance(lifecycle_store, SQLiteStore):
         return
     reopened = SQLiteStore(lifecycle_store.path)
-    [record] = reopened.list_tool_calls("run-1")
+    reopened_records = reopened.list_tool_calls("run-1")
     with sqlite3.connect(lifecycle_store.path) as connection:
         activation_fact = connection.execute(
             "SELECT status, outcome FROM run_activations WHERE activation_id = ?",
@@ -966,8 +1176,12 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
         ).fetchone()
 
     assert activation_fact == ("abandoned", "outcome_unknown")
-    assert record.phase == "outcome_unknown"
-    assert record.updated_at == _T3
+    assert [record.phase for record in reopened_records] == [
+        "outcome_unknown",
+        "outcome_unknown",
+        "prepared",
+    ]
+    assert [record.updated_at for record in reopened_records[:2]] == [_T3, _T3]
 
 
 def test_read_methods_apply_cursor_and_validation_contract(

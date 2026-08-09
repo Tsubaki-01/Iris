@@ -54,7 +54,6 @@ from ..lifecycle.models import (
     project_result,
 )
 from ..lifecycle.store import (
-    ResumeWaitingRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -64,6 +63,7 @@ from ..lifecycle.store import (
     RequestCancellation,
     ReserveModelStep,
     ResolveInteraction,
+    ResumeWaitingRun,
     RunCommit,
     SuspendRun,
 )
@@ -1034,6 +1034,8 @@ class SQLiteStore:
             )
         if tool_call.phase is not ToolCallPhase.PREPARED:
             raise IrisRunStateError("只有 prepared tool call 可以 claim")
+        if run.cancellation_requested_at is not None:
+            raise IrisRunStateError("已请求取消的 run 不接受新的 tool call claim")
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
         claimed = RunToolCallRecord.model_validate(
             tool_call.model_dump()

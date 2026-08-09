@@ -5,7 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
-from ..exceptions import IrisRunConflictError, IrisRunNotFoundError, IrisRunStateError
+from ..exceptions import (
+    IrisCancellationRequestedError,
+    IrisRunConflictError,
+    IrisRunNotFoundError,
+    IrisRunStateError,
+)
 from ..hitl import HumanInteraction, HumanInteractionService
 from ..lifecycle import (
     CheckpointResumability,
@@ -159,17 +164,35 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._require_runtime_call(call)
         record = self._tool_record(call.tool_call_id)
         self._require_tool_subject(record, call, expected_version=call.tool_version)
-        stored = self._store.claim_tool_call(
-            ClaimToolCall(
-                run_id=self._run.run_id,
-                expected_run_revision=self._run.revision,
-                activation_id=self._activation_id,
-                tool_call_id=call.tool_call_id,
-                fingerprint=call.fingerprint,
-                expected_tool_version=call.tool_version,
-                now=self._clock(),
+        try:
+            stored = self._store.claim_tool_call(
+                ClaimToolCall(
+                    run_id=self._run.run_id,
+                    expected_run_revision=self._run.revision,
+                    activation_id=self._activation_id,
+                    tool_call_id=call.tool_call_id,
+                    fingerprint=call.fingerprint,
+                    expected_tool_version=call.tool_version,
+                    now=self._clock(),
+                )
             )
-        )
+        except (IrisRunStateError, IrisRunConflictError) as exc:
+            current = self._store.load_run(self._run.run_id)
+            if (
+                current is None
+                or current.phase is not RunPhase.ACTIVE
+                or current.current_activation_id != self._activation_id
+                or current.cancellation_requested_at is None
+            ):
+                raise
+            previous_sequence = self._run.last_event_sequence
+            self._run = current
+            for event in self._store.list_events(current.run_id, previous_sequence):
+                key = (event.run_id, event.sequence)
+                if key not in self._event_keys:
+                    self._event_keys.add(key)
+                    self._event_sink.append(event)
+            raise IrisCancellationRequestedError("activation 已请求取消") from exc
         self._accept(stored)
         claimed = self._tool_record(call.tool_call_id)
         return ToolCallClaim(
