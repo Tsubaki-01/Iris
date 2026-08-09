@@ -60,6 +60,10 @@ active recovery 会验证 checkpoint v1、session revision、usage counters、en
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
 继续写入。同步阻塞 callable 不保证并发加速，并且仍可能延迟 settlement。
 
+`before_model / step 0` 的初始 recovery 会从 durable `AgentRunRequest.input` 重建尚未提交的
+当前轮次输入。后续 checkpoint 的输入已经随 provider commit 进入 session history，因此不会再次
+注入。
+
 ## 公开接口
 
 `iris.harness` 导出 `AgentRunner`、run request/options/limits/runtime options、phase/stop reason/

@@ -38,6 +38,10 @@ result = await runtime.execute(
 固定的 `RuntimeExecutionOptions` 和 JSON-safe cursor。`RuntimeActivationResult` 只返回 engine
 事实；调用方必须从 durable store 重载最终 `RunResult`。
 
+`start` 与 `before_model / step 0` 的初始 `recover` activation 携带当前用户 input；`resume` 和
+非初始 `recover` 不携带。engine 只在该字段存在时将其注入 provider request 一次，后续恢复依赖
+committed session history。
+
 cursor 位置只有：
 
 - `before_model`：可预留下一次 provider step；

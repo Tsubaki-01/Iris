@@ -146,8 +146,14 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
                 raise ValueError("start activation 必须从 step 0 before_model 开始")
             if self.interaction_projection is not None:
                 raise ValueError("start activation 不能携带 interaction projection")
+        elif self.kind == "resume":
+            if self.input is not None:
+                raise ValueError("resume activation 不能携带用户 input")
+        elif self.cursor.position == "before_model" and self.cursor.step_index == 0:
+            if self.input is None or not self.input.strip():
+                raise ValueError("初始 recover activation 必须包含非空 input")
         elif self.input is not None:
-            raise ValueError("resume/recover activation 不能重复携带用户 input")
+            raise ValueError("非初始 recover activation 不能重复携带用户 input")
         if self.interaction_projection is not None:
             if self.cursor.position != "tool_batch":
                 raise ValueError("interaction projection 必须绑定 tool_batch cursor")

@@ -546,8 +546,8 @@ class AgentRuntime:
                 )
             context_output = self.environment.context_builder.build(context_input)
             current_input = (
-                Msg.user(cast(str, activation.input))
-                if activation.kind == "start" and cursor.step_index == 0
+                Msg.user(activation.input)
+                if activation.input is not None and cursor.step_index == 0
                 else None
             )
             turn_messages = self.environment.assembler.build_turn_messages(

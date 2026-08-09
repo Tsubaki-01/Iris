@@ -76,6 +76,34 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
 
 
 @pytest.mark.asyncio
+async def test_safe_recovery_preserves_initial_turn_input(tmp_path: Path) -> None:
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    first = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    running = asyncio.create_task(
+        first.start(AgentRunRequest(input="当前轮次", run_id="run-recover-input"))
+    )
+    await provider.started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    crashed = store.load_run("run-recover-input")
+    assert crashed is not None and crashed.current_activation_id is not None
+
+    recovery_provider = StaticProvider(text_response("已恢复"))
+    result = await AgentRunner(
+        runtime=build_runtime(tmp_path, provider=recovery_provider),
+        store=store,
+    ).recover(
+        "run-recover-input",
+        expected_activation_id=crashed.current_activation_id,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert recovery_provider.requests[0].messages[-1].text == "当前轮次"
+
+
+@pytest.mark.asyncio
 async def test_outcome_ready_recovery_finalizes_without_provider_call(tmp_path: Path) -> None:
     class FailFinishOnceStore(InMemoryLifecycleStore):
         failed = False
