@@ -37,6 +37,7 @@ from .fakes import (
     StaticProvider,
     build_runtime,
     text_response,
+    tool_batch_response,
     tool_response,
 )
 
@@ -153,6 +154,75 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
     assert record.phase is ToolCallPhase.OUTCOME_UNKNOWN
     assert [event.kind for event in store.list_events("run-claim-recover")][-3:] == [
         RunEventKind.ACTIVATION_ABANDONED,
+        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
+        RunEventKind.RUN_TERMINAL,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recovery_closes_multiple_claims_without_replaying_tools(
+    tmp_path: Path,
+) -> None:
+    """第二个 claim 持久化后中断时，recovery 原子关闭全部 claim 且不重放。"""
+
+    class CrashAfterSecondClaimStore(InMemoryLifecycleStore):
+        claims = 0
+
+        def claim_tool_call(self, command: ClaimToolCall) -> RunCommit:
+            committed = super().claim_tool_call(command)
+            self.claims += 1
+            if self.claims == 2:
+                raise IrisRunPersistenceError("second claim committed before crash")
+            return committed
+
+    effects: list[int] = []
+
+    async def read_value(index: int) -> str:
+        effects.append(index)
+        return f"value-{index}"
+
+    registry = ToolRegistry()
+    registry.register_function(read_value, description="读取值")
+    store = CrashAfterSecondClaimStore()
+    first = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_batch_response(
+                    ToolUseBlock(id="read-1", name="read_value", input={"index": 1}),
+                    ToolUseBlock(id="read-2", name="read_value", input={"index": 2}),
+                )
+            ),
+        ),
+        store=store,
+    )
+    with pytest.raises(IrisRunPersistenceError, match="second claim committed"):
+        await first.start(AgentRunRequest(input="执行", run_id="run-multi-claim-recover"))
+    before_recovery_effects = list(effects)
+    crashed = store.load_run("run-multi-claim-recover")
+    assert crashed is not None and crashed.current_activation_id is not None
+    assert all(
+        record.phase is ToolCallPhase.CLAIMED
+        for record in store.list_tool_calls("run-multi-claim-recover")
+    )
+
+    result = await AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry),
+        store=store,
+    ).recover(
+        "run-multi-claim-recover",
+        expected_activation_id=crashed.current_activation_id,
+    )
+
+    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+    assert effects == before_recovery_effects
+    records = store.list_tool_calls("run-multi-claim-recover")
+    assert {record.tool_call_id for record in records} == {"read-1", "read-2"}
+    assert all(record.phase is ToolCallPhase.OUTCOME_UNKNOWN for record in records)
+    assert [event.kind for event in store.list_events("run-multi-claim-recover")][-4:] == [
+        RunEventKind.ACTIVATION_ABANDONED,
+        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
         RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
         RunEventKind.RUN_TERMINAL,
     ]

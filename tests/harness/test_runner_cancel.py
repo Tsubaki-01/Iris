@@ -30,7 +30,13 @@ from iris.tools import (
     ToolResult,
 )
 
-from .fakes import BlockingProvider, StaticProvider, build_runtime, tool_response
+from .fakes import (
+    BlockingProvider,
+    StaticProvider,
+    build_runtime,
+    tool_batch_response,
+    tool_response,
+)
 
 
 @pytest.mark.asyncio
@@ -229,6 +235,86 @@ async def test_public_cancel_after_claim_settles_outcome_unknown(tmp_path: Path)
     assert RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN in {
         event.kind for event in store.list_events("run-claimed-cancel")
     }
+
+
+@pytest.mark.asyncio
+async def test_parallel_claims_cancel_atomically_settle_outcome_unknown(
+    tmp_path: Path,
+) -> None:
+    """并发 body 都已 claim 后取消时，全部 unresolved claim 必须一起关闭。"""
+    started: set[str] = set()
+    both_started = asyncio.Event()
+
+    class CooperativeParallelTool(BaseTool):
+        definition = ToolDefinition(
+            name="cooperative_parallel",
+            description="并发 claim 后协作取消",
+            input_schema={
+                "type": "object",
+                "properties": {"index": {"type": "integer"}},
+                "required": ["index"],
+            },
+        )
+
+        async def arun(
+            self,
+            params: BaseModel | dict[str, object],
+            context: ToolExecutionContext,
+        ) -> ToolResult:
+            del params
+            assert context.cancellation is not None
+            started.add(context.call_id)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            while not context.cancellation.requested:
+                await asyncio.sleep(0)
+            context.cancellation.raise_if_requested()
+            raise AssertionError("取消后不应继续")
+
+    registry = ToolRegistry()
+    registry.register(CooperativeParallelTool())
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_batch_response(
+                    ToolUseBlock(
+                        id="parallel-1",
+                        name="cooperative_parallel",
+                        input={"index": 1},
+                    ),
+                    ToolUseBlock(
+                        id="parallel-2",
+                        name="cooperative_parallel",
+                        input={"index": 2},
+                    ),
+                )
+            ),
+        ),
+        store=store,
+    )
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="并发取消", run_id="run-parallel-cancel"))
+    )
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+
+    result = await runner.cancel("run-parallel-cancel", settlement_timeout=1)
+
+    assert result == await running
+    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+    records = store.list_tool_calls("run-parallel-cancel")
+    assert {record.tool_call_id for record in records} == {"parallel-1", "parallel-2"}
+    assert all(record.phase is ToolCallPhase.OUTCOME_UNKNOWN for record in records)
+    events = store.list_events("run-parallel-cancel")
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
+    assert {
+        event.correlation_id
+        for event in events
+        if event.kind is RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN
+    } == {"parallel-1", "parallel-2"}
 
 
 @pytest.mark.asyncio

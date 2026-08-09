@@ -38,7 +38,14 @@ from iris.tools import (
     ToolResult,
 )
 
-from .fakes import FrozenClock, StaticProvider, build_runtime, text_response, tool_response
+from .fakes import (
+    FrozenClock,
+    StaticProvider,
+    build_runtime,
+    text_response,
+    tool_batch_response,
+    tool_response,
+)
 
 
 class DeadlineSignalRuntime:
@@ -284,6 +291,49 @@ async def test_claimed_tool_deadline_maps_to_outcome_unknown(tmp_path: Path) -> 
     assert result.error.code == "TOOL_OUTCOME_UNKNOWN"
     [tool_call] = store.list_tool_calls("run-tool-deadline")
     assert tool_call.phase is ToolCallPhase.OUTCOME_UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_parallel_claims_deadline_atomically_settles_outcome_unknown(
+    tmp_path: Path,
+) -> None:
+    """deadline 中断并发 claimed bodies 时必须关闭全部 unresolved claims。"""
+    started: set[int] = set()
+
+    async def slow_read(index: int) -> str:
+        started.add(index)
+        await asyncio.sleep(10)
+        return "不应完成"
+
+    registry = ToolRegistry()
+    registry.register_function(slow_read, description="慢读取")
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_batch_response(
+                    ToolUseBlock(id="slow-1", name="slow_read", input={"index": 1}),
+                    ToolUseBlock(id="slow-2", name="slow_read", input={"index": 2}),
+                )
+            ),
+        ),
+        store=store,
+    )
+
+    result = await runner.start(
+        AgentRunRequest(input="并发 deadline", run_id="run-parallel-deadline"),
+        options=AgentRunOptions(
+            limits=RunLimits(deadline_at=datetime.now(UTC) + timedelta(milliseconds=200))
+        ),
+    )
+
+    assert started == {1, 2}
+    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+    records = store.list_tool_calls("run-parallel-deadline")
+    assert {record.tool_call_id for record in records} == {"slow-1", "slow-2"}
+    assert all(record.phase is ToolCallPhase.OUTCOME_UNKNOWN for record in records)
 
 
 @pytest.mark.asyncio

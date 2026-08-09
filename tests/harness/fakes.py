@@ -105,11 +105,16 @@ def text_response(text: str = "完成") -> LLMResponse:
 
 def tool_response(call: ToolUseBlock) -> LLMResponse:
     """构造包含一个工具调用的 provider response。"""
+    return tool_batch_response(call)
+
+
+def tool_batch_response(*calls: ToolUseBlock) -> LLMResponse:
+    """构造包含一批工具调用的 provider response。"""
     return LLMResponse(
         provider="fake",
-        id=f"response-{call.id}",
+        id="response-" + "-".join(call.id for call in calls),
         model="fake-model",
-        content=[TextBlock(text="需要调用工具。"), call],
+        content=[TextBlock(text="需要调用工具。"), *calls],
         finish_reason="tool_calls",
         input_tokens=5,
         output_tokens=3,
@@ -160,5 +165,6 @@ __all__ = [
     "StaticProvider",
     "build_runtime",
     "text_response",
+    "tool_batch_response",
     "tool_response",
 ]
