@@ -151,9 +151,17 @@ classifier 异常会保守降级为串行执行。`execute_prepared()` 属于新
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
 并发 context copy 会共享原始 `read_state` 和 `cancellation` live object；signal 不会进入
-`model_dump()` 或 checkpoint。`CallableTool` 不会把协作式取消归一化为普通工具错误。
+`model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
+`IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
 
 文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
+
+`ToolExecutor` 只提供分类、重校验和单调用执行原语；lifecycle active path 由 runtime 在它之上
+使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
+HITL、preflight result 与 unsafe 调用保持屏障语义。每个调用仍有自己的 durable claim，body
+完成顺序不决定 result 顺序，claim telemetry 顺序也不是 ordinal 契约。同步 callable 不保证
+加速。该调度不增加 config/schema/API；未来 NETWORK/MCP 或 write 并发必须先定义新的 effect
+与恢复协议，不能仅修改 capability classifier。
 
 ## 文件工具
 
@@ -331,7 +339,7 @@ registry.register(ToolSearchTool(registry))
 
 ```text
 AskQuestionInput, AskQuestionTool, BaseTool, CallableTool,
-CancellationRequestedError, CancellationSignal,
+CancellationSignal,
 CircuitBreaker, CircuitBreakerState,
 DeferredToolIndex, DocstringInfo, DocstringSchemaExtractor,
 DefaultPermissionPolicy, EditFileInput, FILE_TOOL_CLASSES, FileTool,

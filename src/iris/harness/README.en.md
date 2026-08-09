@@ -45,8 +45,23 @@ tool may delay settlement. If a tool returns after the request, its result is co
 run settles cancelled. If an effect cannot be proven after claim, recovery fails closed with
 `TOOL_OUTCOME_UNKNOWN`.
 
+The runner's live signal and store-backed commit port use
+`iris.exceptions.IrisCancellationRequestedError` to request cooperative runtime settlement; the
+type is not part of the `iris.tools` public error surface.
+
+Runtime's read-only concurrency window has a fixed internal bound of 8 and adds no public config,
+schema, or API. Every call in a window has an independent durable claim. Bodies may finish out of
+order, but only a continuous known result prefix enters history, cursor, and checkpoint in ordinal
+order. Claim telemetry event order is not an ordinal contract. Any uncommitted claim makes
+cancellation, deadline, or program interruption settle outcome unknown; the existing terminal
+settlement closes every unresolved claim for that activation in one aggregate transaction.
+
 Active recovery validates checkpoint v1, session revision, usage counters, environment
-fingerprint, and cursor. Only the activation holding the current durable fence may commit.
+fingerprint, and cursor. Tools are never replayed while unresolved claims exist. Recovery atomically
+abandons the old activation, closes every claim as outcome unknown, and creates the terminal result.
+Normal parent/control/infrastructure exit waits for runtime children to drain before revoking the
+commit port, preventing late child writes. Synchronous blocking callables have no concurrency
+speedup guarantee and may still delay settlement.
 
 ## Public API
 

@@ -48,6 +48,30 @@ cursor 位置只有：
 必须 durable claim，result 后必须 durable commit；claim 后无法证明结果时返回
 `TOOL_OUTCOME_UNKNOWN`，不得重放 effect。
 
+## 有界工具并发
+
+在 `RETURN_TO_MODEL` 策略下，runtime 会把连续的“只读且声明为并发安全”调用组成内部窗口，
+每个窗口最多 8 条。8 是私有实现上限，不是 YAML、`RuntimeExecutionOptions` 或环境变量配置；
+本次能力没有改变 public config、schema、model 或导出。
+
+窗口只覆盖连续候选。STOP、HITL、preflight result、WRITE/EXECUTE/NETWORK/MCP/AGENT，以及任一
+不安全或分类失败的调用都是串行屏障，后序调用不能跨过屏障启动。每个 child 在 body 前仍会
+独立 revalidate 并提交 exact durable claim；body 可以乱序结束，但 result message、cursor、
+session history、checkpoint 和 committed event 只按原始 ordinal 的连续前缀推进。多个
+`TOOL_CALL_CLAIMED` telemetry event 的先后顺序不是契约。
+
+control interruption 只提交首个异常/空洞之前的已知 `ToolResult`；后序内存结果不会跳洞。
+任何未提交的 durable claim 都会让取消、deadline 或程序中断最终 fail closed 为
+`OUTCOME_UNKNOWN`。父 task 或基础设施退出前，runtime 会 cancel 并 drain 自己创建的 children。
+协作式取消使用 `iris.exceptions.IrisCancellationRequestedError`；runtime 将它转换为 activation
+outcome，而不是普通工具错误。
+
+并发文件读取共享同一个 `ReadFileState` identity；窗口 settle 后的 checkpoint snapshot 包含
+合并记录，后续串行 write barrier 可以继续执行 stale-read 检查。同步阻塞 callable 仍保证
+claim/result/顺序正确，但不承诺加速。NETWORK/MCP 并发或 write 并发未来必须另行设计 effect、
+retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
+引入 delta/merge/lock/hash 模型。
+
 ## 显式 Memory 注入
 
 `RuntimeExecutionOptions.memory_query` 和 `memory_results` 是显式 opt-in 的动态 memory 输入。
