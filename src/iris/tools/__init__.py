@@ -4,7 +4,6 @@ from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
     CallableTool,
-    CancellationRequestedError,
     CancellationSignal,
     ToolArtifact,
     ToolCapability,
@@ -56,7 +55,6 @@ __all__ = [
     "AskQuestionInput",
     "AskQuestionTool",
     "BaseTool",
-    "CancellationRequestedError",
     "CancellationSignal",
     "CallableTool",
     "CircuitBreaker",

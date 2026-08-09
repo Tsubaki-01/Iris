@@ -21,7 +21,11 @@ from typing import Any, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from ..exceptions import IrisToolExecutionError, IrisToolValidationError
+from ..exceptions import (
+    IrisCancellationRequestedError,
+    IrisToolExecutionError,
+    IrisToolValidationError,
+)
 from ..message import TextBlock
 from .schema import (
     callable_input_model,
@@ -49,10 +53,6 @@ class ToolExecutionMode(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
     STREAM = "stream"
-
-
-class CancellationRequestedError(Exception):
-    """Activation cooperative cancellation 的内部控制流异常。"""
 
 
 @runtime_checkable
@@ -756,7 +756,7 @@ class CallableTool(BaseTool):
             value = self.func(**kwargs)
             if inspect.isawaitable(value):
                 value = await value
-        except CancellationRequestedError:
+        except IrisCancellationRequestedError:
             raise
         except IrisToolValidationError:
             raise

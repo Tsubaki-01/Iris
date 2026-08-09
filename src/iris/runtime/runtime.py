@@ -9,6 +9,7 @@ from typing import Any, cast
 
 from ..exceptions import (
     HITLCheckpointInvalidError,
+    IrisCancellationRequestedError,
     IrisError,
     IrisRunConflictError,
 )
@@ -20,7 +21,6 @@ from ..hitl import (
 from ..lifecycle import CheckpointResumability, RunErrorInfo, ToolErrorPolicy
 from ..message import LLMRequest, Msg
 from ..tools import (
-    CancellationRequestedError,
     CancellationSignal,
     PreparedToolCall,
     ToolRegistryView,
@@ -32,7 +32,9 @@ from .commit import (
     RuntimeModelStepCommit,
     RuntimeSuspension,
     RuntimeSuspensionResult,
+    RuntimeToolCall,
     RuntimeToolResultCommit,
+    ToolCallClaim,
     build_runtime_tool_call,
 )
 from .environment import RuntimeEnvironment
@@ -44,8 +46,11 @@ from .models import (
     RuntimeApprovedToolCall,
     RuntimeCursor,
 )
+from .tool_bridge import ToolBridge
 
 # endregion
+
+_MAX_PARALLEL_TOOL_CALLS = 8
 
 
 class AgentRuntime:
@@ -66,7 +71,12 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
     ) -> RuntimeActivationResult:
-        """从 durable cursor 推进唯一的 model/tool inner loop。"""
+        """按 durable cursor 分阶段推进唯一的 model/tool inner loop。
+
+        阶段边界由 cursor 位置驱动，只有对应事实提交成功后才进入下一阶段。
+        """
+        # --- 1. 恢复 activation 现场 ---
+        # 从 checkpoint 还原工具共享状态，并保留本次 resume 的 HITL 投影。
         cursor = activation.cursor
         self.environment.tool_bridge.restore_read_state(
             activation.session_id,
@@ -76,6 +86,8 @@ class AgentRuntime:
         projection_validated = False
 
         while True:
+            # --- 2. 收口 activation 状态 ---
+            # 先兑现已提交的最终结果；未完成时再检查取消与截止时间。
             if cursor.position == "outcome_ready":
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.COMPLETED,
@@ -95,6 +107,8 @@ class AgentRuntime:
                     assistant_message=cursor.assistant_message,
                 )
 
+            # --- 3. 执行模型阶段 ---
+            # before_model 只推进一次模型调用，成功后转入工具批次或结果终态。
             if cursor.position == "before_model":
                 model_outcome = await self._execute_model_step(
                     activation=activation,
@@ -107,6 +121,8 @@ class AgentRuntime:
                 cursor = model_outcome
                 continue
 
+            # --- 4. 预检工具批次 ---
+            # 为当前 assistant 消息重建执行计划，并校验恢复投影与 cursor 是否一致。
             plan = self.environment.tool_bridge.preflight_once(
                 assistant_message=cast(Msg, cursor.assistant_message),
                 session_id=activation.session_id,
@@ -125,6 +141,30 @@ class AgentRuntime:
                     plan.calls,
                 )
                 projection_validated = True
+
+            # --- 5. 执行安全并发窗口 ---
+            # RETURN_TO_MODEL 仅并发连续安全调用，结果仍按模型原始顺序提交。
+            if activation.options.tool_error_policy is ToolErrorPolicy.RETURN_TO_MODEL:
+                window = _parallel_tool_window(
+                    start=cursor.next_tool_index,
+                    calls=plan.calls,
+                    tool_bridge=self.environment.tool_bridge,
+                )
+                if window:
+                    window_outcome = await self._execute_parallel_tool_window(
+                        activation=activation,
+                        cursor=cursor,
+                        window=window,
+                        commits=commits,
+                        cancellation=cancellation,
+                    )
+                    if isinstance(window_outcome, RuntimeActivationResult):
+                        return window_outcome
+                    cursor = window_outcome
+                    continue
+
+            # --- 6. 处理当前工具交互 ---
+            # 串行路径先消费 HITL 投影；缺少人工决定时在当前批次挂起。
             prepared = plan.calls[cursor.next_tool_index]
             approved_projection: RuntimeApprovedToolCall | None = None
             projected_result: ToolResult | None = None
@@ -144,6 +184,8 @@ class AgentRuntime:
                         commits=commits,
                     )
 
+            # --- 7. 取得当前工具结果 ---
+            # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
             if projected_result is not None:
                 result = projected_result
                 claim = None
@@ -201,7 +243,7 @@ class AgentRuntime:
                         if timeout is not None
                         else await operation
                     )
-                except CancellationRequestedError:
+                except IrisCancellationRequestedError:
                     if guard.claim_for(prepared.tool_use.id) is not None:
                         return _unknown_tool_outcome(cursor, prepared, "工具 claim 后收到取消")
                     return RuntimeActivationResult(
@@ -236,40 +278,17 @@ class AgentRuntime:
                     workspace_root=self.environment.workspace_root,
                 )
 
-            result_message = _tool_result_message(result)
+            # --- 8. 提交工具结果并收口 ---
+            # durable commit 成功后才推进 cursor，再处理取消或 STOP 失败策略。
             batch_assistant = cursor.assistant_message
-            next_index = cursor.next_tool_index + 1
-            next_results = (*cursor.tool_results, result)
-            if next_index == len(cursor.tool_calls):
-                cursor_after = RuntimeCursor(
-                    position="before_model",
-                    step_index=cursor.step_index + 1,
-                    read_state=_read_state_snapshot(
-                        self.environment.tool_bridge.read_state(activation.session_id)
-                    ),
-                )
-            else:
-                cursor_after = cursor.model_copy(
-                    update={
-                        "next_tool_index": next_index,
-                        "tool_results": next_results,
-                        "read_state": _read_state_snapshot(
-                            self.environment.tool_bridge.read_state(activation.session_id)
-                        ),
-                    }
-                )
-            committed_cursor = commits.commit_tool_result(
-                RuntimeToolResultCommit(
-                    tool_call=tool_call,
-                    claim=claim,
-                    result=result,
-                    message_delta=(result_message,),
-                    cursor_after=cursor_after,
-                )
+            cursor = self._commit_tool_result(
+                activation=activation,
+                cursor=cursor,
+                commits=commits,
+                tool_call=tool_call,
+                claim=claim,
+                result=result,
             )
-            if committed_cursor != cursor_after:
-                raise IrisRunConflictError("tool-result commit 返回了意外 cursor")
-            cursor = committed_cursor
             if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.CANCELLED,
@@ -283,6 +302,226 @@ class AgentRuntime:
                     assistant_message=batch_assistant,
                     error=_tool_run_error(result),
                 )
+
+    async def _execute_parallel_tool_window(
+        self,
+        *,
+        activation: RuntimeActivationInput,
+        cursor: RuntimeCursor,
+        window: Sequence[tuple[int, PreparedToolCall]],
+        commits: RuntimeCommitPort,
+        cancellation: CancellationSignal,
+    ) -> RuntimeCursor | RuntimeActivationResult:
+        """执行一个有界安全窗口，并按模型 ordinal 提交结果。"""
+        prepared_calls = [prepared for _, prepared in window]
+        self.environment.tool_bridge._initialize_parallel_read_state(
+            activation.session_id,
+            prepared_calls,
+        )
+        guards = [
+            CommitPortToolEffectGuard(
+                activation=activation,
+                cursor=cursor,
+                commits=commits,
+                workspace_root=self.environment.workspace_root,
+                tool_index=tool_index,
+            )
+            for tool_index, _ in window
+        ]
+        tasks: list[asyncio.Task[ToolResult]] = []
+        runtime_cancelled_tasks: set[asyncio.Task[ToolResult]] = set()
+        timeout = _tool_timeout_seconds(activation, commits)
+        for (_, prepared), guard in zip(window, guards, strict=True):
+            operation = self.environment.tool_bridge.execute_prepared(
+                prepared,
+                session_id=activation.session_id,
+                run_id=activation.run_id,
+                agent_id=self.environment.agent_config.name,
+                workspace_root=self.environment.workspace_root,
+                permission_mode=self.environment.agent_config.permissions.writes,
+                metadata={"activation_id": activation.activation_id},
+                cancellation=cancellation,
+                effect_guard=guard,
+            )
+            task_operation = (
+                asyncio.wait_for(operation, timeout=timeout) if timeout is not None else operation
+            )
+            tasks.append(asyncio.create_task(task_operation))
+
+        pending = set(tasks)
+        try:
+            while pending:
+                done, remaining = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if any(task.cancelled() or task.exception() is not None for task in done):
+                    runtime_cancelled_tasks.update(remaining)
+                    for task in remaining:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    break
+                pending = remaining
+        except asyncio.CancelledError:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        result_slots: list[ToolResult | BaseException | None] = []
+        infrastructure_errors: list[tuple[int, BaseException]] = []
+        for offset, task in enumerate(tasks):
+            if task.cancelled():
+                try:
+                    task.result()
+                except asyncio.CancelledError as child_cancellation:
+                    result_slots.append(child_cancellation)
+                    if task not in runtime_cancelled_tasks:
+                        infrastructure_errors.append((offset, child_cancellation))
+                continue
+            exception = task.exception()
+            if exception is None:
+                result_slots.append(task.result())
+                continue
+            result_slots.append(exception)
+            if not isinstance(exception, (IrisCancellationRequestedError, TimeoutError)):
+                infrastructure_errors.append((offset, exception))
+
+        if infrastructure_errors:
+            _, infrastructure_error = min(
+                infrastructure_errors,
+                key=lambda item: item[0],
+            )
+            raise infrastructure_error
+
+        settlement_exception = next(
+            (
+                slot
+                for task, slot in zip(tasks, result_slots, strict=True)
+                if isinstance(slot, BaseException) and task not in runtime_cancelled_tasks
+            ),
+            None,
+        )
+        committed_cursor = cursor
+        interrupted = False
+        for offset, slot in enumerate(result_slots):
+            if isinstance(slot, BaseException):
+                interrupted = True
+                break
+            if slot is None:
+                raise IrisRunConflictError("并发工具窗口缺少已观察结果")
+            _, prepared = window[offset]
+            guard = guards[offset]
+            tool_call = guard.call_for(prepared.tool_use.id) or build_runtime_tool_call(
+                activation=activation,
+                cursor=cursor,
+                prepared=prepared,
+                workspace_root=self.environment.workspace_root,
+                ordinal=window[offset][0] + 1,
+            )
+            committed_cursor = self._commit_tool_result(
+                activation=activation,
+                cursor=committed_cursor,
+                commits=commits,
+                tool_call=tool_call,
+                claim=guard.claim_for(prepared.tool_use.id),
+                result=slot,
+            )
+
+        if interrupted:
+            committed_count = committed_cursor.next_tool_index - cursor.next_tool_index
+            for offset in range(committed_count, len(window)):
+                prepared = window[offset][1]
+                if guards[offset].claim_for(prepared.tool_use.id) is not None:
+                    return _unknown_tool_outcome(
+                        committed_cursor,
+                        prepared,
+                        "并发工具窗口存在未提交的 claimed 调用",
+                    )
+            assert settlement_exception is not None
+            if _activation_cancelled(commits, cancellation) or isinstance(
+                settlement_exception,
+                IrisCancellationRequestedError,
+            ):
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.CANCELLED,
+                    cursor=committed_cursor,
+                    assistant_message=cursor.assistant_message,
+                )
+            if _deadline_expired(commits):
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                    cursor=committed_cursor,
+                    assistant_message=cursor.assistant_message,
+                )
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.FAILED,
+                cursor=committed_cursor,
+                assistant_message=cursor.assistant_message,
+                error=RunErrorInfo(
+                    code="TOOL_TIMEOUT",
+                    message="工具执行超时",
+                    source="tool",
+                ),
+            )
+
+        if _activation_cancelled(commits, cancellation):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.CANCELLED,
+                cursor=committed_cursor,
+                assistant_message=cursor.assistant_message,
+            )
+        if _deadline_expired(commits):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                cursor=committed_cursor,
+                assistant_message=cursor.assistant_message,
+            )
+        return committed_cursor
+
+    def _commit_tool_result(
+        self,
+        *,
+        activation: RuntimeActivationInput,
+        cursor: RuntimeCursor,
+        commits: RuntimeCommitPort,
+        tool_call: RuntimeToolCall,
+        claim: ToolCallClaim | None,
+        result: ToolResult,
+    ) -> RuntimeCursor:
+        """封装既有的单步 result commit 与 cursor 推进。"""
+        next_index = cursor.next_tool_index + 1
+        if next_index == len(cursor.tool_calls):
+            cursor_after = RuntimeCursor(
+                position="before_model",
+                step_index=cursor.step_index + 1,
+                read_state=_read_state_snapshot(
+                    self.environment.tool_bridge.read_state(activation.session_id)
+                ),
+            )
+        else:
+            cursor_after = cursor.model_copy(
+                update={
+                    "next_tool_index": next_index,
+                    "tool_results": (*cursor.tool_results, result),
+                    "read_state": _read_state_snapshot(
+                        self.environment.tool_bridge.read_state(activation.session_id)
+                    ),
+                }
+            )
+        committed_cursor = commits.commit_tool_result(
+            RuntimeToolResultCommit(
+                tool_call=tool_call,
+                claim=claim,
+                result=result,
+                message_delta=(_tool_result_message(result),),
+                cursor_after=cursor_after,
+            )
+        )
+        if committed_cursor != cursor_after:
+            raise IrisRunConflictError("tool-result commit 返回了意外 cursor")
+        return committed_cursor
 
     async def _execute_model_step(
         self,
@@ -535,6 +774,23 @@ class AgentRuntime:
             assistant_message=cursor.assistant_message,
             suspension=suspended.interaction,
         )
+
+
+def _parallel_tool_window(
+    *,
+    start: int,
+    calls: Sequence[PreparedToolCall],
+    tool_bridge: ToolBridge,
+) -> tuple[tuple[int, PreparedToolCall], ...]:
+    """返回从 start 开始、至多八条的连续并发候选。"""
+    window: list[tuple[int, PreparedToolCall]] = []
+    stop = min(len(calls), start + _MAX_PARALLEL_TOOL_CALLS)
+    for index in range(start, stop):
+        prepared = calls[index]
+        if not tool_bridge._is_parallel_candidate(prepared):
+            break
+        window.append((index, prepared))
+    return tuple(window) if len(window) >= 2 else ()
 
 
 def _validate_interaction_projection(

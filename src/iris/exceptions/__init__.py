@@ -8,6 +8,8 @@ from .exceptions import (
     IrisAgentExecutionError,
     IrisAPIConnectionError,
     IrisAuthenticationError,
+    # Runtime control
+    IrisCancellationRequestedError,
     # Core / Config
     IrisConfigError,
     IrisContextError,
@@ -47,6 +49,7 @@ from .exceptions import (
 
 __all__ = [
     "IrisError",
+    "IrisCancellationRequestedError",
     "IrisConfigError",
     "IrisContextError",
     "IrisExecutionError",

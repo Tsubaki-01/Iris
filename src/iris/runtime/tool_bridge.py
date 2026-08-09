@@ -69,9 +69,7 @@ class ToolBridge:
             metadata=metadata,
             cancellation=cancellation,
         )
-        active_calls = [
-            call for call in assistant_message.tool_calls if call.name in active_names
-        ]
+        active_calls = [call for call in assistant_message.tool_calls if call.name in active_names]
         prepared = iter(self.tool_executor.prepare_many(active_calls, context).calls)
         calls: list[PreparedToolCall] = []
         for call in assistant_message.tool_calls:
@@ -96,6 +94,24 @@ class ToolBridge:
             self._read_states.pop(session_id, None)
             return
         self._read_states[session_id] = ReadFileState.model_validate(state)
+
+    def _is_parallel_candidate(self, prepared: PreparedToolCall) -> bool:
+        """委托 executor 判断预检调用能否进入并发窗口。"""
+        return self.tool_executor._is_read_only_concurrency_safe(prepared)
+
+    def _initialize_parallel_read_state(
+        self,
+        session_id: str,
+        prepared_calls: Sequence[PreparedToolCall],
+    ) -> None:
+        """在并发 child 创建前初始化唯一的文件读取状态。"""
+        if self._read_states.get(session_id) is not None:
+            return
+        if any(
+            prepared.tool is not None and prepared.tool.definition.group == "file"
+            for prepared in prepared_calls
+        ):
+            self._read_states[session_id] = ReadFileState()
 
     async def execute_prepared(
         self,

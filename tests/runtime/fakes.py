@@ -50,9 +50,9 @@ class MutableCancellationSignal:
     def raise_if_requested(self) -> None:
         """在 signal 已置位时抛出协作式取消异常。"""
         if self.requested:
-            from iris.tools import CancellationRequestedError
+            from iris.exceptions import IrisCancellationRequestedError
 
-            raise CancellationRequestedError("测试 activation 已取消")
+            raise IrisCancellationRequestedError("测试 activation 已取消")
 
 
 class FakeRuntimeCommitPort:
@@ -130,12 +130,12 @@ class FakeRuntimeCommitPort:
     def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
         """对 exact tool subject 提交幂等 claim。"""
         self._record("claim_tool_call")
-        self._require_current_tool_call(call)
         existing = self.claims.get(call.tool_call_id)
         if existing is not None:
             if existing[0] != call:
                 raise IrisRunConflictError("fake port tool claim identity 已变化")
             return existing[1]
+        self._require_claimable_tool_call(call)
         claim = ToolCallClaim(
             run_id=call.run_id,
             activation_id=call.activation_id,
@@ -342,6 +342,11 @@ class FakeRuntimeCommitPort:
         )
 
     def _require_current_tool_call(self, call: RuntimeToolCall) -> None:
+        self._require_claimable_tool_call(call)
+        if call.ordinal != self.cursor.next_tool_index + 1:
+            raise IrisRunConflictError("fake port tool fact 跳过或改变当前 cursor 调用")
+
+    def _require_claimable_tool_call(self, call: RuntimeToolCall) -> None:
         if (
             call.run_id != self.activation.run_id
             or call.activation_id != self.activation.activation_id
@@ -349,14 +354,16 @@ class FakeRuntimeCommitPort:
             raise IrisRunConflictError("fake port 收到跨 run/activation tool fact")
         if self.cursor.position != "tool_batch":
             raise IrisRunConflictError("fake port 当前 cursor 不是 tool batch")
-        expected = self.cursor.tool_calls[self.cursor.next_tool_index]
+        index = call.ordinal - 1
+        if index < self.cursor.next_tool_index or index >= len(self.cursor.tool_calls):
+            raise IrisRunConflictError("fake port tool claim 不在未提交 batch 后缀中")
+        expected = self.cursor.tool_calls[index]
         if (
             call.step_index != self.cursor.step_index
-            or call.ordinal != self.cursor.next_tool_index + 1
             or call.tool_call_id != expected.id
             or call.tool_name != expected.name
         ):
-            raise IrisRunConflictError("fake port tool fact 跳过或改变当前 cursor 调用")
+            raise IrisRunConflictError("fake port tool fact 改变 cursor exact subject")
         prepared = self._prepared_calls.get(call.tool_call_id)
         if prepared is not None and (
             call.step_index != prepared.step_index

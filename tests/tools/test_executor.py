@@ -7,10 +7,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from iris.exceptions import IrisCancellationRequestedError
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
     BaseTool,
-    CancellationRequestedError,
     PermissionDecision,
     PermissionEffect,
     ToolDefinition,
@@ -47,13 +47,13 @@ async def test_callable_tool_does_not_normalize_cooperative_cancellation(
     tmp_path: Path,
 ) -> None:
     def cancelled() -> str:
-        raise CancellationRequestedError("activation 已取消")
+        raise IrisCancellationRequestedError("activation 已取消")
 
     registry = ToolRegistry()
     registry.register_function(cancelled, description="触发取消")
     executor = ToolExecutor(registry)
 
-    with pytest.raises(CancellationRequestedError):
+    with pytest.raises(IrisCancellationRequestedError):
         await executor.execute_one(
             ToolUseBlock(id="cancel-1", name="cancelled", input={}),
             ToolExecutionContext(workspace_root=tmp_path),
