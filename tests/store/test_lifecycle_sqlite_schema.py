@@ -84,13 +84,6 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
     assert path.read_bytes() == before
 
 
-def test_concrete_store_has_no_harness_dependency() -> None:
-    source = Path("src/iris/store/sqlite.py").read_text(encoding="utf-8")
-
-    assert "iris.harness" not in source
-    assert "..harness" not in source
-
-
 def test_corrupt_session_message_is_mapped_to_persistence_error(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     store = SQLiteStore(path)

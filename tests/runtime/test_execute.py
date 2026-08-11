@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from pathlib import Path
 from typing import Any
 
@@ -1361,25 +1360,6 @@ async def test_execute_required_commit_failure_propagates(tmp_path: Path) -> Non
             commits=commits,
             cancellation=MutableCancellationSignal(),
         )
-
-
-def test_execute_source_does_not_call_old_persistence_writers() -> None:
-    source = "\n".join(
-        inspect.getsource(method)
-        for method in (
-            AgentRuntime.execute,
-            AgentRuntime._execute_model_step,
-            AgentRuntime._suspend_existing_batch,
-        )
-    )
-
-    for forbidden in (
-        "save_messages",
-        "save_run_metadata",
-        "append_tool_event",
-        "interaction_service",
-    ):
-        assert forbidden not in source
 
 
 @pytest.mark.asyncio

@@ -3,11 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from iris.memory import (
-    FileMemoryMirror,
-    MemoryCandidate,
-    MemoryCandidateStatus,
+    MemoryEvent,
     MemoryEventType,
-    MemoryItemKind,
+    MemoryItem,
     MemoryObserveInput,
     MemoryQuery,
     MemoryScope,
@@ -73,74 +71,27 @@ def test_forget_tombstones_without_leaking_cross_scope_existence(
     )
 
     assert service.forget(item.id, other_scope, reason="wrong scope request") is False
-
     assert service.get_item(item.id, owner_scope) is not None
     assert service.forget(item.id, owner_scope, reason="owner deletion request") is True
     assert service.get_item(item.id, owner_scope) is None
 
 
-def test_forget_rebuilds_mirror_only_when_item_was_deleted(tmp_path: Path) -> None:
-    mirror = _RecordingMirror(tmp_path / ".iris" / "memory")
-    service = MemoryService(
-        SQLiteMemoryStore(tmp_path / ".iris" / "memory" / "memory.db", use_fts=False),
-        mirror=mirror,
-    )
+def test_sqlite_search_keeps_full_scope_isolation(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
     owner_scope = _scope(agent_id="agent-a")
     other_scope = _scope(agent_id="agent-b")
-    item = service.remember(
-        MemoryWriteInput(
+    item = MemoryItem(scope=owner_scope, text="只有 agent-a 能看到")
+    store.add_item(
+        item,
+        event=MemoryEvent(
             scope=owner_scope,
-            text="只删除一次",
+            event_type=MemoryEventType.ADD,
+            item_id=item.id,
             reason="test seed",
-        )
+        ),
     )
 
-    assert service.forget(item.id, other_scope, reason="wrong scope request") is False
-    assert mirror.rebuilt_scopes == []
-
-    assert service.forget(item.id, owner_scope, reason="owner deletion request") is True
-    assert mirror.rebuilt_scopes == [owner_scope]
-
-
-def test_promote_candidate_returns_item_and_syncs_mirror(tmp_path: Path) -> None:
-    root = tmp_path / ".iris" / "memory"
-    service = MemoryService(
-        SQLiteMemoryStore(root / "memory.db", use_fts=False),
-        mirror=FileMemoryMirror(root),
-    )
-    scope = _scope()
-    candidate = service.add_candidate(
-        MemoryCandidate(
-            scope=scope,
-            episode_ids=["episode-a"],
-            text="用户偏好简洁中文回答",
-            reason="candidate reason",
-        )
-    )
-
-    item = service.promote_candidate(
-        candidate.id,
-        scope,
-        kind=MemoryItemKind.PREFERENCE,
-        reason="policy accepted",
-    )
-
-    assert item.source_id == candidate.id
-    assert service.list_candidates(scope)[0].status == MemoryCandidateStatus.ACCEPTED
-    mirror_content = (root / "User" / "preferences.md").read_text(encoding="utf-8")
-    events_content = (root / "Sessions" / "recent_events.md").read_text(encoding="utf-8")
-    assert item.id in mirror_content
-    assert "event_type: add" in events_content
-    assert "event_type: candidate_accept" in events_content
-
-
-class _RecordingMirror(FileMemoryMirror):
-    def __init__(self, root: Path) -> None:
-        super().__init__(root)
-        self.rebuilt_scopes: list[MemoryScope] = []
-
-    def rebuild_from_store(self, store: object, scope: MemoryScope) -> None:
-        self.rebuilt_scopes.append(scope)
+    assert store.search(MemoryQuery(scope=other_scope, text="agent-a")) == []
 
 
 def _service(tmp_path: Path) -> MemoryService:

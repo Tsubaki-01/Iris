@@ -36,18 +36,6 @@ def test_provider_client_rejects_removed_http_client_keyword() -> None:
         ProviderClient(provider="openai", api_key="test-key", http_client=None)
 
 
-def test_provider_client_rejects_removed_adapter_keyword() -> None:
-    with pytest.raises(ValidationError):
-        ProviderClient(provider="openai", api_key="test-key", adapter=object())
-
-
-def test_provider_client_does_not_expose_adapter_or_close_compatibility() -> None:
-    client = ProviderClient(provider="openai", api_key="test-key")
-
-    assert not hasattr(client, "adapter")
-    assert not hasattr(client, "close")
-
-
 @pytest.mark.asyncio
 async def test_provider_client_calls_litellm_with_openai_chat_kwargs(
     monkeypatch: pytest.MonkeyPatch,

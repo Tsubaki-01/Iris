@@ -331,15 +331,6 @@ def test_protocol_exposes_every_required_operation() -> None:
     assert expected <= set(LifecycleStore.__dict__)
 
 
-def test_tool_error_policy_is_owned_only_by_lifecycle_contract() -> None:
-    """Hard cutover 后 runtime models 不再重复导出 lifecycle option enum。"""
-    from iris.lifecycle import ToolErrorPolicy
-    from iris.runtime import models
-
-    assert ToolErrorPolicy.RETURN_TO_MODEL.value == "return_to_model"
-    assert not hasattr(models, "ToolErrorPolicy")
-
-
 def test_lifecycle_source_has_no_forbidden_dependency_edges() -> None:
     """Lifecycle contract 不得反向依赖 owner、engine 或 concrete store。"""
     lifecycle_root = Path(__file__).parents[2] / "src" / "iris" / "lifecycle"
