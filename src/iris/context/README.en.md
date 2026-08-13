@@ -126,10 +126,8 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Slot/section contracts | `models.py` | `tests/context/test_context_models.py` |
-| YAML and template paths | `config.py` | `tests/context/test_context_config.py` |
-| Ordering, roles, limits | `builder.py` | `tests/context/test_context_builder.py` |
-| XML/Jinja2 rendering | `renderer.py` | `tests/context/test_context_templates.py` |
+| Slot/section contracts, ordering, roles, limits, and XML rendering | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
+| YAML, template paths, and Jinja2 rendering | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
 
 ```bash
 uv run pytest tests/context

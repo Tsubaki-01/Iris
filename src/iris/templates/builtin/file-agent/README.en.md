@@ -20,6 +20,5 @@ Change `model.provider` and `model.name` to choose another model. Add `file.writ
 only when writes are required, and set `session.backend: sqlite` when durable history and HITL
 recovery are required.
 
-```bash
-uv run pytest tests/templates/test_scaffold.py
-```
+There are currently no dedicated template tests under `tests/`. Add scaffold behavior coverage
+when changing this template.

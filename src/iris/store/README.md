@@ -84,11 +84,12 @@ model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durabl
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| schema、target row projection 和 CAS transaction | `sqlite.py` | `test_lifecycle_sqlite_schema.py`, `test_lifecycle_sqlite_incremental.py`, `test_lifecycle_sqlite_faults.py` |
-| 公开导出 | `__init__.py` | store contract/import tests |
+| schema 与兼容性校验 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
+| SQLite transaction 与故障回滚 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
+| 公开导出 | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |
 
 ```bash
-uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_incremental.py tests/store/test_lifecycle_sqlite_faults.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```

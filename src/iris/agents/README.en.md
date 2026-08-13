@@ -103,9 +103,8 @@ database, or an ORM.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| YAML fields/defaults/validation | `config/base.py` | `tests/agents/test_agent_config.py` |
+| `agent.yaml` loading and relative context paths | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
-| Harness/runtime consumption and paths | `../harness/runner.py`, `../runtime/factory.py` | composition/factory tests |
 
 ```bash
 uv run pytest tests/agents tests/runtime/test_factory.py

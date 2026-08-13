@@ -121,12 +121,11 @@ schema，由 LiteLLM chat bridge 处理。这是 active path 的明确限制。
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| provider 注册、路由与密钥优先级 | `factory.py` | `tests/providers/test_provider_factory.py` |
 | LiteLLM kwargs、响应与异常映射 | `client.py` | `tests/test_provider_client.py` |
 | Chat message/tool 映射 | `openai.py` | `tests/test_provider_client.py` |
-| 环境变量与配置归一化 | `../config.py` | `tests/test_config.py` |
+| provider 注册、路由、密钥优先级与环境配置 | `factory.py`, `../config.py` | 当前无专用测试 |
 
 ```bash
-uv run pytest tests/providers tests/test_provider_client.py tests/test_provider_exports.py tests/test_config.py
-uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
+uv run pytest tests/test_provider_client.py
+uv run ruff check src/iris/providers tests/test_provider_client.py
 ```

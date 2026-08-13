@@ -92,11 +92,12 @@ recovery protocol and cannot be inferred from current multiple-claim support.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| Schema, target row projection, CAS transactions | `sqlite.py` | schema, incremental-write, and fault-injection store tests |
-| Public exports | `__init__.py` | store contract/import tests |
+| Schema and compatibility validation | `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
+| SQLite transactions and fault rollback | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
+| Public exports | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |
 
 ```bash
-uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_incremental.py tests/store/test_lifecycle_sqlite_faults.py
+uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_lifecycle_sqlite_schema.py tests/store/test_lifecycle_sqlite_faults.py
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```

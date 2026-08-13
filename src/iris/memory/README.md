@@ -169,15 +169,12 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| scope、条目、候选与事件约束 | `models.py` | `tests/memory/test_models.py` |
-| SDK 生命周期与审计 | `service.py` | `tests/memory/test_service.py` |
-| SQLite schema、隔离、FTS 与事务 | `sqlite.py` | `tests/memory/test_sqlite_store.py` |
-| 候选提取/分类/晋升 | `orchestrator.py` | `tests/memory/test_orchestrator.py` |
-| 文件投影 | `mirror.py` | `tests/memory/test_mirror.py` |
-| 只读工具与 access policy | `tools.py` | `tests/memory/test_tools.py` |
-| runtime 显式注入 | `../runtime/memory_context.py` | `tests/runtime/test_memory_context.py` |
+| SDK 生命周期、审计、scope 隔离、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
+
+`orchestrator.py`、`mirror.py` 和 `tools.py` 当前没有独立测试文件。
 
 ```bash
-uv run pytest tests/memory tests/runtime/test_memory_context.py
-uv run ruff check src/iris/memory tests/memory
+uv run pytest tests/memory/test_service.py tests/runtime/test_execute.py
+uv run ruff check src/iris/memory tests/memory/test_service.py tests/runtime/test_execute.py
 ```

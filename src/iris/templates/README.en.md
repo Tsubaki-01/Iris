@@ -29,7 +29,9 @@ contains configuration and documentation only; it does not implement an agent lo
 Templates live under `src/iris/templates/builtin/` and are included by
 `pyproject.toml` package-data pattern `templates/builtin/*/*`.
 
+There are currently no dedicated template tests under `tests/`. Add scaffold behavior coverage
+when adding or changing a template.
+
 ```bash
-uv run pytest tests/templates/test_scaffold.py
-uv run ruff check src/iris/templates tests/templates
+uv run ruff check src/iris/templates
 ```

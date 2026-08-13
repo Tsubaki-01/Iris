@@ -38,7 +38,7 @@ no interaction store or compatibility adapter.
 ## Verification
 
 ```bash
-uv run pytest tests/hitl tests/harness/test_runner_resume.py
-uv run ruff check src/iris/hitl tests/hitl
+uv run pytest tests/harness/test_runner_resume.py tests/runtime/test_execute.py tests/tools/test_executor_preflight.py tests/tools/test_human_ask_tool.py
+uv run ruff check src/iris/hitl tests/harness/test_runner_resume.py tests/runtime/test_execute.py tests/tools/test_executor_preflight.py tests/tools/test_human_ask_tool.py
 uv run mypy src/iris/hitl
 ```

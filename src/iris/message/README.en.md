@@ -92,11 +92,11 @@ persist history, or manage context budgets.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Blocks, factories, and conversations | `message.py` | `tests/test_message_models.py` |
-| Request/response models | `llm.py` | `tests/test_message_models.py`, `tests/test_provider_client.py` |
+| Message construction and conversation/request assembly | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
+| Request/response models and `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | Provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
 
 ```bash
-uv run pytest tests/test_message_models.py tests/test_provider_client.py
-uv run ruff check src/iris/message tests/test_message_models.py
+uv run pytest tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run ruff check src/iris/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```

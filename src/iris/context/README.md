@@ -383,10 +383,8 @@ class ContextTemplateRenderer:
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| slot/section 数据约束 | `models.py` | `tests/context/test_context_models.py` |
-| YAML 与模板路径解析 | `config.py` | `tests/context/test_context_config.py` |
-| section 顺序、角色与字符上限 | `builder.py` | `tests/context/test_context_builder.py` |
-| XML/Jinja2 渲染 | `renderer.py` | `tests/context/test_context_templates.py` |
+| slot/section 约束、顺序、角色、字符上限与 XML 渲染 | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
+| YAML、模板路径与 Jinja2 渲染 | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
 
 ```bash
 uv run pytest tests/context

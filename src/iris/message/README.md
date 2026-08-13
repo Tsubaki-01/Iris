@@ -109,11 +109,11 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| 消息块、工厂方法与会话行为 | `message.py` | `tests/test_message_models.py` |
-| 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_message_models.py`, `tests/test_provider_client.py` |
+| 消息构造与 conversation/request 装配 | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
+| 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
 
 ```bash
-uv run pytest tests/test_message_models.py tests/test_provider_client.py
-uv run ruff check src/iris/message tests/test_message_models.py
+uv run pytest tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run ruff check src/iris/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```

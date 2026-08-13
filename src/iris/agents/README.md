@@ -210,9 +210,8 @@ runner = AgentRunner.from_config_path("agent.yaml")
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| YAML 字段、默认值与校验 | `config/base.py` | `tests/agents/test_agent_config.py` |
+| `agent.yaml` 加载与相对 context 路径 | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
-| harness/runtime 配置消费与路径解析 | `../harness/runner.py`, `../runtime/factory.py` | composition/factory tests |
 
 ```bash
 uv run pytest tests/agents tests/runtime/test_factory.py

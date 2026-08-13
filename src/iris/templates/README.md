@@ -66,7 +66,8 @@ sdist/wheel，并至少包含：
 `pyproject.toml` 通过 `iris = ["templates/builtin/*/*"]` 打包模板文件。新增或修改模板时，
 应验证 scaffold 结果能被 `load_agent_config()` 加载且工具注册成功。
 
+当前 `tests/` 中没有 templates 专用测试文件；新增或修改模板时应同步补充 scaffold 行为测试。
+
 ```bash
-uv run pytest tests/templates/test_scaffold.py
-uv run ruff check src/iris/templates tests/templates
+uv run ruff check src/iris/templates
 ```

@@ -40,8 +40,4 @@ registry = build_tool_registry(config.tools)
 - 在 `tools.builtin` 中增加 `file.write` 或 `file.edit` 启用写入类工具。
 - 将 `session.backend` 改为 `sqlite` 启用轻量本地 session。
 
-修改配置后，可在 Iris 仓库根目录运行：
-
-```bash
-uv run pytest tests/templates/test_scaffold.py
-```
+当前 `tests/` 中没有模板专用测试；修改此模板时应同步补充 scaffold 行为测试。

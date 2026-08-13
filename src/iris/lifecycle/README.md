@@ -50,7 +50,7 @@ cancellation/finish/recover commands，以及 run/session/interaction/checkpoint
 ## 验证
 
 ```bash
-uv run pytest tests/harness/test_lifecycle_models.py tests/store/test_lifecycle_store_contract.py
+uv run pytest tests/store tests/harness
 uv run ruff check src/iris/lifecycle
 uv run mypy src/iris/lifecycle
 ```

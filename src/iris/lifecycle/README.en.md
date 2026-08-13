@@ -47,7 +47,7 @@ importable from `iris.lifecycle`. The complete-run facade exists only in `iris.h
 ## Verification
 
 ```bash
-uv run pytest tests/harness/test_lifecycle_models.py tests/store/test_lifecycle_store_contract.py
+uv run pytest tests/store tests/harness
 uv run ruff check src/iris/lifecycle
 uv run mypy src/iris/lifecycle
 ```

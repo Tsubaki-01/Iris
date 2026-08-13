@@ -100,12 +100,11 @@ all providers on this LiteLLM bridge.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Registry, routing, and key precedence | `factory.py` | `tests/providers/test_provider_factory.py` |
 | LiteLLM kwargs, response, and errors | `client.py` | `tests/test_provider_client.py` |
 | Chat mapping | `openai.py` | `tests/test_provider_client.py` |
-| Environment normalization | `../config.py` | `tests/test_config.py` |
+| Registry, routing, key precedence, and environment configuration | `factory.py`, `../config.py` | No dedicated tests yet |
 
 ```bash
-uv run pytest tests/providers tests/test_provider_client.py tests/test_provider_exports.py tests/test_config.py
-uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
+uv run pytest tests/test_provider_client.py
+uv run ruff check src/iris/providers tests/test_provider_client.py
 ```

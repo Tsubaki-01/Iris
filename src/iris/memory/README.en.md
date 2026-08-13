@@ -146,15 +146,12 @@ failures as `IrisMemoryError`.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Models and isolation | `models.py` | `tests/memory/test_models.py` |
-| SDK lifecycle and audit | `service.py` | `tests/memory/test_service.py` |
-| SQLite, FTS, and transactions | `sqlite.py` | `tests/memory/test_sqlite_store.py` |
-| Candidate orchestration | `orchestrator.py` | `tests/memory/test_orchestrator.py` |
-| File projection | `mirror.py` | `tests/memory/test_mirror.py` |
-| Read-only tools | `tools.py` | `tests/memory/test_tools.py` |
-| Runtime injection | `../runtime/memory_context.py` | `tests/runtime/test_memory_context.py` |
+| SDK lifecycle, audit, scope isolation, SQLite search, and context building | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| Runtime injection | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
+
+`orchestrator.py`, `mirror.py`, and `tools.py` currently have no dedicated test files.
 
 ```bash
-uv run pytest tests/memory tests/runtime/test_memory_context.py
-uv run ruff check src/iris/memory tests/memory
+uv run pytest tests/memory/test_service.py tests/runtime/test_execute.py
+uv run ruff check src/iris/memory tests/memory/test_service.py tests/runtime/test_execute.py
 ```

@@ -161,10 +161,12 @@ MCP implementations merely because `ToolCapability.MCP` exists.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Models and callable/schema adaptation | `base.py`, `schema.py` | schema/executor tests |
-| Registry and deferred search | `registry.py`, `discovery.py` | registry/discovery tests |
-| Lifecycle and HITL preflight | `executor.py`, `permissions.py` | executor/preflight tests |
-| File safety | `builtin/file.py` | file tool/registry tests |
+| Models, callable/schema adaptation, and registration | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
+| Lifecycle and HITL preflight | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
+| File tools, artifacts, and workspace safety | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
+| Circuit breaker | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
+
+Deferred search in `discovery.py` currently has no dedicated test file.
 
 ```bash
 uv run pytest tests/tools

@@ -359,10 +359,12 @@ to_openai_responses_tool_schema, tool
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| 基础模型与 callable 适配 | `base.py`, `schema.py` | `tests/tools/test_schema.py`, `test_executor.py` |
-| 注册、过滤与 deferred 检索 | `registry.py`, `discovery.py` | `test_registry.py`, `test_discovery.py` |
-| 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `test_executor.py`, `test_executor_preflight.py` |
-| 文件工具安全边界 | `builtin/file.py` | `test_file_tools.py`, `test_file_registry.py` |
+| 基础模型、callable/schema 适配与注册 | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
+| 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
+| 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
+| 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
+
+`discovery.py` 的 deferred 检索当前没有独立测试文件。
 
 ```bash
 uv run pytest tests/tools
