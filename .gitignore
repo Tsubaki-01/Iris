@@ -261,3 +261,6 @@ out/
 coverage/
 /.worktrees/
 docs/superpowers/
+
+# Example runtime state
+examples/**/.iris/
