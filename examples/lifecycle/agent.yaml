@@ -1,0 +1,27 @@
+name: iris-lifecycle-example
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  max_tokens: 512
+  timeout: 90
+
+system: |
+  你是 Iris lifecycle 示例 Agent。严格按用户要求调用 ask_question 或
+  wait_for_seconds；得到工具结果或人工回答后简洁报告，不要重复调用工具。
+
+tools:
+  builtin:
+    - human.ask
+  python:
+    functions:
+      - examples.lifecycle.tools:wait_for_seconds
+
+permissions:
+  workspace: .
+  writes: allow
+
+session:
+  backend: sqlite
+  path: .iris/lifecycle.db

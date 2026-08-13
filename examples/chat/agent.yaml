@@ -1,0 +1,28 @@
+name: iris-example-chat
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0.2
+  max_tokens: 1024
+  timeout: 60
+
+context:
+  path: context.yaml
+
+tools:
+  builtin:
+    - file.read
+    - file.list
+    - file.grep
+    - file.write
+    - file.edit
+    - human.ask
+
+permissions:
+  workspace: workspace
+  writes: confirm
+
+session:
+  backend: sqlite
+  path: .iris/session.db

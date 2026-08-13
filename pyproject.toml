@@ -32,7 +32,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "tests/runtime"]
+pythonpath = [".", "src", "tests/runtime"]
 addopts = ["--import-mode=importlib"]
 
 [tool.ruff]
