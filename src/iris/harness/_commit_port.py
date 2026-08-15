@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 
 from ..exceptions import (
@@ -43,6 +44,8 @@ from ..runtime import (
     ToolCallClaim,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class StoreRuntimeCommitPort(RuntimeCommitPort):
     """把一个 activation 的 engine commits 映射到 lifecycle aggregate。"""
@@ -55,6 +58,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         activation_id: str,
         clock: Callable[[], datetime],
         event_sink: list[RunEvent],
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
         interaction_service: HumanInteractionService | None = None,
     ) -> None:
         if run.phase is not RunPhase.ACTIVE or run.current_activation_id != activation_id:
@@ -69,6 +73,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._activation_id = activation_id
         self._clock = clock
         self._event_sink = event_sink
+        self._durable_event_callback = durable_event_callback
         self._interaction_service = interaction_service or HumanInteractionService()
         self._event_keys = {(event.run_id, event.sequence) for event in event_sink}
         self._reusable_model_reservation = (
@@ -187,11 +192,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 raise
             previous_sequence = self._run.last_event_sequence
             self._run = current
-            for event in self._store.list_events(current.run_id, previous_sequence):
-                key = (event.run_id, event.sequence)
-                if key not in self._event_keys:
-                    self._event_keys.add(key)
-                    self._event_sink.append(event)
+            self._record_events(self._store.list_events(current.run_id, previous_sequence))
             raise IrisCancellationRequestedError("activation 已请求取消") from exc
         self._accept(stored)
         claimed = self._tool_record(call.tool_call_id)
@@ -318,11 +319,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             self._checkpoint = commit.checkpoint
         if commit.session is not None:
             self._session_revision = commit.session.revision
-        for event in commit.events:
-            key = (event.run_id, event.sequence)
-            if key not in self._event_keys:
-                self._event_keys.add(key)
-                self._event_sink.append(event)
+        self._record_events(commit.events)
 
     def _require_writable(self) -> None:
         if not self._writable:
@@ -350,15 +347,31 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         ):
             raise IrisRunConflictError("activation 期间出现非 cancellation mutation")
         self._run = current
+        self._record_events(
+            self._store.list_events(
+                current.run_id,
+                self._run.last_event_sequence - 1,
+            )
+        )
+
+    def _record_events(self, events: Sequence[RunEvent]) -> None:
+        """记录并同步 relay 新的 durable events。"""
         self._event_keys.update((event.run_id, event.sequence) for event in self._event_sink)
-        for event in self._store.list_events(
-            current.run_id,
-            self._run.last_event_sequence - 1,
-        ):
+        for event in events:
             key = (event.run_id, event.sequence)
-            if key not in self._event_keys:
-                self._event_keys.add(key)
-                self._event_sink.append(event)
+            if key in self._event_keys:
+                continue
+            self._event_keys.add(key)
+            self._event_sink.append(event)
+            if self._durable_event_callback is None:
+                continue
+            try:
+                self._durable_event_callback(event)
+            except Exception:
+                logger.exception(
+                    "durable event callback 处理失败",
+                    extra={"run_id": event.run_id, "sequence": event.sequence},
+                )
 
     def _require_cursor(self, cursor: RuntimeCursor) -> None:
         if RuntimeCursor.model_validate(self._checkpoint.engine_cursor) != cursor:

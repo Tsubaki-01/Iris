@@ -14,6 +14,7 @@ from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
+    RunEvent,
     RunEventKind,
     RunLimits,
     RunStopReason,
@@ -25,6 +26,7 @@ from iris.runtime import (
     RuntimeActivationOutcome,
     RuntimeActivationResult,
     RuntimeCommitPort,
+    RuntimeSteeringPort,
 )
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
@@ -61,8 +63,9 @@ class DeadlineSignalRuntime:
         *,
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None = None,
     ) -> RuntimeActivationResult:
-        del commits
+        del commits, steering
         self.clock.advance(seconds=2)
         cast(Any, cancellation).request_deadline()
         return RuntimeActivationResult(
@@ -122,6 +125,38 @@ async def test_already_expired_start_skips_runtime_and_provider(tmp_path: Path) 
     assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
     assert provider.requests == []
     assert "run-expired" not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_expired_managed_start_returns_without_false_activation_signal(
+    tmp_path: Path,
+) -> None:
+    """Create transaction 已 terminal 时由 task result 证明成功，signal 保持 unset。"""
+    clock = FrozenClock()
+    provider = StaticProvider(text_response("不应调用"))
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=provider),
+        store=store,
+        clock=clock,
+    )
+    activation_started = asyncio.Event()
+    relayed: list[RunEvent] = []
+
+    result = await runner._start_managed(
+        AgentRunRequest(input="过期", run_id="run-managed-expired"),
+        options=AgentRunOptions(
+            limits=RunLimits(deadline_at=clock.now() - timedelta(seconds=1))
+        ),
+        durable_event_callback=relayed.append,
+        activation_started=activation_started,
+    )
+
+    assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
+    assert not activation_started.is_set()
+    assert provider.requests == []
+    assert relayed == store.list_events("run-managed-expired")
+    assert "run-managed-expired" not in runner._active
 
 
 @pytest.mark.asyncio

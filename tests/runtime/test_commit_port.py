@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
 
-from iris.exceptions import IrisCancellationRequestedError, IrisRunConflictError, IrisRunStateError
+from iris.exceptions import (
+    IrisCancellationRequestedError,
+    IrisRunConflictError,
+    IrisRunPersistenceError,
+    IrisRunStateError,
+)
 from iris.harness._commit_port import StoreRuntimeCommitPort
 from iris.lifecycle import (
     AgentRunOptions,
@@ -12,6 +18,7 @@ from iris.lifecycle import (
     CreateRun,
     RequestCancellation,
     RunCheckpoint,
+    RunEvent,
 )
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import RuntimeCursor
@@ -22,7 +29,11 @@ NOW = datetime(2026, 7, 29, tzinfo=UTC)
 FINGERPRINT = "a" * 64
 
 
-def _store_commit_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
+def _store_commit_port(
+    *,
+    event_sink: list[RunEvent] | None = None,
+    durable_event_callback: Callable[[RunEvent], None] | None = None,
+) -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
     store = InMemoryLifecycleStore()
     before = RuntimeCursor(position="before_model", step_index=0)
     created = store.create_run(
@@ -50,7 +61,8 @@ def _store_commit_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort
         run=created.run,
         activation_id="activation_1",
         clock=lambda: NOW,
-        event_sink=[],
+        event_sink=[] if event_sink is None else event_sink,
+        durable_event_callback=durable_event_callback,
     )
     port.reserve_model_step(before)
     tool_use = ToolUseBlock(id="call_1", name="echo", input={"value": "hello"})
@@ -82,16 +94,72 @@ def _store_commit_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort
     return store, port, call
 
 
+def test_store_commit_port_relays_only_new_committed_events() -> None:
+    collected: list[RunEvent] = []
+    relayed: list[RunEvent] = []
+
+    _store_commit_port(event_sink=collected, durable_event_callback=relayed.append)
+
+    assert relayed == collected
+    assert relayed
+    assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)
+
+
+def test_store_commit_port_isolates_durable_event_callback_failure() -> None:
+    collected: list[RunEvent] = []
+    attempted: list[RunEvent] = []
+
+    def raising_callback(event: RunEvent) -> None:
+        attempted.append(event)
+        raise RuntimeError("模拟 durable event callback 失败")
+
+    store, port, _ = _store_commit_port(
+        event_sink=collected,
+        durable_event_callback=raising_callback,
+    )
+
+    assert attempted == collected
+    assert port.run == store.load_run("run_1")
+
+
+def test_store_commit_port_does_not_relay_failed_store_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collected: list[RunEvent] = []
+    relayed: list[RunEvent] = []
+    store, port, call = _store_commit_port(
+        event_sink=collected,
+        durable_event_callback=relayed.append,
+    )
+    before = list(relayed)
+
+    def fail_claim(command: object) -> object:
+        del command
+        raise IrisRunPersistenceError("模拟 store mutation 失败")
+
+    monkeypatch.setattr(store, "claim_tool_call", fail_claim)
+
+    with pytest.raises(IrisRunPersistenceError, match="store mutation"):
+        port.claim_tool_call(call)
+
+    assert relayed == before
+
+
 def test_store_commit_port_maps_same_activation_cancel_claim_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, port, call = _store_commit_port()
+    collected: list[RunEvent] = []
+    relayed: list[RunEvent] = []
+    store, port, call = _store_commit_port(
+        event_sink=collected,
+        durable_event_callback=relayed.append,
+    )
     original_claim = store.claim_tool_call
 
     def cancel_then_claim(command: object) -> object:
         current = store.load_run("run_1")
         assert current is not None
-        store.request_cancellation(
+        cancelled = store.request_cancellation(
             RequestCancellation(
                 run_id="run_1",
                 expected_run_revision=current.revision,
@@ -100,6 +168,11 @@ def test_store_commit_port_maps_same_activation_cancel_claim_race(
                 now=NOW,
             )
         )
+        for event in cancelled.events:
+            key = (event.run_id, event.sequence)
+            if key not in {(item.run_id, item.sequence) for item in collected}:
+                collected.append(event)
+                relayed.append(event)
         return original_claim(command)
 
     monkeypatch.setattr(store, "claim_tool_call", cancel_then_claim)
@@ -110,3 +183,5 @@ def test_store_commit_port_maps_same_activation_cancel_claim_race(
     assert isinstance(error.value.__cause__, IrisRunConflictError | IrisRunStateError)
     assert port.run.cancellation_requested_at == NOW
     assert store.list_tool_calls("run_1")[0].phase == "prepared"
+    assert relayed == collected
+    assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)

@@ -38,6 +38,26 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
 
+## Managed composition hooks (package-private)
+
+`AgentRunner._start_managed()` and `_resume_managed()` are package-private hooks for composition
+inside `iris.harness`; they are not exported from `iris.harness`. They retain complete-run
+semantics: each coroutine still waits for a waiting or terminal `RunResult`, while public
+`start()` / `resume()` delegate with empty hooks. There is no managed `recover()` variant.
+
+A managed call may inject an activation-scoped steering port, a synchronous durable event callback,
+and an `asyncio.Event` admission signal. The signal is set only after the create/resume durable
+mutation succeeds, its events have been relayed, and the exact activation is registered in the
+runner's `_active` map. Immediate terminal outcomes and mutation/registration failures do not emit
+a false signal.
+
+The store-backed commit port and runner-owned create/resolve/begin/cancel/finish mutations relay
+only new durable `RunEvent` values after success, deduplicated by `(run_id, sequence)`. A callback
+exception is logged and cannot roll back the mutation or change the `RunResult`. The public
+`RunEventObserver` contract is unchanged: observers still receive the complete event list
+asynchronously and best-effort after activation settlement. The synchronous callback is not a new
+public observer registry.
+
 ## Cancellation and recovery
 
 Cancellation requested is a durable fact, not a settlement claim. A non-cooperative synchronous

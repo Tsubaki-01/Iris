@@ -13,6 +13,7 @@ from iris.exceptions import IrisRunObservationTimeoutError, IrisRunStateError
 from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunRequest,
+    RunEvent,
     RunEventKind,
     RunPhase,
     RunResult,
@@ -64,6 +65,36 @@ async def test_active_cancel_persists_first_reason_and_interrupts_provider(
     assert [event.kind for event in store.list_events("run-cancel-provider")].count(
         RunEventKind.CANCELLATION_REQUESTED
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_managed_active_cancel_relays_request_and_terminal_live(
+    tmp_path: Path,
+) -> None:
+    """Active managed run 的 cancellation 与 terminal mutation 均同步 relay。"""
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    activation_started = asyncio.Event()
+    relayed: list[RunEvent] = []
+    running = asyncio.create_task(
+        runner._start_managed(
+            AgentRunRequest(input="等待", run_id="run-managed-cancel"),
+            durable_event_callback=relayed.append,
+            activation_started=activation_started,
+        )
+    )
+
+    await asyncio.wait_for(activation_started.wait(), timeout=1)
+    snapshot = runner.request_cancel("run-managed-cancel", reason="用户停止")
+    provider.release.set()
+    result = await running
+
+    assert snapshot.cancellation_reason == "用户停止"
+    assert result.run.stop_reason is RunStopReason.CANCELLED
+    assert RunEventKind.CANCELLATION_REQUESTED in {event.kind for event in relayed}
+    assert relayed[-1].kind is RunEventKind.RUN_TERMINAL
+    assert relayed == store.list_events("run-managed-cancel")
 
 
 @pytest.mark.asyncio

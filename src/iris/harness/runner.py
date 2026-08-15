@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,6 +64,7 @@ from ..runtime import (
     RuntimeCursor,
     RuntimeFactory,
     RuntimeProvider,
+    RuntimeSteeringPort,
 )
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal
@@ -127,6 +128,8 @@ class ActiveActivation:
     deadline_task: asyncio.Task[None] | None = None
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     events: list[RunEvent] = field(default_factory=list)
+    steering: RuntimeSteeringPort | None = None
+    durable_event_callback: Callable[[RunEvent], None] | None = None
 
 
 class AgentRunner:
@@ -217,6 +220,18 @@ class AgentRunner:
         options: AgentRunOptions | None = None,
     ) -> RunResult:
         """原子创建并推进一个 start activation 到 waiting 或 terminal。"""
+        return await self._start_managed(request, options=options)
+
+    async def _start_managed(
+        self,
+        request: AgentRunRequest,
+        *,
+        options: AgentRunOptions | None = None,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """创建 start activation，并注入可选的 process-local managed hooks。"""
         resolved_options = options or AgentRunOptions()
         run_id = request.run_id or f"run_{uuid.uuid4().hex}"
         resolved_request = request.model_copy(update={"run_id": run_id})
@@ -244,8 +259,10 @@ class AgentRunner:
                 now=self._now(),
             )
         )
+        events: list[RunEvent] = []
+        self._record_events(events, created.events, durable_event_callback)
         if created.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(list(created.events))
+            await self._deliver_events(events)
             return self._require_result(run_id)
         if created.checkpoint != checkpoint:
             raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
@@ -254,7 +271,9 @@ class AgentRunner:
             run_id=run_id,
             activation_id=activation_id,
             signal=_MutableCancellationSignal(),
-            events=list(created.events),
+            events=events,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -262,6 +281,7 @@ class AgentRunner:
             activation_id=activation_id,
             clock=self._now,
             event_sink=active.events,
+            durable_event_callback=durable_event_callback,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -274,6 +294,8 @@ class AgentRunner:
             options=resolved_options.runtime,
         )
         self._register(active, created.run.current_activation_id)
+        if activation_started is not None:
+            activation_started.set()
         return await self._run_activation(active, activation=activation, port=port)
 
     async def resume(
@@ -284,6 +306,23 @@ class AgentRunner:
         response: HumanInteractionResponse,
     ) -> RunResult:
         """从 durable waiting checkpoint 创建一个新的 resume activation。"""
+        return await self._resume_managed(
+            run_id,
+            interaction_id=interaction_id,
+            response=response,
+        )
+
+    async def _resume_managed(
+        self,
+        run_id: str,
+        *,
+        interaction_id: str,
+        response: HumanInteractionResponse,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """创建 resume activation，并注入可选的 process-local managed hooks。"""
         normalized_run_id = self._required_id(run_id)
         normalized_interaction_id = self._required_id(interaction_id)
         run = self.store.load_run(normalized_run_id)
@@ -310,7 +349,13 @@ class AgentRunner:
         now = self._now()
         settled = self._settle_waiting_if_due(run, interaction, now=now)
         if settled is not None:
-            await self._deliver_events(self.store.list_events(run.run_id, event_cursor))
+            events: list[RunEvent] = []
+            self._record_events(
+                events,
+                self.store.list_events(run.run_id, event_cursor),
+                durable_event_callback,
+            )
+            await self._deliver_events(events)
             return settled
 
         checkpoint = self.store.load_checkpoint(run.run_id)
@@ -340,10 +385,11 @@ class AgentRunner:
                 )
             )
             run = resolved.run
+            events = []
+            self._record_events(events, resolved.events, durable_event_callback)
             if resolved.interaction is None:
                 raise IrisRunStateError("resolve commit 缺少 interaction")
             interaction = resolved.interaction
-            events = list(resolved.events)
         else:
             events = []
         projection = self.interaction_service.project_response(interaction, response)
@@ -358,7 +404,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(events, begun.events)
+        self._record_events(events, begun.events, durable_event_callback)
         if begun.checkpoint is None:
             raise IrisRunStateError("begin activation 缺少 rebound checkpoint")
         if begun.checkpoint.engine_cursor != checkpoint.engine_cursor:
@@ -373,6 +419,8 @@ class AgentRunner:
             activation_id=activation_id,
             signal=_MutableCancellationSignal(),
             events=events,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -380,6 +428,7 @@ class AgentRunner:
             activation_id=activation_id,
             clock=self._now,
             event_sink=active.events,
+            durable_event_callback=durable_event_callback,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -393,6 +442,8 @@ class AgentRunner:
             interaction_projection=runtime_projection,
         )
         self._register(active, begun.run.current_activation_id)
+        if activation_started is not None:
+            activation_started.set()
         return await self._run_activation(active, activation=activation, port=port)
 
     def request_cancel(
@@ -427,7 +478,11 @@ class AgentRunner:
             run = committed.run
             active = self._active.get(run.run_id)
             if active is not None:
-                self._record_events(active.events, committed.events)
+                self._record_events(
+                    active.events,
+                    committed.events,
+                    active.durable_event_callback,
+                )
         active = self._active.get(run.run_id)
         if (
             active is not None
@@ -814,6 +869,7 @@ class AgentRunner:
                     activation,
                     commits=port,
                     cancellation=active.signal,
+                    steering=active.steering,
                 )
             )
             try:
@@ -886,7 +942,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events)
+        self._record_events(active.events, committed.events, active.durable_event_callback)
 
     def _settle_engine_result(
         self,
@@ -935,7 +991,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events)
+        self._record_events(active.events, committed.events, active.durable_event_callback)
 
     def _finish_unexpected(
         self,
@@ -981,7 +1037,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events)
+        self._record_events(active.events, committed.events, active.durable_event_callback)
 
     def _start_deadline_task(
         self,
@@ -1049,9 +1105,28 @@ class AgentRunner:
         return normalized
 
     @staticmethod
-    def _record_events(target: list[RunEvent], events: tuple[RunEvent, ...]) -> None:
+    def _record_events(
+        target: list[RunEvent],
+        events: Sequence[RunEvent],
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+    ) -> None:
+        """去重收集 durable events，并同步隔离可选 callback。"""
         keys = {(event.run_id, event.sequence) for event in target}
-        target.extend(event for event in events if (event.run_id, event.sequence) not in keys)
+        for event in events:
+            key = (event.run_id, event.sequence)
+            if key in keys:
+                continue
+            keys.add(key)
+            target.append(event)
+            if durable_event_callback is None:
+                continue
+            try:
+                durable_event_callback(event)
+            except Exception:
+                logger.exception(
+                    "durable event callback 处理失败",
+                    extra={"run_id": event.run_id, "sequence": event.sequence},
+                )
 
 
 def _build_lifecycle_store(

@@ -16,6 +16,7 @@ from iris.runtime import (
     RuntimeCommitPort,
     RuntimeEnvironment,
     RuntimeMessageAssembler,
+    RuntimeSteeringPort,
     ToolBridge,
 )
 from iris.tools import CancellationSignal, PermissionPolicy, ToolExecutor, ToolRegistry
@@ -79,6 +80,7 @@ class CountingAgentRuntime(AgentRuntime):
         *,
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None = None,
     ) -> RuntimeActivationResult:
         """记录调用后委托给真实 inner engine。"""
         self.execute_calls += 1
@@ -86,6 +88,7 @@ class CountingAgentRuntime(AgentRuntime):
             activation,
             commits=commits,
             cancellation=cancellation,
+            steering=steering,
         )
 
 
