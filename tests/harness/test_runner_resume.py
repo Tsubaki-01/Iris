@@ -2,23 +2,85 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from iris.exceptions import HITLConflictError, IrisRunRecoveryError
+from iris.exceptions import HITLConflictError, IrisRunConflictError, IrisRunRecoveryError
 from iris.harness import AgentRunner
 from iris.hitl import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from iris.lifecycle import AgentRunRequest, RunPhase, RunStopReason
+from iris.lifecycle import AgentRunRequest, RunEvent, RunEventKind, RunPhase, RunStopReason
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
-from iris.store import SQLiteStore
+from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import AskQuestionTool, ToolCapability, ToolRegistry
 
-from .fakes import StaticProvider, build_runtime, text_response, tool_response
+from .fakes import BlockingProvider, StaticProvider, build_runtime, text_response, tool_response
+
+
+@pytest.mark.asyncio
+async def test_managed_resume_signals_after_begin_and_relays_live_events(
+    tmp_path: Path,
+) -> None:
+    """Managed resume 在 resolve/begin/register 后早于 resumed provider 返回。"""
+    def write(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write,
+        description="写入",
+        capabilities={ToolCapability.WRITE},
+    )
+    store = InMemoryLifecycleStore()
+    waiting = await AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="write-1", name="write", input={"value": "x"}))
+            ),
+        ),
+        store=store,
+    ).start(AgentRunRequest(input="写入", run_id="run-managed-resume"))
+    assert waiting.pending_interaction is not None
+    before_sequence = waiting.run.last_event_sequence
+    provider = BlockingProvider(text_response("完成"))
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry, provider=provider),
+        store=store,
+    )
+    activation_started = asyncio.Event()
+    relayed: list[RunEvent] = []
+    running = asyncio.create_task(
+        runner._resume_managed(
+            "run-managed-resume",
+            interaction_id=waiting.pending_interaction.interaction_id,
+            response=PermissionInteractionResponse(decision="approve"),
+            durable_event_callback=relayed.append,
+            activation_started=activation_started,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(activation_started.wait(), timeout=1)
+        active = store.load_run("run-managed-resume")
+        assert active is not None and active.phase is RunPhase.ACTIVE
+        assert "run-managed-resume" in runner._active
+        assert not running.done()
+        await asyncio.wait_for(provider.started.wait(), timeout=1)
+    finally:
+        provider.release.set()
+    result = await running
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert relayed == store.list_events("run-managed-resume", before_sequence)
+    assert RunEventKind.INTERACTION_RESOLVED in {event.kind for event in relayed}
+    assert RunEventKind.ACTIVATION_STARTED in {event.kind for event in relayed}
 
 
 @pytest.mark.asyncio
@@ -71,14 +133,20 @@ async def test_new_runner_and_store_resume_same_run_without_repeating_effect(
     assert result.run.run_id == "run-1"
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert effects == ["x"]
+    retry_started = asyncio.Event()
+    retry_relayed: list[RunEvent] = []
     assert (
-        await second.resume(
+        await second._resume_managed(
             "run-1",
             interaction_id=waiting.pending_interaction.interaction_id,
             response=response,
+            durable_event_callback=retry_relayed.append,
+            activation_started=retry_started,
         )
         == result
     )
+    assert not retry_started.is_set()
+    assert retry_relayed == []
     assert effects == ["x"]
     with pytest.raises(HITLConflictError):
         await second.resume(
@@ -86,6 +154,59 @@ async def test_new_runner_and_store_resume_same_run_without_repeating_effect(
             interaction_id=waiting.pending_interaction.interaction_id,
             response=PermissionInteractionResponse(decision="reject"),
         )
+
+
+@pytest.mark.asyncio
+async def test_managed_resume_begin_failure_leaves_signal_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve 成功但 begin mutation 失败时只 relay durable resolve，不发布 admission。"""
+    def write(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write,
+        description="写入",
+        capabilities={ToolCapability.WRITE},
+    )
+    store = InMemoryLifecycleStore()
+    waiting = await AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="write-1", name="write", input={"value": "x"}))
+            ),
+        ),
+        store=store,
+    ).start(AgentRunRequest(input="写入", run_id="run-resume-begin-failure"))
+    assert waiting.pending_interaction is not None
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry),
+        store=store,
+    )
+    activation_started = asyncio.Event()
+    relayed: list[RunEvent] = []
+
+    def fail_begin(command: object) -> object:
+        del command
+        raise IrisRunConflictError("模拟 resume begin conflict")
+
+    monkeypatch.setattr(store, "resume_waiting_run", fail_begin)
+
+    with pytest.raises(IrisRunConflictError, match="begin conflict"):
+        await runner._resume_managed(
+            "run-resume-begin-failure",
+            interaction_id=waiting.pending_interaction.interaction_id,
+            response=PermissionInteractionResponse(decision="approve"),
+            durable_event_callback=relayed.append,
+            activation_started=activation_started,
+        )
+
+    assert not activation_started.is_set()
+    assert [event.kind for event in relayed] == [RunEventKind.INTERACTION_RESOLVED]
 
 
 @pytest.mark.asyncio

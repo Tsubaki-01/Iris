@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from iris.harness._fingerprint import compute_environment_fingerprint
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
+    RunEvent,
     RunEventKind,
     RunPhase,
     RunStopReason,
@@ -19,7 +21,8 @@ from iris.lifecycle import (
     ToolCallPhase,
     ToolErrorPolicy,
 )
-from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
+from iris.runtime import SteeringInput
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
     BaseTool,
@@ -33,6 +36,7 @@ from iris.tools import (
 )
 
 from .fakes import (
+    BlockingProvider,
     CountingAgentRuntime,
     StaticProvider,
     build_runtime,
@@ -155,6 +159,168 @@ async def test_runner_start_returns_reloaded_terminal_result(tmp_path: Path) -> 
     ]
     assert runner.get_run("run-1") == result.run
     assert runner.get_result("run-1") == result
+
+
+@pytest.mark.asyncio
+async def test_managed_start_signals_after_registration_and_relays_live_events(
+    tmp_path: Path,
+) -> None:
+    """Managed admission 不等待 provider，且 relay 覆盖 create、commit 与 finish。"""
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    activation_started = asyncio.Event()
+    relayed: list[RunEvent] = []
+    running = asyncio.create_task(
+        runner._start_managed(
+            AgentRunRequest(input="等待", session_id="session-managed", run_id="run-managed"),
+            durable_event_callback=relayed.append,
+            activation_started=activation_started,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(activation_started.wait(), timeout=1)
+        active = store.load_run("run-managed")
+        assert active is not None and active.phase is RunPhase.ACTIVE
+        assert "run-managed" in runner._active
+        assert not running.done()
+        await asyncio.wait_for(provider.started.wait(), timeout=1)
+    finally:
+        provider.release.set()
+    result = await running
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert relayed == store.list_events("run-managed")
+    assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)
+
+
+@pytest.mark.asyncio
+async def test_managed_start_isolates_runner_owned_sink_failure(tmp_path: Path) -> None:
+    """Create/finish live sink 失败不能改变 public durable result。"""
+    attempted: list[RunEvent] = []
+
+    def raising_callback(event: RunEvent) -> None:
+        attempted.append(event)
+        raise RuntimeError("模拟 runner committed sink 失败")
+
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path), store=store)
+
+    result = await runner._start_managed(
+        AgentRunRequest(input="完成", run_id="run-sink-failure"),
+        durable_event_callback=raising_callback,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert attempted == store.list_events("run-sink-failure")
+
+
+@pytest.mark.asyncio
+async def test_managed_start_failure_leaves_activation_signal_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create mutation 失败时不得发布虚假的 activation admission。"""
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path), store=store)
+    activation_started = asyncio.Event()
+
+    def fail_create(command: object) -> object:
+        del command
+        raise IrisRunConflictError("模拟 create lane conflict")
+
+    monkeypatch.setattr(store, "create_run", fail_create)
+
+    with pytest.raises(IrisRunConflictError, match="lane conflict"):
+        await runner._start_managed(
+            AgentRunRequest(input="失败", run_id="run-create-failure"),
+            activation_started=activation_started,
+        )
+
+    assert not activation_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_managed_start_relays_model_commit_before_steering_ack(
+    tmp_path: Path,
+) -> None:
+    """Durable RunEvent relay 必须先于同一 steering submission 的 delivered ack。"""
+    order: list[str] = []
+
+    class RecordingSteeringPort:
+        def __init__(self) -> None:
+            self.input: SteeringInput | None = SteeringInput(
+                submission_id="submission-1",
+                message=Msg.user("新方向"),
+            )
+
+        async def claim(self, run_id: str, activation_id: str) -> SteeringInput | None:
+            del run_id, activation_id
+            claimed, self.input = self.input, None
+            return claimed
+
+        def acknowledge(self, submission_id: str) -> None:
+            assert submission_id == "submission-1"
+            order.append("acknowledge")
+
+        def fail(self, submission_id: str, reason: str) -> None:
+            raise AssertionError(f"unexpected steering failure: {submission_id} {reason}")
+
+    def record_event(event: RunEvent) -> None:
+        if event.kind is RunEventKind.MODEL_STEP_COMMITTED:
+            order.append("model-step-committed")
+
+    provider = StaticProvider(text_response("第一轮"), text_response("最终轮"))
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=provider),
+        store=InMemoryLifecycleStore(),
+    )
+
+    result = await runner._start_managed(
+        AgentRunRequest(input="开始", run_id="run-steering-order"),
+        steering=RecordingSteeringPort(),
+        durable_event_callback=record_event,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert order == ["model-step-committed", "acknowledge", "model-step-committed"]
+
+
+@pytest.mark.asyncio
+async def test_live_relay_preserves_settlement_late_observer_delivery(
+    tmp_path: Path,
+) -> None:
+    """Live sink 不替代 async observers，observer 失败仍与 durable result 隔离。"""
+    observed: list[RunEvent] = []
+
+    class ThrowingObserver:
+        async def on_event(self, event: RunEvent) -> None:
+            raise RuntimeError(f"模拟 observer 失败: {event.sequence}")
+
+    class RecordingObserver:
+        async def on_event(self, event: RunEvent) -> None:
+            run = store.load_run(event.run_id)
+            assert run is not None and run.phase is RunPhase.TERMINAL
+            assert event.run_id not in runner._active
+            observed.append(event)
+
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path),
+        store=store,
+        observers=(ThrowingObserver(), RecordingObserver()),
+    )
+    relayed: list[RunEvent] = []
+
+    result = await runner._start_managed(
+        AgentRunRequest(input="完成", run_id="run-observer-regression"),
+        durable_event_callback=relayed.append,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert relayed == store.list_events("run-observer-regression")
+    assert observed == relayed
 
 
 @pytest.mark.asyncio

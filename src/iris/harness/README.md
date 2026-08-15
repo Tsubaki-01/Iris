@@ -37,6 +37,23 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
 
+## Managed 组合钩子（包内）
+
+`AgentRunner._start_managed()` 与 `_resume_managed()` 是供 `iris.harness` 内部组合层使用的
+package-private hooks，不是 `iris.harness` 导出。它们不改变 complete-run 语义：coroutine 仍等待
+waiting 或 terminal `RunResult`，public `start()` / `resume()` 只是使用空 hook 委托给它们；
+`recover()` 没有 managed 变体。
+
+Managed 调用可注入 activation-scoped steering port、同步 durable event callback 和
+`asyncio.Event` admission signal。Signal 只会在 create/resume durable mutation 成功、对应 events
+已 relay 且 exact activation 注册进 runner `_active` 后置位；立即 terminal 或 mutation/registration
+失败不会产生虚假 signal。
+
+Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mutation 只在成功后把
+新的 durable `RunEvent` 同步 relay，并按 `(run_id, sequence)` 去重。Callback 异常只记录日志，不回滚
+mutation 或改变 `RunResult`。公开 `RunEventObserver` 契约不变，仍在 activation settlement 后异步、
+best-effort 接收完整事件列表；同步 callback 不是新的 public observer registry。
+
 ## Cancellation 与 recovery
 
 `cancellation_requested` 是 durable fact，不等于已取消。同步且不协作的工具可能延迟
