@@ -4,7 +4,9 @@
 
 `iris.harness.AgentRunner` is Iris's only complete-run SDK facade. It owns logical-run creation,
 resume, durable cancellation, settlement observation, explicit recovery, event delivery, and live
-activation resources. `AgentRuntime` is its inner engine.
+activation resources. `AgentRuntime` is its inner engine. `SessionManager` is an optional,
+process-local admission facade for one session; it composes the runner without taking durable
+ownership from it.
 
 ## Quick start
 
@@ -37,6 +39,61 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
+
+## Per-session input management
+
+`SessionManager(runner, session_id)` binds one exact runner and one session. It is intended for a
+host that must accept new ordinary input while the current run is executing:
+
+```python
+import asyncio
+
+from iris.harness import AgentRunner, SessionManager, SubmissionEvent
+
+runner = AgentRunner.from_config_path("agent.yaml")
+manager = SessionManager(runner, "default")
+
+async def consume_events():
+    async for event in manager.events():
+        if isinstance(event, SubmissionEvent):
+            print(event.submission_id, event.state, event.reason)
+
+consumer = asyncio.create_task(consume_events())
+initial = await manager.submit("Analyze the current state")
+queued = await manager.submit("Focus on concurrency boundaries", mode="steer")
+
+# When the host is done with this manager:
+await manager.close()
+await consumer
+```
+
+When idle, `submit(input, mode=None, options=...)` returns a
+`SubmitReceipt(state="delivered")` after the run create is durably committed, without waiting for
+the provider or run settlement. While busy, callers must choose explicitly:
+
+- `mode="steer"` targets the exact current run and accepts no new run options. The runtime claims
+  one item only at a safe boundary; `SubmissionEvent(state="delivered")` follows the successful
+  durable session-history commit.
+- `mode="follow_up"` pre-generates a future run ID and may carry options. It creates one run at a
+  time, only after the exact current run becomes terminal.
+
+Each mode preserves its own FIFO order, while eligibility is independent: an earlier follow-up
+does not block a steer that can still enter the current run. A busy receipt means only `pending`;
+the final delivery or failure is reported through `events()`. This single-consumer stream mixes raw
+durable `RunEvent` values with transient `SubmissionEvent` values and adds no session-global
+sequence. Idle submissions emit no `SubmissionEvent`.
+
+HITL responses use only `manager.resume(interaction_id=..., response=...)`; they never enter the
+ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
+cancellation request is not terminal, so follow-ups still wait for actual settlement. `close()`
+rejects later operations, fails every pending input with `session_closed`, and ends the event
+stream, but neither cancels nor waits for the current run.
+
+The queue, receipt state, submission events, claims, and event deduplication exist only in the
+current process. A new manager does not scan, recover, or attach an existing active/waiting lane;
+a new idle submit is rejected by the store's session-lane CAS in that case. The runner/store remain
+authoritative for durable runs, history, checkpoints, interactions, cancellation, results, and
+`RunEvent` values.
 
 ## Managed composition hooks (package-private)
 
@@ -89,9 +146,9 @@ the provider commit and is not injected again.
 
 ## Public API
 
-`iris.harness` exports the runner; run request/options/limits/runtime options; phase, stop reason,
-usage, error, snapshot, and result; plus run events and observers. Store commands remain in
-`iris.lifecycle`.
+`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `SubmissionEvent`, and
+`SessionEvent`; run request/options/limits/runtime options; phase, stop reason, usage, error,
+snapshot, and result; plus run events and observers. Store commands remain in `iris.lifecycle`.
 
 ## Verification
 

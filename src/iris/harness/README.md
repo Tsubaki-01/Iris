@@ -4,7 +4,8 @@
 
 `iris.harness.AgentRunner` 是 Iris 唯一的 complete-run SDK facade。它拥有 logical run 的创建、
 resume、durable cancellation、settlement observation、显式 recovery、事件投递和 activation
-live resources；`AgentRuntime` 只作为其内部 engine。
+live resources；`AgentRuntime` 只作为其内部 engine。`SessionManager` 是可选的单 session
+process-local admission facade，只组合 runner，不接管 durable ownership。
 
 ## 快速入门
 
@@ -36,6 +37,56 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 - `get_run()`、`get_result()`、`list_events()`：无副作用 durable reads。
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
+
+## 单 session 输入管理
+
+`SessionManager(runner, session_id)` 绑定一个 exact runner 与一个 session。它适合需要在当前 run
+执行期间接收新普通输入的 host：
+
+```python
+import asyncio
+
+from iris.harness import AgentRunner, SessionManager, SubmissionEvent
+
+runner = AgentRunner.from_config_path("agent.yaml")
+manager = SessionManager(runner, "default")
+
+async def consume_events():
+    async for event in manager.events():
+        if isinstance(event, SubmissionEvent):
+            print(event.submission_id, event.state, event.reason)
+
+consumer = asyncio.create_task(consume_events())
+initial = await manager.submit("先分析现状")
+queued = await manager.submit("把重点改为并发边界", mode="steer")
+
+# host 结束使用 manager 时：
+await manager.close()
+await consumer
+```
+
+Idle 时，`submit(input, mode=None, options=...)` 在 run create 已 durable commit 后返回
+`SubmitReceipt(state="delivered")`，但不等待 provider 或 run settlement。Busy 时必须显式选择：
+
+- `mode="steer"`：绑定 exact current run，不接受新 run options；runtime 只在安全边界 claim
+  一条，成功写入 durable session history 后才产生 `SubmissionEvent(state="delivered")`；
+- `mode="follow_up"`：预生成 future run id，可携带 options；只在 exact current run terminal 后
+  串行创建，一次启动一条。
+
+两种 mode 各自保持 FIFO，但按 eligibility 独立推进，因此较早的 follow-up 不阻塞仍可进入当前
+run 的 steer。Busy receipt 只表示 `pending`；最终 delivery/failure 只通过 `events()` 报告。
+该单消费者 stream 原样混合 durable `RunEvent` 与 transient `SubmissionEvent`，不创建 session-global
+sequence。Idle submit 不产生 `SubmissionEvent`。
+
+HITL response 只走 `manager.resume(interaction_id=..., response=...)`，不进入普通输入队列。
+`interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
+仍等待真实 settlement。`close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
+event stream，但不取消或等待当前 run。
+
+Queue、receipt 状态、submission events、claim 和 event dedup 都只存在于当前进程。新 manager 不扫描、
+恢复或 attach 既有 active/waiting lane；此时新的 idle submit 会由 store 的 session-lane CAS 拒绝。
+Durable run、history、checkpoint、interaction、cancellation、result 和 `RunEvent` 始终由 runner/store
+权威负责。
 
 ## Managed 组合钩子（包内）
 
@@ -83,8 +134,9 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 
 ## 公开接口
 
-`iris.harness` 导出 `AgentRunner`、run request/options/limits/runtime options、phase/stop reason/
-usage/error/snapshot/result，以及 run events/observer。Store commands 仍属于 `iris.lifecycle`。
+`iris.harness` 导出 `AgentRunner`、`SessionManager`、`SubmitReceipt`、`SubmissionEvent`、
+`SessionEvent`，以及 run request/options/limits/runtime options、phase/stop reason/usage/error/
+snapshot/result 和 run events/observer。Store commands 仍属于 `iris.lifecycle`。
 
 ## 验证
 
