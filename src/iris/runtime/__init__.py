@@ -22,6 +22,7 @@ from .models import (
     RuntimeCursor,
 )
 from .runtime import AgentRuntime
+from .steering import RuntimeSteeringPort, SteeringInput
 from .tool_bridge import ToolBridge
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "RuntimeEnvironment",
     "RuntimeModelStepCommit",
     "RuntimeProvider",
+    "RuntimeSteeringPort",
     "RuntimeMessageAssembler",
     "RuntimeSuspension",
     "RuntimeSuspensionResult",
@@ -45,4 +47,5 @@ __all__ = [
     "RuntimeToolResultCommit",
     "ToolCallClaim",
     "ToolBridge",
+    "SteeringInput",
 ]

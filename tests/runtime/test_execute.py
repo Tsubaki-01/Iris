@@ -8,11 +8,13 @@ import pytest
 from fakes import (
     FakeProvider,
     FakeRuntimeCommitPort,
+    FakeRuntimeSteeringPort,
     MutableCancellationSignal,
     build_runtime,
     resume_activation,
     start_activation,
 )
+from pydantic import ValidationError
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -21,7 +23,7 @@ from iris.exceptions import (
     IrisRunConflictError,
     IrisRunPersistenceError,
 )
-from iris.lifecycle import RuntimeExecutionOptions, ToolErrorPolicy
+from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, ToolErrorPolicy
 from iris.memory import (
     MemoryCategory,
     MemoryItem,
@@ -38,7 +40,10 @@ from iris.runtime import (
     RuntimeActivationResult,
     RuntimeApprovedToolCall,
     RuntimeCursor,
+    RuntimeModelStepCommit,
     RuntimeToolCall,
+    RuntimeToolResultCommit,
+    SteeringInput,
     ToolCallClaim,
 )
 from iris.tools import (
@@ -111,6 +116,24 @@ def _tool_batch_response(calls: list[ToolUseBlock]) -> LLMResponse:
         output_tokens=3,
         total_tokens=8,
     )
+
+
+def test_steering_input_requires_user_message() -> None:
+    """Steering input 只能承载待提交的 user message。"""
+    with pytest.raises(ValidationError, match="user message"):
+        SteeringInput(
+            submission_id="submission-1",
+            message=Msg.assistant("不能作为 steer 输入"),
+        )
+    with pytest.raises(ValidationError, match="submission_id"):
+        SteeringInput(submission_id=" ", message=Msg.user("新的指令"))
+
+    input_value = SteeringInput(
+        submission_id="submission-1",
+        message=Msg.user("新的指令"),
+    )
+    with pytest.raises(ValidationError, match="frozen"):
+        input_value.submission_id = "submission-2"
 
 
 def _runtime(
@@ -202,6 +225,651 @@ async def test_execute_start_commits_no_tool_completion(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_no_tool_steer_commits_input_before_next_model_step(
+    tmp_path: Path,
+) -> None:
+    """漏掉原子 steer delta 会让下一次 provider 看不到新输入。"""
+    provider = FakeProvider([_text_response("先回答"), _text_response("最终回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation(input="当前问题")
+    commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [
+            SteeringInput(
+                submission_id="submission-1",
+                message=Msg.user(
+                    "调整方向",
+                    metadata={"submission_id": "submission-1", "mode": "steer"},
+                ),
+            )
+        ]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(provider.requests) == 2
+    assert [message.role for message in commits.model_commits[0].message_delta] == [
+        Role.USER,
+        Role.ASSISTANT,
+        Role.USER,
+    ]
+    assert commits.model_commits[0].cursor_after == RuntimeCursor(
+        position="before_model",
+        step_index=1,
+    )
+    assert commits.model_commits[0].resumability is CheckpointResumability.SAFE
+    assert provider.requests[1].messages[-1].text == "调整方向"
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("acknowledge", "submission-1", None),
+        ("claim", activation.run_id, activation.activation_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_empty_steering_port_keeps_no_tool_completion(
+    tmp_path: Path,
+) -> None:
+    """空 steering port 只观察边界，不改变既有完成语义。"""
+    provider = FakeProvider([_text_response("最终回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation(input="当前问题")
+    commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort()
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert result.cursor.position == "outcome_ready"
+    assert [message.role for message in commits.model_commits[0].message_delta] == [
+        Role.USER,
+        Role.ASSISTANT,
+    ]
+    assert (
+        commits.model_commits[0].resumability
+        is CheckpointResumability.OUTCOME_READY
+    )
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_consumes_one_steer_per_no_tool_boundary(
+    tmp_path: Path,
+) -> None:
+    """连续安全边界按 FIFO 每次只提交一条 steer。"""
+    provider = FakeProvider(
+        [_text_response("第一轮"), _text_response("第二轮"), _text_response("最终轮")]
+    )
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    messages = [Msg.user("方向一"), Msg.user("方向二")]
+    steering = FakeRuntimeSteeringPort(
+        [
+            SteeringInput(submission_id=f"submission-{index}", message=message)
+            for index, message in enumerate(messages, start=1)
+        ]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(commits.model_commits) == 3
+    assert commits.model_commits[0].message_delta[-1] == messages[0]
+    assert commits.model_commits[1].message_delta[-1] == messages[1]
+    assert [event[0] for event in steering.events] == [
+        "claim",
+        "acknowledge",
+        "claim",
+        "acknowledge",
+        "claim",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_has_no_await_between_claim_return_commit_and_ack(
+    tmp_path: Path,
+) -> None:
+    """Claim 返回后，commit 与 ack 必须在 event-loop 下一次调度前完成。"""
+    order: list[str] = []
+
+    class RecordingSteeringPort(FakeRuntimeSteeringPort):
+        async def claim(
+            self,
+            run_id: str,
+            activation_id: str,
+        ) -> SteeringInput | None:
+            claimed = await super().claim(run_id, activation_id)
+            if claimed is not None:
+                order.append("claim-return")
+                asyncio.get_running_loop().call_soon(order.append, "interleaved")
+            return claimed
+
+        def acknowledge(self, submission_id: str) -> None:
+            order.append("acknowledge")
+            super().acknowledge(submission_id)
+
+    class RecordingCommitPort(FakeRuntimeCommitPort):
+        def commit_model_step(self, commit: RuntimeModelStepCommit) -> RuntimeCursor:
+            order.append("commit")
+            return super().commit_model_step(commit)
+
+    provider = FakeProvider([_text_response("第一轮"), _text_response("最终轮")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = RecordingCommitPort(activation)
+    steering = RecordingSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+    await asyncio.sleep(0)
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert order[:3] == ["claim-return", "commit", "acknowledge"]
+    assert order.index("interleaved") > order.index("acknowledge")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit_fails", [False, True])
+async def test_execute_final_tool_settlement_has_no_await_after_claim(
+    tmp_path: Path,
+    commit_fails: bool,
+) -> None:
+    """Final-tool claim 后的 commit 与 ack/fail 不允许 task interleave。"""
+    order: list[str] = []
+
+    class RecordingSteeringPort(FakeRuntimeSteeringPort):
+        async def claim(
+            self,
+            run_id: str,
+            activation_id: str,
+        ) -> SteeringInput | None:
+            claimed = await super().claim(run_id, activation_id)
+            if claimed is not None:
+                order.append("claim-return")
+                asyncio.get_running_loop().call_soon(order.append, "interleaved")
+            return claimed
+
+        def acknowledge(self, submission_id: str) -> None:
+            order.append("acknowledge")
+            super().acknowledge(submission_id)
+
+        def fail(self, submission_id: str, reason: str) -> None:
+            order.append("fail")
+            super().fail(submission_id, reason)
+
+    class RecordingCommitPort(FakeRuntimeCommitPort):
+        def commit_tool_result(self, commit: RuntimeToolResultCommit) -> RuntimeCursor:
+            order.append("commit")
+            return super().commit_tool_result(commit)
+
+    def echo() -> str:
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    provider = FakeProvider(
+        [
+            _tool_response(ToolUseBlock(id="echo-1", name="echo", input={})),
+            _text_response("完成"),
+        ]
+    )
+    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
+    activation = start_activation()
+    commits = RecordingCommitPort(
+        activation,
+        fail_at="commit_tool_result" if commit_fails else None,
+    )
+    steering = RecordingSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    if commit_fails:
+        with pytest.raises(IrisRunPersistenceError, match="required commit"):
+            await runtime.execute(
+                activation,
+                commits=commits,
+                cancellation=MutableCancellationSignal(),
+                steering=steering,
+            )
+        settlement = "fail"
+    else:
+        result = await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+        assert result.outcome is RuntimeActivationOutcome.COMPLETED
+        settlement = "acknowledge"
+    await asyncio.sleep(0)
+
+    assert order[:3] == ["claim-return", "commit", settlement]
+    assert order.index("interleaved") > order.index(settlement)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancellation_requested", "deadline", "expected_outcome"),
+    [
+        (True, None, RuntimeActivationOutcome.CANCELLED),
+        (False, 0.0, RuntimeActivationOutcome.DEADLINE_EXCEEDED),
+    ],
+)
+async def test_execute_cancel_or_deadline_never_claims_steer(
+    tmp_path: Path,
+    cancellation_requested: bool,
+    deadline: float | None,
+    expected_outcome: RuntimeActivationOutcome,
+) -> None:
+    """Activation 已取消或过期时不进入 steering safe boundary。"""
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+
+    class BoundaryStateProvider(FakeProvider):
+        async def complete(self, request: Any) -> Any:
+            response = await super().complete(request)
+            commits.cancel_requested = cancellation_requested
+            commits.deadline = deadline
+            return response
+
+    provider = BoundaryStateProvider([_text_response("边界回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is expected_outcome
+    assert len(provider.requests) == 1
+    assert commits.model_commits == []
+    assert steering.events == []
+
+
+@pytest.mark.asyncio
+async def test_execute_outcome_ready_cursor_never_claims_steer(
+    tmp_path: Path,
+) -> None:
+    """已经 durable terminal 的 cursor 直接兑现结果，不再观察 steering。"""
+    assistant = Msg.assistant("已完成")
+    activation = start_activation().model_copy(
+        update={
+            "cursor": RuntimeCursor(
+                position="outcome_ready",
+                step_index=0,
+                assistant_message=assistant,
+            )
+        }
+    )
+    provider = FakeProvider([])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    commits = FakeRuntimeCommitPort(activation, messages=[assistant])
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert result.assistant_message == assistant
+    assert provider.requests == []
+    assert steering.events == []
+
+
+@pytest.mark.asyncio
+async def test_execute_steers_only_after_final_ordered_tool_result(
+    tmp_path: Path,
+) -> None:
+    """同一批次仅在最终有序工具结果提交时领取 steer。"""
+
+    def write(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(
+        write,
+        description="写入",
+        capabilities={ToolCapability.WRITE},
+    )
+    calls = [
+        ToolUseBlock(id=f"write-{index}", name="write", input={"value": str(index)})
+        for index in (1, 2)
+    ]
+    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
+    runtime = _runtime(
+        provider=provider,
+        tmp_path=tmp_path,
+        registry=registry,
+        permission_policy=DefaultPermissionPolicy(write_mode="allow"),
+    )
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    steered_message = Msg.user("调整工具结果后的方向")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=steered_message)]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(commits.tool_commits) == 2
+    assert len(commits.tool_commits[0].message_delta) == 1
+    assert commits.tool_commits[1].message_delta[1] == steered_message
+    assert provider.requests[1].messages[-1] == steered_message
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("acknowledge", "submission-1", None),
+        ("claim", activation.run_id, activation.activation_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_return_to_model_error_can_steer_after_final_result(
+    tmp_path: Path,
+) -> None:
+    """RETURN_TO_MODEL 的 final error 是可领取 steer 的安全边界。"""
+    call = ToolUseBlock(id="missing-1", name="missing", input={})
+    provider = FakeProvider([_tool_response(call), _text_response("完成")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    steered_message = Msg.user("根据错误调整方向")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=steered_message)]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert commits.tool_commits[0].result.is_error is True
+    assert commits.tool_commits[0].message_delta[1] == steered_message
+    assert provider.requests[1].messages[-1] == steered_message
+    assert steering.events[1] == ("acknowledge", "submission-1", None)
+
+
+@pytest.mark.asyncio
+async def test_execute_model_commit_failure_fails_claimed_steer(
+    tmp_path: Path,
+) -> None:
+    """No-tool required commit 失败时 fail exact submission 并保留原异常。"""
+    provider = FakeProvider([_text_response("回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation, fail_at="commit_model_step")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    with pytest.raises(IrisRunPersistenceError, match="required commit"):
+        await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("fail", "submission-1", "commit_failed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_commit_failure_fails_claimed_steer(
+    tmp_path: Path,
+) -> None:
+    """Final-tool required commit 失败时不把 steer 误报为 delivered。"""
+
+    def echo() -> str:
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    provider = FakeProvider(
+        [_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))]
+    )
+    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation, fail_at="commit_tool_result")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    with pytest.raises(IrisRunPersistenceError, match="required commit"):
+        await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("fail", "submission-1", "commit_failed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_model_cursor_mismatch_fails_claimed_steer(
+    tmp_path: Path,
+) -> None:
+    """Model commit 返回意外 cursor 时不得 acknowledge submission。"""
+
+    class UnexpectedCursorCommitPort(FakeRuntimeCommitPort):
+        def commit_model_step(self, commit: RuntimeModelStepCommit) -> RuntimeCursor:
+            super().commit_model_step(commit)
+            return RuntimeCursor(
+                position="before_model",
+                step_index=commit.cursor_after.step_index + 1,
+            )
+
+    provider = FakeProvider([_text_response("回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = UnexpectedCursorCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    with pytest.raises(IrisRunConflictError, match="意外 cursor"):
+        await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("fail", "submission-1", "commit_failed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_cursor_mismatch_fails_claimed_steer(
+    tmp_path: Path,
+) -> None:
+    """Final-tool commit 返回意外 cursor 时不得 acknowledge submission。"""
+
+    class UnexpectedCursorCommitPort(FakeRuntimeCommitPort):
+        def commit_tool_result(self, commit: RuntimeToolResultCommit) -> RuntimeCursor:
+            super().commit_tool_result(commit)
+            return RuntimeCursor(
+                position="before_model",
+                step_index=commit.cursor_after.step_index + 1,
+            )
+
+    def echo() -> str:
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    provider = FakeProvider(
+        [_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))]
+    )
+    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
+    activation = start_activation()
+    commits = UnexpectedCursorCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
+
+    with pytest.raises(IrisRunConflictError, match="意外 cursor"):
+        await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("fail", "submission-1", "commit_failed"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_isolates_acknowledge_callback_failure(
+    tmp_path: Path,
+) -> None:
+    """Ack callback 违反 non-throwing contract 不覆盖 durable commit。"""
+    provider = FakeProvider([_text_response("第一轮"), _text_response("最终轮")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))],
+        callback_error_at="acknowledge",
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert commits.messages[-2].text == "新方向"
+    assert steering.events[1] == ("acknowledge", "submission-1", None)
+
+
+@pytest.mark.asyncio
+async def test_execute_isolates_fail_callback_failure(
+    tmp_path: Path,
+) -> None:
+    """Fail callback 异常不能覆盖原始 required commit 异常。"""
+    provider = FakeProvider([_text_response("回答")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation, fail_at="commit_model_step")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))],
+        callback_error_at="fail",
+    )
+
+    with pytest.raises(IrisRunPersistenceError, match="required commit"):
+        await runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+            steering=steering,
+        )
+
+    assert steering.events[-1] == ("fail", "submission-1", "commit_failed")
+
+
+@pytest.mark.asyncio
+async def test_execute_parallel_tools_steer_on_final_ordered_commit(
+    tmp_path: Path,
+) -> None:
+    """并发完成的工具仍只在最终有序提交中携带 steer。"""
+
+    async def read_value(index: int) -> str:
+        return f"value-{index}"
+
+    registry = ToolRegistry()
+    registry.register_function(read_value, description="读取值")
+    calls = [
+        ToolUseBlock(id=f"read-{index}", name="read_value", input={"index": index})
+        for index in (1, 2)
+    ]
+    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
+    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    steered_message = Msg.user("并发结果后的新方向")
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=steered_message)]
+    )
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        steering=steering,
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert [commit.result.tool_use_id for commit in commits.tool_commits] == [
+        "read-1",
+        "read-2",
+    ]
+    assert [len(commit.message_delta) for commit in commits.tool_commits] == [1, 2]
+    assert commits.tool_commits[1].message_delta[1] == steered_message
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("acknowledge", "submission-1", None),
+        ("claim", activation.run_id, activation.activation_id),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_execute_runs_multi_step_tool_loop_through_required_commits(
     tmp_path: Path,
 ) -> None:
@@ -222,11 +890,13 @@ async def test_execute_runs_multi_step_tool_loop_through_required_commits(
     runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
     activation = start_activation()
     commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort()
 
     result = await runtime.execute(
         activation,
         commits=commits,
         cancellation=MutableCancellationSignal(),
+        steering=steering,
     )
 
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
@@ -237,6 +907,10 @@ async def test_execute_runs_multi_step_tool_loop_through_required_commits(
     assert commits.tool_commits[0].claim is not None
     assert commits.events.index("claim_tool_call") < commits.events.index("commit_tool_result")
     assert provider.requests[1].messages[-1].tool_results[0].content == "echo:Iris"
+    assert steering.events == [
+        ("claim", activation.run_id, activation.activation_id),
+        ("claim", activation.run_id, activation.activation_id),
+    ]
 
 
 @pytest.mark.asyncio
@@ -937,11 +1611,15 @@ async def test_execute_suspends_before_model_step_commit(tmp_path: Path) -> None
     )
     activation = start_activation()
     commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
 
     result = await runtime.execute(
         activation,
         commits=commits,
         cancellation=MutableCancellationSignal(),
+        steering=steering,
     )
 
     assert result.outcome is RuntimeActivationOutcome.SUSPENDED
@@ -951,6 +1629,7 @@ async def test_execute_suspends_before_model_step_commit(tmp_path: Path) -> None
     assert len(commits.suspensions) == 1
     assert "suspend" in commits.events
     assert "claim_tool_call" not in commits.events
+    assert steering.events == []
 
 
 @pytest.mark.asyncio
@@ -1510,11 +2189,15 @@ async def test_execute_stop_policy_fails_only_after_error_result_commit(
         options=RuntimeExecutionOptions(tool_error_policy=ToolErrorPolicy.STOP)
     )
     commits = FakeRuntimeCommitPort(activation)
+    steering = FakeRuntimeSteeringPort(
+        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
+    )
 
     result = await runtime.execute(
         activation,
         commits=commits,
         cancellation=MutableCancellationSignal(),
+        steering=steering,
     )
 
     assert result.outcome is RuntimeActivationOutcome.FAILED
@@ -1522,6 +2205,7 @@ async def test_execute_stop_policy_fails_only_after_error_result_commit(
     assert result.error.code == "TOOL_NOT_ALLOWED"
     assert len(commits.tool_commits) == 1
     assert commits.tool_commits[0].claim is None
+    assert steering.events == []
 
 
 @pytest.mark.asyncio

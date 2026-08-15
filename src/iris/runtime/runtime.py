@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -46,11 +47,13 @@ from .models import (
     RuntimeApprovedToolCall,
     RuntimeCursor,
 )
+from .steering import RuntimeSteeringPort
 from .tool_bridge import ToolBridge
 
 # endregion
 
 _MAX_PARALLEL_TOOL_CALLS = 8
+_logger = logging.getLogger(__name__)
 
 
 class AgentRuntime:
@@ -70,6 +73,7 @@ class AgentRuntime:
         *,
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None = None,
     ) -> RuntimeActivationResult:
         """按 durable cursor 分阶段推进唯一的 model/tool inner loop。
 
@@ -115,6 +119,7 @@ class AgentRuntime:
                     cursor=cursor,
                     commits=commits,
                     cancellation=cancellation,
+                    steering=steering,
                 )
                 if isinstance(model_outcome, RuntimeActivationResult):
                     return model_outcome
@@ -157,6 +162,7 @@ class AgentRuntime:
                         window=window,
                         commits=commits,
                         cancellation=cancellation,
+                        steering=steering,
                     )
                     if isinstance(window_outcome, RuntimeActivationResult):
                         return window_outcome
@@ -281,13 +287,15 @@ class AgentRuntime:
             # --- 8. 提交工具结果并收口 ---
             # durable commit 成功后才推进 cursor，再处理取消或 STOP 失败策略。
             batch_assistant = cursor.assistant_message
-            cursor = self._commit_tool_result(
+            cursor = await self._commit_tool_result(
                 activation=activation,
                 cursor=cursor,
                 commits=commits,
                 tool_call=tool_call,
                 claim=claim,
                 result=result,
+                cancellation=cancellation,
+                steering=steering,
             )
             if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
@@ -311,6 +319,7 @@ class AgentRuntime:
         window: Sequence[tuple[int, PreparedToolCall]],
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None,
     ) -> RuntimeCursor | RuntimeActivationResult:
         """执行一个有界安全窗口，并按模型 ordinal 提交结果。"""
         prepared_calls = [prepared for _, prepared in window]
@@ -420,13 +429,15 @@ class AgentRuntime:
                 workspace_root=self.environment.workspace_root,
                 ordinal=window[offset][0] + 1,
             )
-            committed_cursor = self._commit_tool_result(
+            committed_cursor = await self._commit_tool_result(
                 activation=activation,
                 cursor=committed_cursor,
                 commits=commits,
                 tool_call=tool_call,
                 claim=guard.claim_for(prepared.tool_use.id),
                 result=slot,
+                cancellation=cancellation,
+                steering=steering,
             )
 
         if interrupted:
@@ -480,7 +491,7 @@ class AgentRuntime:
             )
         return committed_cursor
 
-    def _commit_tool_result(
+    async def _commit_tool_result(
         self,
         *,
         activation: RuntimeActivationInput,
@@ -489,6 +500,8 @@ class AgentRuntime:
         tool_call: RuntimeToolCall,
         claim: ToolCallClaim | None,
         result: ToolResult,
+        cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None,
     ) -> RuntimeCursor:
         """封装既有的单步 result commit 与 cursor 推进。"""
         next_index = cursor.next_tool_index + 1
@@ -510,17 +523,56 @@ class AgentRuntime:
                     ),
                 }
             )
-        committed_cursor = commits.commit_tool_result(
-            RuntimeToolResultCommit(
-                tool_call=tool_call,
-                claim=claim,
-                result=result,
-                message_delta=(_tool_result_message(result),),
-                cursor_after=cursor_after,
+        steering_claim = None
+        if (
+            steering is not None
+            and next_index == len(cursor.tool_calls)
+            and not (
+                result.is_error
+                and activation.options.tool_error_policy is ToolErrorPolicy.STOP
             )
-        )
-        if committed_cursor != cursor_after:
-            raise IrisRunConflictError("tool-result commit 返回了意外 cursor")
+            and not _activation_cancelled(commits, cancellation)
+            and not _deadline_expired(commits)
+        ):
+            claimed_input = await steering.claim(
+                activation.run_id,
+                activation.activation_id,
+            )
+            if claimed_input is not None:
+                steering_claim = (steering, claimed_input)
+        message_delta = (_tool_result_message(result),)
+        if steering_claim is not None:
+            _, claimed_input = steering_claim
+            message_delta = (*message_delta, claimed_input.message)
+        try:
+            committed_cursor = commits.commit_tool_result(
+                RuntimeToolResultCommit(
+                    tool_call=tool_call,
+                    claim=claim,
+                    result=result,
+                    message_delta=message_delta,
+                    cursor_after=cursor_after,
+                )
+            )
+            if committed_cursor != cursor_after:
+                raise IrisRunConflictError("tool-result commit 返回了意外 cursor")
+        except Exception:
+            if steering_claim is not None:
+                claimed_steering, claimed_input = steering_claim
+                _settle_steering_input(
+                    claimed_steering,
+                    activation=activation,
+                    submission_id=claimed_input.submission_id,
+                    reason="commit_failed",
+                )
+            raise
+        if steering_claim is not None:
+            claimed_steering, claimed_input = steering_claim
+            _settle_steering_input(
+                claimed_steering,
+                activation=activation,
+                submission_id=claimed_input.submission_id,
+            )
         return committed_cursor
 
     async def _execute_model_step(
@@ -530,6 +582,7 @@ class AgentRuntime:
         cursor: RuntimeCursor,
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
+        steering: RuntimeSteeringPort | None,
     ) -> RuntimeCursor | RuntimeActivationResult:
         """执行并 required commit 一次 provider step。"""
         snapshot = commits.load_session()
@@ -642,6 +695,60 @@ class AgentRuntime:
             self.environment.tool_bridge.read_state(activation.session_id)
         )
         if not assistant.tool_calls:
+            steering_claim = None
+            if steering is not None:
+                if _activation_cancelled(commits, cancellation):
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.CANCELLED,
+                        cursor=cursor,
+                    )
+                if _deadline_expired(commits):
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                        cursor=cursor,
+                    )
+                claimed_input = await steering.claim(
+                    activation.run_id,
+                    activation.activation_id,
+                )
+                if claimed_input is not None:
+                    steering_claim = (steering, claimed_input)
+            if steering_claim is not None:
+                claimed_steering, claimed_input = steering_claim
+                cursor_after = RuntimeCursor(
+                    position="before_model",
+                    step_index=cursor.step_index + 1,
+                    read_state=read_state,
+                )
+                try:
+                    committed = commits.commit_model_step(
+                        RuntimeModelStepCommit(
+                            cursor_before=cursor,
+                            message_delta=(*message_delta, claimed_input.message),
+                            assistant_message=assistant,
+                            input_tokens=response.input_tokens,
+                            output_tokens=response.output_tokens,
+                            total_tokens=response.total_tokens,
+                            cursor_after=cursor_after,
+                        )
+                    )
+                    if committed != cursor_after:
+                        raise IrisRunConflictError("model-step commit 返回了意外 cursor")
+                except Exception:
+                    _settle_steering_input(
+                        claimed_steering,
+                        activation=activation,
+                        submission_id=claimed_input.submission_id,
+                        reason="commit_failed",
+                    )
+                    raise
+                _settle_steering_input(
+                    claimed_steering,
+                    activation=activation,
+                    submission_id=claimed_input.submission_id,
+                )
+                return committed
+
             cursor_after = RuntimeCursor(
                 position="outcome_ready",
                 step_index=cursor.step_index,
@@ -791,6 +898,30 @@ def _parallel_tool_window(
             break
         window.append((index, prepared))
     return tuple(window) if len(window) >= 2 else ()
+
+
+def _settle_steering_input(
+    steering: RuntimeSteeringPort,
+    *,
+    activation: RuntimeActivationInput,
+    submission_id: str,
+    reason: str | None = None,
+) -> None:
+    """隔离 steering settlement callback，不改变 durable commit 结果。"""
+    try:
+        if reason is None:
+            steering.acknowledge(submission_id)
+        else:
+            steering.fail(submission_id, reason)
+    except Exception:
+        _logger.exception(
+            "Steering settlement callback 失败",
+            extra={
+                "run_id": activation.run_id,
+                "activation_id": activation.activation_id,
+                "submission_id": submission_id,
+            },
+        )
 
 
 def _validate_interaction_projection(
