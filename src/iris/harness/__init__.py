@@ -16,6 +16,7 @@ from ..lifecycle import (
 )
 from .observer import RunEventObserver
 from .runner import AgentRunner
+from .session_manager import SessionEvent, SessionManager, SubmissionEvent, SubmitReceipt
 
 __all__ = [
     "AgentRunOptions",
@@ -32,4 +33,8 @@ __all__ = [
     "RunStopReason",
     "RunUsage",
     "RuntimeExecutionOptions",
+    "SessionEvent",
+    "SessionManager",
+    "SubmissionEvent",
+    "SubmitReceipt",
 ]
