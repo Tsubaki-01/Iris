@@ -23,6 +23,8 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
   interaction service.
 - Runtime never imports harness or writes SQLite directly.
 - Exact session, checkpoint, tool claim/result, and interaction writes come through the commit port.
+- The optional `RuntimeSteeringPort` supplies transient input only at safe boundaries for the
+  current activation; it owns neither a queue nor persistence.
 
 ## Low-level contract
 
@@ -31,6 +33,7 @@ result = await runtime.execute(
     activation,
     commits=commit_port,
     cancellation=cancellation_signal,
+    steering=steering_port,  # optional; omission preserves existing behavior
 )
 ```
 
@@ -46,6 +49,30 @@ Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provid
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
 engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
+
+## Runtime steering
+
+A custom lifecycle owner may pass an activation-scoped `RuntimeSteeringPort` to one `execute()`
+call. `claim(run_id, activation_id)` returns at most one `SteeringInput` per safe boundary. This
+frozen model contains only a non-empty `submission_id` and a `Role.USER` message. Runtime creates
+no queue and writes claim state to neither the cursor, checkpoint, nor store.
+
+Runtime claims only at two boundaries:
+
+- after producing a no-tool assistant response and before `commit_model_step`; a successful commit
+  puts the assistant and steer user message in one delta, advances to the next `before_model`, and
+  uses `SAFE` resumability;
+- after the final ordered tool result is known and before the final `commit_tool_result`; a
+  successful commit puts the tool result and steer user message in one delta and retains the
+  existing next-`before_model` cursor.
+
+Runtime never claims between tool results, while a provider or tool effect is in flight, during
+HITL waiting, at `outcome_ready`, after cancellation or deadline, or for a STOP terminal error.
+There is no `await` between claim return and the synchronous commit plus `acknowledge()` / `fail()`:
+only commit success is acknowledged, while a commit exception fails the submission with
+`commit_failed` and propagates unchanged. Callback exceptions are logged and cannot replace the
+durable result. Passing `None` or receiving `None` from claim preserves existing cursor, message
+delta, resumability, and outcome semantics.
 
 ## Bounded tool concurrency
 
@@ -96,8 +123,9 @@ The factory never reads or creates a lifecycle database. Harness composition int
 
 ## Public API
 
-Package exports cover `AgentRuntime`, factory/environment, provider/assembler/tool bridge, and
-activation/commit-port contracts. Complete-run options/status/results, `run_turn()`, `run_loop()`,
+Package exports cover `AgentRuntime`, factory/environment, provider/assembler/tool bridge,
+`RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
+options/status/results, `run_turn()`, `run_loop()`,
 `resume()`, and old checkpoint helpers do not exist.
 
 ## Verification

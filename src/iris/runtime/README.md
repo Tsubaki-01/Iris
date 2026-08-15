@@ -23,6 +23,8 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
   interaction service；
 - runtime 不 import harness，也不直接写 SQLite；
 - exact session、checkpoint、tool claim/result 与 interaction 写入由 commit port 提供。
+- 可选的 `RuntimeSteeringPort` 只向当前 activation 的安全边界提供瞬时输入，不拥有 queue 或
+  persistence。
 
 ## 低层调用契约
 
@@ -31,6 +33,7 @@ result = await runtime.execute(
     activation,
     commits=commit_port,
     cancellation=cancellation_signal,
+    steering=steering_port,  # 可选；省略时保持原行为
 )
 ```
 
@@ -51,6 +54,26 @@ cursor 位置只有：
 无工具的 provider response 会以 `CheckpointResumability.OUTCOME_READY` 提交。工具 effect 前
 必须 durable claim，result 后必须 durable commit；claim 后无法证明结果时返回
 `TOOL_OUTCOME_UNKNOWN`，不得重放 effect。
+
+## Runtime steering
+
+自定义 lifecycle owner 可以为一次 `execute()` 调用传入 activation-scoped
+`RuntimeSteeringPort`。`claim(run_id, activation_id)` 每个安全边界最多返回一条
+`SteeringInput`；该 frozen model 只包含非空 `submission_id` 与 `Role.USER` message。Runtime
+不创建 queue，也不把 claim 状态写入 cursor、checkpoint 或 store。
+
+Runtime 只在两个位置 claim：
+
+- 无工具 assistant response 已生成、`commit_model_step` 之前；成功时将 assistant 与 steer
+  user message 放入同一 delta，cursor 进入下一 `before_model`，resumability 为 `SAFE`；
+- 同批次 final ordered tool result 已知、最终 `commit_tool_result` 之前；成功时将 tool result
+  与 steer user message 放入同一 delta，沿用下一 `before_model` cursor。
+
+中间工具结果、provider/tool effect 执行中、HITL waiting、`outcome_ready`、cancellation、deadline
+和 STOP terminal error 都不会 claim。Claim 返回后到同步 commit 与 `acknowledge()` / `fail()`
+之间没有 `await`：commit 成功才 acknowledge，commit 异常则 fail `commit_failed` 并原样传播；
+callback 自身的异常只记录日志，不会覆盖 durable 结果。传入 `None` 或 claim 返回 `None` 时，
+既有 cursor、message delta、resumability 与 outcome 语义不变。
 
 ## 有界工具并发
 
@@ -98,7 +121,7 @@ Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配�
 ## 公开接口
 
 包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、provider/assembler/tool
-bridge，以及 activation/commit-port contracts。不存在 complete-run options/status/result、
+bridge、`RuntimeSteeringPort`、`SteeringInput`，以及 activation/commit-port contracts。不存在 complete-run options/status/result、
 `run_turn()`、`run_loop()`、`resume()` 或旧 checkpoint helper。
 
 ## 验证

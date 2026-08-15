@@ -11,7 +11,7 @@ from iris.hitl import (
     PermissionPrompt,
     QuestionPrompt,
 )
-from iris.lifecycle import RuntimeExecutionOptions, SessionSnapshot
+from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.runtime import (
@@ -24,10 +24,12 @@ from iris.runtime import (
     RuntimeMessageAssembler,
     RuntimeModelStepCommit,
     RuntimeProvider,
+    RuntimeSteeringPort,
     RuntimeSuspension,
     RuntimeSuspensionResult,
     RuntimeToolCall,
     RuntimeToolResultCommit,
+    SteeringInput,
     ToolBridge,
     ToolCallClaim,
 )
@@ -53,6 +55,41 @@ class MutableCancellationSignal:
             from iris.exceptions import IrisCancellationRequestedError
 
             raise IrisCancellationRequestedError("测试 activation 已取消")
+
+
+class FakeRuntimeSteeringPort(RuntimeSteeringPort):
+    """按顺序提供瞬时 input，并记录 claim 与 settlement。"""
+
+    def __init__(
+        self,
+        inputs: Sequence[SteeringInput] = (),
+        *,
+        callback_error_at: str | None = None,
+    ) -> None:
+        self.inputs = list(inputs)
+        self.events: list[tuple[str, str, str | None]] = []
+        self.callback_error_at = callback_error_at
+
+    async def claim(
+        self,
+        run_id: str,
+        activation_id: str,
+    ) -> SteeringInput | None:
+        """记录 exact identity，并返回下一条可用 input。"""
+        self.events.append(("claim", run_id, activation_id))
+        return self.inputs.pop(0) if self.inputs else None
+
+    def acknowledge(self, submission_id: str) -> None:
+        """记录 durable commit 成功的 submission。"""
+        self.events.append(("acknowledge", submission_id, None))
+        if self.callback_error_at == "acknowledge":
+            raise RuntimeError("模拟 acknowledge callback 失败")
+
+    def fail(self, submission_id: str, reason: str) -> None:
+        """记录 required commit 失败的 submission。"""
+        self.events.append(("fail", submission_id, reason))
+        if self.callback_error_at == "fail":
+            raise RuntimeError("模拟 fail callback 失败")
 
 
 class FakeRuntimeCommitPort:
@@ -226,12 +263,13 @@ class FakeRuntimeCommitPort:
         assistant = commit.assistant_message
         if before.position != "before_model":
             raise IrisRunConflictError("fake port model commit 必须从 before_model 开始")
-        if not commit.message_delta or commit.message_delta[-1] != assistant:
+        if not commit.message_delta:
             raise IrisRunConflictError("fake port model commit 缺少精确 assistant delta")
         calls = tuple(assistant.tool_calls)
         if calls:
             valid = (
-                after.position == "tool_batch"
+                commit.message_delta[-1] == assistant
+                and after.position == "tool_batch"
                 and after.step_index == before.step_index
                 and after.next_tool_index == 0
                 and after.tool_calls == calls
@@ -240,14 +278,29 @@ class FakeRuntimeCommitPort:
                 and self._prepared_match_calls(commit.prepared_tool_calls, calls)
             )
         else:
-            valid = (
-                after.position == "outcome_ready"
+            outcome_ready = (
+                commit.message_delta[-1] == assistant
+                and after.position == "outcome_ready"
                 and after.step_index == before.step_index
                 and not after.tool_calls
                 and not after.tool_results
                 and after.assistant_message == assistant
                 and not commit.prepared_tool_calls
+                and commit.resumability is CheckpointResumability.OUTCOME_READY
             )
+            steered = (
+                len(commit.message_delta) >= 2
+                and commit.message_delta[-2] == assistant
+                and commit.message_delta[-1].role.value == "user"
+                and after.position == "before_model"
+                and after.step_index == before.step_index + 1
+                and not after.tool_calls
+                and not after.tool_results
+                and after.assistant_message is None
+                and not commit.prepared_tool_calls
+                and commit.resumability is CheckpointResumability.SAFE
+            )
+            valid = outcome_ready or steered
         if not valid:
             raise IrisRunConflictError("fake port model commit cursor/message/prepared 转换无效")
 
