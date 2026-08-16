@@ -1,5 +1,19 @@
-"""单 session 的 process-local input admission facade。"""
+"""单 session 的 process-local input admission facade。
 
+``SessionManager`` 只组合一个 exact ``AgentRunner`` 与一个 session id。
+它不接管任何 durable ownership：run、history、checkpoint、interaction、cancellation、result 
+与 ``RunEvent`` 始终由 runner/store 权威负责。
+队列、receipt 状态、submission 事件、steer claim 与事件去重都只存在于当前进程，
+新建 manager 不扫描也不接管既有 active/waiting lane。
+
+Example:
+    manager = SessionManager(runner, "default")
+    receipt = await manager.submit("先分析现状")
+    queued = await manager.submit("把重点改为并发边界", mode="steer")
+    await manager.close()
+"""
+
+# region imports
 from __future__ import annotations
 
 import asyncio
@@ -20,9 +34,17 @@ from ..message import Msg
 from ..runtime import SteeringInput
 from .runner import AgentRunner
 
+# endregion
+
 logger = logging.getLogger(__name__)
 
+# ==========================================
+#              Type Aliases
+# ==========================================
+# region aliases
 type SubmissionMode = Literal["steer", "follow_up"]
+# steer 只在 runtime 安全边界失败时报 commit_failed；follow_up 只在 create admission 失败时报
+# start_failed。其余三种由 manager 侧的 target/session 状态变化产生。
 type SubmissionFailureReason = Literal[
     "target_terminal",
     "target_cancelling",
@@ -30,10 +52,22 @@ type SubmissionFailureReason = Literal[
     "commit_failed",
     "start_failed",
 ]
+# endregion
 
 
 class SubmitReceipt(BaseModel):
-    """一次普通输入 admission 的不可变即时回执。"""
+    """一次普通输入 admission 的不可变即时回执。
+
+    只表达"输入是否已被接纳"，不表达 run 结果。idle submit 在 run create 已 durable commit
+    后返回 ``delivered``；busy submit 一律返回 ``pending``，最终 delivery/failure 只通过
+    ``SessionManager.events()`` 报告。
+
+    Attributes:
+        submission_id (str): 该次提交的 process-local 标识。
+        run_id (str): 绑定的 run id；follow-up 是预生成的 future run id。
+        mode (SubmissionMode | None): busy 模式；None 表示 idle submit。
+        state (Literal["pending", "delivered"]): 接纳状态。
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -52,6 +86,7 @@ class SubmitReceipt(BaseModel):
 
     @model_validator(mode="after")
     def _validate_state(self) -> SubmitReceipt:
+        # mode 与 state 是绑定的：idle submit 已经完成 create，busy submit 一定还在排队。
         if (self.mode is None, self.state) not in {
             (True, "delivered"),
             (False, "pending"),
@@ -61,7 +96,18 @@ class SubmitReceipt(BaseModel):
 
 
 class SubmissionEvent(BaseModel):
-    """Busy submission 的 process-local 状态事件。"""
+    """Busy submission 的 process-local 状态事件。
+
+    与 durable ``RunEvent`` 混在同一条 stream 中投递，但本身不持久化，也不参与 run 的
+    sequence 编号。
+
+    Attributes:
+        submission_id (str): 对应 ``SubmitReceipt.submission_id``。
+        run_id (str): 绑定的 run id。
+        mode (SubmissionMode): busy 模式。
+        state (Literal["pending", "delivered", "failed"]): 该 submission 的最新状态。
+        reason (SubmissionFailureReason | None): 失败原因；仅 failed 状态携带。
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -86,11 +132,20 @@ class SubmissionEvent(BaseModel):
         return self
 
 
+# 单消费者 stream 原样混合 durable run event 与 transient submission event，不合并 sequence。
 type SessionEvent = RunEvent | SubmissionEvent
 
 
 class _PendingInput(BaseModel):
-    """尚未证明 durable delivery 的单条 transient input。"""
+    """尚未证明 durable delivery 的单条 transient input。
+
+    Attributes:
+        submission_id (str): 该次提交的 process-local 标识。
+        input (str): 已 strip 的用户输入。
+        mode (SubmissionMode): 决定它进入哪一条 FIFO。
+        run_id (str): steer 绑定 exact current run；follow-up 是预生成的 future run id。
+        options (AgentRunOptions | None): 仅 follow-up 可携带，用于其未来的 run create。
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
@@ -110,43 +165,67 @@ class _PendingInput(BaseModel):
 
     @model_validator(mode="after")
     def _validate_options(self) -> _PendingInput:
+        # steer 加入的是已存在 run，其 options 早已 durable，不能再被覆盖。
         if self.mode == "steer" and self.options is not None:
             raise ValueError("steer input 不接受 run options")
         return self
 
 
 class _PendingInputQueue:
-    """按 mode 分离的两条 FIFO；eligibility 由调用方决定。"""
+    """按 mode 分离的两条 FIFO；eligibility 由调用方决定。
+
+    两条队列各自保持 FIFO，但推进条件不同：steer 需要 exact current run 仍可接收，follow-up
+    需要 current run 已 terminal。分开存放使较早的 follow-up 不会阻塞仍能进入当前 run 的
+    steer。
+
+    Attributes:
+        _steer (deque[_PendingInput]): steer FIFO。
+        _follow_up (deque[_PendingInput]): follow-up FIFO。
+    """
 
     def __init__(self) -> None:
         self._steer: deque[_PendingInput] = deque()
         self._follow_up: deque[_PendingInput] = deque()
 
     def admit_steer(self, item: _PendingInput) -> None:
+        """把一条 steer input 追加到队尾。"""
         self._steer.append(item)
 
     def admit_follow_up(self, item: _PendingInput) -> None:
+        """把一条 follow-up input 追加到队尾。"""
         self._follow_up.append(item)
 
     def claim_steer(self, run_id: str) -> _PendingInput | None:
+        """取出队首 steer，且仅当它绑定的正是 ``run_id`` 时。
+
+        队首绑定其它 run 时直接返回 None 而不是跳过它，以保持 steer 的严格 FIFO 语义。
+        """
         if not self._steer or self._steer[0].run_id != run_id:
             return None
         return self._steer.popleft()
 
     def pop_follow_up(self) -> _PendingInput | None:
+        """取出队首 follow-up；队列为空时返回 None。"""
         return self._follow_up.popleft() if self._follow_up else None
 
-    def fail_target(self, run_id: str) -> tuple[_PendingInput, ...]:
-        failed = tuple(item for item in self._steer if item.run_id == run_id)
-        self._steer = deque(item for item in self._steer if item.run_id != run_id)
-        return failed
+    def drain_steers_for_run(self, run_id: str) -> tuple[_PendingInput, ...]:
+        """移除并返回绑定指定 run 的全部 steer input。
 
-    def take_follow_ups(self) -> tuple[_PendingInput, ...]:
+        Returns:
+            tuple[_PendingInput, ...]: 被移除的 steer input，供调用方发出 failed 事件。
+        """
+        items = tuple(item for item in self._steer if item.run_id == run_id)
+        self._steer = deque(item for item in self._steer if item.run_id != run_id)
+        return items
+
+    def drain_follow_ups(self) -> tuple[_PendingInput, ...]:
+        """清空并返回全部 follow-up input。"""
         items = tuple(self._follow_up)
         self._follow_up.clear()
         return items
 
-    def fail_all(self) -> tuple[_PendingInput, ...]:
+    def drain_all_pending(self) -> tuple[_PendingInput, ...]:
+        """清空两条队列并返回全部 input，用于 session 关闭。"""
         items = (*self._steer, *self._follow_up)
         self._steer.clear()
         self._follow_up.clear()
@@ -162,7 +241,19 @@ _EVENT_STREAM_END = _EventStreamEnd()
 
 @dataclass(slots=True)
 class _FollowUpAdmission:
-    """已从 FIFO 取出、等待 create admission 结算的 follow-up。"""
+    """已从 FIFO 取出、等待 create admission 结算的 follow-up。
+
+    follow-up 的 create 可能失败，而结算既可能由 admission waiter 先观察到，也可能由 run
+    settlement callback 先观察到；``outcome`` 作为唯一汇合点，让两条路径只结算一次。
+
+    Attributes:
+        item (_PendingInput): 对应的 pending input。
+        task (asyncio.Task[RunResult]): 正在执行的 managed start task。
+        started (asyncio.Event): runner 的 admission signal。
+        outcome (asyncio.Future[Exception | None]): 结算结果，None 表示 create 成功。
+        waiter (asyncio.Task[None] | None): 观察 admission 并填充 ``outcome`` 的 helper。
+        finalizer (asyncio.Task[None] | None): 在锁外兜底应用 ``outcome`` 的 helper。
+    """
 
     item: _PendingInput
     task: asyncio.Task[RunResult]
@@ -173,12 +264,30 @@ class _FollowUpAdmission:
 
 
 class _SessionSteeringPort:
-    """把 runtime safe-boundary protocol 映射到 manager transient state。"""
+    """把 runtime safe-boundary protocol 映射到 manager transient state。
+
+    runtime 只在安全边界调用 ``claim()``，随后按写入 durable session history 的结果回调
+    ``acknowledge()`` 或 ``fail()``。claim 到回调之间不允许出现 await，因此 claim 中的 item
+    暂存在 ``SessionManager._claimed_steer``，由回调负责摘除。
+
+    Attributes:
+        _manager (SessionManager): 被映射的 manager，访问其锁与 transient 队列。
+    """
 
     def __init__(self, manager: SessionManager) -> None:
         self._manager = manager
 
     async def claim(self, run_id: str, activation_id: str) -> SteeringInput | None:
+        """在安全边界为 exact activation 取出至多一条 steer input。
+
+        Args:
+            run_id (str): 请求 steer 的 run id。
+            activation_id (str): 请求 steer 的 activation id，用作 fence。
+
+        Returns:
+            SteeringInput | None: 待注入的用户消息；session 已关闭、run 身份不符、run 不再
+                active、已请求取消或队首不匹配时返回 None。
+        """
         manager = self._manager
         async with manager._lock:
             if manager._closed or manager._current_run_id != run_id:
@@ -196,6 +305,7 @@ class _SessionSteeringPort:
             item = manager._pending.claim_steer(run_id)
             if item is None:
                 return None
+            # 已离开队列但尚未证明 durable delivery，暂存等待 acknowledge/fail 回调结算。
             manager._claimed_steer[item.submission_id] = item
             return SteeringInput(
                 submission_id=item.submission_id,
@@ -206,6 +316,15 @@ class _SessionSteeringPort:
             )
 
     def acknowledge(self, submission_id: str) -> None:
+        """确认 steer input 已写入 durable session history。
+
+        Args:
+            submission_id (str): 之前 claim 返回的 submission id。
+
+        Notes:
+            identity 不存在说明 claim/回调配对被破坏，只记录日志：此时既无法判定投递结果，
+            也不应伪造 submission event。
+        """
         manager = self._manager
         item = manager._claimed_steer.pop(submission_id, None)
         if item is None:
@@ -217,6 +336,16 @@ class _SessionSteeringPort:
         manager._emit_submission_event(item, "delivered")
 
     def fail(self, submission_id: str, reason: str) -> None:
+        """报告 steer input 未能写入 durable session history。
+
+        Args:
+            submission_id (str): 之前 claim 返回的 submission id。
+            reason (str): runtime 给出的失败原因。
+
+        Notes:
+            对外只暴露 ``commit_failed`` 这一种 steer 失败原因；收到其它取值时额外记录日志，
+            但仍按 ``commit_failed`` 上报，避免把内部字符串泄漏成新的公开状态。
+        """
         manager = self._manager
         item = manager._claimed_steer.pop(submission_id, None)
         if item is None:
@@ -234,9 +363,40 @@ class _SessionSteeringPort:
 
 
 class SessionManager:
-    """绑定 exact runner 与单个 session 的 process-local admission owner。"""
+    """绑定 exact runner 与单个 session 的 process-local admission owner。
 
+    面向"当前 run 执行期间还要接收新普通输入"的 host：idle 时直接创建 run，busy 时按
+    ``steer`` / ``follow_up`` 入队。所有状态由单个 ``asyncio.Lock`` 串行化，durable 事实一律
+    委托给 runner。
+
+    Attributes:
+        _runner (AgentRunner): 唯一 durable owner。
+        _session_id (str): 绑定的 session id。
+        _lock (asyncio.Lock): 串行化全部 transient 状态变更。
+        _pending (_PendingInputQueue): steer / follow-up 两条 FIFO。
+        _claimed_steer (dict[str, _PendingInput]): 已 claim 但未结算的 steer input。
+        _current_run_id (str | None): facade 认定的当前 run；None 表示 idle。
+        _current_task (asyncio.Task[RunResult] | None): 推进当前 run 的 managed task。
+        _closed (bool): facade 是否已关闭。
+        _event_queue (asyncio.Queue): mixed event stream 的缓冲队列。
+        _relayed_event_keys (set[tuple[str, int]]): 已 relay 的 durable event 去重键。
+        _event_consumer_started (bool): ``events()`` 是否已被取用。
+        _event_stream_closed (bool): stream 是否已终止，终止后不再入队。
+        _steering (_SessionSteeringPort): 注入 runner 的安全边界 steering port。
+        _follow_up_admissions (dict[str, _FollowUpAdmission]): 等待 create 结算的 follow-up。
+
+    Example:
+        manager = SessionManager(runner, "default")
+        await manager.submit("先分析现状")
+        await manager.close()
+    """
+
+    # ==========================================
+    #               Initialization
+    # ==========================================
+    # region
     def __init__(self, runner: AgentRunner, session_id: str) -> None:
+        """绑定 runner 与 session id，初始化全部 process-local 状态。"""
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise IrisRunStateError("session_id 不能为空")
@@ -255,6 +415,12 @@ class SessionManager:
         self._steering = _SessionSteeringPort(self)
         self._follow_up_admissions: dict[str, _FollowUpAdmission] = {}
 
+    # endregion
+
+    # ==========================================
+    #               Input Admission
+    # ==========================================
+    # region
     async def submit(
         self,
         input: str,
@@ -262,13 +428,31 @@ class SessionManager:
         mode: SubmissionMode | None = None,
         options: AgentRunOptions | None = None,
     ) -> SubmitReceipt:
-        """提交 idle input，或向 busy run admission 一条 steer/follow-up。"""
+        """提交 idle input，或向 busy run admission 一条 steer/follow-up。
+
+        Args:
+            input (str): 用户输入，不能为空白。
+            mode (SubmissionMode | None): idle 时必须为 None；busy 时必须显式给出
+                ``steer`` 或 ``follow_up``。
+            options (AgentRunOptions | None): 新 run 的限额与 runtime 选项；``steer`` 不接受。
+
+        Returns:
+            SubmitReceipt: idle submit 返回 ``delivered``；busy submit 返回 ``pending``，最终
+                结果只通过 ``events()`` 报告。
+
+        Raises:
+            IrisRunStateError: 当输入为空、mode 与 idle/busy 状态不符、steer 携带 options、
+                current run admission 尚未完成，或 run 已请求取消而不再接收 steer 时。
+        """
+        # --- 1. 规范化输入并同步 facade 状态 ---
         normalized_input = input.strip()
         if not normalized_input:
             raise IrisRunStateError("input 不能为空")
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
+
+            # --- 2. idle：直接创建并等待 run admission ---
             if self._current_run_id is None:
                 if mode is not None:
                     raise IrisRunStateError("idle submit 的 mode 必须为 None")
@@ -284,6 +468,7 @@ class SessionManager:
                 try:
                     await self._wait_for_admission(task, started)
                 except Exception:
+                    # create 失败时必须回退 facade 的 current 占位，否则 session 永远停在 busy。
                     if self._current_task is task and self._current_run_id == run_id:
                         self._current_task = None
                         self._current_run_id = None
@@ -295,6 +480,8 @@ class SessionManager:
                     state="delivered",
                 )
 
+            # --- 3. busy：校验 mode 与 target run 可接收性 ---
+            # busy 语义差异很大（改写当前 run 还是排下一个 run），不提供默认值。
             if mode not in ("steer", "follow_up"):
                 raise IrisRunStateError("busy submit 必须显式提供 steer 或 follow_up mode")
             if mode == "steer" and options is not None:
@@ -303,12 +490,15 @@ class SessionManager:
                 current = self._runner.get_run(self._current_run_id)
             except IrisRunNotFoundError as exc:
                 raise IrisRunStateError("current run admission 尚未完成") from exc
+            # 已请求取消的 run 不会再到达安全边界，顺带清空其存量 steer 而不是让它们悬挂。
             if mode == "steer" and current.cancellation_requested_at is not None:
                 self._fail_items(
-                    self._pending.fail_target(current.run_id),
+                    self._pending.drain_steers_for_run(current.run_id),
                     reason="target_cancelling",
                 )
                 raise IrisRunStateError("cancelling run 不接受新的 steer input")
+
+            # --- 4. 入队并返回 pending receipt ---
             item = _PendingInput(
                 submission_id=self._new_submission_id(),
                 input=normalized_input,
@@ -334,7 +524,21 @@ class SessionManager:
         interaction_id: str,
         response: HumanInteractionResponse,
     ) -> RunResult:
-        """恢复 façade 当前 exact waiting run，并返回 runner 的 durable result。"""
+        """恢复 facade 当前 exact waiting run，并返回 runner 的 durable result。
+
+        HITL 响应不进入普通输入队列，只能经由本方法交付。
+
+        Args:
+            interaction_id (str): 必须是 current run 当前 pending 的 exact interaction id。
+            response (HumanInteractionResponse): 人工决定。
+
+        Returns:
+            RunResult: runner 的 durable result；等待 result 时已释放 facade 锁。
+
+        Raises:
+            IrisRunStateError: 当 facade 已关闭、没有 current run、current run 不在 waiting
+                phase，或 interaction_id 不是当前 waiting interaction 时。
+        """
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
@@ -358,20 +562,36 @@ class SessionManager:
             self._current_task = task
             self._attach_settlement_callback(task, run_id, submission=None)
             await self._wait_for_admission(task, started)
+        # 在锁外等待完整 result；shield 保证调用方被取消时不会连带取消 durable activation。
         return await asyncio.shield(task)
 
     async def interrupt(self, *, reason: str | None = None) -> RunSnapshot:
-        """请求取消 façade 当前 exact run，并保留 follow-up 到真实 terminal。"""
+        """请求取消 facade 当前 exact run，并保留 follow-up 到真实 terminal。
+
+        active run 的 cancellation request 不是 terminal，因此只清空该 run 的 steer input，
+        follow-up 仍等待真实 settlement。
+
+        Args:
+            reason (str | None): 取消原因，None 表示使用 runner 默认文案。
+
+        Returns:
+            RunSnapshot: 请求提交后的 run snapshot。
+
+        Raises:
+            IrisRunStateError: 当 facade 已关闭或没有 current run 时。
+        """
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
             run_id = self._require_current_run()
             before = self._runner.get_run(run_id)
             snapshot = self._runner.request_cancel(run_id, reason=reason)
+            # request_cancel 是同步 durable 写入，其 events 不经过 managed
+            # callback，需要在此补 relay。
             for event in self._runner.list_events(run_id, before.last_event_sequence):
                 self._relay_run_event(event)
             self._fail_items(
-                self._pending.fail_target(run_id),
+                self._pending.drain_steers_for_run(run_id),
                 reason="target_cancelling",
             )
             if snapshot.phase is RunPhase.TERMINAL:
@@ -379,18 +599,36 @@ class SessionManager:
             return snapshot
 
     def events(self) -> AsyncIterator[SessionEvent]:
-        """返回唯一 mixed event consumer；不回放 manager 创建前的 durable events。"""
+        """返回唯一 mixed event consumer；不回放 manager 创建前的 durable events。
+
+        Returns:
+            AsyncIterator[SessionEvent]: 混合 durable ``RunEvent`` 与 transient
+                ``SubmissionEvent`` 的异步迭代器，在 ``close()`` 之后正常结束。
+
+        Raises:
+            IrisRunStateError: 当已有 consumer 取用过该 stream 时；事件只入队一次，多个
+                consumer 会互相吞掉事件。
+        """
         if self._event_consumer_started:
             raise IrisRunStateError("SessionManager events 只允许一个 consumer")
         self._event_consumer_started = True
         return self._iterate_events()
 
     async def close(self) -> None:
-        """关闭 façade admission/event stream，不取消或等待 durable run。"""
+        """关闭 facade admission/event stream，不取消或等待 durable run。
+
+        幂等：重复调用直接返回。当前 durable run 继续由 runner 推进，manager 只放弃对它的
+        观察与后续输入接纳。
+
+        Notes:
+            已进入 create 的 follow-up 按 run 是否已 durable 区分处理：已存在则视为投递成功，
+            尚未成型才以 ``session_closed`` 失败并取消其 task。
+        """
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
+            # claim 与 acknowledge/fail 之间不允许 await，因此持锁时不应存在悬挂 claim。
             assert not self._claimed_steer, "claim 到 callback 之间不得出现 await"
             for admission in tuple(self._follow_up_admissions.values()):
                 try:
@@ -406,13 +644,20 @@ class SessionManager:
                     self._cancel_follow_up_helpers(admission)
                 else:
                     self._complete_follow_up_success_locked(admission)
-            self._fail_items(self._pending.fail_all(), reason="session_closed")
+            self._fail_items(self._pending.drain_all_pending(), reason="session_closed")
             self._current_run_id = None
             self._current_task = None
             self._event_stream_closed = True
             self._event_queue.put_nowait(_EVENT_STREAM_END)
 
+    # endregion
+
+    # ==========================================
+    #            Managed Task Plumbing
+    # ==========================================
+    # region
     async def _iterate_events(self) -> AsyncIterator[SessionEvent]:
+        """消费事件队列直到读到终止 sentinel。"""
         while True:
             event = await self._event_queue.get()
             if isinstance(event, _EventStreamEnd):
@@ -427,6 +672,19 @@ class SessionManager:
         options: AgentRunOptions | None,
         submission: _PendingInput | None,
     ) -> tuple[asyncio.Task[RunResult], asyncio.Event]:
+        """创建 managed start task 并把它登记为 facade 的 current run。
+
+        必须在持有 ``_lock`` 时调用：它直接改写 ``_current_task``。
+
+        Args:
+            input (str): 已规范化的用户输入。
+            run_id (str): 预生成的 run id。
+            options (AgentRunOptions | None): run 级限额与 runtime 选项。
+            submission (_PendingInput | None): 触发该 run 的 follow-up；idle submit 为 None。
+
+        Returns:
+            tuple[asyncio.Task[RunResult], asyncio.Event]: managed task 与其 admission signal。
+        """
         started = asyncio.Event()
         task = asyncio.create_task(
             self._runner._start_managed(
@@ -448,6 +706,15 @@ class SessionManager:
         *,
         submission: _PendingInput | None,
     ) -> None:
+        """挂上 done callback，在 managed task 结束后异步收口 facade 状态。
+
+        Args:
+            task (asyncio.Task[RunResult]): managed task。
+            run_id (str): 该 task 推进的 run id。
+            submission (_PendingInput | None): 触发该 run 的 follow-up；idle submit 为 None。
+        """
+
+        # done callback 是同步上下文，收口需要取锁，因此只在这里派发一个 task。
         def schedule(completed: asyncio.Task[RunResult]) -> None:
             asyncio.create_task(
                 self._settle_managed_task(completed, run_id, submission=submission)
@@ -460,14 +727,22 @@ class SessionManager:
         task: asyncio.Task[RunResult],
         started: asyncio.Event,
     ) -> None:
+        """等待 run admission 完成，或在 admission 前失败时抛出原因。
+
+        Args:
+            task (asyncio.Task[RunResult]): managed task。
+            started (asyncio.Event): runner 的 admission signal。
+        """
         signal_waiter = asyncio.create_task(started.wait())
         try:
+            # signal 与 task 竞速：任一先到都说明 admission 已有结论，不必等完整 result。
             await asyncio.wait(
                 {task, signal_waiter},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if started.is_set():
                 return
+            # task 先到说明 admission 失败，抛出异常让调用方知晓。
             task.result()
         finally:
             signal_waiter.cancel()
@@ -481,15 +756,32 @@ class SessionManager:
         *,
         submission: _PendingInput | None,
     ) -> None:
-        task_error = None if task.cancelled() else task.exception()
+        """managed task 结束后收口 facade 的 current owner 与 follow-up 结算。
+
+        Args:
+            task (asyncio.Task[RunResult]): 已结束的 managed task。
+            run_id (str): 该 task 推进的 run id。
+            submission (_PendingInput | None): 触发该 run 的 follow-up；idle submit 为 None。
+
+        Notes:
+            全程吞掉异常并只记录日志：本方法运行在 done callback 派发的游离 task 中，没有
+            调用方可以接收错误，抛出只会变成未处理异常。
+        """
+        task_error: Exception | None = None
+        if not task.cancelled():
+            exception = task.exception()
+            if isinstance(exception, Exception):
+                task_error = exception
         try:
             async with self._lock:
+                # 取锁期间 facade 可能已换代或已关闭，非当前 owner 一律不再改状态。
                 if self._current_task is not task or self._current_run_id != run_id:
                     return
                 self._current_task = None
                 try:
                     snapshot = self._runner.get_run(run_id)
                 except IrisRunNotFoundError:
+                    # run 从未成型：facade 回到 idle，并把 follow-up 判为 create 失败。
                     self._current_run_id = None
                     if submission is not None:
                         admission = self._follow_up_admissions.get(submission.submission_id)
@@ -500,6 +792,7 @@ class SessionManager:
                                 )
                             self._complete_follow_up_failure_locked(admission)
                     return
+                # run 已 durable 存在即视为 follow-up 投递成功，run 自身成败与之无关。
                 if submission is not None:
                     admission = self._follow_up_admissions.get(submission.submission_id)
                     if admission is not None:
@@ -516,11 +809,17 @@ class SessionManager:
             )
 
     async def _reconcile_locked(self) -> None:
+        """按 durable 事实校正 facade 的 current owner，并串行放行 follow-up。
+
+        必须在持有 ``_lock`` 时调用。循环是必要的：结算一个 terminal run 会立即启动下一条
+        follow-up，而它也可能已经是 terminal。
+        """
         while self._current_run_id is not None:
             run_id = self._current_run_id
             try:
                 snapshot = self._runner.get_run(run_id)
             except IrisRunNotFoundError:
+                # task 仍在跑说明 create 尚未提交，保留占位等它出结果，不要误判为 idle。
                 task = self._current_task
                 if task is not None and not task.done():
                     return
@@ -530,21 +829,27 @@ class SessionManager:
             if snapshot.phase is RunPhase.TERMINAL:
                 await self._handle_terminal_locked(run_id)
                 continue
+            # waiting 或 active 都保留 current owner；只清理已结束的 task 引用。
             task = self._current_task
             if task is not None and task.done():
                 self._current_task = None
             return
 
     async def _handle_terminal_locked(self, run_id: str) -> None:
+        """结算 terminal run：清空其 steer 并启动下一条 follow-up。"""
         if self._current_run_id != run_id:
             return
-        self._fail_items(self._pending.fail_target(run_id), reason="target_terminal")
+        self._fail_items(self._pending.drain_steers_for_run(run_id), reason="target_terminal")
         self._current_run_id = None
         self._current_task = None
         if not self._closed:
             await self._start_next_follow_up_locked()
 
     async def _start_next_follow_up_locked(self) -> None:
+        """取出并启动至多一条 follow-up，等待其 create admission 有结论。
+
+        follow-up 严格串行：只有本条 create 结算后，facade 才可能推进到下一条。
+        """
         item = self._pending.pop_follow_up()
         if item is None:
             return
@@ -562,15 +867,18 @@ class SessionManager:
             outcome=asyncio.get_running_loop().create_future(),
         )
         self._follow_up_admissions[item.submission_id] = admission
+        # waiter 负责观察 admission，finalizer 负责在本方法被取消后仍能兜底应用 outcome。
         admission.waiter = asyncio.create_task(self._resolve_follow_up_admission(admission))
         admission.finalizer = asyncio.create_task(self._finalize_follow_up_admission(admission))
         try:
+            # shield 让 outcome 不因本 await 被取消而丢失，交由 finalizer 继续结算。
             await asyncio.shield(admission.outcome)
         except asyncio.CancelledError:
             raise
         self._apply_follow_up_outcome_locked(admission)
 
     async def _resolve_follow_up_admission(self, admission: _FollowUpAdmission) -> None:
+        """观察 follow-up 的 create admission，把结论写入 ``outcome``。"""
         try:
             await self._wait_for_admission(admission.task, admission.started)
         except asyncio.CancelledError:
@@ -581,10 +889,12 @@ class SessionManager:
             outcome: Exception | None = exc
         else:
             outcome = None
+        # settlement callback 可能已先写入结论，此处不覆盖。
         if not admission.outcome.done():
             admission.outcome.set_result(outcome)
 
     async def _finalize_follow_up_admission(self, admission: _FollowUpAdmission) -> None:
+        """在 ``_start_next_follow_up_locked`` 之外兜底应用 follow-up 的 outcome。"""
         try:
             await asyncio.shield(admission.outcome)
         except asyncio.CancelledError:
@@ -593,6 +903,7 @@ class SessionManager:
             self._apply_follow_up_outcome_locked(admission)
 
     def _apply_follow_up_outcome_locked(self, admission: _FollowUpAdmission) -> None:
+        """按已就绪的 ``outcome`` 把 follow-up 结算为 delivered 或 failed。"""
         if self._follow_up_admissions.get(admission.item.submission_id) is not admission:
             return
         if admission.outcome.result() is None:
@@ -601,12 +912,19 @@ class SessionManager:
         self._complete_follow_up_failure_locked(admission)
 
     def _complete_follow_up_success_locked(self, admission: _FollowUpAdmission) -> None:
+        """摘除 admission 并发出 delivered 事件。"""
+        # pop 兼作幂等闸门：多条结算路径只有第一条能取到它。
         if self._follow_up_admissions.pop(admission.item.submission_id, None) is not admission:
             return
         self._cancel_follow_up_helpers(admission)
         self._emit_submission_event(admission.item, "delivered")
 
     def _complete_follow_up_failure_locked(self, admission: _FollowUpAdmission) -> None:
+        """回退 facade 状态，并以 ``start_failed`` 结算该 follow-up 及其后继。
+
+        create 失败通常源于 session lane 或配置层面的问题，后续 follow-up 大概率同样失败，
+        因此一并结算而不是逐条重试。
+        """
         if self._follow_up_admissions.pop(admission.item.submission_id, None) is not admission:
             return
         self._cancel_follow_up_helpers(admission)
@@ -614,25 +932,40 @@ class SessionManager:
             self._current_task = None
             self._current_run_id = None
         self._emit_submission_event(admission.item, "failed", reason="start_failed")
-        self._fail_items(self._pending.take_follow_ups(), reason="start_failed")
+        self._fail_items(self._pending.drain_follow_ups(), reason="start_failed")
 
     @staticmethod
     def _cancel_follow_up_helpers(admission: _FollowUpAdmission) -> None:
+        """结算完成后取消该 admission 残留的观察 task。"""
+        # 结算可能正发生在 helper 自身的栈上，取消自己会把结算路径一起中断。
         current = asyncio.current_task()
         for helper in (admission.waiter, admission.finalizer):
             if helper is not None and helper is not current and not helper.done():
                 helper.cancel()
 
+    # endregion
+
+    # ==========================================
+    #              Event Emission
+    # ==========================================
+    # region
     def _fail_items(
         self,
         items: Iterable[_PendingInput],
         *,
         reason: SubmissionFailureReason,
     ) -> None:
+        """批量把一组 pending input 结算为 failed。"""
         for item in items:
             self._emit_submission_event(item, "failed", reason=reason)
 
     def _relay_run_event(self, event: RunEvent) -> None:
+        """把 durable ``RunEvent`` 转发到混合事件流，并按 ``(run_id, sequence)`` 去重。
+
+        Notes:
+            同一事件可能既走 managed callback 又走显式 relay，因此去重是必要的；
+            session 不维护全局序号，仅保证每条事件至多出现一次。
+        """
         if self._event_stream_closed:
             return
         key = (event.run_id, event.sequence)
@@ -648,6 +981,7 @@ class SessionManager:
         *,
         reason: SubmissionFailureReason | None = None,
     ) -> None:
+        """发出一条 transient ``SubmissionEvent``，报告某条输入的最终去向。"""
         if self._event_stream_closed:
             return
         self._event_queue.put_nowait(
@@ -660,22 +994,34 @@ class SessionManager:
             )
         )
 
+    # endregion
+
+    # ==========================================
+    #             Internal Helpers
+    # ==========================================
+    # region
     def _require_open(self) -> None:
+        """断言 session 仍开放，拒绝 close 之后的新输入。"""
         if self._closed:
             raise IrisRunStateError("SessionManager is closed")
 
     def _require_current_run(self) -> str:
+        """取出当前 run id，要求 facade 处于 busy。"""
         if self._current_run_id is None:
             raise IrisRunStateError("SessionManager 没有 current run")
         return self._current_run_id
 
     @staticmethod
     def _new_submission_id() -> str:
+        """生成一个提交 id。"""
         return f"sub_{uuid.uuid4().hex}"
 
     @staticmethod
     def _new_run_id() -> str:
+        """预生成一个 run id，供 follow-up 在 create 之前占位。 """
         return f"run_{uuid.uuid4().hex}"
+
+    # endregion
 
 
 __all__ = ["SessionEvent", "SessionManager", "SubmissionEvent", "SubmitReceipt"]
