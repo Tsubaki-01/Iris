@@ -20,6 +20,10 @@ $env:IRIS_PROVIDER_API_KEYS__DEEPSEEK = "sk-..."
 uv run iris chat examples/chat/agent.yaml --session-id example
 ```
 
+当前 run 执行期间可以继续输入普通文本，它会作为 `steer` 在下一个安全边界进入当前 run；使用
+`/follow-up <消息>` 可以排入下一轮。Ctrl-C 会先请求中断当前 run，再保持原有行为退出 chat。
+permission / question 提示出现后，下一行输入会作为 typed HITL response，而不是普通消息。
+
 ## Provider
 
 基础调用展示 provider-neutral 请求和响应：
