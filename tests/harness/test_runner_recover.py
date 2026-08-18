@@ -23,11 +23,14 @@ from iris.lifecycle import (
     RunCommit,
     RunEventKind,
     RunLimits,
+    RunPhase,
     RunStopReason,
     ToolCallPhase,
 )
-from iris.message import ToolUseBlock
-from iris.store import InMemoryLifecycleStore
+from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.providers.openai import OpenAIChatMapper
+from iris.runtime import RuntimeCursor
+from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
 
 from .fakes import (
@@ -101,6 +104,147 @@ async def test_safe_recovery_preserves_initial_turn_input(tmp_path: Path) -> Non
 
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert recovery_provider.requests[0].messages[-1].text == "当前轮次"
+
+
+@pytest.mark.asyncio
+async def test_safe_recovery_from_second_model_step_reuses_committed_history(
+    tmp_path: Path,
+) -> None:
+    class BlockSecondRequestProvider:
+        def __init__(self, first_response: LLMResponse) -> None:
+            self.first_response = first_response
+            self.requests: list[LLMRequest] = []
+            self.second_started = asyncio.Event()
+            self.release_second = asyncio.Event()
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return self.first_response
+            self.second_started.set()
+            await self.release_second.wait()
+            raise AssertionError("cancelled second request must not return")
+
+    effects: list[str] = []
+
+    def read_once() -> str:
+        effects.append("read_once")
+        return "value"
+
+    registry = ToolRegistry()
+    registry.register_function(read_once, description="读取一次")
+    provider = BlockSecondRequestProvider(
+        tool_response(ToolUseBlock(id="read-once-1", name="read_once", input={}))
+    )
+    store = InMemoryLifecycleStore()
+    running = asyncio.create_task(
+        AgentRunner(
+            runtime=build_runtime(tmp_path, registry=registry, provider=provider),
+            store=store,
+        ).start(AgentRunRequest(input="多轮恢复", run_id="run-step-one-recover"))
+    )
+    await provider.second_started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    crashed = store.load_run("run-step-one-recover")
+    checkpoint = store.load_checkpoint("run-step-one-recover")
+    assert crashed is not None and crashed.current_activation_id is not None
+    assert crashed.phase is RunPhase.ACTIVE
+    assert checkpoint is not None
+    cursor = RuntimeCursor.model_validate(checkpoint.engine_cursor)
+    assert cursor.position == "before_model"
+    assert cursor.step_index == 1
+    assert cursor.tool_calls == ()
+    assert cursor.tool_results == ()
+    assert cursor.assistant_message is None
+    assert crashed.usage.model_steps_reserved == crashed.usage.model_steps_committed + 1
+    assert effects == ["read_once"]
+    [tool_call] = store.list_tool_calls("run-step-one-recover")
+    assert tool_call.phase is ToolCallPhase.COMMITTED
+    assert tool_call.result is not None
+    session = store.load_session("default")
+    assert sum(message.text == "多轮恢复" for message in session.messages) == 1
+    assert [call.id for message in session.messages for call in message.tool_calls] == [
+        "read-once-1"
+    ]
+    assert [
+        result.tool_use_id for message in session.messages for result in message.tool_results
+    ] == ["read-once-1"]
+
+    recovery_provider = StaticProvider(text_response("已从第二轮恢复"))
+    result = await AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=recovery_provider,
+        ),
+        store=store,
+    ).recover(
+        "run-step-one-recover",
+        expected_activation_id=crashed.current_activation_id,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert len(recovery_provider.requests) == 1
+    assert (
+        sum(message.text == "多轮恢复" for message in recovery_provider.requests[0].messages) == 1
+    )
+    assert effects == ["read_once"]
+    final_session = store.load_session("default")
+    assert [call.id for message in final_session.messages for call in message.tool_calls] == [
+        "read-once-1"
+    ]
+    assert [
+        tool_result.tool_use_id
+        for message in final_session.messages
+        for tool_result in message.tool_results
+    ] == ["read-once-1"]
+    assert sum(message.text == "已从第二轮恢复" for message in final_session.messages) == 1
+    assert result.run.usage.model_steps_reserved == 2
+    assert result.run.usage.model_steps_committed == 2
+    events = store.list_events("run-step-one-recover")
+    assert [event.kind for event in events].count(RunEventKind.MODEL_STEP_RESERVED) == 2
+    assert [event.kind for event in events].count(RunEventKind.ACTIVATION_ABANDONED) == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_restart_discovers_active_lane_and_recovers_with_exact_fence(
+    tmp_path: Path,
+) -> None:
+    provider = BlockingProvider()
+    path = tmp_path / "restart-lifecycle.db"
+    first_store = SQLiteStore(path)
+    running = asyncio.create_task(
+        AgentRunner(
+            runtime=build_runtime(tmp_path, provider=provider),
+            store=first_store,
+        ).start(AgentRunRequest(input="重启恢复", run_id="run-restart-discovery"))
+    )
+    await provider.started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    restarted_store = SQLiteStore(path)
+    discovered_run_id = restarted_store.load_session_lane("default")
+    assert discovered_run_id == "run-restart-discovery"
+    discovered = restarted_store.load_run(discovered_run_id)
+    assert discovered is not None and discovered.current_activation_id is not None
+
+    recovery_provider = StaticProvider(text_response("恢复完成"))
+    result = await AgentRunner(
+        runtime=build_runtime(tmp_path, provider=recovery_provider),
+        store=restarted_store,
+    ).recover(
+        discovered_run_id,
+        expected_activation_id=discovered.current_activation_id,
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert len(recovery_provider.requests) == 1
+    assert restarted_store.load_session_lane("default") is None
 
 
 @pytest.mark.asyncio
@@ -185,6 +329,35 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
         RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
         RunEventKind.RUN_TERMINAL,
     ]
+
+    follow_up_provider = StaticProvider(text_response("继续完成"))
+    follow_up = await AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry, provider=follow_up_provider),
+        store=store,
+    ).start(AgentRunRequest(input="继续", run_id="run-after-claim-recover"))
+
+    assert follow_up.run.stop_reason is RunStopReason.COMPLETED
+    wire_messages = OpenAIChatMapper().format_messages(follow_up_provider.requests[0].messages)
+    tool_call_ids = [
+        call["id"] for message in wire_messages for call in message.get("tool_calls", [])
+    ]
+    tool_result_ids = [
+        message["tool_call_id"] for message in wire_messages if message["role"] == "tool"
+    ]
+    assert tool_call_ids == ["effect-1"]
+    assert tool_result_ids == tool_call_ids
+    tool_call_index = next(
+        index for index, message in enumerate(wire_messages) if message.get("tool_calls")
+    )
+    tool_result_index = next(
+        index for index, message in enumerate(wire_messages) if message["role"] == "tool"
+    )
+    next_user_index = next(
+        index
+        for index, message in enumerate(wire_messages)
+        if message["role"] == "user" and message["content"] == "继续"
+    )
+    assert tool_call_index < tool_result_index < next_user_index
 
 
 @pytest.mark.asyncio

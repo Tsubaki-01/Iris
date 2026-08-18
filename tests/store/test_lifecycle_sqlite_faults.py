@@ -180,6 +180,7 @@ def test_statement_failure_rolls_back_outcome_unknown_recovery(
         store.create_run(_create_command())
         claimed = _prepare_claimed_tool(store)
         run_before = store.load_run("run-1")
+        session_before = store.load_session("session-1")
         checkpoint_before = store.load_checkpoint("run-1")
         calls_before = store.list_tool_calls("run-1")
         events_before = store.list_events("run-1")
@@ -211,6 +212,7 @@ def test_statement_failure_rolls_back_outcome_unknown_recovery(
         assert path.read_bytes() == before
         reopened = SQLiteStore(path)
         assert reopened.load_run("run-1") == run_before
+        assert reopened.load_session("session-1") == session_before
         assert reopened.load_checkpoint("run-1") == checkpoint_before
         assert reopened.list_tool_calls("run-1") == calls_before
         assert reopened.list_events("run-1") == events_before

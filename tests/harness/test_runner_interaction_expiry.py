@@ -62,6 +62,9 @@ async def test_resume_at_interaction_expiry_terminalizes_without_tool_effect(
 
     assert result.run.stop_reason is RunStopReason.INTERACTION_EXPIRED
     assert effects == []
+    [tool_result] = store.load_session("default").messages[-1].tool_results
+    assert tool_result.tool_use_id == "write"
+    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"
 
 
 @pytest.mark.asyncio
@@ -109,3 +112,6 @@ async def test_earlier_run_deadline_wins_over_later_interaction_expiry(tmp_path:
     )
 
     assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
+    [tool_result] = store.load_session("default").messages[-1].tool_results
+    assert tool_result.tool_use_id == "write"
+    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"

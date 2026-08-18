@@ -145,9 +145,7 @@ async def test_expired_managed_start_returns_without_false_activation_signal(
 
     result = await runner._start_managed(
         AgentRunRequest(input="过期", run_id="run-managed-expired"),
-        options=AgentRunOptions(
-            limits=RunLimits(deadline_at=clock.now() - timedelta(seconds=1))
-        ),
+        options=AgentRunOptions(limits=RunLimits(deadline_at=clock.now() - timedelta(seconds=1))),
         durable_event_callback=relayed.append,
         activation_started=activation_started,
     )
@@ -265,6 +263,9 @@ async def test_deadline_signal_before_effect_guard_prevents_new_tool_effect(
     assert effects == []
     [tool_call] = store.list_tool_calls("run-deadline-effect")
     assert tool_call.phase is ToolCallPhase.PREPARED
+    [tool_result] = store.load_session("default").messages[-1].tool_results
+    assert tool_result.tool_use_id == "deadline-effect-1"
+    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,11 @@ async def test_waiting_cancel_closes_interaction_and_releases_lane(tmp_path: Pat
     assert result.run.stop_reason is RunStopReason.CANCELLED
     assert closed is not None and closed.status.value == "closed"
     assert result.run.pending_interaction_id is None
+    [tool_result] = store.load_session("default").messages[-1].tool_results
+    [tool_call] = store.list_tool_calls("run-wait-cancel")
+    assert tool_result.tool_use_id == "write-1"
+    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"
+    assert tool_call.phase is ToolCallPhase.PREPARED
     assert await runner.recover("run-wait-cancel") == result
     next_result = await runner.start(
         AgentRunRequest(input="继续", session_id="default", run_id="run-after-cancel")
