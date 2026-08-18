@@ -23,6 +23,9 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 - Model steps reserve before commit, with at most one outstanding reservation.
 - Tool effects claim before execution and commit a result afterward; unresolved claims never replay.
 - A terminal run has no current activation, open interaction, or lane.
+- In a terminal run's durable history, every `tool_use` has exactly one matching result. Tool-call
+  phase still distinguishes a committed result, unknown outcome, and never-started execution; a
+  synthetic closer must not erase side-effect knowledge.
 - Run, checkpoint, session revision, usage counters, and environment fingerprint cross-validate.
 - Mutation events append atomically with aggregate facts and use monotonic sequence numbers.
 
@@ -36,8 +39,11 @@ or callbacks, and no old payload is migrated.
 ## Store contract
 
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
-cancellation/finish/recover commands plus run/session/interaction/checkpoint/tool/result/event reads.
+cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
+reads.
 Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
+`load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
+or transfer ownership.
 
 ## Public API
 

@@ -23,6 +23,8 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
 - model step 先 reserve 再 commit，最多一个未提交 reservation；
 - tool effect 先 claim，再 commit result；unresolved claim 不得重放；
 - terminal run 没有 current activation、open interaction 或 lane；
+- terminal run 的 durable history 中，每个 `tool_use` 都恰好有一个匹配的 result；tool-call phase
+  继续区分已提交结果、结果未知与从未开始，不能用合成 closer 抹去副作用知识；
 - run、checkpoint、session revision、usage counters 与 environment fingerprint 必须交叉一致；
 - mutation events 与 aggregate facts 同事务追加，sequence 单调递增。
 
@@ -39,8 +41,10 @@ checkpoint schema 不迁移旧 payload，也不保存 provider client、task、l
 ## Store contract
 
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
-cancellation/finish/recover commands，以及 run/session/interaction/checkpoint/tool/result/event reads。
+cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
+reads。
 每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
+`load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
 
 ## 公开接口
 

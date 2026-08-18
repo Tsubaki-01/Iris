@@ -31,8 +31,8 @@ print(session.revision, session.messages)
 不导入或调用内存实现。
 
 `SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
-读取目标 run、session、interaction、checkpoint、tool calls 或 events；跨多条查询的 read 在
-同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
+读取目标 run、session、lane owner、interaction、checkpoint、tool calls 或 events；跨多条查询的
+read 在同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
 
 Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所需的 rows。run、session、
 checkpoint、tool call 与 interaction 更新分别使用 revision、sequence 或 version CAS
@@ -60,8 +60,12 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 - `SQLiteStore`：持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
-finish/recover/cancel commands 及 run/session/checkpoint/tool/interaction/event/result reads。应通过
-`iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
+finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
+应通过 `iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
+
+`load_session_lane(session_id)` 只读返回当前 non-terminal lane owner 的 `run_id`，无占用时返回
+`None`。它不修复、恢复或接管 run；host 仍需读取 run/interaction，并用精确 activation fence 调用
+`recover()`，或用精确 interaction identity 调用 `resume()`。
 
 取消请求、waiting settlement、activation abandon/rebind、outcome-ready finalize 与 unresolved
 claim -> outcome unknown 都在 aggregate transaction 内完成。不存在旧 schema reader、migration、
@@ -71,6 +75,14 @@ dual write 或 compatibility adapter。
 step、ordinal、call ID、fingerprint 和 version。durable cancellation 先提交时，store 拒绝新的
 claim 且不追加 claim event；claim 先提交时，该调用只能提交明确 result，或在 terminal/
 recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcome unknown，绝不重放。
+
+任何 terminal mutation 都在同一 aggregate transaction 内闭合仍为 `PREPARED` 或 `CLAIMED` 的
+tool history。`CLAIMED` fact 转为 `OUTCOME_UNKNOWN`，并追加既有的
+`TOOL_CALL_OUTCOME_UNKNOWN` event；`PREPARED` fact 保持不变且不追加 outcome event。两者都会向
+session history 追加一个模型可见的合成 error result：前者使用 `TOOL_OUTCOME_UNKNOWN`，后者使用
+`TOOL_NOT_STARTED`。这些 closer 不是工具真实返回值，不计 usage，也不产生
+`TOOL_CALL_COMMITTED` event。session、run 与 checkpoint 的 session revision 随 closer 在同一事务
+推进；SQLite 任一写入失败会整体回滚。
 
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
