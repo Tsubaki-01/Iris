@@ -107,6 +107,7 @@ def _create_command(
     activation_id: str = "activation-1",
     max_model_steps: int = 20,
     metadata: dict[str, object] | None = None,
+    session_revision: int = 0,
 ) -> CreateRun:
     return CreateRun(
         request=AgentRunRequest(
@@ -123,7 +124,7 @@ def _create_command(
             run_id=run_id,
             sequence=1,
             activation_id=activation_id,
-            session_revision=0,
+            session_revision=session_revision,
         ),
         now=_NOW,
     )
@@ -156,7 +157,12 @@ def _interaction() -> HumanInteraction:
     )
 
 
-def _suspend(store: LifecycleStore, created: RunCommit) -> RunCommit:
+def _suspend(
+    store: LifecycleStore,
+    created: RunCommit,
+    *,
+    include_tool_history: bool = False,
+) -> RunCommit:
     prepared = RunToolCallRecord(
         run_id="run-1",
         step_index=0,
@@ -170,19 +176,23 @@ def _suspend(store: LifecycleStore, created: RunCommit) -> RunCommit:
         created_at=_T1,
         updated_at=_T1,
     )
+    assistant = Msg.assistant(
+        [ToolUseBlock(id="call-question", name="ask_question", input={"question": "继续吗？"})]
+    )
+    session_revision = 1 if include_tool_history else 0
     return store.suspend_run(
         SuspendRun(
             run_id="run-1",
             expected_run_revision=created.run.revision,
             activation_id="activation-1",
             expected_session_revision=0,
-            message_delta=[],
+            message_delta=[assistant] if include_tool_history else [],
             prepared_tool_calls=[prepared],
             checkpoint=_checkpoint(
                 run_id="run-1",
                 sequence=2,
                 activation_id="activation-1",
-                session_revision=0,
+                session_revision=session_revision,
             ),
             pending_interaction=_interaction(),
             usage=created.run.usage,
@@ -322,6 +332,7 @@ def test_protocol_exposes_every_required_operation() -> None:
         "load_result",
         "load_run",
         "load_session",
+        "load_session_lane",
         "recover_active_run",
         "request_cancellation",
         "reserve_model_step",
@@ -417,6 +428,73 @@ def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> N
     loaded = lifecycle_store.load_run("run-1")
     assert loaded is not None
     assert loaded.request.metadata == {"nested": {"value": "original"}}
+
+
+def test_session_lane_read_tracks_non_terminal_owner_without_mutation(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Lane read 只观察 active/waiting owner，并在 terminal 后返回空。"""
+    assert lifecycle_store.load_session_lane("session-1") is None
+    created = _create(lifecycle_store)
+    run_before = lifecycle_store.load_run("run-1")
+    session_before = lifecycle_store.load_session("session-1")
+    checkpoint_before = lifecycle_store.load_checkpoint("run-1")
+    events_before = lifecycle_store.list_events("run-1")
+
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    assert lifecycle_store.load_run("run-1") == run_before
+    assert lifecycle_store.load_session("session-1") == session_before
+    assert lifecycle_store.load_checkpoint("run-1") == checkpoint_before
+    assert lifecycle_store.list_events("run-1") == events_before
+    if isinstance(lifecycle_store, SQLiteStore):
+        assert SQLiteStore(lifecycle_store.path).load_session_lane("session-1") == "run-1"
+
+    waiting = _suspend(lifecycle_store, created)
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    if isinstance(lifecycle_store, SQLiteStore):
+        assert SQLiteStore(lifecycle_store.path).load_session_lane("session-1") == "run-1"
+
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=waiting.run.revision,
+            activation_id=None,
+            stop_reason="cancelled",
+            now=_T2,
+        )
+    )
+    assert lifecycle_store.load_session_lane("session-1") is None
+    if isinstance(lifecycle_store, SQLiteStore):
+        assert SQLiteStore(lifecycle_store.path).load_session_lane("session-1") is None
+
+    second = _create(
+        lifecycle_store,
+        run_id="run-2",
+        session_id="session-1",
+        activation_id="activation-2",
+        session_revision=lifecycle_store.load_session("session-1").revision,
+    )
+    requested = lifecycle_store.request_cancellation(
+        RequestCancellation(
+            run_id="run-2",
+            expected_run_revision=second.run.revision,
+            activation_id="activation-2",
+            reason="stop",
+            now=_T2,
+        )
+    )
+    assert lifecycle_store.load_session_lane("session-1") == "run-2"
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-2",
+            expected_run_revision=requested.run.revision,
+            activation_id="activation-2",
+            stop_reason="cancelled",
+            now=_T3,
+        )
+    )
+    assert lifecycle_store.load_session_lane("session-1") is None
 
 
 def test_reserve_exact_replay_is_noop_and_budget_exhaustion_is_terminal(
@@ -969,6 +1047,44 @@ def test_cancellation_request_is_once_only_and_does_not_release_active_lane(
         )
 
 
+def test_waiting_cancel_closes_prepared_tool_history_without_tool_event(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Waiting terminal cancellation 要闭合 history，但不能伪造 tool effect。"""
+    waiting = _suspend(
+        lifecycle_store,
+        _create(lifecycle_store),
+        include_tool_history=True,
+    )
+    cancelled = lifecycle_store.request_cancellation(
+        RequestCancellation(
+            run_id="run-1",
+            expected_run_revision=waiting.run.revision,
+            activation_id=None,
+            reason="user requested",
+            settle_waiting=True,
+            now=_T2,
+        )
+    )
+
+    session = lifecycle_store.load_session("session-1")
+    [tool_result] = session.messages[-1].tool_results
+    [record] = lifecycle_store.list_tool_calls("run-1")
+    assert cancelled.run.stop_reason == "cancelled"
+    assert session.revision == 2
+    assert tool_result.tool_use_id == "call-question"
+    assert tool_result.is_error is True
+    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"
+    assert tool_result.metadata["error"]["retryable"] is True
+    assert record.phase == "prepared"
+    assert record.result is None
+    assert all(event.kind != "tool_call.outcome_unknown" for event in cancelled.events)
+    assert cancelled.session == session
+    assert cancelled.checkpoint is not None
+    assert cancelled.checkpoint.sequence == waiting.checkpoint.sequence
+    assert cancelled.checkpoint.session_revision == session.revision
+
+
 def test_finish_exact_replay_is_noop_and_releases_lane(
     lifecycle_store: LifecycleStore,
 ) -> None:
@@ -996,10 +1112,10 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
     assert next_run.run.phase == "active"
 
 
-def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
+def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """Live settlement 必须在同一 transaction 闭合全部 unresolved claims。"""
+    """Terminal settlement 必须原子闭合全部 unresolved tool history。"""
     prepared = _prepare_tool_batch(lifecycle_store)
     claim_revision = prepared.run.revision
     for tool_call_id in ("call-1", "call-2"):
@@ -1016,20 +1132,19 @@ def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
         )
         claim_revision = claimed.run.revision
 
-    terminal = lifecycle_store.finish_run(
-        FinishRun(
-            run_id="run-1",
-            expected_run_revision=claim_revision,
-            activation_id="activation-1",
-            stop_reason="outcome_unknown",
-            error=RunErrorInfo(
-                code="TOOL_OUTCOME_UNKNOWN",
-                message="工具结果不可证明",
-                source="tool",
-            ),
-            now=_T3,
-        )
+    command = FinishRun(
+        run_id="run-1",
+        expected_run_revision=claim_revision,
+        activation_id="activation-1",
+        stop_reason="outcome_unknown",
+        error=RunErrorInfo(
+            code="TOOL_OUTCOME_UNKNOWN",
+            message="工具结果不可证明",
+            source="tool",
+        ),
+        now=_T3,
     )
+    terminal = lifecycle_store.finish_run(command)
 
     records = lifecycle_store.list_tool_calls("run-1")
     assert [record.phase for record in records] == [
@@ -1048,6 +1163,32 @@ def test_outcome_unknown_finish_closes_claim_and_emits_tool_event(
         for event in terminal.events
         if event.kind == "tool_call.outcome_unknown"
     } == {"call-1", "call-2"}
+    assert all(record.result is None for record in records)
+
+    session = lifecycle_store.load_session("session-1")
+    tool_results = [result for message in session.messages for result in message.tool_results]
+    assert session.revision == 2
+    assert [result.tool_use_id for result in tool_results] == ["call-1", "call-2", "call-3"]
+    assert [result.is_error for result in tool_results] == [True, True, True]
+    assert [result.metadata["error"]["code"] for result in tool_results] == [
+        "TOOL_OUTCOME_UNKNOWN",
+        "TOOL_OUTCOME_UNKNOWN",
+        "TOOL_NOT_STARTED",
+    ]
+    assert [result.metadata["error"]["retryable"] for result in tool_results] == [
+        False,
+        False,
+        True,
+    ]
+    assert terminal.session == session
+    assert terminal.checkpoint is not None
+    assert terminal.checkpoint.sequence == 2
+    assert terminal.checkpoint.session_revision == session.revision
+    assert terminal.run.usage.tool_calls_committed == 0
+
+    replay = lifecycle_store.finish_run(command)
+    assert replay.events == ()
+    assert lifecycle_store.load_session("session-1") == session
 
 
 def test_safe_recovery_abandons_old_fence_and_rebinds_checkpoint(
@@ -1156,6 +1297,14 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
         "outcome_unknown",
         "prepared",
     ]
+    session = lifecycle_store.load_session("session-1")
+    tool_results = [result for message in session.messages for result in message.tool_results]
+    assert session.revision == 2
+    assert [result.tool_use_id for result in tool_results] == ["call-1", "call-2", "call-3"]
+    assert recovered.session == session
+    assert recovered.checkpoint is not None
+    assert recovered.checkpoint.sequence == claimed.checkpoint.sequence
+    assert recovered.checkpoint.session_revision == session.revision
     if not isinstance(lifecycle_store, SQLiteStore):
         return
     reopened = SQLiteStore(lifecycle_store.path)

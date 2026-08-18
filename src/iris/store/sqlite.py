@@ -69,6 +69,7 @@ from ..lifecycle.store import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._terminal_closure import build_terminal_tool_closure
 
 _CommandT = TypeVar("_CommandT", bound=BaseModel)
 _ReadT = TypeVar("_ReadT")
@@ -370,6 +371,16 @@ class SQLiteStore:
                 operation="load_session",
             ),
         )
+
+    def load_session_lane(self, session_id: str) -> str | None:
+        def read(connection: sqlite3.Connection) -> str | None:
+            row = connection.execute(
+                "SELECT run_id FROM session_run_lanes WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            return None if row is None else str(row["run_id"])
+
+        return self._read("load_session_lane", read)
 
     def load_interaction(self, interaction_id: str) -> HumanInteraction | None:
         return self._read(
@@ -1518,6 +1529,10 @@ class SQLiteStore:
             )
         ]
         interaction: HumanInteraction | None = None
+        current_session: SessionSnapshot | None = None
+        updated_session: SessionSnapshot | None = None
+        updated_checkpoint = checkpoint
+        unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         if run.phase is RunPhase.WAITING and command.settle_waiting:
             interaction = self._close_interaction(
                 connection,
@@ -1526,7 +1541,43 @@ class SQLiteStore:
                 command.reason,
                 operation=operation,
             )
-            sequence += 1
+            closures = self._terminal_tool_closures(
+                connection,
+                run,
+                command.now,
+                operation=operation,
+            )
+            closure_messages = [message for _, _, message in closures]
+            current_session = self._select_session(
+                connection,
+                run.session_id,
+                operation=operation,
+            )
+            appended_session = _append_messages(current_session, closure_messages)
+            if closure_messages:
+                updated_session = appended_session
+                updated_checkpoint = checkpoint.model_copy(
+                    deep=True,
+                    update={"session_revision": appended_session.revision},
+                )
+            unknown_pairs = [
+                (current_call, updated_call)
+                for current_call, updated_call, _ in closures
+                if current_call.phase is ToolCallPhase.CLAIMED
+            ]
+            for index, (_, record) in enumerate(unknown_pairs, start=1):
+                events.append(
+                    _make_event(
+                        run,
+                        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
+                        command.now,
+                        sequence=sequence + index,
+                        activation_id=record.claim_activation_id,
+                        step_index=record.step_index,
+                        correlation_id=record.tool_call_id,
+                    )
+                )
+            sequence += len(unknown_pairs) + 1
             updated = _replace_run(
                 run,
                 phase=RunPhase.TERMINAL,
@@ -1567,13 +1618,17 @@ class SQLiteStore:
             else:
                 result = None
 
-        self._touch_session(
-            connection,
-            run.session_id,
-            checkpoint.session_revision,
-            command.now,
-        )
-        self._update_run(connection, run, updated, checkpoint.session_revision)
+        if updated_session is not None and current_session is not None:
+            self._update_session(connection, current_session, updated_session, command.now)
+            self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
+        else:
+            self._touch_session(
+                connection,
+                run.session_id,
+                checkpoint.session_revision,
+                command.now,
+            )
+        self._update_run(connection, run, updated, updated_checkpoint.session_revision)
         if interaction is not None:
             current_interaction = self._require_interaction(
                 connection,
@@ -1582,11 +1637,14 @@ class SQLiteStore:
             )
             self._update_interaction(connection, current_interaction, interaction)
             self._delete_lane(connection, run, require_match=False)
+        for current_call, updated_call in unknown_pairs:
+            self._update_tool_call(connection, current_call, updated_call)
         for event in events:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            checkpoint=checkpoint,
+            session=updated_session,
+            checkpoint=updated_checkpoint,
             interaction=interaction,
             events=tuple(events),
             result=result,
@@ -1645,16 +1703,32 @@ class SQLiteStore:
         else:
             activation = None
             settled = None
-        unknown_calls = (
-            self._claimed_calls_as_outcome_unknown(
-                connection,
-                run,
-                command.now,
-                operation=operation,
-            )
-            if command.stop_reason is RunStopReason.OUTCOME_UNKNOWN
-            else []
+        closures = self._terminal_tool_closures(
+            connection,
+            run,
+            command.now,
+            operation=operation,
         )
+        closure_messages = [message for _, _, message in closures]
+        current_session = self._select_session(
+            connection,
+            run.session_id,
+            operation=operation,
+        )
+        updated_session = _append_messages(current_session, closure_messages)
+        updated_checkpoint = (
+            checkpoint.model_copy(
+                deep=True,
+                update={"session_revision": updated_session.revision},
+            )
+            if closure_messages
+            else checkpoint
+        )
+        unknown_calls = [
+            (current_call, updated_call)
+            for current_call, updated_call, _ in closures
+            if current_call.phase is ToolCallPhase.CLAIMED
+        ]
         sequence = run.last_event_sequence + len(unknown_calls) + 1
         updated = _replace_run(
             run,
@@ -1691,13 +1765,17 @@ class SQLiteStore:
         )
         result = project_result(updated)
 
-        self._touch_session(
-            connection,
-            run.session_id,
-            checkpoint.session_revision,
-            command.now,
-        )
-        self._update_run(connection, run, updated, checkpoint.session_revision)
+        if closure_messages:
+            self._update_session(connection, current_session, updated_session, command.now)
+            self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
+        else:
+            self._touch_session(
+                connection,
+                run.session_id,
+                checkpoint.session_revision,
+                command.now,
+            )
+        self._update_run(connection, run, updated, updated_checkpoint.session_revision)
         self._delete_lane(connection, run, require_match=True)
         if activation is not None and settled is not None:
             self._update_activation(connection, activation, settled)
@@ -1709,7 +1787,8 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            checkpoint=checkpoint,
+            session=updated_session if closure_messages else None,
+            checkpoint=updated_checkpoint,
             interaction=interaction,
             events=(*unknown_events, terminal_event),
             result=result,
@@ -1768,6 +1847,32 @@ class SQLiteStore:
             activation_id=activation.activation_id,
         )
 
+        terminal_closures = (
+            self._terminal_tool_closures(
+                connection,
+                run,
+                command.now,
+                operation=operation,
+            )
+            if command.recovery_disposition
+            in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
+            else []
+        )
+        closure_messages = [message for _, _, message in terminal_closures]
+        current_session: SessionSnapshot | None = None
+        updated_session: SessionSnapshot | None = None
+        terminal_checkpoint = checkpoint
+        if closure_messages:
+            current_session = self._select_session(
+                connection,
+                run.session_id,
+                operation=operation,
+            )
+            updated_session = _append_messages(current_session, closure_messages)
+            terminal_checkpoint = checkpoint.model_copy(
+                deep=True,
+                update={"session_revision": updated_session.revision},
+            )
         unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         activation_next: ActivationRecord | None = None
         rebound: RunCheckpoint | None = None
@@ -1779,7 +1884,9 @@ class SQLiteStore:
                     run_id=run.run_id,
                 )
             unknown_pairs = [
-                (record, _outcome_unknown_call(record, command.now)) for record in claimed
+                (current_call, updated_call)
+                for current_call, updated_call, _ in terminal_closures
+                if current_call.phase is ToolCallPhase.CLAIMED
             ]
             terminal_sequence = first_sequence + len(unknown_pairs) + 1
             updated = _replace_run(
@@ -1819,7 +1926,7 @@ class SQLiteStore:
             )
             events = (abandoned_event, *unknown_events, terminal_event)
             result = project_result(updated)
-            output_checkpoint = checkpoint
+            output_checkpoint = terminal_checkpoint
             delete_lane = True
         elif command.recovery_disposition is RecoveryDisposition.FINALIZE:
             if claimed:
@@ -1852,7 +1959,7 @@ class SQLiteStore:
             )
             events = (abandoned_event, terminal_event)
             result = project_result(updated)
-            output_checkpoint = checkpoint
+            output_checkpoint = terminal_checkpoint
             delete_lane = True
         else:
             if command.new_activation_id is None:
@@ -1910,12 +2017,16 @@ class SQLiteStore:
             result = None
             output_checkpoint = rebound
 
-        self._touch_session(
-            connection,
-            run.session_id,
-            checkpoint.session_revision,
-            command.now,
-        )
+        if updated_session is not None and current_session is not None:
+            self._update_session(connection, current_session, updated_session, command.now)
+            self._update_checkpoint(connection, checkpoint, terminal_checkpoint, command.now)
+        else:
+            self._touch_session(
+                connection,
+                run.session_id,
+                checkpoint.session_revision,
+                command.now,
+            )
         self._update_run(connection, run, updated, output_checkpoint.session_revision)
         self._update_activation(connection, activation, abandoned)
         if delete_lane:
@@ -1929,6 +2040,7 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
+            session=updated_session,
             checkpoint=output_checkpoint,
             events=events,
             result=result,
@@ -1974,21 +2086,30 @@ class SQLiteStore:
             )
         ]
 
-    def _claimed_calls_as_outcome_unknown(
+    def _terminal_tool_closures(
         self,
         connection: sqlite3.Connection,
         run: RunRecord,
         now: datetime,
         *,
         operation: str,
-    ) -> list[tuple[RunToolCallRecord, RunToolCallRecord]]:
-        """构造当前 run 所有 unresolved claim 的闭合前后事实。"""
+    ) -> list[tuple[RunToolCallRecord, RunToolCallRecord, Msg]]:
+        """构造当前 run 所有未闭合 tool call 的 fact/message。"""
         return [
-            (record, _outcome_unknown_call(record, now))
-            for record in self._select_claimed_tool_calls(
-                connection,
-                run.run_id,
-                operation=operation,
+            (record, *build_terminal_tool_closure(record, now=now))
+            for record in (
+                _decode_row(
+                    _row_to_tool_call,
+                    row,
+                    path=self.path,
+                    operation=operation,
+                )
+                for row in connection.execute(
+                    """SELECT * FROM run_tool_calls
+                    WHERE run_id = ? AND phase IN ('prepared', 'claimed')
+                    ORDER BY step_index, ordinal""",
+                    (run.run_id,),
+                )
             )
         ]
 
@@ -3074,21 +3195,6 @@ def _closed_interaction(
             "closed_at": now,
             "close_reason": reason,
         },
-    )
-
-
-def _outcome_unknown_call(
-    record: RunToolCallRecord,
-    now: datetime,
-) -> RunToolCallRecord:
-    """把 claimed tool fact 闭合为 outcome_unknown。"""
-    return RunToolCallRecord.model_validate(
-        record.model_dump()
-        | {
-            "phase": ToolCallPhase.OUTCOME_UNKNOWN,
-            "version": record.version + 1,
-            "updated_at": now,
-        }
     )
 
 
