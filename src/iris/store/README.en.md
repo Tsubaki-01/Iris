@@ -34,7 +34,8 @@ inputs and outputs; its state disappears with the process. The SQLite implementa
 imports nor calls the in-memory implementation.
 
 `SQLiteStore` opens a scoped connection and enables foreign keys for every operation. Public reads
-use targeted reads for the requested run, session, interaction, checkpoint, tool calls, or events.
+use targeted reads for the requested run, session, lane owner, interaction, checkpoint, tool calls,
+or events.
 Reads that need multiple queries use one deferred transaction for a consistent snapshot and remain
 write-free.
 
@@ -65,9 +66,14 @@ The `iris.store` package exports only:
 - `SQLiteStore` as the durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
-resolve/finish/recover/cancel commands and run/session/checkpoint/tool/interaction/event/result
+resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
 reads. Construct commands and models through `iris.lifecycle`; do not depend on underscored
 `iris.store` modules.
+
+`load_session_lane(session_id)` is a pure read that returns the current non-terminal lane owner's
+`run_id`, or `None` when the lane is free. It does not repair, recover, or adopt a run. A host still
+loads the run/interaction and calls `recover()` with the exact activation fence or `resume()` with
+the exact interaction identity.
 
 Cancellation requests, waiting settlement, activation abandon/rebind, outcome-ready finalization,
 and unresolved-claim-to-unknown transitions are aggregate transactions. There is no old-schema
@@ -78,6 +84,15 @@ claim remains bound to its step, ordinal, call ID, fingerprint, and version. If 
 commits first, the store rejects a new claim without appending a claim event. If a claim commits
 first, that call can only commit a proven result or be closed atomically with every other unresolved
 claim as outcome unknown during terminal settlement or recovery; it is never replayed.
+
+Every terminal mutation closes tool history that is still `PREPARED` or `CLAIMED` in the same
+aggregate transaction. A `CLAIMED` fact becomes `OUTCOME_UNKNOWN` and emits the existing
+`TOOL_CALL_OUTCOME_UNKNOWN` event. A `PREPARED` fact remains unchanged and emits no outcome event.
+Both append a model-visible synthetic error result to session history: `TOOL_OUTCOME_UNKNOWN` for
+the former and `TOOL_NOT_STARTED` for the latter. These closers are not real tool results, consume
+no usage, and emit no `TOOL_CALL_COMMITTED` event. Session, run, and checkpoint session revisions
+advance with the closer in the same transaction; any SQLite write failure rolls the whole change
+back.
 
 Tool bodies may finish out of order, while session messages, checkpoints, cursors, and
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
