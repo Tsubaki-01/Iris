@@ -3,6 +3,7 @@
 from .base import (
     AgentConfig,
     AgentContextConfig,
+    AgentSkillsConfig,
     ModelConfig,
     PermissionsConfig,
     PythonToolsConfig,
@@ -15,6 +16,7 @@ from .tools import build_tool_registry
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentSkillsConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",

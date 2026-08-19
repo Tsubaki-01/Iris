@@ -3,6 +3,7 @@
 from .config import (
     AgentConfig,
     AgentContextConfig,
+    AgentSkillsConfig,
     ModelConfig,
     PermissionsConfig,
     PythonToolsConfig,
@@ -15,6 +16,7 @@ from .config import (
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentSkillsConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",

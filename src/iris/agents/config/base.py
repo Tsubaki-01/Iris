@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +19,8 @@ from pydantic import (
 
 from ...exceptions import IrisConfigError, IrisValidationError
 from ...providers import ModelRoute, parse_model_route
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 class ModelConfig(BaseModel):
@@ -129,6 +132,31 @@ class ToolsConfig(BaseModel):
         return data
 
 
+class AgentSkillsConfig(BaseModel):
+    """Agent 的 Skill 发现配置。"""
+
+    enabled: bool = Field(default=False, strict=True)
+    root: str = ".agents/skills"
+    require: tuple[str, ...] = ()
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("root")
+    @classmethod
+    def _validate_root(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("skills.root 不能为空")
+        return normalized
+
+    @field_validator("require")
+    @classmethod
+    def _validate_require(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if any(_SKILL_NAME_RE.fullmatch(name) is None for name in value):
+            raise ValueError("skills.require 必须使用小写 kebab-case 名称")
+        return value
+
+
 class PermissionsConfig(BaseModel):
     """权限声明配置。
 
@@ -197,6 +225,7 @@ class AgentConfig(BaseModel):
         model (ModelConfig): 模型配置。
         system (str | None): 简单模式的 system prompt。
         context (AgentContextConfig | None): 结构化 context 配置声明。
+        skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         session (SessionConfig): 会话配置。
@@ -206,6 +235,7 @@ class AgentConfig(BaseModel):
     model: ModelConfig
     system: str | None = None
     context: AgentContextConfig | None = None
+    skills: AgentSkillsConfig | None = None
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
@@ -303,6 +333,7 @@ def load_agent_config(path: str | Path) -> AgentConfig:
 __all__ = [
     "AgentContextConfig",
     "AgentConfig",
+    "AgentSkillsConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",

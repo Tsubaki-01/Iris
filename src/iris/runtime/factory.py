@@ -10,6 +10,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,7 +21,18 @@ from ..context import (
     ContextSlot,
     load_context_build_input,
 )
+from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
 from ..providers import create_provider_client
+from ..skill import (
+    CATALOG_SLOT_NAME,
+    LoadSkillTool,
+    SkillCatalog,
+    SkillDiscoveryOptions,
+    SkillRegistry,
+    SkillScope,
+    discover_skills,
+    resolve_skills_root,
+)
 from ..tools import DefaultPermissionPolicy, ToolExecutor
 from .environment import RuntimeEnvironment, RuntimeProvider
 from .runtime import AgentRuntime
@@ -29,6 +41,8 @@ from .tool_bridge import ToolBridge
 if TYPE_CHECKING:
     from ..memory import MemoryService
 # endregion
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeFactory:
@@ -94,8 +108,25 @@ class RuntimeFactory:
             AgentRuntime: 已装配的 runtime 实例。
         """
         base_dir = _base_dir(config_path)
+        workspace_root = _resolve_relative_to_base(
+            config.permissions.workspace,
+            base_dir=base_dir,
+        ).resolve()
         context_input = _build_context_input(config, base_dir=base_dir)
         tool_registry = build_tool_registry(config.tools)
+        context_input, skill_registry = _prepare_skills(
+            context_input,
+            config=config,
+            workspace_root=workspace_root,
+        )
+        if skill_registry is not None:
+            try:
+                tool_registry.register(LoadSkillTool(skill_registry))
+            except IrisToolValidationError as exc:
+                raise IrisConfigError(
+                    "load_skill 与现有工具名称或别名冲突",
+                    tool="load_skill",
+                ) from exc
         tool_view = tool_registry.view()
         permission_policy = DefaultPermissionPolicy(write_mode=config.permissions.writes)
         tool_executor = ToolExecutor(
@@ -107,10 +138,6 @@ class RuntimeFactory:
             api_key=api_key,
             base_url=config.model.base_url,
             timeout=config.model.timeout,
-        )
-        workspace_root = _resolve_relative_to_base(
-            config.permissions.workspace,
-            base_dir=base_dir,
         )
 
         tool_bridge = ToolBridge(
@@ -151,6 +178,81 @@ def _build_context_input(config: AgentConfig, *, base_dir: Path) -> ContextBuild
             ]
         )
     )
+
+
+def _prepare_skills(
+    context_input: ContextBuildInput,
+    *,
+    config: AgentConfig,
+    workspace_root: Path,
+) -> tuple[ContextBuildInput, SkillRegistry | None]:
+    """发现项目级 Skill，并为非空 registry 追加 catalog slot。"""
+    skills_config = config.skills
+    if skills_config is None or not skills_config.enabled:
+        return context_input, None
+
+    try:
+        root = resolve_skills_root(
+            skills_config.root,
+            workspace_root=workspace_root,
+        )
+    except IrisSkillPathError as exc:
+        raise IrisConfigError(
+            "skills.root 不在 workspace 内",
+            root=skills_config.root,
+            workspace_root=str(workspace_root.resolve()),
+        ) from exc
+
+    result = discover_skills(
+        SkillDiscoveryOptions(
+            workspace_root=workspace_root,
+            roots=((SkillScope.PROJECT, root),),
+        )
+    )
+    registry = SkillRegistry(result)
+    for diagnostic in registry.diagnostics:
+        logger.warning(
+            "skill discovery diagnostic %s: %s",
+            diagnostic.code,
+            diagnostic.message,
+            extra={
+                "code": diagnostic.code,
+                "path": str(diagnostic.path) if diagnostic.path is not None else None,
+                "detail": diagnostic.detail,
+            },
+        )
+
+    missing = registry.missing(skills_config.require)
+    if missing:
+        raise IrisConfigError(
+            "required skills 不存在",
+            missing=missing,
+            available=registry.names(),
+        )
+    if len(registry) == 0:
+        return context_input, None
+
+    if context_input.system.template is not None:
+        logger.warning(
+            "custom system template must explicitly consume the skill catalog slot",
+            extra={
+                "code": "TEMPLATE_SECTION",
+                "section": "system",
+                "template": str(context_input.system.template),
+                "slot": CATALOG_SLOT_NAME,
+            },
+        )
+
+    catalog = SkillCatalog(registry)
+    content_chars = catalog.content_chars()
+    logger.info(
+        "skill catalog built",
+        extra={"count": len(registry), "content_chars": content_chars},
+    )
+    system = context_input.system.model_copy(
+        update={"slots": [*context_input.system.slots, catalog.build_slot()]},
+    )
+    return context_input.model_copy(update={"system": system}), registry
 
 
 def _resolve_relative_to_base(path: str | Path, *, base_dir: Path) -> Path:
