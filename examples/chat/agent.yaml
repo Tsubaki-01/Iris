@@ -10,6 +10,12 @@ model:
 context:
   path: context.yaml
 
+skills:
+  enabled: true
+  root: .agents/skills
+  require:
+    - review-python
+
 tools:
   builtin:
     - file.read

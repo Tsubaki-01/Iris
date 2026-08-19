@@ -24,6 +24,18 @@ uv run iris chat examples/chat/agent.yaml --session-id example
 `/follow-up <消息>` 可以排入下一轮。Ctrl-C 会先请求中断当前 run，再保持原有行为退出 chat。
 permission / question 提示出现后，下一行输入会作为 typed HITL response，而不是普通消息。
 
+## Skill
+
+Chat 示例在 `examples/chat/workspace/.agents/skills/` 内提供 `review-python`，并通过
+`agent.yaml` 的 `skills.require` 保证启动时能够发现它。可以直接输入：
+
+```text
+请使用 review-python 检查 hello.py，只报告问题，不修改文件。
+```
+
+模型会先从 system context 的 Skill catalog 发现该名称，再调用自动注册的 `load_skill` 读取
+`SKILL.md`；无需把 `load_skill` 写进 `tools.builtin`。
+
 ## Provider
 
 基础调用展示 provider-neutral 请求和响应：
