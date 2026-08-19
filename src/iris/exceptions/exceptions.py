@@ -147,6 +147,25 @@ class IrisContextError(IrisError, ValueError):
     runtime_error_code = "CONTEXT_ERROR"
 
 
+# ----- Skill 领域 -----
+
+
+class IrisSkillError(IrisError, ValueError):
+    """Skill 子系统错误的基类。"""
+
+
+class IrisSkillFormatError(IrisSkillError):
+    """Skill 文件格式无效。"""
+
+
+class IrisSkillPathError(IrisSkillError):
+    """Skill 路径不满足 workspace 边界。"""
+
+
+class IrisSkillNotFoundError(IrisSkillError):
+    """按名称找不到 Skill。"""
+
+
 # ----- 提供者 (Provider) 领域 -----
 
 

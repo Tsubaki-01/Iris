@@ -35,6 +35,11 @@ from .exceptions import (
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
+    # Skill
+    IrisSkillError,
+    IrisSkillFormatError,
+    IrisSkillNotFoundError,
+    IrisSkillPathError,
     # Template
     IrisTemplateError,
     IrisTemplateNotFoundError,
@@ -52,6 +57,10 @@ __all__ = [
     "IrisCancellationRequestedError",
     "IrisConfigError",
     "IrisContextError",
+    "IrisSkillError",
+    "IrisSkillFormatError",
+    "IrisSkillPathError",
+    "IrisSkillNotFoundError",
     "IrisExecutionError",
     "IrisParserError",
     "IrisValidationError",
