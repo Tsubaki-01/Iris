@@ -41,6 +41,11 @@ model:
   max_tokens: 512
 system: |
   你是一个本地笔记助手。
+skills:
+  enabled: true
+  root: .agents/skills
+  require:
+    - review-python
 tools:
   builtin:
     - file.read
@@ -92,6 +97,7 @@ model: openai/gpt-4o-mini
 - `model`: `ModelConfig`，也兼容 `provider/model` route string。
 - `system`: 简单模式的 system prompt，和 `context` 互斥。
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
+- `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
@@ -155,6 +161,19 @@ tools:
 
 YAML 中不支持 inline Python 脚本。Python 扩展必须通过可导入的模块引用提供。
 
+### `AgentSkillsConfig`
+
+项目级 Skill 发现配置：
+
+- `enabled`: 严格布尔值，默认 `false`。关闭时 runtime 完全绕过 Skill discovery。
+- `root`: 默认 `.agents/skills`，相对 `permissions.workspace` 解析，且不得越出 workspace。
+- `require`: 默认空元组；每个名称必须是小写 kebab-case，启用后缺少任一必需 Skill 都会让
+  `RuntimeFactory` 抛出 `IrisConfigError`。
+
+Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。启用且发现结果非空时，
+`RuntimeFactory` 会自动注册 `load_skill`，并让它与 context catalog 共用同一个 registry。
+`load_skill` 不是 `tools.builtin` 配置项；不要在 `tools.builtin` 中声明它。
+
 ### `PermissionsConfig`
 
 当前只承载配置形状：
@@ -211,6 +230,7 @@ runner = AgentRunner.from_config_path("agent.yaml")
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | `agent.yaml` 加载与相对 context 路径 | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| Skill 配置与 factory 集成 | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
 
 ```bash

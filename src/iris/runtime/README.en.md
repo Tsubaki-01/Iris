@@ -121,6 +121,17 @@ runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
 The factory never reads or creates a lifecycle database. Harness composition interprets the
 `session` section of `agent.yaml`; the low-level factory has no persistence side effect from it.
 
+The factory resolves `permissions.workspace` before constructing base context and user-declared
+tools. With `skills.enabled: true`, it takes one project-level discovery snapshot against that
+workspace. A non-empty result adds the `available_skills` system slot and registers `load_skill`
+from the same registry before creating `ToolRegistryView` / `ToolExecutor`. Disabled Skills and an
+empty result bypass both additions exactly, preserving the previous context/tool shape. A factory
+or runtime instance does not refresh the snapshot automatically.
+
+A `skills.root` escape, missing `skills.require` entry, or name/alias collision between
+`load_skill` and a user tool becomes an assembly-time `IrisConfigError` and fails closed. See
+[`iris.skill`](../skill/README.en.md) for the full contract.
+
 ## Public API
 
 Package exports cover `AgentRuntime`, factory/environment, provider/assembler/tool bridge,

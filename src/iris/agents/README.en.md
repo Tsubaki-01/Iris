@@ -37,6 +37,11 @@ model:
   max_tokens: 512
 system: |
   You are a local notes assistant.
+skills:
+  enabled: true
+  root: .agents/skills
+  require:
+    - review-python
 tools:
   builtin:
     - file.read
@@ -69,8 +74,8 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 ## Public models and APIs
 
-`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `ModelConfig`, `PermissionsConfig`,
-`PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
+`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `ModelConfig`,
+`PermissionsConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
@@ -83,6 +88,17 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 - `PermissionsConfig` defaults to workspace `.` and writes `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
+
+`AgentConfig.skills` is optional and defaults to `None`. `AgentSkillsConfig` has:
+
+- strict boolean `enabled`, defaulting to `false`; disabled configuration bypasses discovery;
+- `root`, defaulting to `.agents/skills` and resolving inside `permissions.workspace`;
+- `require`, defaulting to an empty tuple and accepting lowercase kebab-case names only. When
+  enabled, any missing required Skill becomes an `IrisConfigError` in `RuntimeFactory`.
+
+See [`iris.skill`](../skill/README.en.md) for the directory and `SKILL.md` contract. A non-empty
+discovery result makes `RuntimeFactory` register `load_skill` automatically with the same registry
+as the context catalog. `load_skill` is not a `tools.builtin` entry and must not be declared there.
 
 `load_agent_config()` reads UTF-8 YAML, rejects unknown fields, and wraps file/YAML/model failures as
 `IrisConfigError`. `build_tool_registry()` creates one shared file service for configured file tools,
@@ -104,6 +120,7 @@ database, or an ORM.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | `agent.yaml` loading and relative context paths | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| Skill config and factory integration | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
 
 ```bash

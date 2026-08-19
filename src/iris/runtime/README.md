@@ -118,6 +118,16 @@ runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
 Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配置由 harness composition
 解释；直接调用 Factory 时该字段不会产生持久化副作用。
 
+Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户声明的工具。若
+`skills.enabled: true`，它以该 workspace 做一次项目级发现快照：非空结果会追加
+`available_skills` system slot，并在创建 `ToolRegistryView` / `ToolExecutor` 前注册共享同一
+registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过 catalog 和 loader，不改变
+原有 context/tool 形状；每个 factory/runtime 实例内不自动刷新快照。
+
+`skills.root` 越出 workspace、`skills.require` 缺失，或 `load_skill` 与用户工具名称/别名冲突，
+都会在装配阶段转为 `IrisConfigError` 并 fail closed。完整契约见
+[`iris.skill`](../skill/README.md)。
+
 ## 公开接口
 
 包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、provider/assembler/tool
