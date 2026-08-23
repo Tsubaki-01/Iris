@@ -673,6 +673,50 @@ def test_commit_model_step_updates_history_checkpoint_and_tool_intents_atomicall
 
     session.messages.clear()
     assert len(lifecycle_store.load_session("session-1").messages) == 1
+    assert committed.session is not None
+    committed.session.messages[0].metadata["caller-mutated"] = True
+    assert lifecycle_store.load_session("session-1").messages[0].metadata == {}
+
+
+def test_nonempty_message_delta_advances_session_revision_once(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    created = _create(lifecycle_store)
+    reserved = lifecycle_store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            now=_T1,
+        )
+    )
+    assistant = Msg.assistant("second")
+
+    committed = lifecycle_store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=reserved.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            message_delta=[Msg.user("first"), assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ),
+            assistant_message=assistant,
+            now=_T2,
+        )
+    )
+
+    assert committed.session is not None
+    assert committed.session.revision == 1
+    assert [message.text for message in committed.session.messages] == ["first", "second"]
+    assert lifecycle_store.load_session("session-1") == committed.session
 
 
 def test_claim_and_commit_tool_result_cover_effect_fence(

@@ -20,15 +20,16 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v1 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v2 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
-任何写入前抛出 `IrisLifecycleSchemaError`，不迁移、重置或修改原文件。
+任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，调用方需要替换后重新创建；
+constructor 不重置或修改原文件。
 
 ## 实现架构
 
 `InMemoryLifecycleStore` 和 `SQLiteStore` 是两个独立、平级的 protocol 实现。内存实现以一把
-`RLock` 管理进程内 facts，并对输入/输出做深拷贝隔离；数据随进程退出丢失。SQLite 实现
-不导入或调用内存实现。
+`RLock` 管理进程内 facts，并对输入/输出做深拷贝隔离；内部追加只复制 list 容器与新 delta，
+不重复复制 store-owned 旧消息。数据随进程退出丢失。SQLite 实现不导入或调用内存实现。
 
 `SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
 读取目标 run、session、lane owner、interaction、checkpoint、tool calls 或 events；跨多条查询的
@@ -41,15 +42,19 @@ Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所�
 checkpoint、tool call 与 interaction 更新分别使用 revision、sequence 或 version CAS
 predicates；lane、activation、interaction、tool facts 与 run 在同一事务中增量写入，events
 保持 append-only。任一 SQL 失败都会触发完整 transaction rollback，不暴露半更新状态。
-schema v1 的 `sessions.messages_json` 仍是单行 JSON 数组，因此追加消息会重写当前 session
-row，但不会读取或改写其他 aggregate。
+schema v2 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
+`session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
+CAS 推进 metadata；完整 `SessionSnapshot` 读取仍按 ordinal 重建并校验 `1..message_count`。
 
-schema v1 只包含：
+schema v2 包含：
 
-- `lifecycle_schema`、`sessions`、`agent_runs`、`session_run_lanes`；
+- `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
 - `run_interactions`、`run_events`；
 - partial unique index `one_open_interaction_per_run`。
+
+`session_messages` 的 `(session_id, ordinal)` composite primary key 已覆盖有序读取，不额外增加
+index。session revision 表示非空 delta 的提交次数，不等于 message count。
 
 SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` context 的
 `IrisRunPersistenceError`；预期 facts 已变化或数据库约束竞争使用 lifecycle conflict/state
@@ -57,10 +62,10 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 
 ## 公开接口
 
-`iris.store` 顶层只导出：
+`iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v2 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -69,15 +74,15 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-表、索引、连接池或 migration，schema identity 仍为 lifecycle v1。
+额外索引或连接池，schema identity 为 lifecycle v2。
 
 `load_session_lane(session_id)` 只读返回当前 non-terminal lane owner 的 `run_id`，无占用时返回
 `None`。它不修复、恢复或接管 run；host 仍需读取 run/interaction，并用精确 activation fence 调用
 `recover()`，或用精确 interaction identity 调用 `resume()`。
 
 取消请求、waiting settlement、activation abandon/rebind、outcome-ready finalize 与 unresolved
-claim -> outcome unknown 都在 aggregate transaction 内完成。不存在旧 schema reader、migration、
-dual write 或 compatibility adapter。
+claim -> outcome unknown 都在 aggregate transaction 内完成。runtime 不包含旧 schema reader、
+dual write 或 compatibility adapter；不兼容文件直接拒绝。
 
 同一 active activation 可以在提交任何 result 前持有多个 exact durable claims；每条 claim 仍绑定
 step、ordinal、call ID、fingerprint 和 version。durable cancellation 先提交时，store 拒绝新的
@@ -95,7 +100,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v1、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v2、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
@@ -104,7 +109,7 @@ model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durabl
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| schema 与兼容性校验 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
+| 当前 schema 创建与精确校验 | `_sqlite_schema.py`、`sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transaction 与故障回滚 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
 | 公开导出 | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |
 

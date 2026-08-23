@@ -1,9 +1,8 @@
-"""精确 lifecycle schema v1 的同步 SQLite store。"""
+"""精确 lifecycle schema v2 的同步 SQLite store。"""
 
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
@@ -12,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, TypeVar
 
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from ..exceptions import (
     IrisLifecycleSchemaError,
@@ -70,6 +69,7 @@ from ..lifecycle.store import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._sqlite_schema import create_schema, require_exact_schema
 from ._terminal_closure import build_terminal_tool_closure
 
 _CommandT = TypeVar("_CommandT", bound=BaseModel)
@@ -85,172 +85,29 @@ class _ActiveCommand(Protocol):
     activation_id: str
 
 
-def _object_name(sql: str) -> str:
-    match = re.search(r"CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX)\s+([a-z_]+)", sql, re.I)
-    if match is None:
-        raise ValueError("无法解析 schema object name")
-    return match.group(1)
+class _SessionMetadata(BaseModel):
+    """SQLite session aggregate 的私有 CAS metadata。"""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
-def _normalize_sql(sql: str) -> str:
-    return re.sub(r"\s+", " ", sql.strip().rstrip(";")).lower()
+    session_id: str
+    revision: int = Field(ge=0, strict=True)
+    message_count: int = Field(ge=0, strict=True)
+    updated_at: datetime | None
 
+    @field_validator("session_id")
+    @classmethod
+    def _validate_session_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("session_id 不能为空")
+        return value
 
-_SCHEMA_STATEMENTS = (
-    """
-    CREATE TABLE lifecycle_schema (
-        component TEXT PRIMARY KEY,
-        version INTEGER NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE sessions (
-        session_id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-        messages_json TEXT NOT NULL DEFAULT '[]',
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE agent_runs (
-        run_id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        phase TEXT NOT NULL CHECK (phase IN ('active', 'waiting', 'terminal')),
-        stop_reason TEXT,
-        request_json TEXT NOT NULL,
-        options_json TEXT NOT NULL,
-        environment_fingerprint TEXT NOT NULL,
-        session_revision INTEGER NOT NULL,
-        run_revision INTEGER NOT NULL CHECK (run_revision >= 1),
-        current_activation_id TEXT,
-        pending_interaction_id TEXT,
-        cancellation_requested_at TEXT,
-        cancellation_reason TEXT,
-        model_steps_reserved INTEGER NOT NULL DEFAULT 0,
-        model_steps_committed INTEGER NOT NULL DEFAULT 0,
-        tool_calls_committed INTEGER NOT NULL DEFAULT 0,
-        usage_json TEXT NOT NULL DEFAULT '{}',
-        assistant_message_json TEXT,
-        error_json TEXT,
-        checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
-        last_event_sequence INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        started_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        finished_at TEXT,
-        CHECK ((phase = 'terminal') = (stop_reason IS NOT NULL)),
-        CHECK (model_steps_committed <= model_steps_reserved)
-    )
-    """,
-    """
-    CREATE TABLE session_run_lanes (
-        session_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL UNIQUE,
-        revision INTEGER NOT NULL,
-        acquired_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE run_activations (
-        activation_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
-        ordinal INTEGER NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('start', 'resume', 'recover')),
-        status TEXT NOT NULL CHECK (status IN ('active', 'settled', 'abandoned')),
-        outcome TEXT CHECK (
-            outcome IN (
-                'completed', 'suspended', 'failed', 'cancelled', 'recovered',
-                'outcome_unknown'
-            )
-        ),
-        started_at TEXT NOT NULL,
-        ended_at TEXT,
-        UNIQUE (run_id, ordinal)
-    )
-    """,
-    """
-    CREATE TABLE run_checkpoints (
-        run_id TEXT PRIMARY KEY REFERENCES agent_runs(run_id),
-        sequence INTEGER NOT NULL,
-        activation_id TEXT NOT NULL,
-        checkpoint_version INTEGER NOT NULL,
-        cursor_json TEXT NOT NULL,
-        session_revision INTEGER NOT NULL,
-        model_steps_reserved INTEGER NOT NULL,
-        model_steps_committed INTEGER NOT NULL,
-        environment_fingerprint TEXT NOT NULL,
-        resumability TEXT NOT NULL CHECK (
-            resumability IN ('safe', 'outcome_ready', 'blocked_unknown')
-        ),
-        updated_at TEXT NOT NULL
-    )
-    """,
-    """
-    CREATE TABLE run_tool_calls (
-        run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
-        tool_call_id TEXT NOT NULL,
-        step_index INTEGER NOT NULL,
-        ordinal INTEGER NOT NULL,
-        tool_name TEXT NOT NULL,
-        arguments_json TEXT NOT NULL,
-        fingerprint TEXT NOT NULL,
-        interaction_id TEXT,
-        phase TEXT NOT NULL CHECK (
-            phase IN ('prepared', 'claimed', 'committed', 'outcome_unknown')
-        ),
-        claim_activation_id TEXT,
-        result_json TEXT,
-        version INTEGER NOT NULL,
-        prepared_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        claimed_at TEXT,
-        committed_at TEXT,
-        PRIMARY KEY (run_id, tool_call_id)
-    )
-    """,
-    """
-    CREATE TABLE run_interactions (
-        interaction_id TEXT PRIMARY KEY,
-        run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
-        session_id TEXT NOT NULL,
-        step_index INTEGER NOT NULL,
-        tool_call_id TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('pending', 'resolved', 'closed')),
-        request_json TEXT NOT NULL,
-        response_json TEXT,
-        version INTEGER NOT NULL,
-        expires_at TEXT,
-        created_at TEXT NOT NULL,
-        resolved_at TEXT,
-        closed_at TEXT,
-        close_reason TEXT
-    )
-    """,
-    """
-    CREATE UNIQUE INDEX one_open_interaction_per_run
-    ON run_interactions(run_id)
-    WHERE status IN ('pending', 'resolved')
-    """,
-    """
-    CREATE TABLE run_events (
-        run_id TEXT NOT NULL REFERENCES agent_runs(run_id),
-        sequence INTEGER NOT NULL,
-        session_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        occurred_at TEXT NOT NULL,
-        activation_id TEXT,
-        step_index INTEGER,
-        correlation_id TEXT,
-        payload_json TEXT NOT NULL,
-        PRIMARY KEY (run_id, sequence)
-    )
-    """,
-)
-
-_EXPECTED_OBJECT_SQL = {
-    _object_name(statement): _normalize_sql(statement) for statement in _SCHEMA_STATEMENTS
-}
+    @field_validator("updated_at")
+    @classmethod
+    def _validate_updated_at(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("updated_at 必须包含时区")
+        return value
 
 
 class SQLiteStore:
@@ -265,8 +122,8 @@ class SQLiteStore:
             is_empty = not self.path.exists() or self.path.stat().st_size == 0
             if is_empty:
                 with self._connect() as connection:
-                    _create_schema(connection)
-            _inspect_schema_read_only(self.path)
+                    create_schema(connection)
+            require_exact_schema(self.path)
         except IrisLifecycleSchemaError:
             raise
         except (OSError, sqlite3.Error) as exc:
@@ -733,14 +590,21 @@ class SQLiteStore:
         expected_session_revision: int,
         *,
         operation: str,
-    ) -> SessionSnapshot:
-        """校验 lane 与 session history revision。"""
+    ) -> _SessionMetadata:
+        """只读 metadata 校验 lane 与 session history revision。"""
         self._require_lane(connection, run)
-        session = self._select_session(
+        session = self._select_session_metadata(
             connection,
             run.session_id,
             operation=operation,
         )
+        if session is None:
+            session = _SessionMetadata(
+                session_id=run.session_id,
+                revision=0,
+                message_count=0,
+                updated_at=None,
+            )
         if session.revision != expected_session_revision:
             raise IrisRunConflictError(
                 "session revision 已变化",
@@ -995,13 +859,13 @@ class SQLiteStore:
             run.run_id,
             operation=operation,
         )
-        next_session = _append_messages(session, command.message_delta)
+        next_session_revision = session.revision + bool(command.message_delta)
         _validate_checkpoint_replacement(
             run,
             current_checkpoint,
             command.checkpoint,
             command.activation_id,
-            next_session.revision,
+            next_session_revision,
             command.usage,
         )
         if command.usage.model_steps_reserved != run.usage.model_steps_reserved:
@@ -1032,8 +896,15 @@ class SQLiteStore:
             activation_id=command.activation_id,
             step_index=command.usage.model_steps_committed - 1,
         )
+        committed_session: SessionSnapshot | None = None
         if command.message_delta:
-            self._update_session(connection, session, next_session, command.now)
+            committed_session = self._update_session(
+                connection,
+                session,
+                command.message_delta,
+                command.now,
+                operation=operation,
+            )
         else:
             self._touch_session(
                 connection,
@@ -1041,7 +912,7 @@ class SQLiteStore:
                 session.revision,
                 command.now,
             )
-        self._update_run(connection, run, updated, next_session.revision)
+        self._update_run(connection, run, updated, next_session_revision)
         self._update_checkpoint(
             connection,
             current_checkpoint,
@@ -1053,7 +924,7 @@ class SQLiteStore:
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=next_session if command.message_delta else None,
+            session=committed_session,
             checkpoint=command.checkpoint,
             events=(event,),
         )
@@ -1177,14 +1048,14 @@ class SQLiteStore:
         if tool_call.phase not in {ToolCallPhase.PREPARED, ToolCallPhase.CLAIMED}:
             raise IrisRunStateError("当前 tool call phase 不能提交 result")
 
-        next_session = _append_messages(session, command.message_delta)
+        next_session_revision = session.revision + bool(command.message_delta)
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
         _validate_checkpoint_replacement(
             run,
             checkpoint,
             command.checkpoint,
             command.activation_id,
-            next_session.revision,
+            next_session_revision,
             run.usage,
         )
         committed_call = RunToolCallRecord.model_validate(
@@ -1218,8 +1089,15 @@ class SQLiteStore:
             step_index=tool_call.step_index,
             correlation_id=tool_call.tool_call_id,
         )
+        committed_session: SessionSnapshot | None = None
         if command.message_delta:
-            self._update_session(connection, session, next_session, command.now)
+            committed_session = self._update_session(
+                connection,
+                session,
+                command.message_delta,
+                command.now,
+                operation=operation,
+            )
         else:
             self._touch_session(
                 connection,
@@ -1227,13 +1105,13 @@ class SQLiteStore:
                 session.revision,
                 command.now,
             )
-        self._update_run(connection, run, updated, next_session.revision)
+        self._update_run(connection, run, updated, next_session_revision)
         self._update_checkpoint(connection, checkpoint, command.checkpoint, command.now)
         self._update_tool_call(connection, tool_call, committed_call)
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=next_session if command.message_delta else None,
+            session=committed_session,
             checkpoint=command.checkpoint,
             events=(event,),
         )
@@ -1253,13 +1131,13 @@ class SQLiteStore:
             operation=operation,
         )
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
-        next_session = _append_messages(session, command.message_delta)
+        next_session_revision = session.revision + bool(command.message_delta)
         _validate_checkpoint_replacement(
             run,
             checkpoint,
             command.checkpoint,
             command.activation_id,
-            next_session.revision,
+            next_session_revision,
             command.usage,
         )
         interaction = command.pending_interaction
@@ -1342,8 +1220,15 @@ class SQLiteStore:
             correlation_id=interaction.interaction_id,
         )
         result = project_result(updated, interaction)
+        committed_session: SessionSnapshot | None = None
         if command.message_delta:
-            self._update_session(connection, session, next_session, command.now)
+            committed_session = self._update_session(
+                connection,
+                session,
+                command.message_delta,
+                command.now,
+                operation=operation,
+            )
         else:
             self._touch_session(
                 connection,
@@ -1351,7 +1236,7 @@ class SQLiteStore:
                 session.revision,
                 command.now,
             )
-        self._update_run(connection, run, updated, next_session.revision)
+        self._update_run(connection, run, updated, next_session_revision)
         self._update_activation(connection, activation, settled)
         self._update_checkpoint(connection, checkpoint, command.checkpoint, command.now)
         self._insert_interaction(connection, interaction)
@@ -1367,7 +1252,7 @@ class SQLiteStore:
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=next_session if command.message_delta else None,
+            session=committed_session,
             checkpoint=command.checkpoint,
             interaction=interaction,
             events=(event,),
@@ -1568,8 +1453,9 @@ class SQLiteStore:
             )
         ]
         interaction: HumanInteraction | None = None
-        current_session: SessionSnapshot | None = None
+        session_metadata: _SessionMetadata | None = None
         updated_session: SessionSnapshot | None = None
+        closure_messages: list[Msg] = []
         updated_checkpoint = checkpoint
         unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         if run.phase is RunPhase.WAITING and command.settle_waiting:
@@ -1587,17 +1473,22 @@ class SQLiteStore:
                 operation=operation,
             )
             closure_messages = [message for _, _, message in closures]
-            current_session = self._select_session(
+            session_metadata = self._select_session_metadata(
                 connection,
                 run.session_id,
                 operation=operation,
             )
-            appended_session = _append_messages(current_session, closure_messages)
+            if session_metadata is None:
+                session_metadata = _SessionMetadata(
+                    session_id=run.session_id,
+                    revision=0,
+                    message_count=0,
+                    updated_at=None,
+                )
             if closure_messages:
-                updated_session = appended_session
                 updated_checkpoint = checkpoint.model_copy(
                     deep=True,
-                    update={"session_revision": appended_session.revision},
+                    update={"session_revision": session_metadata.revision + 1},
                 )
             unknown_pairs = [
                 (current_call, updated_call)
@@ -1657,8 +1548,14 @@ class SQLiteStore:
             else:
                 result = None
 
-        if updated_session is not None and current_session is not None:
-            self._update_session(connection, current_session, updated_session, command.now)
+        if closure_messages and session_metadata is not None:
+            updated_session = self._update_session(
+                connection,
+                session_metadata,
+                closure_messages,
+                command.now,
+                operation=operation,
+            )
             self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
         else:
             self._touch_session(
@@ -1749,16 +1646,23 @@ class SQLiteStore:
             operation=operation,
         )
         closure_messages = [message for _, _, message in closures]
-        current_session = self._select_session(
+        session_metadata = self._select_session_metadata(
             connection,
             run.session_id,
             operation=operation,
         )
-        updated_session = _append_messages(current_session, closure_messages)
+        if session_metadata is None:
+            session_metadata = _SessionMetadata(
+                session_id=run.session_id,
+                revision=0,
+                message_count=0,
+                updated_at=None,
+            )
+        updated_session: SessionSnapshot | None = None
         updated_checkpoint = (
             checkpoint.model_copy(
                 deep=True,
-                update={"session_revision": updated_session.revision},
+                update={"session_revision": session_metadata.revision + 1},
             )
             if closure_messages
             else checkpoint
@@ -1805,7 +1709,13 @@ class SQLiteStore:
         result = project_result(updated)
 
         if closure_messages:
-            self._update_session(connection, current_session, updated_session, command.now)
+            updated_session = self._update_session(
+                connection,
+                session_metadata,
+                closure_messages,
+                command.now,
+                operation=operation,
+            )
             self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
         else:
             self._touch_session(
@@ -1826,7 +1736,7 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=updated_session if closure_messages else None,
+            session=updated_session,
             checkpoint=updated_checkpoint,
             interaction=interaction,
             events=(*unknown_events, terminal_event),
@@ -1898,19 +1808,25 @@ class SQLiteStore:
             else []
         )
         closure_messages = [message for _, _, message in terminal_closures]
-        current_session: SessionSnapshot | None = None
+        session_metadata: _SessionMetadata | None = None
         updated_session: SessionSnapshot | None = None
         terminal_checkpoint = checkpoint
         if closure_messages:
-            current_session = self._select_session(
+            session_metadata = self._select_session_metadata(
                 connection,
                 run.session_id,
                 operation=operation,
             )
-            updated_session = _append_messages(current_session, closure_messages)
+            if session_metadata is None:
+                session_metadata = _SessionMetadata(
+                    session_id=run.session_id,
+                    revision=0,
+                    message_count=0,
+                    updated_at=None,
+                )
             terminal_checkpoint = checkpoint.model_copy(
                 deep=True,
-                update={"session_revision": updated_session.revision},
+                update={"session_revision": session_metadata.revision + 1},
             )
         unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         activation_next: ActivationRecord | None = None
@@ -2056,8 +1972,14 @@ class SQLiteStore:
             result = None
             output_checkpoint = rebound
 
-        if updated_session is not None and current_session is not None:
-            self._update_session(connection, current_session, updated_session, command.now)
+        if closure_messages and session_metadata is not None:
+            updated_session = self._update_session(
+                connection,
+                session_metadata,
+                closure_messages,
+                command.now,
+                operation=operation,
+            )
             self._update_checkpoint(connection, checkpoint, terminal_checkpoint, command.now)
         else:
             self._touch_session(
@@ -2185,19 +2107,16 @@ class SQLiteStore:
                 "activation_id 已存在",
                 activation_id=command.start_activation_id,
             )
-        session_row = connection.execute(
-            "SELECT * FROM sessions WHERE session_id = ?",
-            (command.request.session_id,),
-        ).fetchone()
-        session = (
-            SessionSnapshot(session_id=command.request.session_id)
-            if session_row is None
-            else _decode_row(
-                _row_to_session,
-                session_row,
-                path=self.path,
-                operation="create_run",
-            )
+        stored_session = self._select_session_metadata(
+            connection,
+            command.request.session_id,
+            operation="create_run",
+        )
+        session = stored_session or _SessionMetadata(
+            session_id=command.request.session_id,
+            revision=0,
+            message_count=0,
+            updated_at=None,
         )
         if command.initial_checkpoint.session_revision != session.revision:
             raise IrisRunConflictError(
@@ -2234,7 +2153,7 @@ class SQLiteStore:
                 command.now,
                 sequence=1,
             )
-            self._persist_create_session(connection, session, session_row, command.now)
+            self._persist_create_session(connection, session, stored_session, command.now)
             self._insert_run(connection, run, session.revision)
             self._insert_event(connection, event)
             return RunCommit(
@@ -2278,7 +2197,7 @@ class SQLiteStore:
                 activation_id=activation.activation_id,
             ),
         )
-        self._persist_create_session(connection, session, session_row, command.now)
+        self._persist_create_session(connection, session, stored_session, command.now)
         self._insert_run(connection, run, session.revision)
         _execute(
             connection,
@@ -2300,21 +2219,21 @@ class SQLiteStore:
     def _persist_create_session(
         self,
         connection: sqlite3.Connection,
-        session: SessionSnapshot,
-        session_row: sqlite3.Row | None,
+        session: _SessionMetadata,
+        stored_session: _SessionMetadata | None,
         updated_at: datetime,
     ) -> None:
         """创建缺失 session，或只推进已有 session 的 aggregate 时间。"""
-        if session_row is None:
+        if stored_session is None:
             _execute(
                 connection,
                 """INSERT INTO sessions(
-                    session_id, revision, messages_json, updated_at
+                    session_id, revision, message_count, updated_at
                 ) VALUES (?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.revision,
-                    _dump_json(session.messages),
+                    session.message_count,
                     updated_at.isoformat(),
                 ),
             )
@@ -2352,22 +2271,27 @@ class SQLiteStore:
     def _update_session(
         self,
         connection: sqlite3.Connection,
-        current: SessionSnapshot,
-        updated: SessionSnapshot,
+        current: _SessionMetadata,
+        message_delta: list[Msg],
         updated_at: datetime,
-    ) -> None:
-        """使用 revision CAS 更新当前 session history。"""
+        *,
+        operation: str,
+    ) -> SessionSnapshot:
+        """CAS 推进 session metadata，并只插入本次 message delta。"""
+        next_revision = current.revision + 1
+        next_message_count = current.message_count + len(message_delta)
         cursor = _execute(
             connection,
             """UPDATE sessions
-            SET revision = ?, messages_json = ?, updated_at = ?
-            WHERE session_id = ? AND revision = ?""",
+            SET revision = ?, message_count = ?, updated_at = ?
+            WHERE session_id = ? AND revision = ? AND message_count = ?""",
             (
-                updated.revision,
-                _dump_json(updated.messages),
+                next_revision,
+                next_message_count,
                 updated_at.isoformat(),
                 current.session_id,
                 current.revision,
+                current.message_count,
             ),
         )
         if cursor.rowcount != 1:
@@ -2376,6 +2300,21 @@ class SQLiteStore:
                 session_id=current.session_id,
                 expected=current.revision,
             )
+        first_ordinal = current.message_count + 1
+        _executemany(
+            connection,
+            """INSERT INTO session_messages(session_id, ordinal, message_json)
+            VALUES (?, ?, ?)""",
+            [
+                (current.session_id, ordinal, _dump_json(message))
+                for ordinal, message in enumerate(message_delta, start=first_ordinal)
+            ],
+        )
+        return self._select_session(
+            connection,
+            current.session_id,
+            operation=operation,
+        )
 
     def _insert_run(
         self,
@@ -2701,13 +2640,70 @@ class SQLiteStore:
         *,
         operation: str,
     ) -> SessionSnapshot:
+        metadata = self._select_session_metadata(
+            connection,
+            session_id,
+            operation=operation,
+        )
+        if metadata is None:
+            return SessionSnapshot(session_id=session_id)
+        rows = connection.execute(
+            """SELECT ordinal, message_json FROM session_messages
+            WHERE session_id = ? ORDER BY ordinal""",
+            (session_id,),
+        ).fetchall()
+        try:
+            if len(rows) != metadata.message_count:
+                raise ValueError("session message_count 与 row count 不一致")
+            messages: list[Msg] = []
+            for expected_ordinal, row in enumerate(rows, start=1):
+                if row["ordinal"] != expected_ordinal:
+                    raise ValueError("session message ordinal 不连续")
+                payload = _load_json(row["message_json"])
+                if not isinstance(payload, dict):
+                    raise TypeError("session message JSON 必须是 object")
+                messages.append(Msg.from_dict(payload))
+            return SessionSnapshot(
+                session_id=metadata.session_id,
+                revision=metadata.revision,
+                messages=messages,
+            )
+        except (
+            ValidationError,
+            ValueError,
+            TypeError,
+            KeyError,
+            AttributeError,
+            IndexError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise IrisRunPersistenceError(
+                "lifecycle SQLite session history 无法验证",
+                path=str(self.path),
+                operation=operation,
+            ) from exc
+
+    def _select_session_metadata(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        *,
+        operation: str,
+    ) -> _SessionMetadata | None:
+        """只读取 session CAS revision、message_count 与时间。"""
         row = connection.execute(
-            "SELECT * FROM sessions WHERE session_id = ?",
+            """SELECT session_id, revision, message_count, updated_at
+            FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
         if row is None:
-            return SessionSnapshot(session_id=session_id)
-        return _decode_row(_row_to_session, row, path=self.path, operation=operation)
+            return None
+        return _decode_row(
+            _row_to_session_metadata,
+            row,
+            path=self.path,
+            operation=operation,
+        )
 
     def _select_activation(
         self,
@@ -2776,52 +2772,6 @@ class SQLiteStore:
         return _decode_row(_row_to_interaction, row, path=self.path, operation=operation)
 
 
-def _inspect_schema_read_only(path: Path) -> None:
-    uri = f"{path.resolve().as_uri()}?mode=ro"
-    try:
-        with sqlite3.connect(uri, uri=True) as connection:
-            rows = connection.execute(
-                """
-                SELECT name, sql
-                FROM sqlite_master
-                WHERE type IN ('table', 'index')
-                  AND name NOT LIKE 'sqlite_%'
-                """
-            ).fetchall()
-            actual = {name: _normalize_sql(sql) for name, sql in rows if sql is not None}
-            identity = (
-                connection.execute("SELECT component, version FROM lifecycle_schema").fetchall()
-                if "lifecycle_schema" in actual
-                else []
-            )
-    except sqlite3.Error as exc:
-        raise IrisLifecycleSchemaError(
-            "无法只读检查 lifecycle SQLite schema",
-            path=str(path),
-        ) from exc
-    if actual != _EXPECTED_OBJECT_SQL or identity != [("agent_lifecycle", 1)]:
-        raise IrisLifecycleSchemaError(
-            "SQLite 文件不是精确 lifecycle schema v1",
-            path=str(path),
-        )
-
-
-def _create_schema(connection: sqlite3.Connection) -> None:
-    try:
-        _execute(connection, "BEGIN IMMEDIATE")
-        for statement in _SCHEMA_STATEMENTS:
-            _execute(connection, statement)
-        _execute(
-            connection,
-            "INSERT INTO lifecycle_schema(component, version) VALUES (?, ?)",
-            ("agent_lifecycle", 1),
-        )
-        connection.commit()
-    except sqlite3.Error:
-        connection.rollback()
-        raise
-
-
 def _execute(
     connection: sqlite3.Connection,
     sql: str,
@@ -2829,6 +2779,15 @@ def _execute(
 ) -> sqlite3.Cursor:
     """执行一条 mutation statement；测试可在此注入故障。"""
     return connection.execute(sql, params)
+
+
+def _executemany(
+    connection: sqlite3.Connection,
+    sql: str,
+    params: list[tuple[object, ...]],
+) -> sqlite3.Cursor:
+    """批量执行同形 mutation statement；测试可在此注入中途故障。"""
+    return connection.executemany(sql, params)
 
 
 def _decode_row[RowT](
@@ -2876,11 +2835,12 @@ def _project_durable_result(
         ) from exc
 
 
-def _row_to_session(row: sqlite3.Row) -> SessionSnapshot:
-    return SessionSnapshot(
+def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:
+    return _SessionMetadata(
         session_id=row["session_id"],
         revision=row["revision"],
-        messages=[Msg.from_dict(item) for item in _load_json(row["messages_json"])],
+        message_count=row["message_count"],
+        updated_at=row["updated_at"],
     )
 
 
@@ -3171,17 +3131,6 @@ def _make_event(
 def _replace_run(run: RunRecord, **changes: Any) -> RunRecord:
     """以领域模型验证后的字段替换构造新 run。"""
     return RunRecord.model_validate(run.model_dump() | changes)
-
-
-def _append_messages(session: SessionSnapshot, delta: list[Msg]) -> SessionSnapshot:
-    """仅在存在 delta 时推进 session revision 并追加历史。"""
-    if not delta:
-        return deepcopy(session)
-    return SessionSnapshot(
-        session_id=session.session_id,
-        revision=session.revision + 1,
-        messages=deepcopy(session.messages) + deepcopy(delta),
-    )
 
 
 def _validate_checkpoint_replacement(

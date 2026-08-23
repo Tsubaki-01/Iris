@@ -21,17 +21,19 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v1
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v2
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
-any write; the store never migrates, resets, or changes that file.
+any write. Old databases are unsupported and must be replaced before creating a new store; the
+constructor never resets or changes that file.
 
 ## Architecture
 
 `InMemoryLifecycleStore` and `SQLiteStore` are independent, peer protocol implementations. The
 in-memory implementation protects process-local facts with one `RLock` and deep-copy isolates
-inputs and outputs; its state disappears with the process. The SQLite implementation neither
-imports nor calls the in-memory implementation.
+inputs and outputs. Internal append copies only the list container and the new delta instead of
+copying store-owned old messages again. Its state disappears with the process. The SQLite
+implementation neither imports nor calls the in-memory implementation.
 
 `SQLiteStore` opens a scoped connection and enables foreign keys for every operation. Public reads
 use targeted reads for the requested run, session, lane owner, interaction, checkpoint, tool calls,
@@ -47,16 +49,21 @@ Mutations use `BEGIN IMMEDIATE` and load only the rows required to validate and 
 command. Run, session, checkpoint, tool-call, and interaction updates use revision, sequence, or
 version CAS predicates. Lane, activation, interaction, tool, and run changes use incremental writes
 in the same transaction, while events remain append-only. Any SQL failure causes a complete
-transaction rollback, so readers never observe half-committed facts. Schema v1 still stores
-`sessions.messages_json` as one JSON array, so appending messages rewrites the current session row
-but does not read or modify other aggregates.
+transaction rollback, so readers never observe half-committed facts. Schema v2 keeps only revision,
+message count, and update time in `sessions`; messages append under contiguous ordinals in
+`session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
+metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and
+validate exact ordinals `1..message_count`.
 
-Schema v1 contains only:
+Schema v2 contains:
 
-- `lifecycle_schema`, `sessions`, `agent_runs`, and `session_run_lanes`;
+- `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
 - `run_interactions` and `run_events`;
 - the partial unique index `one_open_interaction_per_run`.
+
+The `(session_id, ordinal)` composite primary key already supports ordered message reads, so no
+extra index is added. Session revision counts non-empty delta commits; it is not the message count.
 
 Connection, serialization, and corrupt-row failures map to `IrisRunPersistenceError` with `path`
 and `operation` context. Stale expected facts and database constraint races use lifecycle
@@ -64,10 +71,10 @@ conflict/state errors.
 
 ## Public API
 
-The `iris.store` package exports only:
+The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v2-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -77,8 +84,8 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_tool_call()` returns `None` for an absent composite key even when the run is absent, and
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
-`(step_index, ordinal)` ordering. These targeted reads add no table, index, pool, or migration; the
-schema identity remains lifecycle v1.
+`(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
+schema identity is lifecycle v2.
 
 `load_session_lane(session_id)` is a pure read that returns the current non-terminal lane owner's
 `run_id`, or `None` when the lane is free. It does not repair, recover, or adopt a run. A host still
@@ -86,8 +93,8 @@ loads the run/interaction and calls `recover()` with the exact activation fence 
 the exact interaction identity.
 
 Cancellation requests, waiting settlement, activation abandon/rebind, outcome-ready finalization,
-and unresolved-claim-to-unknown transitions are aggregate transactions. There is no old-schema
-reader, migration, dual write, or compatibility adapter.
+and unresolved-claim-to-unknown transitions are aggregate transactions. Runtime has no old-schema
+reader, dual write, or compatibility adapter; incompatible files are rejected directly.
 
 One active activation may hold multiple exact durable claims before any result is committed. Every
 claim remains bound to its step, ordinal, call ID, fingerprint, and version. If durable cancellation
@@ -108,7 +115,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v1, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v2, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
@@ -117,7 +124,7 @@ recovery protocol and cannot be inferred from current multiple-claim support.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
-| Schema and compatibility validation | `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
+| Current schema creation and exact validation | `_sqlite_schema.py`, `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transactions and fault rollback | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
 | Public exports | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |
 
