@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ from iris.runtime import (
 from iris.tools import (
     AskQuestionTool,
     BaseTool,
+    CallableExecutionMode,
     CallableTool,
     DefaultPermissionPolicy,
     PermissionPolicy,
@@ -296,13 +298,8 @@ async def test_execute_empty_steering_port_keeps_no_tool_completion(
         Role.USER,
         Role.ASSISTANT,
     ]
-    assert (
-        commits.model_commits[0].resumability
-        is CheckpointResumability.OUTCOME_READY
-    )
-    assert steering.events == [
-        ("claim", activation.run_id, activation.activation_id)
-    ]
+    assert commits.model_commits[0].resumability is CheckpointResumability.OUTCOME_READY
+    assert steering.events == [("claim", activation.run_id, activation.activation_id)]
 
 
 @pytest.mark.asyncio
@@ -670,9 +667,7 @@ async def test_execute_tool_commit_failure_fails_claimed_steer(
 
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")
-    provider = FakeProvider(
-        [_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))]
-    )
+    provider = FakeProvider([_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))])
     runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
     activation = start_activation()
     commits = FakeRuntimeCommitPort(activation, fail_at="commit_tool_result")
@@ -749,9 +744,7 @@ async def test_execute_tool_cursor_mismatch_fails_claimed_steer(
 
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")
-    provider = FakeProvider(
-        [_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))]
-    )
+    provider = FakeProvider([_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))])
     runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
     activation = start_activation()
     commits = UnexpectedCursorCommitPort(activation)
@@ -2631,6 +2624,65 @@ async def test_execute_claim_then_cancellation_is_outcome_unknown(
     assert effects == []
     assert len(commits.claims) == 1
     assert commits.tool_commits == []
+
+
+@pytest.mark.asyncio
+async def test_thread_callable_timeout_after_claim_discards_late_result(
+    tmp_path: Path,
+) -> None:
+    """tool timeout 只停止等待 thread worker，claim 必须以 unknown 收口。"""
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_effect() -> str:
+        started.set()
+        try:
+            release.wait(timeout=2)
+            return "late-effect-complete"
+        finally:
+            finished.set()
+
+    registry = ToolRegistry()
+    registry.register_function(
+        blocking_effect,
+        description="线程阻塞工具",
+        execution_mode=CallableExecutionMode.THREAD,
+    )
+    provider = FakeProvider(
+        [_tool_response(ToolUseBlock(id="thread-1", name="blocking_effect", input={}))]
+    )
+    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
+    activation = start_activation(options=RuntimeExecutionOptions(tool_timeout_seconds=0.02))
+    commits = FakeRuntimeCommitPort(activation)
+    execution = asyncio.create_task(
+        runtime.execute(
+            activation,
+            commits=commits,
+            cancellation=MutableCancellationSignal(),
+        )
+    )
+
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        result = await asyncio.wait_for(execution, timeout=1)
+        assert result.outcome is RuntimeActivationOutcome.OUTCOME_UNKNOWN
+        assert result.error is not None and result.error.code == "TOOL_OUTCOME_UNKNOWN"
+        assert len(commits.claims) == 1
+        assert commits.tool_commits == []
+        events_before_release = list(commits.events)
+
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        assert commits.events == events_before_release
+        assert commits.tool_commits == []
+    finally:
+        release.set()
+        if not execution.done():
+            await execution
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from .base import ToolCapability
+from ..exceptions import IrisToolValidationError
+from .base import (
+    CallableExecutionMode,
+    ToolCapability,
+    _validated_callable_execution_mode,
+)
 
 # endregion
 
@@ -40,6 +45,8 @@ def tool(
     version: str | None = None,
     deprecated: bool = False,
     deprecation_message: str | None = None,
+    execution_mode: CallableExecutionMode | None = None,
+    concurrency_safe: bool | None = None,
 ) -> Callable[[F], F]:
     """为函数附加 Iris 工具元数据，不自动触发注册。
 
@@ -59,6 +66,8 @@ def tool(
         version (str | None): 工具版本号。
         deprecated (bool): 是否已弃用。
         deprecation_message (str | None): 弃用提示。
+        execution_mode (CallableExecutionMode | None): 同步 callable 的执行位置。
+        concurrency_safe (bool | None): 是否允许进入只读并发窗口。
 
     Returns:
         Callable[[F], F]: 接收靶函数并回传其原引用的装饰器闭包。
@@ -68,6 +77,10 @@ def tool(
         ... def read_file(path: str) -> str:
         ...     return "content"
     """
+
+    validated_mode = _validated_callable_execution_mode(execution_mode)
+    if concurrency_safe is not None and not isinstance(concurrency_safe, bool):
+        raise IrisToolValidationError("callable concurrency_safe 必须是 bool")
 
     def decorator(func: F) -> F:
         func.__dict__["iris_tool_name"] = name
@@ -81,6 +94,10 @@ def tool(
         func.__dict__["iris_tool_version"] = version
         func.__dict__["iris_tool_deprecated"] = deprecated
         func.__dict__["iris_tool_deprecation_message"] = deprecation_message
+        if validated_mode is not None:
+            func.__dict__["iris_tool_execution_mode"] = validated_mode
+        if concurrency_safe is not None:
+            func.__dict__["iris_tool_concurrency_safe"] = concurrency_safe
         return func
 
     return decorator

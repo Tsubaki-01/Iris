@@ -10,9 +10,13 @@ Example:
 # region imports
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import tempfile
 from abc import abstractmethod
+from collections.abc import Callable, Iterator
+from fnmatch import fnmatchcase
 from itertools import islice
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar, cast
@@ -28,13 +32,57 @@ from ..base import (
     ToolExecutionContext,
     ToolResult,
 )
-from ..permissions import ReadFileState, WorkspacePolicy
+from ..permissions import ReadFileRecord, ReadFileState, WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
 
 # endregion
 
 InputT = TypeVar("InputT", bound=BaseModel)
+
+
+def _matches_rglob_pattern(
+    path_parts: tuple[str, ...],
+    pattern_parts: tuple[str, ...],
+) -> bool:
+    """按 pathlib rglob 语义匹配路径段，包括 `**` 的零段匹配。
+
+    Args:
+        path_parts (tuple[str, ...]): 相对搜索根的路径段。
+        pattern_parts (tuple[str, ...]): 已带隐式递归前缀的 glob pattern 段。
+
+    Returns:
+        bool: 路径是否满足递归 glob pattern。
+    """
+    # --- 1. 扩展零段状态 ---
+    states = {0}
+
+    def include_zero_segment_matches(current: set[int]) -> set[int]:
+        expanded = set(current)
+        for initial in current:
+            position = initial
+            while position < len(pattern_parts) and pattern_parts[position] == "**":
+                position += 1
+                expanded.add(position)
+        return expanded
+
+    # --- 2. 消费路径段 ---
+    for part in path_parts:
+        next_states: set[int] = set()
+        for position in include_zero_segment_matches(states):
+            if position == len(pattern_parts):
+                continue
+            pattern_part = pattern_parts[position]
+            if pattern_part == "**":
+                next_states.add(position)
+            elif fnmatchcase(os.path.normcase(part), os.path.normcase(pattern_part)):
+                next_states.add(position + 1)
+        if not next_states:
+            return False
+        states = next_states
+
+    # --- 3. 判断接受状态 ---
+    return len(pattern_parts) in include_zero_segment_matches(states)
 
 
 class ReadFileInput(BaseModel):
@@ -262,27 +310,118 @@ class WorkspaceFileService:
         root: Path,
         context: ToolExecutionContext,
         pattern: str = "*",
-    ) -> list[Path]:
-        """列出 workspace 内普通文件，并跳过逃逸符号链接。
+        *,
+        limit: int | None = None,
+        ignore_directory: Callable[[Path], bool] | None = None,
+    ) -> Iterator[Path]:
+        """按文件系统发现顺序迭代普通文件，并跳过逃逸符号链接。
 
         Args:
             root (Path): 搜索起点，可以是文件或目录。
             context (ToolExecutionContext): 当前工具执行上下文。
             pattern (str): 目录递归搜索使用的 glob 模式。默认为 "*"。
+            limit (int | None): 最多产出的文件数。为 None 时不限制。
+            ignore_directory (Callable[[Path], bool] | None): 下降前调用的目录过滤器。
+
+        Yields:
+            Path: 位于 workspace 内的真实普通文件路径。
+        """
+        if limit == 0:
+            return
+
+        workspace_root = context.workspace_root.resolve()
+        if root.is_file():
+            resolved = root.resolve(strict=False)
+            if self.workspace_policy.is_within_workspace(resolved, workspace_root):
+                yield resolved
+            return
+
+        if pattern.endswith(os.sep) or (os.altsep is not None and pattern.endswith(os.altsep)):
+            return
+        pattern_parts = ("**", *Path(pattern).parts)
+
+        yielded = 0
+        pending_directories = [root]
+        while pending_directories:
+            directory = pending_directories.pop()
+            discovered_directories: list[Path] = []
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if limit is not None and yielded >= limit:
+                        return
+                    candidate = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        if ignore_directory is not None and ignore_directory(candidate):
+                            continue
+                        resolved_directory = candidate.resolve(strict=False)
+                        if not self.workspace_policy.is_within_workspace(
+                            resolved_directory,
+                            workspace_root,
+                        ):
+                            continue
+                        discovered_directories.append(candidate)
+                        continue
+                    if not entry.is_file(follow_symlinks=False) and not entry.is_symlink():
+                        continue
+                    if not _matches_rglob_pattern(
+                        candidate.relative_to(root).parts,
+                        pattern_parts,
+                    ):
+                        continue
+                    resolved = candidate.resolve(strict=False)
+                    if not self.workspace_policy.is_within_workspace(resolved, workspace_root):
+                        continue
+                    if resolved.is_file():
+                        yielded += 1
+                        yield resolved
+                        if limit is not None and yielded >= limit:
+                            return
+            pending_directories.extend(reversed(discovered_directories))
+
+    def read_file_observed(
+        self,
+        params: ReadFileInput,
+        context: ToolExecutionContext,
+    ) -> tuple[str, ReadFileRecord]:
+        """读取文件片段并返回与已打开文件绑定的不可变观测。
+
+        Args:
+            params (ReadFileInput): 读取路径、分页和行号参数。
+            context (ToolExecutionContext): 只提供 workspace 等不可变执行事实的 worker context。
 
         Returns:
-            list[Path]: 位于 workspace 内的真实普通文件路径。
+            tuple[str, ReadFileRecord]: 文本片段及同一已打开文件的 mtime/size 观测。
+
+        Raises:
+            IrisToolExecutionError: 路径不存在或不是普通文件。
+            IrisToolValidationError: 路径越出 workspace。
+            OSError: 打开、读取或观测文件失败。
+            UnicodeDecodeError: 文件不是有效 UTF-8 文本。
         """
-        candidates = [root] if root.is_file() else sorted(root.rglob(pattern))
-        files: list[Path] = []
-        workspace_root = context.workspace_root.resolve()
-        for candidate in candidates:
-            resolved = candidate.resolve(strict=False)
-            if not self.workspace_policy.is_within_workspace(resolved, workspace_root):
-                continue
-            if resolved.is_file():
-                files.append(resolved)
-        return files
+        path = self.resolve_path(params.file_path, context)
+        if not path.exists():
+            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
+        if not path.is_file():
+            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
+        offset = params.offset or 0
+        limit = params.limit if params.limit is not None else 1000
+        with path.open("r", encoding="utf-8") as handle:
+            selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
+            stat = os.fstat(handle.fileno())
+        if params.with_line_numbers:
+            content = "\n".join(
+                f"L{index:04d} | {line}" for index, line in enumerate(selected, start=offset + 1)
+            )
+        else:
+            content = "\n".join(selected)
+        return (
+            content,
+            ReadFileRecord(
+                path=path,
+                mtime_ns=stat.st_mtime_ns,
+                size_bytes=stat.st_size,
+            ),
+        )
 
     def read_file(self, params: ReadFileInput, context: ToolExecutionContext) -> str:
         """读取文件片段并更新读取状态。
@@ -297,21 +436,9 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当路径不存在或不是普通文件时。
         """
-        path = self.resolve_path(params.file_path, context)
-        if not path.exists():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
-        if not path.is_file():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
-        offset = params.offset or 0
-        limit = params.limit if params.limit is not None else 1000
-        with path.open("r", encoding="utf-8") as handle:
-            selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
-        self.record_read(path, context)
-        if params.with_line_numbers:
-            return "\n".join(
-                f"L{index:04d} | {line}" for index, line in enumerate(selected, start=offset + 1)
-            )
-        return "\n".join(selected)
+        content, record = self.read_file_observed(params, context)
+        self.ensure_read_state(context).merge(record)
+        return content
 
     def list_files(self, params: ListFilesInput, context: ToolExecutionContext) -> str:
         """列出 workspace 内文件。
@@ -326,11 +453,18 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当起点路径不存在时。
         """
+        if params.max_results == 0:
+            return ""
+
         root = self.resolve_path(params.path, context)
         if not root.exists():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不存在")
-        paths = self.iter_files(root, context, params.pattern or "*")
-        paths = paths[: params.max_results]
+        paths = self.iter_files(
+            root,
+            context,
+            params.pattern or "*",
+            limit=params.max_results,
+        )
         workspace_root = context.workspace_root.resolve()
         return "\n".join(str(path.relative_to(workspace_root)) for path in paths)
 
@@ -356,25 +490,30 @@ class WorkspaceFileService:
             regex = re.compile(params.pattern)
         except re.error as exc:
             raise IrisToolValidationError("invalid regex pattern", pattern=params.pattern) from exc
+        if not root.exists():
+            return ""
 
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []
         workspace_root = context.workspace_root.resolve()
-        for path in self.iter_files(root, context):
-            if ".iris" in path.parts:
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
-                continue
-            for line_number, line in enumerate(lines, start=1):
-                if regex.search(line):
-                    relative = path.relative_to(workspace_root)
-                    matches.append(f"{relative}:{line_number}: {line}")
-                    if len(matches) >= params.max_results:
-                        break
-            if len(matches) >= params.max_results:
-                break
+        if ".iris" in root.relative_to(workspace_root).parts:
+            return ""
+        for path in self.iter_files(
+            root,
+            context,
+            ignore_directory=lambda directory: directory.name == ".iris",
+        ):
+            with path.open("r", encoding="utf-8") as handle:
+                try:
+                    for line_number, line in enumerate(handle, start=1):
+                        line = line.rstrip("\r\n")
+                        if regex.search(line):
+                            relative = path.relative_to(workspace_root)
+                            matches.append(f"{relative}:{line_number}: {line}")
+                            if len(matches) >= params.max_results:
+                                return "\n".join(matches)
+                except UnicodeDecodeError:
+                    continue
 
         # --- 3. 返回匹配 ---
         return "\n".join(matches)
@@ -573,7 +712,14 @@ class ReadFileTool(FileTool[ReadFileInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用文件服务读取文本片段。"""
-        return self._text_result(self.file_service.read_file(params, context))
+        worker_context = context.model_copy(update={"read_state": None})
+        content, record = await asyncio.to_thread(
+            self.file_service.read_file_observed,
+            params,
+            worker_context,
+        )
+        self.file_service.ensure_read_state(context).merge(record)
+        return self._text_result(content)
 
 
 class ListFilesTool(FileTool[ListFilesInput]):
@@ -590,7 +736,9 @@ class ListFilesTool(FileTool[ListFilesInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用文件服务列出 workspace 文件。"""
-        return self._text_result(self.file_service.list_files(params, context))
+        worker_context = context.model_copy(update={"read_state": None})
+        content = await asyncio.to_thread(self.file_service.list_files, params, worker_context)
+        return self._text_result(content)
 
 
 class GrepSearchTool(FileTool[GrepSearchInput]):
@@ -607,7 +755,9 @@ class GrepSearchTool(FileTool[GrepSearchInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用文件服务执行文本搜索。"""
-        return self._text_result(self.file_service.grep_search(params, context))
+        worker_context = context.model_copy(update={"read_state": None})
+        content = await asyncio.to_thread(self.file_service.grep_search, params, worker_context)
+        return self._text_result(content)
 
 
 class WriteFileTool(FileTool[WriteFileInput]):

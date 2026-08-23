@@ -3,6 +3,7 @@
 from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
+    CallableExecutionMode,
     CallableTool,
     CancellationSignal,
     ToolArtifact,
@@ -56,6 +57,7 @@ __all__ = [
     "AskQuestionTool",
     "BaseTool",
     "CancellationSignal",
+    "CallableExecutionMode",
     "CallableTool",
     "CircuitBreaker",
     "CircuitBreakerState",

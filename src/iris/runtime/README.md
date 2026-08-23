@@ -93,9 +93,12 @@ control interruption 只提交首个异常/空洞之前的已知 `ToolResult`；
 协作式取消使用 `iris.exceptions.IrisCancellationRequestedError`；runtime 将它转换为 activation
 outcome，而不是普通工具错误。
 
-并发文件读取共享同一个 `ReadFileState` identity；窗口 settle 后的 checkpoint snapshot 包含
-合并记录，后续串行 write barrier 可以继续执行 stale-read 检查。同步阻塞 callable 仍保证
-claim/result/顺序正确，但不承诺加速。NETWORK/MCP 并发或 write 并发未来必须另行设计 effect、
+并发文件读取共享同一个 `ReadFileState` identity；worker 只返回不可变 observation，由 event
+loop 合并。窗口 settle 后的 checkpoint snapshot 包含合并记录，后续串行 write barrier 可以
+继续执行 stale-read 检查。同步 callable 默认 inline；显式 `CallableExecutionMode.THREAD` 才把
+阻塞 body 放入 worker。线程无法安全强停，取消或 timeout 只停止等待并丢弃晚到返回；claim 已
+存在时 runtime 以 `OUTCOME_UNKNOWN` 收口，晚到结果不能推进 history、cursor 或 checkpoint。
+thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来必须另行设计 effect、
 retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
 引入 delta/merge/lock/hash 模型。
 

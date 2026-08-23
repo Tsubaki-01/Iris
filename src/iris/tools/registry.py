@@ -17,7 +17,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from ..exceptions import IrisToolNotFoundError, IrisToolValidationError
-from .base import BaseTool, CallableTool, ToolCapability, ToolDefinition
+from .base import (
+    BaseTool,
+    CallableExecutionMode,
+    CallableTool,
+    ToolCapability,
+    ToolDefinition,
+)
 from .schema import (
     to_anthropic_tool_schema,
     to_openai_chat_tool_schema,
@@ -103,6 +109,8 @@ class ToolRegistry:
         version: str | None = None,
         deprecated: bool = False,
         deprecation_message: str | None = None,
+        execution_mode: CallableExecutionMode | None = None,
+        concurrency_safe: bool | None = None,
     ) -> BaseTool:
         """将普通函数包装为工具并注册。
 
@@ -122,6 +130,8 @@ class ToolRegistry:
             version (str | None): 工具版本。
             deprecated (bool): 是否弃用。
             deprecation_message (str | None): 弃用说明。
+            execution_mode (CallableExecutionMode | None): 同步 callable 的执行位置。
+            concurrency_safe (bool | None): 是否允许进入只读并发窗口。
 
         Returns:
             BaseTool: 包裹原函数并完成全局挂载的新工具。
@@ -143,6 +153,8 @@ class ToolRegistry:
             version=version,
             deprecated=deprecated,
             deprecation_message=deprecation_message,
+            execution_mode=execution_mode,
+            concurrency_safe=concurrency_safe,
         )
         self.register(tool)
         return tool

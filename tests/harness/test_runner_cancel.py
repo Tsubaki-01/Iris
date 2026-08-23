@@ -24,6 +24,7 @@ from iris.message import TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
     BaseTool,
+    CallableExecutionMode,
     ToolCapability,
     ToolDefinition,
     ToolExecutionContext,
@@ -404,6 +405,71 @@ async def test_non_cooperative_sync_tool_delays_cancel_settlement(tmp_path: Path
     assert not isinstance(result, BaseException)
     assert isinstance(result, RunResult)
     assert result.run.stop_reason is RunStopReason.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_thread_callable_cancel_after_claim_discards_late_result(
+    tmp_path: Path,
+) -> None:
+    """thread worker 不能强停；取消后应 fail closed，晚到返回不得提交。"""
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_effect() -> str:
+        started.set()
+        try:
+            release.wait(timeout=2)
+            return "late-effect-complete"
+        finally:
+            finished.set()
+
+    registry = ToolRegistry()
+    registry.register_function(
+        blocking_effect,
+        description="线程阻塞工具",
+        execution_mode=CallableExecutionMode.THREAD,
+    )
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="thread-1", name="blocking_effect", input={}))
+            ),
+        ),
+        store=store,
+    )
+    running = asyncio.create_task(
+        runner.start(AgentRunRequest(input="执行", run_id="run-thread-cancel"))
+    )
+
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        result = await runner.cancel("run-thread-cancel", settlement_timeout=1)
+        assert result == await running
+        assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
+        assert result.error is not None and result.error.code == "TOOL_OUTCOME_UNKNOWN"
+        [record] = store.list_tool_calls("run-thread-cancel")
+        assert record.phase is ToolCallPhase.OUTCOME_UNKNOWN
+
+        events_before_release = store.list_events("run-thread-cancel")
+        session_before_release = store.load_session("default")
+        checkpoint_before_release = store.load_checkpoint("run-thread-cancel")
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        assert store.list_events("run-thread-cancel") == events_before_release
+        assert store.load_session("default") == session_before_release
+        assert store.load_checkpoint("run-thread-cancel") == checkpoint_before_release
+        assert store.load_result("run-thread-cancel") == result
+    finally:
+        release.set()
+        if not running.done():
+            await running
 
 
 def test_cancel_validates_reason_and_observation_timeout(tmp_path: Path) -> None:
