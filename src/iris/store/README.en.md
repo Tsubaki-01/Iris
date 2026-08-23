@@ -38,6 +38,10 @@ use targeted reads for the requested run, session, lane owner, interaction, chec
 or events.
 Reads that need multiple queries use one deferred transaction for a consistent snapshot and remain
 write-free.
+Exact tool-call reads reuse the existing `(run_id, tool_call_id)` primary key. Run-control reads
+select only the eight `RunControlSnapshot` columns and do not decode request, options, usage,
+message, or error JSON. The in-memory implementation lists one run through a per-run call-ID index;
+the existing tuple-key dictionary remains authoritative.
 
 Mutations use `BEGIN IMMEDIATE` and load only the rows required to validate and apply the current
 command. Run, session, checkpoint, tool-call, and interaction updates use revision, sequence, or
@@ -69,6 +73,12 @@ Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/c
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
 reads. Construct commands and models through `iris.lifecycle`; do not depend on underscored
 `iris.store` modules.
+
+`load_tool_call()` returns `None` for an absent composite key even when the run is absent, and
+`load_run_control()` follows `load_run()` by returning `None` for an absent run.
+`list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
+`(step_index, ordinal)` ordering. These targeted reads add no table, index, pool, or migration; the
+schema identity remains lifecycle v1.
 
 `load_session_lane(session_id)` is a pure read that returns the current non-terminal lane owner's
 `run_id`, or `None` when the lane is free. It does not repair, recover, or adopt a run. A host still

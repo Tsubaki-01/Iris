@@ -12,10 +12,13 @@ from pathlib import Path
 from typing import Protocol
 
 import pytest
+from pydantic import ValidationError
 
+import iris.store.sqlite as sqlite_module
 from iris.exceptions import (
     IrisRunConflictError,
     IrisRunNotFoundError,
+    IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
 )
@@ -46,6 +49,7 @@ from iris.lifecycle import (
     ResumeWaitingRun,
     RunCheckpoint,
     RunCommit,
+    RunControlSnapshot,
     RunErrorInfo,
     RunLimits,
     RunToolCallRecord,
@@ -331,8 +335,10 @@ def test_protocol_exposes_every_required_operation() -> None:
         "load_interaction",
         "load_result",
         "load_run",
+        "load_run_control",
         "load_session",
         "load_session_lane",
+        "load_tool_call",
         "recover_active_run",
         "request_cancellation",
         "reserve_model_step",
@@ -428,6 +434,131 @@ def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> N
     loaded = lifecycle_store.load_run("run-1")
     assert loaded is not None
     assert loaded.request.metadata == {"nested": {"value": "original"}}
+
+
+def test_exact_tool_call_read_is_copy_isolated_and_missing_is_none(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Exact composite-key read 不扫描或模糊匹配其他 durable subject。"""
+    _prepare_tool(lifecycle_store)
+    _create(
+        lifecycle_store,
+        run_id="run-2",
+        session_id="session-2",
+        activation_id="activation-2",
+    )
+
+    loaded = lifecycle_store.load_tool_call("run-1", "call-tool")
+
+    assert loaded == lifecycle_store.list_tool_calls("run-1")[0]
+    assert loaded is not None
+    loaded.arguments["value"] = "changed"
+    reloaded = lifecycle_store.load_tool_call("run-1", "call-tool")
+    assert reloaded is not None
+    assert reloaded.arguments == {"value": "A"}
+    assert lifecycle_store.load_tool_call("run-1", "missing") is None
+    assert lifecycle_store.load_tool_call("missing", "call-tool") is None
+    assert lifecycle_store.load_tool_call("run-2", "call-tool") is None
+    with pytest.raises(IrisRunNotFoundError):
+        lifecycle_store.list_tool_calls("missing")
+
+
+def test_run_control_read_projects_exact_frozen_fields(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Control read 只暴露 fence/cancellation 所需的八个不可变字段。"""
+    created = _create(lifecycle_store)
+
+    control = lifecycle_store.load_run_control("run-1")
+
+    assert control == RunControlSnapshot(
+        run_id=created.run.run_id,
+        phase=created.run.phase,
+        revision=created.run.revision,
+        current_activation_id=created.run.current_activation_id,
+        cancellation_requested_at=created.run.cancellation_requested_at,
+        cancellation_reason=created.run.cancellation_reason,
+        last_event_sequence=created.run.last_event_sequence,
+        updated_at=created.run.updated_at,
+    )
+    assert set(RunControlSnapshot.model_fields) == {
+        "run_id",
+        "phase",
+        "revision",
+        "current_activation_id",
+        "cancellation_requested_at",
+        "cancellation_reason",
+        "last_event_sequence",
+        "updated_at",
+    }
+    assert lifecycle_store.load_run_control("missing") is None
+    assert control is not None
+    with pytest.raises(ValidationError, match="frozen"):
+        control.revision = 99
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        RunControlSnapshot.model_validate(control.model_dump() | {"unexpected": True})
+    with pytest.raises(ValidationError, match="同时存在"):
+        RunControlSnapshot.model_validate(
+            control.model_dump() | {"cancellation_reason": "unpaired"}
+        )
+
+
+def test_sqlite_run_control_read_skips_aggregate_json_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Control projection 不读取 request/options/usage/message/error JSON。"""
+    store = SQLiteStore(tmp_path / "control.db")
+    created = _create(store)
+
+    def fail_json_decode(value: str) -> object:
+        del value
+        raise AssertionError("control projection 不应 decode aggregate JSON")
+
+    monkeypatch.setattr(sqlite_module, "_load_json", fail_json_decode)
+
+    assert store.load_run_control("run-1") == RunControlSnapshot(
+        run_id=created.run.run_id,
+        phase=created.run.phase,
+        revision=created.run.revision,
+        current_activation_id=created.run.current_activation_id,
+        cancellation_requested_at=None,
+        cancellation_reason=None,
+        last_event_sequence=created.run.last_event_sequence,
+        updated_at=created.run.updated_at,
+    )
+
+
+def test_sqlite_corrupt_run_control_maps_validation_to_persistence_error(tmp_path: Path) -> None:
+    """窄投影的 durable validation 失败沿用 lifecycle persistence error。"""
+    store = SQLiteStore(tmp_path / "corrupt-control.db")
+    _create(store)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE agent_runs SET cancellation_reason = 'unpaired' WHERE run_id = 'run-1'"
+        )
+
+    with pytest.raises(IrisRunPersistenceError) as captured:
+        store.load_run_control("run-1")
+
+    assert captured.value.context["operation"] == "load_run_control"
+    assert captured.value.context["path"] == str(store.path)
+
+
+def test_sqlite_corrupt_point_read_maps_decode_to_persistence_error(tmp_path: Path) -> None:
+    """Exact tool read 保留既有 corrupt-row error context。"""
+    store = SQLiteStore(tmp_path / "corrupt-tool.db")
+    _prepare_tool(store)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE run_tool_calls SET arguments_json = '{' WHERE tool_call_id = 'call-tool'"
+        )
+
+    with pytest.raises(IrisRunPersistenceError) as captured:
+        store.load_tool_call("run-1", "call-tool")
+
+    assert captured.value.context["operation"] == "load_tool_call"
+    assert captured.value.context["path"] == str(store.path)
 
 
 def test_session_lane_read_tracks_non_terminal_owner_without_mutation(

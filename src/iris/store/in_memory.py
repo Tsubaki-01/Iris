@@ -38,6 +38,7 @@ from ..lifecycle.models import (
     CheckpointResumability,
     RecoveryDisposition,
     RunCheckpoint,
+    RunControlSnapshot,
     RunErrorInfo,
     RunEvent,
     RunEventKind,
@@ -89,6 +90,7 @@ class InMemoryLifecycleStore:
         self._activations: dict[str, ActivationRecord] = {}
         self._checkpoints: dict[str, RunCheckpoint] = {}
         self._tool_calls: dict[tuple[str, str], RunToolCallRecord] = {}
+        self._tool_call_ids_by_run: dict[str, list[str]] = {}
         self._interactions: dict[str, HumanInteraction] = {}
         self._events: dict[str, list[RunEvent]] = {}
         self._results: dict[str, RunResult] = {}
@@ -385,7 +387,7 @@ class InMemoryLifecycleStore:
             self._sessions[session.session_id] = deepcopy(next_session)
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             for tool_call in prepared:
-                self._tool_calls[(run.run_id, tool_call.tool_call_id)] = deepcopy(tool_call)
+                self._set_tool_call(tool_call)
             self._events[run.run_id].append(deepcopy(event))
             return self._store_replay("commit_model_step", command, commit)
 
@@ -442,7 +444,7 @@ class InMemoryLifecycleStore:
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._tool_calls[(run.run_id, tool_call.tool_call_id)] = deepcopy(claimed)
+            self._set_tool_call(claimed)
             self._events[run.run_id].append(deepcopy(event))
             return self._store_replay("claim_tool_call", command, commit)
 
@@ -528,7 +530,7 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             self._sessions[session.session_id] = deepcopy(next_session)
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
-            self._tool_calls[(run.run_id, tool_call.tool_call_id)] = deepcopy(committed_call)
+            self._set_tool_call(committed_call)
             self._events[run.run_id].append(deepcopy(event))
             return self._store_replay("commit_tool_result", command, commit)
 
@@ -627,10 +629,8 @@ class InMemoryLifecycleStore:
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._interactions[interaction.interaction_id] = deepcopy(interaction)
             for tool_call in prepared:
-                self._tool_calls[(run.run_id, tool_call.tool_call_id)] = deepcopy(tool_call)
-            self._tool_calls[(run.run_id, interaction.tool_call_id)] = deepcopy(
-                bound_interaction_tool
-            )
+                self._set_tool_call(tool_call)
+            self._set_tool_call(bound_interaction_tool)
             self._events[run.run_id].append(deepcopy(event))
             self._results[run.run_id] = deepcopy(result)
             return self._store_replay("suspend_run", command, commit)
@@ -832,7 +832,7 @@ class InMemoryLifecycleStore:
             if interaction is not None:
                 self._interactions[interaction.interaction_id] = deepcopy(interaction)
             for record in claimed_closures:
-                self._tool_calls[(run.run_id, record.tool_call_id)] = deepcopy(record)
+                self._set_tool_call(record)
             self._events[run.run_id].extend(deepcopy(events))
             return self._store_replay("request_cancellation", command, commit)
 
@@ -957,7 +957,7 @@ class InMemoryLifecycleStore:
             if interaction is not None:
                 self._interactions[interaction.interaction_id] = deepcopy(interaction)
             for record in unknown_calls:
-                self._tool_calls[(run.run_id, record.tool_call_id)] = deepcopy(record)
+                self._set_tool_call(record)
             self._events[run.run_id].extend(deepcopy(commit.events))
             self._results[run.run_id] = deepcopy(result)
             return self._store_replay("finish_run", command, commit)
@@ -1086,7 +1086,7 @@ class InMemoryLifecycleStore:
                 self._lanes.pop(run.session_id, None)
                 self._results[run.run_id] = deepcopy(result)
                 for item in unknown_calls:
-                    self._tool_calls[(run.run_id, item.tool_call_id)] = deepcopy(item)
+                    self._set_tool_call(item)
             elif command.recovery_disposition is RecoveryDisposition.FINALIZE:
                 if claimed:
                     raise IrisRunRecoveryError(
@@ -1192,6 +1192,23 @@ class InMemoryLifecycleStore:
         with self._lock:
             return deepcopy(self._runs.get(run_id))
 
+    def load_run_control(self, run_id: str) -> RunControlSnapshot | None:
+        """返回 activation/cancellation 判断所需的最小 run 投影。"""
+        with self._lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return None
+            return RunControlSnapshot(
+                run_id=run.run_id,
+                phase=run.phase,
+                revision=run.revision,
+                current_activation_id=run.current_activation_id,
+                cancellation_requested_at=run.cancellation_requested_at,
+                cancellation_reason=run.cancellation_reason,
+                last_event_sequence=run.last_event_sequence,
+                updated_at=run.updated_at,
+            )
+
     def load_session(self, session_id: str) -> SessionSnapshot:
         """返回 session snapshot；缺失 session 表示 revision 0 的空历史。"""
         with self._lock:
@@ -1212,12 +1229,24 @@ class InMemoryLifecycleStore:
         with self._lock:
             return deepcopy(self._checkpoints.get(run_id))
 
+    def load_tool_call(
+        self,
+        run_id: str,
+        tool_call_id: str,
+    ) -> RunToolCallRecord | None:
+        """按 composite identity 返回 copy-isolated tool call。"""
+        with self._lock:
+            return deepcopy(self._tool_calls.get((run_id, tool_call_id)))
+
     def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]:
         """按 step index 与 ordinal 返回 run 的全部工具调用。"""
         with self._lock:
             if run_id not in self._runs:
                 raise IrisRunNotFoundError("run 不存在", run_id=run_id)
-            calls = [item for item in self._tool_calls.values() if item.run_id == run_id]
+            calls = [
+                self._tool_calls[(run_id, tool_call_id)]
+                for tool_call_id in self._tool_call_ids_by_run.get(run_id, ())
+            ]
             return deepcopy(sorted(calls, key=lambda item: (item.step_index, item.ordinal)))
 
     def load_result(self, run_id: str) -> RunResult | None:
@@ -1267,6 +1296,13 @@ class InMemoryLifecycleStore:
         if tool_call is None:
             raise IrisRunNotFoundError("tool call 不存在", run_id=run_id, tool_call_id=tool_call_id)
         return tool_call
+
+    def _set_tool_call(self, record: RunToolCallRecord) -> None:
+        """写入权威 tool fact，并在首次插入时登记 per-run identity。"""
+        key = (record.run_id, record.tool_call_id)
+        if key not in self._tool_calls:
+            self._tool_call_ids_by_run.setdefault(record.run_id, []).append(record.tool_call_id)
+        self._tool_calls[key] = deepcopy(record)
 
     @staticmethod
     def _require_revision(run: RunRecord, expected: int) -> None:

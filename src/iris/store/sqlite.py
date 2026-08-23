@@ -40,6 +40,7 @@ from ..lifecycle.models import (
     CheckpointResumability,
     RecoveryDisposition,
     RunCheckpoint,
+    RunControlSnapshot,
     RunErrorInfo,
     RunEvent,
     RunEventKind,
@@ -362,6 +363,28 @@ class SQLiteStore:
             ),
         )
 
+    def load_run_control(self, run_id: str) -> RunControlSnapshot | None:
+        """只读取 activation/cancellation 判断所需的八个 run 字段。"""
+
+        def read(connection: sqlite3.Connection) -> RunControlSnapshot | None:
+            row = connection.execute(
+                """SELECT run_id, phase, run_revision, current_activation_id,
+                    cancellation_requested_at, cancellation_reason,
+                    last_event_sequence, updated_at
+                FROM agent_runs WHERE run_id = ?""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return _decode_row(
+                _row_to_run_control,
+                row,
+                path=self.path,
+                operation="load_run_control",
+            )
+
+        return self._read("load_run_control", read)
+
     def load_session(self, session_id: str) -> SessionSnapshot:
         return self._read(
             "load_session",
@@ -399,6 +422,22 @@ class SQLiteStore:
                 connection,
                 run_id,
                 operation="load_checkpoint",
+            ),
+        )
+
+    def load_tool_call(
+        self,
+        run_id: str,
+        tool_call_id: str,
+    ) -> RunToolCallRecord | None:
+        """使用现有 composite primary key 读取 exact tool call。"""
+        return self._read(
+            "load_tool_call",
+            lambda connection: self._select_tool_call(
+                connection,
+                run_id,
+                tool_call_id,
+                operation="load_tool_call",
             ),
         )
 
@@ -2873,6 +2912,19 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         started_at=row["started_at"],
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
+    )
+
+
+def _row_to_run_control(row: sqlite3.Row) -> RunControlSnapshot:
+    return RunControlSnapshot(
+        run_id=row["run_id"],
+        phase=row["phase"],
+        revision=row["run_revision"],
+        current_activation_id=row["current_activation_id"],
+        cancellation_requested_at=row["cancellation_requested_at"],
+        cancellation_reason=row["cancellation_reason"],
+        last_event_sequence=row["last_event_sequence"],
+        updated_at=row["updated_at"],
     )
 
 

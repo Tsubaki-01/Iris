@@ -116,6 +116,11 @@ Runner 的 live signal 与 store-backed commit port 使用
 `iris.exceptions.IrisCancellationRequestedError` 通知 runtime 协作式收口；该类型不属于
 `iris.tools` 公共错误面。
 
+Store-backed commit port 在每个 effect/commit 安全边界重新读取最小 run control，不跨边界缓存。
+它只接受 control 完全相等，或同一 active activation 上 revision/event sequence 各推进一步且由唯一
+`run.cancellation_requested` event 证明的取消；phase、fence、跳号、重复取消或 event/payload 不匹配
+全部 fail closed。随后 mutation 仍以原有 revision 与 activation CAS 为最终授权。
+
 runtime 的只读并发窗口使用固定内部上限 8；它不增加 public config/schema/API。窗口中每个
 调用都有独立 durable claim，body 可以乱序结束，但只有连续的已知 result prefix 会按 ordinal
 进入 history/cursor/checkpoint。claim telemetry 的 event 顺序不是 ordinal 契约。任一未提交

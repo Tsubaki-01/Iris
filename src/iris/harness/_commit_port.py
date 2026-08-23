@@ -22,7 +22,9 @@ from ..lifecycle import (
     ReserveModelStep,
     RunCheckpoint,
     RunCommit,
+    RunControlSnapshot,
     RunEvent,
+    RunEventKind,
     RunPhase,
     RunRecord,
     RunToolCallRecord,
@@ -182,27 +184,18 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 )
             )
         except (IrisRunStateError, IrisRunConflictError) as exc:
-            current = self._store.load_run(self._run.run_id)
-            if (
-                current is None
-                or current.phase is not RunPhase.ACTIVE
-                or current.current_activation_id != self._activation_id
-                or current.cancellation_requested_at is None
-            ):
+            self._refresh_control_from_store()
+            if self._run.cancellation_requested_at is None:
                 raise
-            previous_sequence = self._run.last_event_sequence
-            self._run = current
-            self._record_events(self._store.list_events(current.run_id, previous_sequence))
             raise IrisCancellationRequestedError("activation 已请求取消") from exc
         self._accept(stored)
-        claimed = self._tool_record(call.tool_call_id)
         return ToolCallClaim(
             run_id=self._run.run_id,
             activation_id=self._activation_id,
-            tool_call_id=claimed.tool_call_id,
-            tool_name=claimed.tool_name,
-            fingerprint=claimed.fingerprint,
-            tool_version=claimed.version,
+            tool_call_id=record.tool_call_id,
+            tool_name=record.tool_name,
+            fingerprint=record.fingerprint,
+            tool_version=record.version + 1,
         )
 
     def commit_tool_result(self, commit: RuntimeToolResultCommit) -> RuntimeCursor:
@@ -301,10 +294,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
 
     def cancellation_requested(self) -> bool:
         """返回最近 committed run 上的 durable cancellation fact。"""
-        current = self._store.load_run(self._run.run_id)
-        if current is None:
-            raise IrisRunNotFoundError("commit port 绑定的 run 不存在", run_id=self._run.run_id)
-        return current.cancellation_requested_at is not None
+        self._refresh_control_from_store()
+        return self._run.cancellation_requested_at is not None
 
     def remaining_deadline_seconds(self) -> float | None:
         """按 absolute deadline 与 injected clock 计算非负剩余秒数。"""
@@ -324,34 +315,73 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
     def _require_writable(self) -> None:
         if not self._writable:
             raise IrisRunStateError("activation commit port 已结算或撤销")
-        current = self._store.load_run(self._run.run_id)
-        if current is None:
+        self._refresh_control_from_store()
+
+    def _refresh_control_from_store(self) -> None:
+        snapshot = self._store.load_run_control(self._run.run_id)
+        if snapshot is None:
             raise IrisRunNotFoundError("commit port 绑定的 run 不存在", run_id=self._run.run_id)
-        if current.revision == self._run.revision:
+        self._refresh_control(snapshot)
+
+    def _refresh_control(self, snapshot: RunControlSnapshot) -> None:
+        """只接受 control facts 完全相等或可证明的一步 cancellation。"""
+        local = self._control_snapshot()
+        if snapshot == local:
             return
-        expected = self._run.model_copy(
+        expected = local.model_copy(
             update={
-                "revision": current.revision,
-                "cancellation_requested_at": current.cancellation_requested_at,
-                "cancellation_reason": current.cancellation_reason,
-                "last_event_sequence": current.last_event_sequence,
-                "updated_at": current.updated_at,
+                "revision": local.revision + 1,
+                "cancellation_requested_at": snapshot.cancellation_requested_at,
+                "cancellation_reason": snapshot.cancellation_reason,
+                "last_event_sequence": local.last_event_sequence + 1,
+                "updated_at": snapshot.updated_at,
             }
         )
         if (
-            self._run.cancellation_requested_at is not None
-            or current.cancellation_requested_at is None
-            or current.revision != self._run.revision + 1
-            or current.last_event_sequence != self._run.last_event_sequence + 1
-            or current != expected
+            snapshot.run_id != local.run_id
+            or local.phase is not RunPhase.ACTIVE
+            or snapshot.phase is not RunPhase.ACTIVE
+            or local.current_activation_id != self._activation_id
+            or snapshot.current_activation_id != self._activation_id
+            or local.cancellation_requested_at is not None
+            or snapshot.cancellation_requested_at is None
+            or snapshot.updated_at < local.updated_at
+            or snapshot != expected
         ):
             raise IrisRunConflictError("activation 期间出现非 cancellation mutation")
-        self._run = current
-        self._record_events(
-            self._store.list_events(
-                current.run_id,
-                self._run.last_event_sequence - 1,
-            )
+        events = self._store.list_events(snapshot.run_id, local.last_event_sequence)
+        if len(events) != 1:
+            raise IrisRunConflictError("cancellation event 无法证明 control mutation")
+        event = events[0]
+        if (
+            event.run_id != snapshot.run_id
+            or event.sequence != snapshot.last_event_sequence
+            or event.kind is not RunEventKind.CANCELLATION_REQUESTED
+            or event.activation_id != self._activation_id
+            or event.payload.get("reason") != snapshot.cancellation_reason
+        ):
+            raise IrisRunConflictError("cancellation event 与 control mutation 不匹配")
+        self._run = self._run.model_copy(
+            update={
+                "revision": snapshot.revision,
+                "cancellation_requested_at": snapshot.cancellation_requested_at,
+                "cancellation_reason": snapshot.cancellation_reason,
+                "last_event_sequence": snapshot.last_event_sequence,
+                "updated_at": snapshot.updated_at,
+            }
+        )
+        self._record_events(events)
+
+    def _control_snapshot(self) -> RunControlSnapshot:
+        return RunControlSnapshot(
+            run_id=self._run.run_id,
+            phase=self._run.phase,
+            revision=self._run.revision,
+            current_activation_id=self._run.current_activation_id,
+            cancellation_requested_at=self._run.cancellation_requested_at,
+            cancellation_reason=self._run.cancellation_reason,
+            last_event_sequence=self._run.last_event_sequence,
+            updated_at=self._run.updated_at,
         )
 
     def _record_events(self, events: Sequence[RunEvent]) -> None:
@@ -382,14 +412,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             raise IrisRunConflictError("runtime tool call 跨越 commit port identity")
 
     def _tool_record(self, tool_call_id: str) -> RunToolCallRecord:
-        match = next(
-            (
-                record
-                for record in self._store.list_tool_calls(self._run.run_id)
-                if record.tool_call_id == tool_call_id
-            ),
-            None,
-        )
+        match = self._store.load_tool_call(self._run.run_id, tool_call_id)
         if match is None:
             raise IrisRunConflictError("durable prepared tool call 不存在")
         return match
@@ -447,6 +470,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         now: datetime,
     ) -> list[RunToolCallRecord]:
         """验证已持久化 subject，并只构造本次尚未存在的 prepared records。"""
+        if not calls:
+            return []
         existing = {
             record.tool_call_id: record for record in self._store.list_tool_calls(self._run.run_id)
         }
