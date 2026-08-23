@@ -45,11 +45,15 @@ cancellation/finish/recover commands，以及 run/session/lane/interaction/check
 reads。
 每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
+`load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
+`load_run_control(run_id)` 只返回 `RunControlSnapshot` 的八个 fence/cancellation 字段。两者都不
+替代 mutation CAS，也不改变同步 store boundary。
 
 ## 公开接口
 
 `iris.lifecycle` 可直接导入所有契约模型、enums、commands、`LifecycleStore` 和
-`snapshot_run()`/`project_result()`。完整运行入口只在 `iris.harness`。
+`snapshot_run()`/`project_result()`，包括最小只读投影 `RunControlSnapshot`。完整运行入口只在
+`iris.harness`。
 
 ## 验证
 

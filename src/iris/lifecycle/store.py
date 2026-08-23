@@ -23,6 +23,7 @@ from .models import (
     AgentRunRequest,
     RecoveryDisposition,
     RunCheckpoint,
+    RunControlSnapshot,
     RunErrorInfo,
     RunEvent,
     RunRecord,
@@ -365,6 +366,8 @@ class LifecycleStore(Protocol):
 
     def load_run(self, run_id: str) -> RunRecord | None: ...
 
+    def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
+
     def load_session(self, session_id: str) -> SessionSnapshot: ...
 
     def load_session_lane(self, session_id: str) -> str | None: ...
@@ -372,6 +375,12 @@ class LifecycleStore(Protocol):
     def load_interaction(self, interaction_id: str) -> HumanInteraction | None: ...
 
     def load_checkpoint(self, run_id: str) -> RunCheckpoint | None: ...
+
+    def load_tool_call(
+        self,
+        run_id: str,
+        tool_call_id: str,
+    ) -> RunToolCallRecord | None: ...
 
     def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]: ...
 

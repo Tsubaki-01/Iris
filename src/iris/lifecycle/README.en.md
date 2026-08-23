@@ -44,11 +44,15 @@ reads.
 Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
+`load_tool_call(run_id, tool_call_id)` reads one exact composite identity, while
+`load_run_control(run_id)` returns only the eight fence/cancellation fields in
+`RunControlSnapshot`. Neither read replaces mutation CAS or changes the synchronous store boundary.
 
 ## Public API
 
 All contract models, enums, commands, `LifecycleStore`, `snapshot_run()`, and `project_result()` are
-importable from `iris.lifecycle`. The complete-run facade exists only in `iris.harness`.
+importable from `iris.lifecycle`, including the minimal read projection `RunControlSnapshot`. The
+complete-run facade exists only in `iris.harness`.
 
 ## Verification
 

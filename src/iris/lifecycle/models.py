@@ -469,6 +469,47 @@ class RunRecord(_FrozenModel):
         return self
 
 
+class RunControlSnapshot(_FrozenModel):
+    """Commit port 判断 activation/cancellation 所需的最小 run 投影。"""
+
+    run_id: str
+    phase: RunPhase
+    revision: int = Field(ge=1)
+    current_activation_id: str | None
+    cancellation_requested_at: datetime | None
+    cancellation_reason: str | None
+    last_event_sequence: int = Field(ge=1)
+    updated_at: datetime
+
+    @field_validator("run_id")
+    @classmethod
+    def _validate_run_id(cls, value: str) -> str:
+        return _trim_required(value, field_name="run_id")
+
+    @field_validator("current_activation_id", "cancellation_reason")
+    @classmethod
+    def _validate_optional_text(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return None if value is None else _trim_required(value, field_name=str(info.field_name))
+
+    @field_validator("cancellation_requested_at")
+    @classmethod
+    def _validate_cancellation_time(cls, value: datetime | None) -> datetime | None:
+        return _aware_utc(value, field_name="cancellation_requested_at")
+
+    @field_validator("updated_at")
+    @classmethod
+    def _validate_updated_at(cls, value: datetime) -> datetime:
+        return _required_aware_utc(value, field_name="updated_at")
+
+    @model_validator(mode="after")
+    def _validate_control_facts(self) -> RunControlSnapshot:
+        if (self.cancellation_requested_at is None) != (self.cancellation_reason is None):
+            raise ValueError("cancellation time 与 reason 必须同时存在")
+        if (self.phase is RunPhase.ACTIVE) != (self.current_activation_id is not None):
+            raise ValueError("active phase 与 current activation 必须同时存在")
+        return self
+
+
 class SessionSnapshot(_FrozenModel):
     """一个 session 的消息历史与 CAS revision。"""
 
@@ -708,6 +749,7 @@ __all__ = [
     "CheckpointResumability",
     "RecoveryDisposition",
     "RunCheckpoint",
+    "RunControlSnapshot",
     "RunErrorInfo",
     "RunErrorSource",
     "RunEvent",

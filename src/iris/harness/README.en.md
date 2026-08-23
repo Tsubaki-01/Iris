@@ -126,6 +126,13 @@ The runner's live signal and store-backed commit port use
 `iris.exceptions.IrisCancellationRequestedError` to request cooperative runtime settlement; the
 type is not part of the `iris.tools` public error surface.
 
+The store-backed commit port rereads minimal run control at every effect/commit safety boundary and
+does not cache it across boundaries. It accepts only exact equality or a one-revision,
+one-event-sequence cancellation on the same active activation, proven by exactly one
+`run.cancellation_requested` event. Phase/fence changes, jumps, repeated cancellation, and event or
+payload mismatches fail closed. Mutations still use the original revision and activation CAS as the
+final authority.
+
 Runtime's read-only concurrency window has a fixed internal bound of 8 and adds no public config,
 schema, or API. Every call in a window has an independent durable claim. Bodies may finish out of
 order, but only a continuous known result prefix enters history, cursor, and checkpoint in ordinal

@@ -33,6 +33,9 @@ print(session.revision, session.messages)
 `SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
 读取目标 run、session、lane owner、interaction、checkpoint、tool calls 或 events；跨多条查询的
 read 在同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
+exact tool call 读取复用现有 `(run_id, tool_call_id)` 主键；run control 读取只选择
+`RunControlSnapshot` 所需的八列，不解码 request/options/usage/message/error JSON。内存实现以
+per-run call-ID 索引列举目标 run，权威事实仍保存在原有 tuple-key dict。
 
 Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所需的 rows。run、session、
 checkpoint、tool call 与 interaction 更新分别使用 revision、sequence 或 version CAS
@@ -62,6 +65,11 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
 应通过 `iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
+
+`load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
+`load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
+不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
+表、索引、连接池或 migration，schema identity 仍为 lifecycle v1。
 
 `load_session_lane(session_id)` 只读返回当前 non-terminal lane owner 的 `run_id`，无占用时返回
 `None`。它不修复、恢复或接管 run；host 仍需读取 run/interaction，并用精确 activation fence 调用
