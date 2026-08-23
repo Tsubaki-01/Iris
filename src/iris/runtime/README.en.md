@@ -95,10 +95,14 @@ and drains the children it created before a parent-task or infrastructure exit c
 Cooperative cancellation uses `iris.exceptions.IrisCancellationRequestedError`; runtime converts
 it into an activation outcome rather than an ordinary tool error.
 
-Concurrent file reads share one `ReadFileState` identity. The checkpoint snapshot taken after the
-window settles contains the combined records, so a later serial write barrier can retain stale-read
-checks. Synchronous blocking callables retain correct claim/result/order semantics but receive no
-speedup guarantee. Future NETWORK/MCP or write concurrency requires a new effect, retry, timeout,
+Concurrent file reads share one `ReadFileState` identity. Workers only return immutable
+observations, which the event loop merges. The checkpoint snapshot taken after the window settles
+contains the combined records, so a later serial write barrier can retain stale-read checks.
+Synchronous callables remain inline by default; only explicit `CallableExecutionMode.THREAD`
+placement moves a blocking body to a worker. Threads cannot be safely forced to stop. Cancellation
+or timeout stops waiting and discards the late return; when a durable claim exists, runtime settles
+as `OUTCOME_UNKNOWN`, and the late result cannot advance history, cursor, or checkpoint state.
+Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concurrency requires a new effect, retry, timeout,
 conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
 delta/merge/lock/hash model.
 

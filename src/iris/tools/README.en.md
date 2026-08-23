@@ -55,8 +55,12 @@ subset.
 
 `BaseTool` defines `validate_input()`, read/destructive/concurrency classification, and async
 `arun()`. `CallableTool` derives a schema from signatures, annotations, docstrings, or an explicit
-Pydantic model and normalizes strings, `None`, JSON-compatible values, and exceptions. Preset kwargs
-are hidden from schema and callers cannot override them.
+Pydantic model and normalizes strings, `None`, JSON-compatible values, and exceptions. Synchronous
+functions use `CallableExecutionMode.INLINE` by default, preserving the existing calling thread and
+ordering. Only an explicit `THREAD` declaration runs the function in a worker thread. Async
+functions cannot use `THREAD` and fail registration with `IrisToolValidationError`. If a synchronous
+thread function returns an awaitable, Iris still awaits it on the event loop. Preset kwargs are
+hidden from schema and callers cannot override them.
 
 `ToolRegistry` registers tools/functions, resolves names and aliases, creates filtered views, exports
 active schemas, and searches deferred definitions. Deny filters override allow filters. Deferred
@@ -97,14 +101,22 @@ after a claim propagates as control flow to runtime instead of becoming a normal
 Low-level executor callers may omit the guard; lifecycle execution requires it through
 `ToolBridge`. Parallel context copies preserve identity for both shared read state and cancellation.
 Cooperative cancellation uses `IrisCancellationRequestedError` from `iris.exceptions`, and
-`CallableTool` propagates it instead of normalizing it as an ordinary tool error.
+`CallableTool` propagates it instead of normalizing it as an ordinary tool error. A thread worker
+cannot be forcibly terminated: cancellation or timeout stops waiting, abandons its late return, and
+lets lifecycle settlement fail closed when a durable claim already exists.
+
+The blocking I/O in `read_file`, `list_files`, and `grep_search` runs in worker threads; `write_file`
+and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A read returns an
+immutable `ReadFileRecord` observation that the event loop merges only after a successful await.
 
 `ToolExecutor` provides classification, revalidation, and per-call execution primitives only. The
 lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
 Only consecutive read-only and concurrency-safe calls can enter a window; STOP, HITL, preflight
 results, and unsafe calls remain barriers. Every call keeps its own durable claim. Body completion
-does not determine result order, and claim telemetry order is not an ordinal contract. Synchronous
-callables have no speedup guarantee. This scheduling adds no config, schema, or API. Future
+does not determine result order, and claim telemetry order is not an ordinal contract. Undeclared
+synchronous callables remain inline and may block the event loop; explicit `THREAD` placement
+isolates blocking waits but does not promise CPU speedup. Placement does not enter provider schemas.
+Future
 NETWORK/MCP or write concurrency must define a new effect and recovery protocol rather than merely
 changing the capability classifier.
 
@@ -121,9 +133,14 @@ flowchart LR
     Service --> Boundary["WorkspacePolicy / ReadFileState / filesystem"]
 ```
 
-- reads may include `L0001 |` line numbers and update `ReadFileState`;
-- list/grep recursively inspect UTF-8 regular files, skip `.iris`, binary failures, and escaping
-  symlinks;
+- reads may include `L0001 |` line numbers and update `ReadFileState` through loop-side observation
+  merge;
+- list uses streaming `os.scandir` discovery order and does not guarantee global lexicographic
+  order; list patterns retain `Path.rglob()` recursion semantics, including `**` matching zero or
+  more directory segments; grep reads UTF-8 files line by line and skips `.iris` before descent;
+- list/grep stop as soon as the global `max_results` limit is reached, and `max_results=0` performs
+  no path resolution, walk, stat, or open;
+- recursive file discovery skips escaping symlinks and grep skips decoding failures;
 - overwriting/editing an existing file requires a prior unchanged read;
 - edit requires exactly one match;
 - resolved parent/symlink escapes are rejected;
@@ -149,7 +166,8 @@ bigrams, low-weight single characters, query coverage, and stable sorting. `Tool
 
 ## Public surface and boundaries
 
-The exact top-level API is `src/iris/tools/__init__.py::__all__`, covering models, base/adapters,
+The exact top-level API is `src/iris/tools/__init__.py::__all__`, including
+`CallableExecutionMode`, and covering models, base/adapters,
 registry/view, executor/preflight, permission/artifact/middleware/breaker types, file/human tools,
 deferred discovery, schema helpers, and `tool`. Protected `_impl()` hooks and executor private
 lifecycle methods are internal.

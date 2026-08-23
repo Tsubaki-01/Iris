@@ -63,6 +63,8 @@ assert result.model_content == "你好，Iris"
 
 - `ToolCapability`: 能力标签，包含 `READ`、`WRITE`、`EXECUTE`、`NETWORK`、`MCP`、`AGENT`。
 - `ToolExecutionMode`: 执行模式枚举，包含 `SYNC`、`ASYNC`、`STREAM`。
+- `CallableExecutionMode`: 同步 callable 的本地执行位置，包含默认的 `INLINE` 和显式
+  opt-in 的 `THREAD`；它不进入 provider schema。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本。
@@ -82,7 +84,7 @@ assert result.model_content == "你好，Iris"
 - `is_concurrency_safe(params)`: 默认 `True`。
 - `async arun(params, context)`: 子类必须实现，返回 `ToolResult`。
 
-`CallableTool` 将普通 callable 适配为 `BaseTool`。它会从函数签名、类型注解、docstring 或显式 `input_model` 生成 schema，并把返回值归一化为 `ToolResult`：字符串直接作为文本，`None` 为空内容，其他值优先 JSON 序列化。
+`CallableTool` 将普通 callable 适配为 `BaseTool`。它会从函数签名、类型注解、docstring 或显式 `input_model` 生成 schema，并把返回值归一化为 `ToolResult`：字符串直接作为文本，`None` 为空内容，其他值优先 JSON 序列化。同步函数默认使用 `CallableExecutionMode.INLINE`，保持既有调用线程与顺序；只有显式声明 `THREAD` 才用 worker thread 执行。async function 不能声明 `THREAD`，会在注册阶段得到 `IrisToolValidationError`。同步函数在线程中返回 awaitable 时，awaitable 仍回到 event loop 等待。
 
 `preset_kwargs` 会在执行前注入函数调用，但不会暴露在 schema 中；调用方若传入同名参数会得到校验错误。
 
@@ -103,7 +105,7 @@ tool_obj = registry.register_function(
 公共方法：
 
 - `register(tool, on_conflict="raise")`: 注册 `BaseTool` 实例；当前只支持 `raise` 冲突策略。
-- `register_function(func, ...)`: 创建 `CallableTool` 并注册，支持 `name`、`description`、`input_model`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`。
+- `register_function(func, ...)`: 创建 `CallableTool` 并注册，支持 `name`、`description`、`input_model`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。显式参数优先于 `@tool` 元数据。
 - `get(name)`: 按主名称或别名获取工具，未找到时抛出工具不存在错误。
 - `view(include_groups=None, allow=None, deny=None)`: 创建只读过滤视图。
 - `active_schemas(provider=None, api_style=None)`: 导出当前活动工具 schema。
@@ -154,13 +156,14 @@ guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 `model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
 `IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
 
-文件工具在并发只读批次中仍共享调用方的 `ReadFileState`，因此同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验状态。
+`read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
 
 `ToolExecutor` 只提供分类、重校验和单调用执行原语；lifecycle active path 由 runtime 在它之上
 使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
 HITL、preflight result 与 unsafe 调用保持屏障语义。每个调用仍有自己的 durable claim，body
-完成顺序不决定 result 顺序，claim telemetry 顺序也不是 ordinal 契约。同步 callable 不保证
-加速。该调度不增加 config/schema/API；未来 NETWORK/MCP 或 write 并发必须先定义新的 effect
+完成顺序不决定 result 顺序，claim telemetry 顺序也不是 ordinal 契约。未声明的同步 callable
+继续 inline，可能阻塞 event loop；显式 `THREAD` 只隔离阻塞等待，不承诺 CPU 加速。该调度不改变
+provider schema；未来 NETWORK/MCP 或 write 并发必须先定义新的 effect
 与恢复协议，不能仅修改 capability classifier。
 
 ## 文件工具
@@ -186,8 +189,8 @@ executor = ToolExecutor(
 | 工具名 | 输入模型 | 能力 | 行为 |
 | --- | --- | --- | --- |
 | `read_file` | `ReadFileInput` | `READ` | 读取 workspace 内文本文件，默认返回原文；`with_line_numbers=true` 时返回 `L0001 |` 行号视图；并记录 `ReadFileState` |
-| `list_files` | `ListFilesInput` | `READ` | 列出 workspace 内普通文件路径 |
-| `grep_search` | `GrepSearchInput` | `READ` | 用 Python 正则搜索 workspace 内 UTF-8 文本文件，跳过 `.iris` 和二进制解码失败文件 |
+| `list_files` | `ListFilesInput` | `READ` | 按 `os.scandir` 发现顺序流式列出 workspace 内普通文件；不保证全局词典序，达到 `max_results` 后立即停止 |
+| `grep_search` | `GrepSearchInput` | `READ` | 流式逐行执行 Python 正则搜索，下降前跳过 `.iris`，达到全局 `max_results` 后立即停止 |
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
 | `edit_file` | `EditFileInput` | `WRITE` | 对已读且未变化的文件执行唯一字符串替换 |
 
@@ -225,12 +228,15 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 输入约束：
 
 - `ReadFileInput(file_path, offset=None, limit=None)`: `offset`/`limit` 非负，`limit <= 1000`。
-- `ListFilesInput(path=".", pattern=None, max_results=200)`: `max_results` 范围为 `0..1000`。
+- `ListFilesInput(path=".", pattern=None, max_results=200)`: `max_results` 范围为 `0..1000`；
+  `pattern` 保持 `Path.rglob()` 的递归语义，`**` 可匹配零个或多个目录段。
 - `GrepSearchInput(pattern, path=".", max_results=200)`: `max_results` 范围为 `0..1000`；无效正则会校验失败。
 - `WriteFileInput(file_path, content)`。
 - `EditFileInput(file_path, old_string, new_string)`: `old_string` 不能为空，且必须唯一匹配。
 
 `WorkspacePolicy.resolve_path()` 会拒绝 workspace 外路径，包括父目录逃逸和解析后逃逸的符号链接。`WorkspaceFileService` 用 `ReadFileState` 记录文件的 `mtime_ns` 和 `size_bytes`，写入或编辑已有文件前会检查 `FILE_NOT_READ` 和 `STALE_FILE_STATE`。
+
+`list_files` 与 `grep_search` 的 `max_results=0` 会在路径解析、walk、stat 或 open 前直接返回空结果。流式遍历以低开销早停为契约，因此 `list_files` 不再提供旧实现的全局排序保证；需要稳定排序的调用方应对返回的有限结果自行排序。
 
 文件写入成功返回的 workspace 相对路径统一使用 `/` 分隔，避免不同操作系统返回不同格式。
 
@@ -322,7 +328,7 @@ registry.register(ToolSearchTool(registry))
 
 `tool(...)` 只给函数附加 `iris_tool_` 元数据，不自动注册，也不改变函数引用。`ToolRegistry.register_function()` / `CallableTool` 会读取这些元数据。
 
-支持参数：`name`、`description`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`。
+支持参数：`name`、`description`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。
 
 ### schema helpers
 
@@ -338,7 +344,7 @@ registry.register(ToolSearchTool(registry))
 `iris.tools.__all__` 当前导出：
 
 ```text
-AskQuestionInput, AskQuestionTool, BaseTool, CallableTool,
+AskQuestionInput, AskQuestionTool, BaseTool, CallableExecutionMode, CallableTool,
 CancellationSignal,
 CircuitBreaker, CircuitBreakerState,
 DeferredToolIndex, DocstringInfo, DocstringSchemaExtractor,

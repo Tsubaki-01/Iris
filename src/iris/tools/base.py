@@ -10,6 +10,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -53,6 +54,22 @@ class ToolExecutionMode(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
     STREAM = "stream"
+
+
+class CallableExecutionMode(StrEnum):
+    """同步 callable 的本地执行位置。"""
+
+    INLINE = "inline"
+    THREAD = "thread"
+
+
+def _validated_callable_execution_mode(
+    value: CallableExecutionMode | None,
+) -> CallableExecutionMode | None:
+    """校验 callable placement 声明。"""
+    if value is None or isinstance(value, CallableExecutionMode):
+        return value
+    raise IrisToolValidationError("callable execution_mode 必须是 CallableExecutionMode")
 
 
 @runtime_checkable
@@ -585,6 +602,8 @@ class CallableTool(BaseTool):
         version: str | None = None,
         deprecated: bool = False,
         deprecation_message: str | None = None,
+        execution_mode: CallableExecutionMode | None = None,
+        concurrency_safe: bool | None = None,
     ) -> None:
         """初始化 callable 工具。
 
@@ -604,14 +623,35 @@ class CallableTool(BaseTool):
             version (str | None): 工具版本。
             deprecated (bool): 是否弃用。
             deprecation_message (str | None): 弃用说明。
+            execution_mode (CallableExecutionMode | None): 同步 callable 的执行位置。
+            concurrency_safe (bool | None): 是否允许进入只读并发窗口。
 
         Raises:
+            IrisToolValidationError: placement 或并发声明无效时抛出。
             ValueError: 解析模型约束异常时抛出。
 
         Example:
             tool = CallableTool(fetch_data)
         """
         self.func = func
+        declared_mode = _validated_callable_execution_mode(
+            execution_mode
+            if execution_mode is not None
+            else getattr(func, "iris_tool_execution_mode", None)
+        )
+        self.execution_mode = declared_mode or CallableExecutionMode.INLINE
+        if self.execution_mode is CallableExecutionMode.THREAD and inspect.iscoroutinefunction(
+            func
+        ):
+            raise IrisToolValidationError("async callable 不能使用 thread execution_mode")
+        declared_concurrency = (
+            concurrency_safe
+            if concurrency_safe is not None
+            else getattr(func, "iris_tool_concurrency_safe", None)
+        )
+        if declared_concurrency is not None and not isinstance(declared_concurrency, bool):
+            raise IrisToolValidationError("callable concurrency_safe 必须是 bool")
+        self._concurrency_safe = declared_concurrency
         self._input_model = input_model
         decorated_preset = getattr(func, "iris_tool_preset_kwargs", {})
         self.preset_kwargs = dict(preset_kwargs if preset_kwargs is not None else decorated_preset)
@@ -653,6 +693,17 @@ class CallableTool(BaseTool):
         self._generated_model = (
             input_model if input_model is not None else callable_input_model(func, preset_names)
         )
+        metadata: dict[str, Any] = {
+            "examples": list(tool_examples or []),
+            "tags": list(tool_tags or []),
+            "version": tool_version or "",
+            "deprecated": tool_deprecated,
+            "deprecation_message": tool_deprecation_message,
+        }
+        if self.execution_mode is CallableExecutionMode.THREAD:
+            metadata["execution_mode"] = self.execution_mode.value
+        if self._concurrency_safe is not None:
+            metadata["concurrency_safe"] = self._concurrency_safe
         self.definition = ToolDefinition(
             name=tool_name,
             description=_description_with_deprecation(
@@ -664,13 +715,7 @@ class CallableTool(BaseTool):
             capabilities=set(tool_capabilities),
             group=tool_group,
             deferred=tool_deferred,
-            metadata={
-                "examples": list(tool_examples or []),
-                "tags": list(tool_tags or []),
-                "version": tool_version or "",
-                "deprecated": tool_deprecated,
-                "deprecation_message": tool_deprecation_message,
-            },
+            metadata=metadata,
         )
 
     # endregion
@@ -719,12 +764,52 @@ class CallableTool(BaseTool):
         except ValidationError as exc:
             raise IrisToolValidationError("工具参数校验失败", errors=exc.errors()) from exc
 
+    def is_concurrency_safe(self, params: dict[str, Any]) -> bool:
+        """返回 callable 的显式并发声明或兼容默认值。"""
+        if self._concurrency_safe is not None:
+            return self._concurrency_safe
+        return super().is_concurrency_safe(params)
+
     # endregion
 
     # ==========================================
     #               Core Execution
     # ==========================================
     # region
+    async def _run_in_thread(
+        self,
+        kwargs: dict[str, Any],
+        cancellation: CancellationSignal | None,
+    ) -> Any:
+        """等待 thread callable，并在 activation 取消后丢弃晚到结果。
+
+        Args:
+            kwargs (dict[str, Any]): 传给同步 callable 的已校验参数。
+            cancellation (CancellationSignal | None): activation 共享的协作取消信号。
+
+        Returns:
+            Any: worker 正常完成时的 callable 返回值。
+
+        Raises:
+            IrisCancellationRequestedError: activation 等待期间收到取消请求。
+            asyncio.CancelledError: 当前 async task 被外部取消。
+            Exception: 同步 callable 的异常原样传播给上层归一化。
+        """
+        worker = asyncio.create_task(asyncio.to_thread(self.func, **kwargs))
+        try:
+            while True:
+                done, _ = await asyncio.wait({worker}, timeout=0.01)
+                if done:
+                    return worker.result()
+                if cancellation is not None:
+                    cancellation.raise_if_requested()
+        except BaseException:
+            if not worker.done():
+                # 这里只取消 async waiter；线程继续自然收口，但已无路径发布晚到结果。
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            raise
+
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
@@ -748,12 +833,14 @@ class CallableTool(BaseTool):
         Example:
             res = await tool.arun(args, ctx)
         """
-        del context
         kwargs = params.model_dump() if isinstance(params, BaseModel) else dict(params)
         kwargs.update(self.preset_kwargs)
         start = time.perf_counter()
         try:
-            value = self.func(**kwargs)
+            if self.execution_mode is CallableExecutionMode.THREAD:
+                value = await self._run_in_thread(kwargs, context.cancellation)
+            else:
+                value = self.func(**kwargs)
             if inspect.isawaitable(value):
                 value = await value
         except IrisCancellationRequestedError:
@@ -764,6 +851,7 @@ class CallableTool(BaseTool):
             raise IrisToolExecutionError(str(exc), tool_name=self.name) from exc
         result = self._normalize_result(value)
         result.stats.setdefault("elapsed_ms", round((time.perf_counter() - start) * 1000, 3))
+        result.stats["execution_mode"] = self.execution_mode.value
         return result
 
     def _normalize_result(self, value: Any) -> ToolResult:
