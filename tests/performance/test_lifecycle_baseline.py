@@ -1,7 +1,9 @@
-"""P2 lifecycle hot-read 的结构计数与同机计时观测。"""
+"""P2/P3 lifecycle 热路径的结构计数与同机计时观测。"""
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
@@ -20,6 +22,7 @@ from iris.lifecycle import (
     CreateRun,
     RunCheckpoint,
     RunToolCallRecord,
+    SessionSnapshot,
 )
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import RuntimeCursor
@@ -47,8 +50,14 @@ class _CountingToolCalls(dict[tuple[str, str], RunToolCallRecord]):
 
 def _create_port(
     path: Path,
+    *,
+    session_history: list[Msg] | None = None,
 ) -> tuple[SQLiteStore, StoreRuntimeCommitPort, RuntimeCursor]:
     store = SQLiteStore(path)
+    session_revision = 0
+    if session_history is not None:
+        _seed_session_history(path, session_history)
+        session_revision = 1
     before = RuntimeCursor(position="before_model", step_index=0)
     created = store.create_run(
         CreateRun(
@@ -62,7 +71,7 @@ def _create_port(
                 sequence=1,
                 activation_id="activation_1",
                 engine_cursor=before.model_dump(mode="json"),
-                session_revision=0,
+                session_revision=session_revision,
                 model_steps_reserved=0,
                 model_steps_committed=0,
                 environment_fingerprint=_FINGERPRINT,
@@ -267,6 +276,95 @@ def _measure_in_memory_target_list(
     }
 
 
+def _seed_session_history(path: Path, messages: list[Msg]) -> None:
+    """向当前 schema 写入一次 non-empty delta 形成的既有历史。"""
+    payloads = [
+        json.dumps(
+            message.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        for message in messages
+    ]
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "messages_json" in columns:
+            connection.execute(
+                """INSERT INTO sessions(session_id, revision, messages_json, updated_at)
+                VALUES ('session_1', 1, ?, ?)""",
+                (f"[{','.join(payloads)}]", _NOW.isoformat()),
+            )
+            return
+        connection.execute(
+            """INSERT INTO sessions(session_id, revision, message_count, updated_at)
+            VALUES ('session_1', 1, ?, ?)""",
+            (len(payloads), _NOW.isoformat()),
+        )
+        connection.executemany(
+            """INSERT INTO session_messages(session_id, ordinal, message_json)
+            VALUES ('session_1', ?, ?)""",
+            enumerate(payloads, start=1),
+        )
+
+
+def _measure_session_append(path: Path) -> tuple[float, dict[str, int]]:
+    store, port, before = _create_port(
+        path,
+        session_history=[Msg.user(f"history-{index}") for index in range(1000)],
+    )
+    counters = {
+        "full_history_items_serialized": 0,
+        "session_metadata_updates": 0,
+        "messages_json_updates": 0,
+        "session_message_inserts": 0,
+    }
+    original_connect = store._connect
+    original_dump_json = sqlite_module._dump_json
+
+    def trace(sql: str) -> None:
+        normalized = " ".join(sql.lower().split())
+        if normalized.startswith("update sessions"):
+            counters["session_metadata_updates"] += 1
+            if "messages_json" in normalized:
+                counters["messages_json_updates"] += 1
+        if normalized.startswith("insert into session_messages"):
+            counters["session_message_inserts"] += 1
+
+    def connect() -> sqlite3.Connection:
+        connection = original_connect()
+        connection.set_trace_callback(trace)
+        return connection
+
+    def dump_json(value: object) -> str:
+        if isinstance(value, list) and value and isinstance(value[0], Msg):
+            counters["full_history_items_serialized"] += len(value)
+        return original_dump_json(value)
+
+    assistant = Msg.assistant("new-message")
+    commit = RuntimeModelStepCommit(
+        cursor_before=before,
+        message_delta=(assistant,),
+        assistant_message=assistant,
+        cursor_after=RuntimeCursor(
+            position="outcome_ready",
+            step_index=0,
+            assistant_message=assistant,
+        ),
+    )
+    with (
+        patch.object(store, "_connect", connect),
+        patch.object(sqlite_module, "_dump_json", dump_json),
+    ):
+        started_at = time.perf_counter()
+        port.commit_model_step(commit)
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+
+    assert len(store.load_session("session_1").messages) == 1001
+    return elapsed_ms, counters
+
+
 def test_p2_sqlite_text_commit_avoids_full_control_decode_and_empty_tool_list(
     tmp_path: Path,
 ) -> None:
@@ -303,6 +401,29 @@ def test_p2_in_memory_list_uses_only_target_run_index() -> None:
         "global_records_yielded": 0,
         "target_records": 1,
     }
+
+
+def test_p3_sqlite_append_serializes_and_writes_only_the_delta(tmp_path: Path) -> None:
+    _, counters = _measure_session_append(tmp_path / "append.db")
+
+    assert counters == {
+        "full_history_items_serialized": 0,
+        "session_metadata_updates": 1,
+        "messages_json_updates": 0,
+        "session_message_inserts": 1,
+    }
+
+
+def test_p3_in_memory_append_reuses_old_store_owned_messages() -> None:
+    old_message = Msg.user("old")
+    delta_message = Msg.assistant("new")
+    current = SessionSnapshot(session_id="session_1", revision=1, messages=[old_message])
+
+    updated = InMemoryLifecycleStore._append_messages(current, [delta_message])
+
+    assert updated.revision == 2
+    assert updated.messages[0] is current.messages[0]
+    assert updated.messages[1] is not delta_message
 
 
 @pytest.mark.performance_timing
@@ -353,4 +474,27 @@ def test_p2_in_memory_list_observation(
         },
         samples_ms=(elapsed_ms,),
         counters=counters,
+    )
+
+
+@pytest.mark.performance_timing
+def test_p3_sqlite_session_append_observation(
+    tmp_path: Path,
+    require_performance_timing: None,
+    record_observation: Callable[..., None],
+) -> None:
+    samples: list[float] = []
+    totals: dict[str, int] = {}
+    for index in range(5):
+        elapsed_ms, counters = _measure_session_append(tmp_path / f"append-{index}.db")
+        samples.append(elapsed_ms)
+        for name, value in counters.items():
+            totals[name] = totals.get(name, 0) + value
+
+    record_observation(
+        scenario="p3_sqlite_append_one_after_1000_messages",
+        perf_ids=("PERF-03",),
+        fixture={"samples": 5, "existing_messages": 1000, "delta_messages": 1},
+        samples_ms=tuple(samples),
+        counters=totals,
     )

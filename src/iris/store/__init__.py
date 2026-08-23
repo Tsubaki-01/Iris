@@ -3,4 +3,7 @@
 from .in_memory import InMemoryLifecycleStore
 from .sqlite import SQLiteStore
 
-__all__ = ["InMemoryLifecycleStore", "SQLiteStore"]
+__all__ = [
+    "InMemoryLifecycleStore",
+    "SQLiteStore",
+]

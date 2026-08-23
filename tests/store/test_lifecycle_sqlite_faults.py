@@ -23,11 +23,13 @@ from iris.lifecycle import (
     ClaimToolCall,
     CommitModelStep,
     CreateRun,
+    FinishRun,
     RecoverActiveRun,
     RecoveryDisposition,
     ReserveModelStep,
     RunCheckpoint,
     RunCommit,
+    RunErrorInfo,
     RunToolCallRecord,
     RunUsage,
     SuspendRun,
@@ -227,6 +229,155 @@ def test_statement_failure_rolls_back_outcome_unknown_recovery(
             ).fetchone()
         assert activation == ("active", None)
         assert lane == ("run-1",)
+
+
+def test_partial_session_message_insert_rolls_back_complete_model_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delta 中途插入失败时 metadata、history、run、checkpoint 与 event 一起回滚。"""
+    path = tmp_path / "message-insert-failure.db"
+    store = SQLiteStore(path)
+    created = store.create_run(_create_command())
+    reserved = store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="act-1",
+            now=_NOW,
+        )
+    )
+    run_before = store.load_run("run-1")
+    session_before = store.load_session("session-1")
+    checkpoint_before = store.load_checkpoint("run-1")
+    events_before = store.list_events("run-1")
+    command = CommitModelStep(
+        run_id="run-1",
+        expected_run_revision=reserved.run.revision,
+        activation_id="act-1",
+        expected_session_revision=0,
+        message_delta=[Msg.user("one"), Msg.assistant("two")],
+        usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+        checkpoint=RunCheckpoint(
+            run_id="run-1",
+            sequence=2,
+            activation_id="act-1",
+            engine_cursor={"position": "after_model", "step_index": 1},
+            session_revision=1,
+            model_steps_reserved=1,
+            model_steps_committed=1,
+            environment_fingerprint="environment-v1",
+        ),
+        assistant_message=Msg.assistant("two"),
+        now=_NOW,
+    )
+    original = sqlite_module._executemany
+
+    def insert_one_then_fail(
+        connection: sqlite3.Connection,
+        sql: str,
+        params: list[tuple[object, ...]],
+    ) -> sqlite3.Cursor:
+        first, *_ = params
+        connection.execute(sql, first)
+        raise sqlite3.OperationalError("injected session message insert failure")
+
+    monkeypatch.setattr(sqlite_module, "_executemany", insert_one_then_fail)
+    with pytest.raises(IrisRunPersistenceError):
+        store.commit_model_step(command)
+    monkeypatch.setattr(sqlite_module, "_executemany", original)
+
+    assert store.load_run("run-1") == run_before
+    assert store.load_session("session-1") == session_before
+    assert store.load_checkpoint("run-1") == checkpoint_before
+    assert store.list_events("run-1") == events_before
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM session_messages").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("operation", ["finish", "recovery"])
+def test_partial_session_message_insert_rolls_back_terminal_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    """Terminal closure 的 message row 写入后失败时，全部 aggregate facts 回滚。"""
+    path = tmp_path / f"{operation}-message-insert-failure.db"
+    store = SQLiteStore(path)
+    store.create_run(_create_command())
+    claimed = _prepare_claimed_tool(store)
+    run_before = store.load_run("run-1")
+    session_before = store.load_session("session-1")
+    checkpoint_before = store.load_checkpoint("run-1")
+    calls_before = store.list_tool_calls("run-1")
+    events_before = store.list_events("run-1")
+    result_before = store.load_result("run-1")
+    lane_before = store.load_session_lane("session-1")
+    with sqlite3.connect(path) as connection:
+        activation_before = connection.execute(
+            "SELECT status, outcome FROM run_activations WHERE activation_id = 'act-1'"
+        ).fetchone()
+        message_rows_before = connection.execute(
+            """SELECT session_id, ordinal, message_json FROM session_messages
+            ORDER BY session_id, ordinal"""
+        ).fetchall()
+
+    def insert_one_then_fail(
+        connection: sqlite3.Connection,
+        sql: str,
+        params: list[tuple[object, ...]],
+    ) -> sqlite3.Cursor:
+        first, *_ = params
+        connection.execute(sql, first)
+        raise sqlite3.OperationalError("injected terminal session message insert failure")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(sqlite_module, "_executemany", insert_one_then_fail)
+        with pytest.raises(IrisRunPersistenceError):
+            if operation == "finish":
+                store.finish_run(
+                    FinishRun(
+                        run_id="run-1",
+                        expected_run_revision=claimed.run.revision,
+                        activation_id="act-1",
+                        stop_reason="outcome_unknown",
+                        error=RunErrorInfo(
+                            code="TOOL_OUTCOME_UNKNOWN",
+                            message="工具结果不可证明",
+                            source="tool",
+                        ),
+                        now=_NOW + timedelta(seconds=1),
+                    )
+                )
+            else:
+                store.recover_active_run(
+                    _recovery_command(
+                        claimed.run.revision,
+                        claimed.checkpoint.sequence,
+                    )
+                )
+
+    assert store.load_run("run-1") == run_before
+    assert store.load_session("session-1") == session_before
+    assert store.load_checkpoint("run-1") == checkpoint_before
+    assert store.list_tool_calls("run-1") == calls_before
+    assert store.list_events("run-1") == events_before
+    assert store.load_result("run-1") == result_before
+    assert store.load_session_lane("session-1") == lane_before
+    with sqlite3.connect(path) as connection:
+        assert (
+            connection.execute(
+                "SELECT status, outcome FROM run_activations WHERE activation_id = 'act-1'"
+            ).fetchone()
+            == activation_before
+        )
+        assert (
+            connection.execute(
+                """SELECT session_id, ordinal, message_json FROM session_messages
+            ORDER BY session_id, ordinal"""
+            ).fetchall()
+            == message_rows_before
+        )
 
 
 def _create_command() -> CreateRun:

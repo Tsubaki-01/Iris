@@ -33,8 +33,8 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 
 `RunCheckpoint.resumability` is `safe`, `outcome_ready`, or `blocked_unknown`. Safe checkpoints may
 re-enter the engine. Outcome-ready checkpoints only need terminal settlement. Blocked-unknown facts
-must not execute automatically. Checkpoints never contain provider clients, tasks, locks, signals,
-or callbacks, and no old payload is migrated.
+must not execute automatically. Checkpoints accept only the current payload shape and never contain
+provider clients, tasks, locks, signals, or callbacks.
 
 ## Store contract
 
@@ -42,6 +42,9 @@ or callbacks, and no old payload is migrated.
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
 Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
+`SessionSnapshot` still exposes only `session_id`, CAS `revision`, and complete `messages`. Revision
+advances once per non-empty message delta regardless of how many messages that delta contains.
+Persistence message counts and ordinals do not enter lifecycle public models or commands.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
 `load_tool_call(run_id, tool_call_id)` reads one exact composite identity, while

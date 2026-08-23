@@ -36,7 +36,7 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
 - `outcome_ready`：assistant outcome 已提交，只补 terminal；
 - `blocked_unknown`：effect 结果不可安全解释，禁止自动执行。
 
-checkpoint schema 不迁移旧 payload，也不保存 provider client、task、lock、signal 或 callback。
+checkpoint 只接受当前 payload 形状，也不保存 provider client、task、lock、signal 或 callback。
 
 ## Store contract
 
@@ -44,6 +44,9 @@ checkpoint schema 不迁移旧 payload，也不保存 provider client、task、l
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
 每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
+`SessionSnapshot` 继续只公开 `session_id`、CAS `revision` 和完整 `messages`。revision 每次非空
+message delta 只推进一次，与 delta 中的消息条数无关；持久化层的 message count 与 ordinal
+不进入 lifecycle 公共模型或 command。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
 `load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
 `load_run_control(run_id)` 只返回 `RunControlSnapshot` 的八个 fence/cancellation 字段。两者都不

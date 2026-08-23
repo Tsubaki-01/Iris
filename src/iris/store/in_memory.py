@@ -384,7 +384,7 @@ class InMemoryLifecycleStore:
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = deepcopy(next_session)
+            self._sessions[session.session_id] = next_session
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             for tool_call in prepared:
                 self._set_tool_call(tool_call)
@@ -528,7 +528,7 @@ class InMemoryLifecycleStore:
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = deepcopy(next_session)
+            self._sessions[session.session_id] = next_session
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._set_tool_call(committed_call)
             self._events[run.run_id].append(deepcopy(event))
@@ -624,7 +624,7 @@ class InMemoryLifecycleStore:
                 result=result,
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = deepcopy(next_session)
+            self._sessions[session.session_id] = next_session
             self._activations[activation.activation_id] = deepcopy(settled)
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._interactions[interaction.interaction_id] = deepcopy(interaction)
@@ -827,7 +827,7 @@ class InMemoryLifecycleStore:
                 updated_session is not None
                 and updated_session.revision != checkpoint.session_revision
             ):
-                self._sessions[run.session_id] = deepcopy(updated_session)
+                self._sessions[run.session_id] = updated_session
                 self._checkpoints[run.run_id] = deepcopy(updated_checkpoint)
             if interaction is not None:
                 self._interactions[interaction.interaction_id] = deepcopy(interaction)
@@ -949,7 +949,7 @@ class InMemoryLifecycleStore:
             )
             self._runs[run.run_id] = deepcopy(updated)
             if closure_messages:
-                self._sessions[run.session_id] = deepcopy(updated_session)
+                self._sessions[run.session_id] = updated_session
                 self._checkpoints[run.run_id] = deepcopy(updated_checkpoint)
             self._lanes.pop(run.session_id, None)
             if activation is not None and settled is not None:
@@ -1181,7 +1181,7 @@ class InMemoryLifecycleStore:
                 self._checkpoints[run.run_id] = deepcopy(rebound)
             self._runs[run.run_id] = deepcopy(updated)
             if updated_session is not None:
-                self._sessions[run.session_id] = deepcopy(updated_session)
+                self._sessions[run.session_id] = updated_session
                 self._checkpoints[run.run_id] = deepcopy(terminal_checkpoint)
             self._activations[activation.activation_id] = deepcopy(abandoned)
             self._events[run.run_id].extend(deepcopy(list(events)))
@@ -1350,7 +1350,7 @@ class InMemoryLifecycleStore:
         return SessionSnapshot(
             session_id=session.session_id,
             revision=session.revision + 1,
-            messages=deepcopy(session.messages) + deepcopy(delta),
+            messages=[*session.messages, *deepcopy(delta)],
         )
 
     @staticmethod
