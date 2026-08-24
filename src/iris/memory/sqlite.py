@@ -170,6 +170,31 @@ class SQLiteMemoryStore:
                     )
                     """)
                 connection.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_memory_items_scope_status_updated
+                    ON memory_items (
+                        scope_workspace_id,
+                        scope_agent_id,
+                        scope_collection,
+                        scope_visibility,
+                        scope_session_id,
+                        status,
+                        updated_at DESC,
+                        id DESC
+                    )
+                    """)
+                connection.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_memory_events_scope_created
+                    ON memory_events (
+                        scope_workspace_id,
+                        scope_agent_id,
+                        scope_collection,
+                        scope_visibility,
+                        scope_session_id,
+                        created_at DESC,
+                        id DESC
+                    )
+                    """)
+                connection.execute("""
                     INSERT INTO memory_schema (key, value)
                     VALUES ('schema_version', '1')
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value

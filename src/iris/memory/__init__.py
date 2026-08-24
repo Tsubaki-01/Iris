@@ -52,7 +52,7 @@ from .orchestrator import (
     RuleMemoryClassifier,
     RuleMemoryExtractor,
 )
-from .service import MemoryService
+from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
 from .store import MemoryStore
 from .tools import (
@@ -95,6 +95,7 @@ __all__ = [
     "MemoryItemKind",
     "MemoryItemPatch",
     "MemoryItemStatus",
+    "MemoryIOExecutionMode",
     "MemoryLevel",
     "MemoryMirrorConfig",
     "MemoryMirrorMode",

@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..exceptions import IrisConfigError
 from .mirror import FileMemoryMirror
 from .models import MemoryScope, MemoryVisibility
-from .service import MemoryService
+from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
 
 # endregion
@@ -163,7 +163,11 @@ def build_memory_service_from_config(
     if config.mirror.enabled:
         mirror = FileMemoryMirror(root)
         mirror.initialize_layout()
-    return MemoryService(store, mirror=mirror)
+    return MemoryService(
+        store,
+        mirror=mirror,
+        io_execution_mode=MemoryIOExecutionMode.THREAD,
+    )
 
 
 def resolve_memory_path(value: str, workspace_root: Path) -> Path:

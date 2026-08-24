@@ -203,20 +203,25 @@ class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.recall 执行搜索。"""
-        results: list[MemorySearchResult] = []
-        for scope in self._read_scopes(context):
-            results.extend(
-                self.service.recall(
-                    MemoryQuery(
-                        scope=scope,
-                        text=params.query,
-                        categories=params.categories,
-                        kinds=params.kinds,
-                        limit=params.limit,
+        scopes = self._read_scopes(context)
+
+        def search_scopes() -> list[MemorySearchResult]:
+            results: list[MemorySearchResult] = []
+            for scope in scopes:
+                results.extend(
+                    self.service.recall(
+                        MemoryQuery(
+                            scope=scope,
+                            text=params.query,
+                            categories=params.categories,
+                            kinds=params.kinds,
+                            limit=params.limit,
+                        )
                     )
                 )
-            )
-        results = _dedupe_results(results)[: params.limit]
+            return _dedupe_results(results)[: params.limit]
+
+        results = await self.service.run_async_read(search_scopes)
         return self._json_result({"results": [_result_payload(result) for result in results]})
 
 
@@ -234,16 +239,21 @@ class MemoryListTool(MemoryTool[MemoryListToolInput]):
     ) -> ToolResult:
         """调用 MemoryService.list_items 执行列表读取。"""
         categories = [params.category] if params.category is not None else None
-        items: list[MemoryItem] = []
-        for scope in self._read_scopes(context):
-            items.extend(
-                self.service.list_items(
-                    scope,
-                    limit=params.limit,
-                    categories=categories,
+        scopes = self._read_scopes(context)
+
+        def list_scopes() -> list[MemoryItem]:
+            items: list[MemoryItem] = []
+            for scope in scopes:
+                items.extend(
+                    self.service.list_items(
+                        scope,
+                        limit=params.limit,
+                        categories=categories,
+                    )
                 )
-            )
-        items = _dedupe_items(items)[: params.limit]
+            return _dedupe_items(items)[: params.limit]
+
+        items = await self.service.run_async_read(list_scopes)
         return self._json_result({"items": [_item_payload(item) for item in items]})
 
 
@@ -260,10 +270,18 @@ class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.get_item 读取单条记忆。"""
-        for scope in self._read_scopes(context):
-            item = self.service.get_item(params.item_id, scope)
-            if item is not None:
-                return self._json_result({"found": True, "item": _item_payload(item)})
+        scopes = self._read_scopes(context)
+
+        def get_from_scopes() -> MemoryItem | None:
+            for scope in scopes:
+                item = self.service.get_item(params.item_id, scope)
+                if item is not None:
+                    return item
+            return None
+
+        item = await self.service.run_async_read(get_from_scopes)
+        if item is not None:
+            return self._json_result({"found": True, "item": _item_payload(item)})
         return self._json_result({"found": False})
 
 

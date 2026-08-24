@@ -112,7 +112,10 @@ delta/merge/lock/hash model.
 inputs. Each logical run injects them only on its first `before_model` step; provider requests
 caused by later tool-loop steps or HITL resume do not append the same dynamic memory again. A new
 user input creates a new `start` activation and can inject memory once again. Static memory slots
-declared in `context.yaml` are not affected by this rule.
+declared in `context.yaml` are not affected by this rule. `memory_results` consumes only the local
+snapshot supplied by the caller; only `memory_query` awaits `MemoryService.abuild_context()`. A
+configured SQLite service creates, uses, and closes its connection inside one worker job, and the
+runtime does not consume a late result after cancellation.
 
 ## Factory
 

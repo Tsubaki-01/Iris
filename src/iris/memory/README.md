@@ -49,7 +49,10 @@ bundle = service.build_context(
 ```
 
 `backend="none"` 返回 `None` 且不创建文件。memory root 和 database path 必须解析在调用方给定
-的 workspace 内。
+的 workspace 内。由 `build_memory_service_from_config()` 构造的 SQLite service 会让 async
+读取在一个 worker job 中完成；同步 `recall()` 等 API 仍在调用线程执行。直接构造
+`MemoryService` 或注入自定义 store 时默认 `MemoryIOExecutionMode.INLINE`，不会静默改变其
+线程亲和性。
 
 ## 架构与数据流
 
@@ -127,6 +130,8 @@ result = await runner.start(
 - 模型与枚举：`MemoryScope`、`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
   `MemoryEvent`、`MemoryQuery`、`MemorySearchResult`、`MemoryContextBundle` 等；
 - 服务与协议：`MemoryService`、`MemoryStore`、`SQLiteMemoryStore`；
+- async 读取调度：`MemoryIOExecutionMode`，以及 service 上与同步读取对应的 `arecall()`、
+  `aget_item()`、`alist_items()`、`alist_events()`、`abuild_context()`；
 - 配置：`MemoryConfig` 及其子配置、`build_memory_service_from_config()`、
   `resolve_memory_path()`；
 - 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
@@ -145,12 +150,18 @@ result = await runner.start(
 
 工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；默认
 可同时读取自身 scope 和约定的 workspace-shared scope，并按 item ID 去重。
+工具会先在事件循环执行 access policy，再把完整的多 scope 读取作为一个 service job 调度；
+不会按 scope 重复切换线程。
 
 ## 文件镜像与持久化
 
 `FileMemoryMirror.initialize_layout()` 创建固定的 `Memory.md`、User、Feedback、Reference、
 Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成功写入 store 后同步镜像；
 `rebuild_from_store()` 可按 scope 确定性重建 active 条目和最近 100 条事件。
+
+`project_batch()` 会在实例锁内按目标归组，一次读取并在内存中合并每个目标，保留 marker
+之外的手工内容，再通过同目录临时文件原子替换。布局只在成功后记为已初始化；初始化失败
+可以重试，投影或替换错误仍向调用方传播。
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
 以及可选 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
@@ -170,11 +181,11 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | SDK 生命周期、审计、scope 隔离、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| async 读取、工具多 scope 调度、查询计划 | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
+| mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
 | runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
 
-`orchestrator.py`、`mirror.py` 和 `tools.py` 当前没有独立测试文件。
-
 ```bash
-uv run pytest tests/memory/test_service.py tests/runtime/test_execute.py
-uv run ruff check src/iris/memory tests/memory/test_service.py tests/runtime/test_execute.py
+uv run pytest tests/memory tests/runtime/test_execute.py
+uv run ruff check src/iris/memory tests/memory tests/runtime/test_execute.py
 ```
