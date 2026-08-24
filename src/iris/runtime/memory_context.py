@@ -18,7 +18,7 @@ from ..memory import (
 )
 
 
-def prepare_activation_memory_context_input(
+async def prepare_activation_memory_context_input(
     context_input: ContextBuildInput,
     *,
     options: RuntimeExecutionOptions,
@@ -38,7 +38,7 @@ def prepare_activation_memory_context_input(
     elif options.memory_query is not None:
         if memory_service is None:
             raise IrisMemoryError("显式 memory_query 需要注入 memory_service")
-        bundle = memory_service.build_context(
+        bundle = await memory_service.abuild_context(
             MemoryQuery.model_validate(options.memory_query),
             max_chars=options.memory_max_chars,
         )

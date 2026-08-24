@@ -12,6 +12,11 @@ Example:
 # region imports
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from enum import StrEnum
+from typing import TypeVar
+
 from ..exceptions import IrisMemoryError
 from .context import MemoryContextBuilder
 from .mirror import FileMemoryMirror
@@ -35,6 +40,15 @@ from .models import (
 from .store import MemoryStore
 
 # endregion
+
+ResultT = TypeVar("ResultT")
+
+
+class MemoryIOExecutionMode(StrEnum):
+    """控制同步 Memory 读取在 async 调用方中的执行位置。"""
+
+    INLINE = "inline"
+    THREAD = "thread"
 
 
 class MemoryService:
@@ -63,11 +77,24 @@ class MemoryService:
         *,
         mirror: FileMemoryMirror | None = None,
         context_builder: MemoryContextBuilder | None = None,
+        io_execution_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
     ) -> None:
         """初始化记忆服务。"""
         self.store = store
         self.mirror = mirror
         self.context_builder = context_builder or MemoryContextBuilder()
+        self._io_execution_mode = io_execution_mode
+
+    @property
+    def io_execution_mode(self) -> MemoryIOExecutionMode:
+        """返回 async 读取适配器使用的固定执行模式。"""
+        return self._io_execution_mode
+
+    async def run_async_read(self, operation: Callable[[], ResultT]) -> ResultT:
+        """按配置执行一个完整同步读取，并保留其返回值和异常。"""
+        if self._io_execution_mode is MemoryIOExecutionMode.THREAD:
+            return await asyncio.to_thread(operation)
+        return operation()
 
     # endregion
 
@@ -107,7 +134,7 @@ class MemoryService:
 
         # 将产生的变更同步投递至文件系统以实现灾备与外挂修改监测。
         if self.mirror is not None:
-            self.mirror.mirror_event(event)
+            self.mirror.project_batch(events=[event])
 
         return stored
 
@@ -147,8 +174,7 @@ class MemoryService:
 
         # 将产生的变更同步投递至文件系统以实现灾备与外挂修改监测。
         if self.mirror is not None:
-            self.mirror.mirror_item(stored)
-            self.mirror.mirror_event(event)
+            self.mirror.project_batch(items=[stored], events=[event])
 
         return stored
 
@@ -170,6 +196,10 @@ class MemoryService:
             list[MemorySearchResult]: 按相关度或时间排序的命中结果。
         """
         return self.store.search(query)
+
+    async def arecall(self, query: MemoryQuery) -> list[MemorySearchResult]:
+        """异步适配长期记忆召回。"""
+        return await self.run_async_read(lambda: self.recall(query))
 
     def forget(
         self,
@@ -225,6 +255,10 @@ class MemoryService:
         """
         return self.store.get_item(item_id, scope)
 
+    async def aget_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
+        """异步适配单条长期记忆读取。"""
+        return await self.run_async_read(lambda: self.get_item(item_id, scope))
+
     def list_items(
         self,
         scope: MemoryScope,
@@ -251,6 +285,24 @@ class MemoryService:
             kinds=kinds,
         )
 
+    async def alist_items(
+        self,
+        scope: MemoryScope,
+        *,
+        limit: int | None = 50,
+        categories: list[MemoryCategory] | None = None,
+        kinds: list[MemoryItemKind] | None = None,
+    ) -> list[MemoryItem]:
+        """异步适配长期记忆列表读取。"""
+        return await self.run_async_read(
+            lambda: self.list_items(
+                scope,
+                limit=limit,
+                categories=categories,
+                kinds=kinds,
+            )
+        )
+
     def list_events(
         self,
         scope: MemoryScope,
@@ -269,6 +321,18 @@ class MemoryService:
             list[MemoryEvent]: 用于还原操作历史记录的事件集。
         """
         return self.store.list_events(scope, item_id=item_id, limit=limit)
+
+    async def alist_events(
+        self,
+        scope: MemoryScope,
+        *,
+        item_id: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryEvent]:
+        """异步适配记忆审计事件列表读取。"""
+        return await self.run_async_read(
+            lambda: self.list_events(scope, item_id=item_id, limit=limit)
+        )
 
     # endregion
 
@@ -311,7 +375,7 @@ class MemoryService:
 
         # 将候选态事件录入镜像事件流中，保持完整审计闭环。
         if self.mirror is not None:
-            self.mirror.mirror_event(event)
+            self.mirror.project_batch(events=[event])
 
         return stored
 
@@ -446,6 +510,15 @@ class MemoryService:
         """
         return self.context_builder.build(self.recall(query), max_chars=max_chars)
 
+    async def abuild_context(
+        self,
+        query: MemoryQuery,
+        *,
+        max_chars: int,
+    ) -> MemoryContextBundle:
+        """异步适配召回与上下文构建的完整同步操作。"""
+        return await self.run_async_read(lambda: self.build_context(query, max_chars=max_chars))
+
     def _update_candidate_status(
         self,
         candidate_id: str,
@@ -487,7 +560,7 @@ class MemoryService:
 
         # 当候选状态变化时，将其同步分发以保留文件层镜像状态一致。
         if self.mirror is not None:
-            self.mirror.mirror_event(event)
+            self.mirror.project_batch(events=[event])
 
         return stored
 

@@ -591,7 +591,7 @@ class AgentRuntime:
         try:
             context_input = self.environment.context_input
             if cursor.step_index == 0:
-                context_input = prepare_activation_memory_context_input(
+                context_input = await prepare_activation_memory_context_input(
                     context_input,
                     options=activation.options,
                     memory_service=self.environment.memory_service,

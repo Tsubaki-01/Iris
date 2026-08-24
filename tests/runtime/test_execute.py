@@ -27,11 +27,16 @@ from iris.exceptions import (
 from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, ToolErrorPolicy
 from iris.memory import (
     MemoryCategory,
+    MemoryIOExecutionMode,
     MemoryItem,
     MemoryItemKind,
     MemoryLevel,
+    MemoryQuery,
     MemoryScope,
     MemorySearchResult,
+    MemoryService,
+    MemoryWriteInput,
+    SQLiteMemoryStore,
 )
 from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
 from iris.runtime import (
@@ -145,6 +150,7 @@ def _runtime(
     registry: ToolRegistry | None = None,
     middleware: list[ToolMiddleware] | None = None,
     permission_policy: PermissionPolicy | None = None,
+    memory_service: MemoryService | None = None,
     writes: str = "allow",
 ) -> AgentRuntime:
     resolved_registry = registry or ToolRegistry()
@@ -160,6 +166,7 @@ def _runtime(
             middleware=middleware,
         ),
         workspace_root=tmp_path,
+        memory_service=memory_service,
     )
 
 
@@ -2069,6 +2076,58 @@ async def test_execute_injects_explicit_memory_snapshot(tmp_path: Path) -> None:
     assert memory_message.sender == "context"
     assert "用户喜欢简洁回答" in memory_message.text
     assert provider.requests[0].messages[2].text == "当前问题"
+
+
+@pytest.mark.asyncio
+async def test_execute_awaits_memory_query_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteMemoryStore(tmp_path / "runtime-memory.db", use_fts=False)
+    service = MemoryService(store, io_execution_mode=MemoryIOExecutionMode.THREAD)
+    scope = MemoryScope(workspace_id="workspace", agent_id="agent")
+    service.remember(
+        MemoryWriteInput(
+            scope=scope,
+            text="用户喜欢简洁回答",
+            reason="test seed",
+        )
+    )
+    loop_thread = threading.get_ident()
+    search_threads: list[int] = []
+    original_search = store.search
+
+    def search(query: MemoryQuery) -> list[MemorySearchResult]:
+        search_threads.append(threading.get_ident())
+        return original_search(query)
+
+    monkeypatch.setattr(store, "search", search)
+    provider = FakeProvider([_text_response("完成")])
+    runtime = _runtime(
+        provider=provider,
+        tmp_path=tmp_path,
+        memory_service=service,
+    )
+    activation = start_activation(
+        options=RuntimeExecutionOptions(
+            memory_query=MemoryQuery(
+                scope=scope,
+                text="简洁",
+            ).model_dump(mode="json"),
+            memory_max_chars=100,
+        )
+    )
+    commits = FakeRuntimeCommitPort(activation)
+
+    result = await runtime.execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert search_threads and all(thread_id != loop_thread for thread_id in search_threads)
+    assert any("用户喜欢简洁回答" in message.text for message in provider.requests[0].messages)
 
 
 @pytest.mark.asyncio

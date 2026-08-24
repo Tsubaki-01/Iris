@@ -108,7 +108,9 @@ retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当�
 每个 logical run 只在第一次 `before_model` step 注入一次；同一用户输入后续因工具循环或
 HITL resume 产生的 provider 请求不会再次附加这条动态 memory。新的用户输入会创建新的
 `start` activation，因此可以重新注入一次。`context.yaml` 中声明的静态 memory slot 不受此
-规则影响。
+规则影响。`memory_results` 只处理调用方提供的本地快照；`memory_query` 才会 await
+`MemoryService.abuild_context()`。配置构造的 SQLite service 会在单个 worker job 中完成建连、
+查询、物化和关闭，runtime 不消费取消后的迟到结果。
 
 ## Factory
 

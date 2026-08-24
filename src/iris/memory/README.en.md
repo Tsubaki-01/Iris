@@ -48,7 +48,10 @@ bundle = service.build_context(
 
 `backend="none"` returns `None` without filesystem effects. Memory root and database paths must
 resolve inside the caller-supplied workspace. SQLite FTS5 is used when available; deterministic
-text search handles disabled FTS and missing Unicode matches.
+text search handles disabled FTS and missing Unicode matches. A SQLite service built by
+`build_memory_service_from_config()` runs async reads as one worker job, while synchronous methods
+still execute on their caller's thread. Directly constructed services and custom stores default to
+`MemoryIOExecutionMode.INLINE`, so their thread affinity is not changed implicitly.
 
 ## Architecture and lifecycle
 
@@ -114,6 +117,8 @@ The large `iris.memory` export surface is grouped as follows:
 
 - models/enums: scope, episode, candidate, item, event, query, search result, and context bundle;
 - service/storage: `MemoryService`, `MemoryStore`, and `SQLiteMemoryStore`;
+- async read scheduling: `MemoryIOExecutionMode` and the service's `arecall()`, `aget_item()`,
+  `alist_items()`, `alist_events()`, and `abuild_context()` counterparts;
 - config: `MemoryConfig` and child models, `build_memory_service_from_config()`, and
   `resolve_memory_path()`;
 - orchestration: extractor/classifier protocols, policy, orchestrator, and rule/no-op defaults;
@@ -126,12 +131,16 @@ tool-payload helpers are not extension contracts.
 `register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
 `READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
 scope; `MemoryAccessPolicy` derives read/write scopes from trusted host context and can include the
-workspace-shared scope.
+workspace-shared scope. Tools evaluate that policy on the event loop, then submit the entire
+multi-scope read as one service job rather than switching threads once per scope.
 
 `FileMemoryMirror` creates the fixed Memory/User/Feedback/Reference/Tasks/Sessions projection and
 can deterministically rebuild active items plus the most recent 100 events for one scope. It is not
-an import source or the audit authority. SQLite uses short-lived connections and wraps storage/JSON
-failures as `IrisMemoryError`.
+an import source or the audit authority. `project_batch()` groups changes by target under an
+instance lock, reads and renders each target once while preserving manual text outside markers, and
+uses a same-directory temporary file for atomic replacement. Layout initialization is cached only
+after success, and projection failures remain visible. SQLite uses short-lived connections and
+wraps storage/JSON failures as `IrisMemoryError`.
 
 ## Current limitations
 
@@ -147,11 +156,11 @@ failures as `IrisMemoryError`.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | SDK lifecycle, audit, scope isolation, SQLite search, and context building | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| Async reads, multi-scope tool scheduling, and query plans | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
+| Batched mirror projection, rebuild, and atomic replacement | `mirror.py` | `tests/memory/test_mirror.py` |
 | Runtime injection | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
 
-`orchestrator.py`, `mirror.py`, and `tools.py` currently have no dedicated test files.
-
 ```bash
-uv run pytest tests/memory/test_service.py tests/runtime/test_execute.py
-uv run ruff check src/iris/memory tests/memory/test_service.py tests/runtime/test_execute.py
+uv run pytest tests/memory tests/runtime/test_execute.py
+uv run ruff check src/iris/memory tests/memory tests/runtime/test_execute.py
 ```
