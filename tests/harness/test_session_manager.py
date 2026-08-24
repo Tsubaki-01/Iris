@@ -593,8 +593,10 @@ async def test_close_fails_all_pending_then_ends_stream_without_cancelling_run(
 
 
 @pytest.mark.asyncio
-async def test_unbounded_queue_accounts_for_every_pending_submission(tmp_path: Path) -> None:
-    """首版没有 capacity/drop 语义，close 必须逐条结算所有 pending input。"""
+async def test_default_capacity_accounts_for_sixty_four_pending_submissions(
+    tmp_path: Path,
+) -> None:
+    """默认容量保持既有 64 条负载，close 逐条结算所有已接纳 input。"""
     provider = BlockingProvider()
     manager = SessionManager(
         AgentRunner(

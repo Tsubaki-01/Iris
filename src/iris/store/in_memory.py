@@ -11,6 +11,7 @@ Example:
 from __future__ import annotations
 
 import json
+from bisect import bisect_right
 from copy import deepcopy
 from datetime import datetime
 from threading import RLock
@@ -1256,16 +1257,27 @@ class InMemoryLifecycleStore:
                 return None
             return deepcopy(self._results.get(run_id))
 
-    def list_events(self, run_id: str, after_sequence: int = 0) -> list[RunEvent]:
-        """返回 sequence 严格大于游标的 durable events。"""
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
+        """按 sequence 返回游标后的 durable events，可限制返回条数。"""
         if after_sequence < 0:
             raise IrisRunStateError("after_sequence 不能小于 0", after_sequence=after_sequence)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise IrisRunStateError("limit 必须是正整数", limit=limit)
         with self._lock:
             if run_id not in self._runs:
                 raise IrisRunNotFoundError("run 不存在", run_id=run_id)
-            return deepcopy(
-                [event for event in self._events[run_id] if event.sequence > after_sequence]
-            )
+            events = self._events[run_id]
+            start = bisect_right(events, after_sequence, key=lambda event: event.sequence)
+            stop = None if limit is None else start + limit
+            return deepcopy(events[start:stop])
 
     def _require_run(self, run_id: str) -> RunRecord:
         run = self._runs.get(run_id)

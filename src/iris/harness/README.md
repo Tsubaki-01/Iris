@@ -34,7 +34,8 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 - `recover(run_id, expected_activation_id=...)`：对 active run 要求精确 fence。safe checkpoint
   创建 recover activation，outcome-ready 只补 terminal，unresolved claim 结算为
   `outcome_unknown`；
-- `get_run()`、`get_result()`、`list_events()`：无副作用 durable reads。
+- `get_run()`、`get_result()`、`list_events(after_sequence=0, limit=None)`：无副作用 durable
+  reads；`limit` 如提供必须是正整数。
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
 
@@ -78,12 +79,24 @@ run 的 steer。Busy receipt 只表示 `pending`；最终 delivery/failure 只�
 该单消费者 stream 原样混合 durable `RunEvent` 与 transient `SubmissionEvent`，不创建 session-global
 sequence。Idle submit 不产生 `SubmissionEvent`。
 
+Manager 默认最多分别排队 64 条 steer 与 64 条 follow-up，最多保留 256 个 transient submission
+event 槽位，并跟踪 64 个尚未被 consumer 追平的 durable run。可通过
+`max_pending_steer`、`max_pending_follow_up`、`max_buffered_submission_events` 和
+`max_tracked_durable_runs` 关键字参数设置其它有限正整数。Busy admission 会同时预留 pending 与
+terminal event 槽位；任一容量不足时，在 receipt、队列和 event 发布前抛出 `IrisRunStateError`，不
+静默丢弃。已接纳的 follow-up 在 tracker 暂满时保留 FIFO，consumer 追平旧 run 后继续推进；新的
+idle submit 则在创建 task 前拒绝。
+
 HITL response 只走 `manager.resume(interaction_id=..., response=...)`，不进入普通输入队列。
 `interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
 仍等待真实 settlement。`close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
 event stream，但不取消或等待当前 run。
 
-Queue、receipt 状态、submission events、claim 和 event dedup 都只存在于当前进程。新 manager 不扫描、
+Queue、receipt 状态、submission events、claim 和 durable event 水位都只存在于当前进程。Durable
+event payload 不进入无界进程内队列；callback 只推进每个 run 的 observed watermark，consumer 按
+delivered watermark 从权威 store 以最多 64 条的 page 分批补读。内置 memory/SQLite store 在复制
+或解码前执行 `limit`；未实现新关键字参数的旧 custom store 仍由 runner 兼容切片，但其底层读取
+不具备该有界物化保证，custom store 应补充 `limit`。新 manager 不扫描、
 恢复或 attach 既有 active/waiting lane；此时新的 idle submit 会由 store 的 session-lane CAS 拒绝。
 Durable run、history、checkpoint、interaction、cancellation、result 和 `RunEvent` 始终由 runner/store
 权威负责。
@@ -101,9 +114,10 @@ Managed 调用可注入 activation-scoped steering port、同步 durable event c
 失败不会产生虚假 signal。
 
 Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mutation 只在成功后把
-新的 durable `RunEvent` 同步 relay，并按 `(run_id, sequence)` 去重。Callback 异常只记录日志，不回滚
-mutation 或改变 `RunResult`。公开 `RunEventObserver` 契约不变，仍在 activation settlement 后异步、
-best-effort 接收完整事件列表；同步 callback 不是新的 public observer registry。
+新的 durable `RunEvent` 同步 relay。Callback 异常只记录日志，不回滚 mutation 或改变 `RunResult`。
+公开 `RunEventObserver` 签名不变：同一 observer 内按 run sequence 串行保序，不同 observer lane
+并行；每个 event 默认最多等待 30 秒，可用 `observer_event_timeout_s` 覆盖。Timeout 或普通异常只
+记录 warning 并继续，不改变 durable result；同步 callback 不是新的 public observer registry。
 
 ## Cancellation 与 recovery
 

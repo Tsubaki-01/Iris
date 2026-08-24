@@ -87,6 +87,11 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
 schema identity is lifecycle v2.
 
+`list_events(run_id, after_sequence=0, limit=None)` always preserves sequence order; when provided,
+`limit` must be a positive integer. The in-memory store locates the cursor before copying a bounded
+slice, while SQLite pushes `LIMIT` into the query so paged consumers do not materialize all
+remaining events on every read.
+
 `load_session_lane(session_id)` is a pure read that returns the current non-terminal lane owner's
 `run_id`, or `None` when the lane is free. It does not repair, recover, or adopt a run. A host still
 loads the run/interaction and calls `recover()` with the exact activation fence or `resume()` with

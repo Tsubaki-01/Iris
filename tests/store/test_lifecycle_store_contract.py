@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 import pytest
 from pydantic import ValidationError
@@ -1508,9 +1508,14 @@ def test_read_methods_apply_cursor_and_validation_contract(
     assert lifecycle_store.load_checkpoint("run-1").sequence == 1
     assert lifecycle_store.load_interaction("missing") is None
     assert lifecycle_store.load_result("run-1") is None
+    assert [event.sequence for event in lifecycle_store.list_events("run-1", limit=1)] == [1]
+    assert [event.sequence for event in lifecycle_store.list_events("run-1", 1, limit=1)] == [2]
     assert [event.sequence for event in lifecycle_store.list_events("run-1", 1)] == [2]
     with pytest.raises(IrisRunStateError):
         lifecycle_store.list_events("run-1", -1)
+    for invalid_limit in (0, -1, True, 1.5):
+        with pytest.raises(IrisRunStateError):
+            lifecycle_store.list_events("run-1", limit=cast(int, invalid_limit))
 
 
 def test_project_result_rejects_active_record_with_domain_error(

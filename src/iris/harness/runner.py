@@ -15,7 +15,9 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import math
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -87,6 +89,23 @@ from .observer import RunEventObserver
 # endregion
 
 logger = logging.getLogger(__name__)
+
+
+def _supports_list_events_limit(store: LifecycleStore) -> bool:
+    """判断 custom store 的 ``list_events`` 是否接受 keyword-only limit。"""
+    try:
+        parameters = inspect.signature(store.list_events).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (
+            parameter.name == "limit"
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        )
+        for parameter in parameters
+    )
 
 
 class Clock(Protocol):
@@ -178,6 +197,7 @@ class AgentRunner:
         runtime (AgentRuntime): 被驱动的内部 engine。
         store (LifecycleStore): 权威 durable store。
         observers (tuple[RunEventObserver, ...]): settlement 后 best-effort 的事件观察者。
+        observer_event_timeout_s (float): 单个 observer event 的有限等待秒数。
         clock (Clock): aware UTC 时间源。
         interaction_service (HumanInteractionService): 无状态 HITL 领域服务。
         environment_fingerprint (str): 环境指纹，用于拒绝跨环境 resume/recover。
@@ -197,13 +217,26 @@ class AgentRunner:
         runtime: AgentRuntime,
         store: LifecycleStore,
         observers: Sequence[RunEventObserver] = (),
+        observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         interaction_service: HumanInteractionService | None = None,
     ) -> None:
-        """绑定 engine、durable store 与观察者，装配唯一 lifecycle owner。"""
+        """绑定 engine、durable store 与观察者，装配唯一 lifecycle owner。
+
+        ``observer_event_timeout_s`` 必须是有限正数；默认 30 秒。
+        """
+        if (
+            isinstance(observer_event_timeout_s, bool)
+            or not math.isfinite(observer_event_timeout_s)
+            or observer_event_timeout_s <= 0
+        ):
+            raise ValueError("observer_event_timeout_s 必须是有限正数")
         self.runtime = runtime
         self.store = store
+        self._store_list_events_supports_limit = _supports_list_events_limit(store)
         self.observers = tuple(observers)
+        self.observer_event_timeout_s = observer_event_timeout_s
+        self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
         # HITL 决定必须只落在 runner 的 aggregate transaction 里；带自有 store 的实现会
@@ -225,6 +258,7 @@ class AgentRunner:
         memory_service: MemoryService | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
+        observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         api_key: str | None = None,
     ) -> AgentRunner:
@@ -237,6 +271,7 @@ class AgentRunner:
             memory_service=memory_service,
             store=store,
             observers=observers,
+            observer_event_timeout_s=observer_event_timeout_s,
             clock=clock,
             api_key=api_key,
         )
@@ -251,6 +286,7 @@ class AgentRunner:
         memory_service: MemoryService | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
+        observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         api_key: str | None = None,
     ) -> AgentRunner:
@@ -269,6 +305,7 @@ class AgentRunner:
             runtime=runtime,
             store=resolved_store,
             observers=observers,
+            observer_event_timeout_s=observer_event_timeout_s,
             clock=clock,
         )
 
@@ -1061,9 +1098,24 @@ class AgentRunner:
             raise IrisRunNotFoundError("run 不存在", run_id=run_id)
         return self.store.load_result(normalized)
 
-    def list_events(self, run_id: str, after_sequence: int = 0) -> list[RunEvent]:
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
         """读取 sequence 严格大于游标的 durable events。"""
-        return self.store.list_events(self._required_id(run_id), after_sequence)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise IrisRunStateError("limit 必须是正整数", limit=limit)
+        normalized = self._required_id(run_id)
+        if limit is None:
+            return self.store.list_events(normalized, after_sequence)
+        if self._store_list_events_supports_limit:
+            return self.store.list_events(normalized, after_sequence, limit=limit)
+        return self.store.list_events(normalized, after_sequence)[:limit]
 
     # endregion
 
@@ -1321,20 +1373,55 @@ class AgentRunner:
             投递是 best-effort：observer 抛出的异常只记录日志，不影响 durable 事实，也不
             中断后续 observer 与后续事件。
         """
-        seen: set[tuple[str, int]] = set()
-        for event in sorted(events, key=lambda item: item.sequence):
-            key = (event.run_id, event.sequence)
-            if key in seen:
-                continue
-            seen.add(key)
-            for observer in self.observers:
-                try:
-                    await observer.on_event(event)
-                except Exception:
-                    logger.exception(
-                        "run event observer 处理失败",
-                        extra={"run_id": event.run_id, "sequence": event.sequence},
-                    )
+        events_by_run: dict[str, dict[int, RunEvent]] = {}
+        for event in events:
+            events_by_run.setdefault(event.run_id, {}).setdefault(event.sequence, event)
+        ordered = [
+            event
+            for run_events in events_by_run.values()
+            for _, event in sorted(run_events.items())
+        ]
+
+        async def deliver_lane(
+            observer: RunEventObserver,
+            lock: asyncio.Lock,
+        ) -> None:
+            async with lock:
+                for event in ordered:
+                    try:
+                        await asyncio.wait_for(
+                            observer.on_event(event),
+                            timeout=self.observer_event_timeout_s,
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "observer event 超时",
+                            extra={
+                                "observer": type(observer).__qualname__,
+                                "run_id": event.run_id,
+                                "sequence": event.sequence,
+                                "timeout_s": self.observer_event_timeout_s,
+                            },
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "run event observer 处理失败",
+                            exc_info=True,
+                            extra={
+                                "observer": type(observer).__qualname__,
+                                "run_id": event.run_id,
+                                "sequence": event.sequence,
+                            },
+                        )
+
+        await asyncio.gather(
+            *(
+                deliver_lane(observer, lock)
+                for observer, lock in zip(self.observers, self._observer_locks, strict=True)
+            )
+        )
 
     # endregion
 
@@ -1379,7 +1466,7 @@ class AgentRunner:
         durable_event_callback: Callable[[RunEvent], None] | None = None,
     ) -> None:
         """去重收集 durable events，并同步隔离可选 callback。
-        
+
         Notes:
             callback 异常只记录日志，不回滚已提交的 mutation，也不改变最终 ``RunResult``。
         """
