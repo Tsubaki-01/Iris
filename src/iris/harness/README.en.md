@@ -35,7 +35,8 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 - `recover()` requires the exact active activation fence. Safe checkpoints create a recover
   activation, outcome-ready checkpoints only finalize, and unresolved claims become
   `outcome_unknown`.
-- `get_run()`, `get_result()`, and `list_events()` are side-effect-free durable reads.
+- `get_run()`, `get_result()`, and `list_events(after_sequence=0, limit=None)` are side-effect-free
+  durable reads. When provided, `limit` must be a positive integer.
 
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
@@ -83,14 +84,29 @@ the final delivery or failure is reported through `events()`. This single-consum
 durable `RunEvent` values with transient `SubmissionEvent` values and adds no session-global
 sequence. Idle submissions emit no `SubmissionEvent`.
 
+By default, a manager queues at most 64 steers and 64 follow-ups, reserves 256 transient submission
+event slots, and tracks 64 durable runs that the consumer has not caught up with. Hosts may set
+other finite positive limits through `max_pending_steer`, `max_pending_follow_up`,
+`max_buffered_submission_events`, and `max_tracked_durable_runs`. A busy admission reserves both its
+pending and terminal event slots. If any required capacity is unavailable, it raises
+`IrisRunStateError` before publishing a receipt, queue entry, or event; events are never silently
+dropped. An accepted follow-up remains FIFO-blocked while the tracker is full and resumes after the
+consumer catches up. A new idle submit is rejected before task creation in the same situation.
+
 HITL responses use only `manager.resume(interaction_id=..., response=...)`; they never enter the
 ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
 cancellation request is not terminal, so follow-ups still wait for actual settlement. `close()`
 rejects later operations, fails every pending input with `session_closed`, and ends the event
 stream, but neither cancels nor waits for the current run.
 
-The queue, receipt state, submission events, claims, and event deduplication exist only in the
-current process. A new manager does not scan, recover, or attach an existing active/waiting lane;
+The queue, receipt state, submission events, claims, and durable event watermarks exist only in the
+current process. Durable event payloads do not accumulate in an unbounded process-local queue: a
+callback advances a per-run observed watermark, and the consumer replays bounded batches from the
+authoritative store after its delivered watermark, at most 64 events per page. The built-in memory
+and SQLite stores apply `limit` before copying or decoding. The runner still slices results from a
+legacy custom store that lacks the new keyword, but that compatibility path cannot bound
+materialization inside the custom store; custom stores should add `limit`. A new manager does not
+scan, recover, or attach an existing active/waiting lane;
 a new idle submit is rejected by the store's session-lane CAS in that case. The runner/store remain
 authoritative for durable runs, history, checkpoints, interactions, cancellation, results, and
 `RunEvent` values.
@@ -109,11 +125,12 @@ runner's `_active` map. Immediate terminal outcomes and mutation/registration fa
 a false signal.
 
 The store-backed commit port and runner-owned create/resolve/begin/cancel/finish mutations relay
-only new durable `RunEvent` values after success, deduplicated by `(run_id, sequence)`. A callback
-exception is logged and cannot roll back the mutation or change the `RunResult`. The public
-`RunEventObserver` contract is unchanged: observers still receive the complete event list
-asynchronously and best-effort after activation settlement. The synchronous callback is not a new
-public observer registry.
+only newly committed durable `RunEvent` values. A callback exception is logged and cannot roll back
+the mutation or change the `RunResult`. The public `RunEventObserver` signature is unchanged. Each
+observer lane is sequence-ordered, different observers run in parallel, and each event has a
+30-second timeout by default, configurable with `observer_event_timeout_s`. A timeout or ordinary
+exception is logged and the lane continues without changing the durable result. The synchronous
+callback is not a new public observer registry.
 
 ## Cancellation and recovery
 

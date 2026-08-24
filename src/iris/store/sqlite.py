@@ -342,13 +342,39 @@ class SQLiteStore:
 
         return self._read("load_result", read)
 
-    def list_events(self, run_id: str, after_sequence: int = 0) -> list[RunEvent]:
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
+        """按 sequence 返回游标后的 durable events，可在 SQL 层限制条数。"""
         if after_sequence < 0:
             raise IrisRunStateError("after_sequence 不能小于 0", after_sequence=after_sequence)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise IrisRunStateError("limit 必须是正整数", limit=limit)
 
         def read(connection: sqlite3.Connection) -> list[RunEvent]:
             if self._select_run(connection, run_id, operation="list_events") is None:
                 raise IrisRunNotFoundError("run 不存在", run_id=run_id)
+            if limit is None:
+                rows = connection.execute(
+                    """SELECT * FROM run_events
+                    WHERE run_id = ? AND sequence > ?
+                    ORDER BY sequence""",
+                    (run_id, after_sequence),
+                )
+            else:
+                rows = connection.execute(
+                    """SELECT * FROM run_events
+                    WHERE run_id = ? AND sequence > ?
+                    ORDER BY sequence
+                    LIMIT ?""",
+                    (run_id, after_sequence, limit),
+                )
             return [
                 _decode_row(
                     _row_to_event,
@@ -356,12 +382,7 @@ class SQLiteStore:
                     path=self.path,
                     operation="list_events",
                 )
-                for row in connection.execute(
-                    """SELECT * FROM run_events
-                    WHERE run_id = ? AND sequence > ?
-                    ORDER BY sequence""",
-                    (run_id, after_sequence),
-                )
+                for row in rows
             ]
 
         return self._read("list_events", read)

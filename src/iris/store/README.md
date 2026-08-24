@@ -76,6 +76,10 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
 额外索引或连接池，schema identity 为 lifecycle v2。
 
+`list_events(run_id, after_sequence=0, limit=None)` 始终按 sequence 返回；`limit` 如提供必须是正
+整数。内存实现先定位游标再复制有限 slice，SQLite 实现把 `LIMIT` 下推到查询，避免分页 consumer
+在每轮读取中物化全部剩余 events。
+
 `load_session_lane(session_id)` 只读返回当前 non-terminal lane owner 的 `run_id`，无占用时返回
 `None`。它不修复、恢复或接管 run；host 仍需读取 run/interaction，并用精确 activation fence 调用
 `recover()`，或用精确 interaction identity 调用 `resume()`。

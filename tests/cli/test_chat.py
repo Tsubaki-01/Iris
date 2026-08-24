@@ -10,7 +10,7 @@ from iris.cli.chat import (
     run_chat_loop,
 )
 from iris.exceptions import IrisProviderError, IrisRunStateError
-from iris.harness import AgentRunner
+from iris.harness import AgentRunner, RunEvent
 from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
@@ -52,9 +52,29 @@ class SequenceRunner:
     def __init__(self) -> None:
         self.start_calls: list[object] = []
 
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
+        del run_id, after_sequence, limit
+        return []
+
 
 class ErrorRunner:
     """在 manager create admission 前抛出领域错误。"""
+
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
+        del run_id, after_sequence, limit
+        return []
 
     async def _start_managed(self, *args: object, **kwargs: object) -> None:
         del args, kwargs

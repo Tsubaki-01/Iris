@@ -386,7 +386,13 @@ class LifecycleStore(Protocol):
 
     def load_result(self, run_id: str) -> RunResult | None: ...
 
-    def list_events(self, run_id: str, after_sequence: int = 0) -> list[RunEvent]: ...
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]: ...
 
 
 __all__ = [
