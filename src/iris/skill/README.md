@@ -89,8 +89,9 @@ Read the relevant files, then report concrete findings.
 {"name": "my-skill"}
 ```
 
-`load_skill` 返回当前 live `SKILL.md` 的 Markdown（最多 1000 行），并再次校验文件仍位于
-Skill root 和 workspace 内。模型无需、也不应改用 `file.read` 获取正文。该工具只读取文本：不会执行正文、
+`load_skill` 返回当前 live `SKILL.md` 的 Markdown（最多 1000 行）。Discovery 负责配置 root
+与扫描目录边界；实际加载时会重新校验文件仍位于原 Skill 目录内，并由共享文件服务复核
+workspace 边界。模型无需、也不应改用 `file.read` 获取正文。该工具只读取文本：不会执行正文、
 自动调用其中命令或把 Skill 转换成一组工具。
 
 稳定工具错误码为 `SKILL_NOT_FOUND`、`SKILL_PATH_ERROR` 和 `SKILL_READ_ERROR`。

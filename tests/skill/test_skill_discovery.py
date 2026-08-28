@@ -392,6 +392,22 @@ def test_skill_directory_symlink_escape_is_invalid_but_siblings_survive(
     assert [item.code for item in result.diagnostics] == ["INVALID_SKILL"]
 
 
+def test_escaped_skill_directory_without_skill_file_is_invalid_not_missing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    root = workspace / "skills"
+    root.mkdir(parents=True)
+    outside_dir = tmp_path / "outside-empty"
+    outside_dir.mkdir()
+    _symlink_or_skip(root / "escaped-skill", outside_dir, is_directory=True)
+
+    result = _discover(workspace, root)
+
+    assert result.skills == ()
+    assert [item.code for item in result.diagnostics] == ["INVALID_SKILL"]
+
+
 def test_skill_file_symlink_escape_is_invalid_but_siblings_survive(
     tmp_path: Path,
 ) -> None:

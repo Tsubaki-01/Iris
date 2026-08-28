@@ -26,6 +26,7 @@ from ..tools import (
     WorkspaceFileService,
     schema_from_pydantic_model,
 )
+from ._paths import is_resolved_within
 from .models import _NAME_RE, SkillMetadata
 from .registry import SkillRegistry
 
@@ -100,16 +101,6 @@ class LoadSkillTool(BaseTool):
             return self._path_error(input_data.name, exc)
 
         try:
-            is_file = live_file.is_file()
-        except OSError:
-            is_file = False
-        if not is_file:
-            return self._read_error(
-                input_data.name,
-                "SKILL.md 不存在或不是普通文件",
-            )
-
-        try:
             service_target = self.file_service.resolve_path(
                 metadata.relative_skill_file,
                 context,
@@ -119,12 +110,12 @@ class LoadSkillTool(BaseTool):
                 input_data.name,
                 IrisSkillPathError("Skill 文件路径越出 workspace", path=str(exc)),
             )
-        if service_target.resolve(strict=False) != live_file:
+        if service_target != live_file:
             return self._path_error(
                 input_data.name,
                 IrisSkillPathError(
                     "Skill metadata 与文件服务目标不一致",
-                    path=str(service_target.resolve(strict=False)),
+                    path=str(service_target),
                     expected=str(live_file),
                 ),
             )
@@ -170,24 +161,17 @@ class LoadSkillTool(BaseTool):
         workspace = context.workspace_root.resolve(strict=False)
         root = metadata.root_dir.resolve(strict=False)
         skill_file = metadata.skill_file.resolve(strict=False)
-        policy = self.file_service.workspace_policy
-        if not policy.is_within_workspace(root, workspace):
+        if not is_resolved_within(root, workspace):
             raise IrisSkillPathError(
                 "Skill root 不在 workspace 内",
                 path=str(root),
                 workspace_root=str(workspace),
             )
-        if not policy.is_within_workspace(skill_file, root):
+        if not is_resolved_within(skill_file, root):
             raise IrisSkillPathError(
                 "Skill 文件不在 Skill root 内",
                 path=str(skill_file),
                 root=str(root),
-            )
-        if not policy.is_within_workspace(skill_file, workspace):
-            raise IrisSkillPathError(
-                "Skill 文件不在 workspace 内",
-                path=str(skill_file),
-                workspace_root=str(workspace),
             )
         return skill_file
 

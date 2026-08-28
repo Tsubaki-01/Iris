@@ -176,6 +176,29 @@ async def test_post_discovery_symlink_escape_returns_path_error_without_secret(
 
 
 @pytest.mark.asyncio
+async def test_post_discovery_sibling_retarget_returns_path_error_without_secret(
+    tmp_path: Path,
+) -> None:
+    registry, skill_file = _registry(tmp_path)
+    sibling_dir = skill_file.parent.parent / "sibling-skill"
+    sibling_dir.mkdir()
+    sibling_file = sibling_dir / "SKILL.md"
+    sibling_file.write_text("SIBLING SECRET", encoding="utf-8")
+    skill_file.unlink()
+    _symlink_or_skip(skill_file, sibling_file)
+
+    result = await LoadSkillTool(registry).arun(
+        {"name": "example-skill"},
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert result.is_error is True
+    assert result.error is not None
+    assert result.error.code == "SKILL_PATH_ERROR"
+    assert "SIBLING SECRET" not in result.model_content
+
+
+@pytest.mark.asyncio
 async def test_deleted_skill_file_returns_retryable_read_error(tmp_path: Path) -> None:
     registry, skill_file = _registry(tmp_path)
     skill_file.unlink()

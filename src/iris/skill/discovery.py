@@ -11,6 +11,7 @@ from ..exceptions import (
     IrisSkillPathError,
 )
 from ..tools.permissions import WorkspacePolicy
+from ._paths import is_resolved_within
 from .frontmatter import parse_frontmatter, split_frontmatter
 from .models import (
     _NAME_RE,
@@ -42,8 +43,12 @@ def resolve_skills_root(
     raw_path = Path(raw_root)
     candidate = raw_path if raw_path.is_absolute() else resolved_workspace / raw_path
     resolved = candidate.resolve(strict=False)
-    workspace_policy = policy or WorkspacePolicy()
-    if not workspace_policy.is_within_workspace(resolved, resolved_workspace):
+    is_contained = (
+        is_resolved_within(resolved, resolved_workspace)
+        if policy is None
+        else policy.is_within_workspace(resolved, resolved_workspace)
+    )
+    if not is_contained:
         raise IrisSkillPathError(
             "skills root 不在 workspace 内",
             path=str(resolved),
@@ -91,7 +96,7 @@ def _scan_root(
     max_description_chars: int,
 ) -> tuple[list[SkillMetadata], list[SkillDiagnostic]]:
     """扫描单个 root，并把单条 Skill 错误降级为诊断。"""
-    resolved_root = root.resolve(strict=False)
+    resolved_root = root
     try:
         if not resolved_root.is_dir():
             return [], [_root_missing_diagnostic(resolved_root, scope, root_index)]
@@ -101,8 +106,7 @@ def _scan_root(
 
     skills: list[SkillMetadata] = []
     diagnostics: list[SkillDiagnostic] = []
-    workspace_policy = WorkspacePolicy()
-    resolved_workspace = workspace_root.resolve(strict=False)
+    resolved_workspace = workspace_root
 
     for candidate in candidates:
         if candidate.name.startswith("."):
@@ -133,37 +137,39 @@ def _scan_root(
             continue
 
         resolved_candidate = candidate.resolve(strict=False)
-        candidate_is_contained = workspace_policy.is_within_workspace(
-            resolved_candidate,
-            resolved_root,
-        ) and workspace_policy.is_within_workspace(
-            resolved_candidate,
-            resolved_workspace,
-        )
-        if candidate_is_contained:
-            try:
-                has_skill_file = any(
-                    child.name == SKILL_FILE_NAME for child in candidate.iterdir()
+        try:
+            _require_containment(
+                resolved_candidate,
+                boundary=resolved_root,
+                workspace_root=resolved_workspace,
+            )
+        except IrisSkillPathError as exc:
+            diagnostics.append(_invalid_skill_diagnostic(exc, candidate))
+            continue
+
+        try:
+            has_skill_file = any(
+                child.name == SKILL_FILE_NAME for child in candidate.iterdir()
+            )
+        except OSError as exc:
+            diagnostics.append(
+                SkillDiagnostic(
+                    code="INVALID_SKILL",
+                    message="无法枚举 Skill 目录",
+                    path=resolved_candidate,
+                    detail={"reason": str(exc)},
                 )
-            except OSError as exc:
-                diagnostics.append(
-                    SkillDiagnostic(
-                        code="INVALID_SKILL",
-                        message="无法枚举 Skill 目录",
-                        path=resolved_candidate,
-                        detail={"reason": str(exc)},
-                    )
+            )
+            continue
+        if not has_skill_file:
+            diagnostics.append(
+                SkillDiagnostic(
+                    code="MISSING_SKILL_FILE",
+                    message=f"Skill 目录缺少 {SKILL_FILE_NAME}",
+                    path=resolved_candidate,
                 )
-                continue
-            if not has_skill_file:
-                diagnostics.append(
-                    SkillDiagnostic(
-                        code="MISSING_SKILL_FILE",
-                        message=f"Skill 目录缺少 {SKILL_FILE_NAME}",
-                        path=resolved_candidate,
-                    )
-                )
-                continue
+            )
+            continue
 
         try:
             metadata = _load_skill(
@@ -221,24 +227,9 @@ def _load_skill(
             name=skill_dir.name,
         )
 
-    resolved_workspace = workspace_root.resolve(strict=False)
-    resolved_root = root.resolve(strict=False)
+    resolved_workspace = workspace_root
+    resolved_root = root
     resolved_skill_dir = skill_dir.resolve(strict=False)
-    _require_containment(
-        resolved_root,
-        boundary=resolved_workspace,
-        workspace_root=resolved_workspace,
-    )
-    _require_containment(
-        resolved_skill_dir,
-        boundary=resolved_root,
-        workspace_root=resolved_workspace,
-    )
-    _require_containment(
-        resolved_skill_dir,
-        boundary=resolved_workspace,
-        workspace_root=resolved_workspace,
-    )
 
     try:
         skill_file = next(
@@ -265,11 +256,6 @@ def _load_skill(
     _require_containment(
         resolved_skill_file,
         boundary=resolved_root,
-        workspace_root=resolved_workspace,
-    )
-    _require_containment(
-        resolved_skill_file,
-        boundary=resolved_workspace,
         workspace_root=resolved_workspace,
     )
     try:
@@ -359,9 +345,7 @@ def _merge_by_priority(
             if winner is None:
                 winners[skill.name] = skill
                 continue
-            if winner.root_dir.resolve(strict=False) == skill.root_dir.resolve(
-                strict=False
-            ):
+            if winner.root_dir == skill.root_dir:
                 continue
             diagnostics.append(
                 SkillDiagnostic(
@@ -386,8 +370,7 @@ def _require_containment(
     boundary: Path,
     workspace_root: Path,
 ) -> None:
-    policy = WorkspacePolicy()
-    if not policy.is_within_workspace(path, boundary):
+    if not is_resolved_within(path, boundary):
         raise IrisSkillPathError(
             "Skill 路径不在允许的目录内",
             path=str(path),

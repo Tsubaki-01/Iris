@@ -93,10 +93,11 @@ contains only `name` and `description`. After selecting an entry, the model call
 {"name": "my-skill"}
 ```
 
-`load_skill` returns up to 1000 lines of the current live `SKILL.md` Markdown and revalidates that
-the file is still inside both its Skill root and the workspace. The model does not need `file.read` for Skill bodies.
-The tool reads text only: it never executes body content, invokes commands automatically, or turns
-a Skill into a mounted tool set.
+`load_skill` returns up to 1000 lines of the current live `SKILL.md` Markdown. Discovery owns the
+configured root and scan-directory boundaries. At load time, the tool revalidates that the file is
+still inside its original Skill directory, while the shared file service enforces the workspace
+boundary. The model does not need `file.read` for Skill bodies. The tool reads text only: it never
+executes body content, invokes commands automatically, or turns a Skill into a mounted tool set.
 
 Stable tool error codes are `SKILL_NOT_FOUND`, `SKILL_PATH_ERROR`, and `SKILL_READ_ERROR`.
 

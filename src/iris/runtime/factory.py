@@ -31,7 +31,6 @@ from ..skill import (
     SkillRegistry,
     SkillScope,
     discover_skills,
-    resolve_skills_root,
 )
 from ..tools import DefaultPermissionPolicy, ToolExecutor
 from .environment import RuntimeEnvironment, RuntimeProvider
@@ -192,9 +191,11 @@ def _prepare_skills(
         return context_input, None
 
     try:
-        root = resolve_skills_root(
-            skills_config.root,
-            workspace_root=workspace_root,
+        result = discover_skills(
+            SkillDiscoveryOptions(
+                workspace_root=workspace_root,
+                roots=((SkillScope.PROJECT, Path(skills_config.root)),),
+            )
         )
     except IrisSkillPathError as exc:
         raise IrisConfigError(
@@ -202,13 +203,6 @@ def _prepare_skills(
             root=skills_config.root,
             workspace_root=str(workspace_root.resolve()),
         ) from exc
-
-    result = discover_skills(
-        SkillDiscoveryOptions(
-            workspace_root=workspace_root,
-            roots=((SkillScope.PROJECT, root),),
-        )
-    )
     registry = SkillRegistry(result)
     for diagnostic in registry.diagnostics:
         logger.warning(
