@@ -40,13 +40,14 @@ from iris.message import ToolUseBlock
 from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry, tool
 
 
-@tool(description="生成问候语")
+registry = ToolRegistry()
+
+
+@tool(registry=registry, description="生成问候语")
 def greet(name: str) -> str:
     return f"你好，{name}"
 
 
-registry = ToolRegistry()
-registry.register_function(greet)
 executor = ToolExecutor(registry)
 
 result = await executor.execute_one(
@@ -326,9 +327,9 @@ registry.register(ToolSearchTool(registry))
 
 ### `@tool`
 
-`tool(...)` 只给函数附加 `iris_tool_` 元数据，不自动注册，也不改变函数引用。`ToolRegistry.register_function()` / `CallableTool` 会读取这些元数据。
+`tool(...)` 给函数附加 `iris_tool_` 元数据且不改变函数引用。传入 `registry` 时会立即调用该注册表的 `register_function()`；未传入时只声明元数据，供配置装配或后续显式注册读取。
 
-支持参数：`name`、`description`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。
+支持参数：`registry`、`name`、`description`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。
 
 ### schema helpers
 

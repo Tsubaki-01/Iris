@@ -29,13 +29,14 @@ from iris.message import ToolUseBlock
 from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry, tool
 
 
-@tool(description="Create a greeting")
+registry = ToolRegistry()
+
+
+@tool(registry=registry, description="Create a greeting")
 def greet(name: str) -> str:
     return f"Hello, {name}"
 
 
-registry = ToolRegistry()
-registry.register_function(greet)
 executor = ToolExecutor(registry)
 
 result = await executor.execute_one(
@@ -68,9 +69,10 @@ tools are hidden unless explicitly allowed. Schema helpers support Iris-native, 
 OpenAI Responses, and Anthropic wrapper shapes; runtime's active provider path currently mounts the
 OpenAI Chat shape.
 
-`@tool` only attaches metadata; it does not register or wrap the function. Schema extraction supports
-the documented Python/Pydantic types and Google-style docstring argument descriptions. Unsupported
-parameter types produce validation errors.
+`@tool` attaches metadata without wrapping the function. Passing `registry` immediately calls that
+registry's `register_function()`; omitting it leaves registration to config assembly or a later
+explicit call. Schema extraction supports the documented Python/Pydantic types and Google-style
+docstring argument descriptions. Unsupported parameter types produce validation errors.
 
 ## Execution and HITL preflight
 
