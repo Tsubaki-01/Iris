@@ -11,6 +11,7 @@ import iris.tools as tools
 from iris.exceptions import IrisToolValidationError
 from iris.tools import (
     CallableExecutionMode,
+    CallableTool,
     ToolExecutionContext,
     ToolRegistry,
     tool,
@@ -40,6 +41,22 @@ def test_function_registration_exports_schema_from_type_hints() -> None:
             },
         }
     ]
+
+
+def test_tool_registers_function_in_explicit_registry() -> None:
+    """传入 registry 时，decorator 立即注册并保留原函数引用。"""
+    registry = ToolRegistry()
+
+    @tool(registry=registry, description="生成问候语")
+    def greet(name: str) -> str:
+        return f"你好，{name}"
+
+    registered = registry.get("greet")
+
+    assert isinstance(registered, CallableTool)
+    assert registered.func is greet
+    assert registered.definition.description == "生成问候语"
+    assert greet("Iris") == "你好，Iris"
 
 
 def test_callable_execution_mode_is_public() -> None:
