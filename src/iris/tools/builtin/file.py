@@ -21,7 +21,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import TextBlock
@@ -96,25 +96,9 @@ class ReadFileInput(BaseModel):
     """
 
     file_path: str
-    offset: int | None = None
-    limit: int | None = None
+    offset: int | None = Field(default=None, ge=0)
+    limit: int | None = Field(default=None, ge=0, le=1000)
     with_line_numbers: bool = False
-
-    @field_validator("offset", "limit")
-    @classmethod
-    def _validate_non_negative(cls, value: int | None) -> int | None:
-        """校验分页参数非负。"""
-        if value is not None and value < 0:
-            raise ValueError("offset/limit 必须非负")
-        return value
-
-    @field_validator("limit")
-    @classmethod
-    def _validate_limit(cls, value: int | None) -> int | None:
-        """限制单次读取行数。"""
-        if value is not None and value > 1000:
-            raise ValueError("limit 不能超过 1000")
-        return value
 
 
 class ListFilesInput(BaseModel):
@@ -128,15 +112,7 @@ class ListFilesInput(BaseModel):
 
     path: str = "."
     pattern: str | None = None
-    max_results: int = 200
-
-    @field_validator("max_results")
-    @classmethod
-    def _validate_max_results(cls, value: int) -> int:
-        """限制最大结果数。"""
-        if value < 0 or value > 1000:
-            raise ValueError("max_results 必须在 0..1000 范围内")
-        return value
+    max_results: int = Field(default=200, ge=0, le=1000)
 
 
 class GrepSearchInput(BaseModel):
@@ -150,15 +126,7 @@ class GrepSearchInput(BaseModel):
 
     pattern: str
     path: str = "."
-    max_results: int = 200
-
-    @field_validator("max_results")
-    @classmethod
-    def _validate_max_results(cls, value: int) -> int:
-        """限制最大结果数。"""
-        if value < 0 or value > 1000:
-            raise ValueError("max_results 必须在 0..1000 范围内")
-        return value
+    max_results: int = Field(default=200, ge=0, le=1000)
 
 
 class WriteFileInput(BaseModel):
@@ -658,7 +626,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
         Returns:
             ToolResult: 可转换为模型消息的工具结果。
         """
-        input_data = cast(InputT, self.input_type.model_validate(params))
+        input_data = cast(InputT, params)
         return await self._impl(input_data, context)
 
     # endregion

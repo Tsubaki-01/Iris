@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    ValidationInfo,
-    field_validator,
-    model_validator,
 )
 
 SKILL_FILE_NAME = "SKILL.md"
@@ -53,50 +51,15 @@ class SkillMetadata(BaseModel):
     declared_name: str | None = None
     extra_frontmatter: dict[str, Any] = Field(default_factory=dict)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_description_field(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        description = data.get("description")
-        if not isinstance(description, str):
-            return data
-        normalized, truncated = _normalize_description(
-            description,
-            MAX_DESCRIPTION_CHARS,
-        )
-        values = dict(data)
-        values["description"] = normalized
-        values["description_truncated"] = bool(
-            values.get("description_truncated", False)
-        ) or truncated
-        return values
 
-    @field_validator("name")
-    @classmethod
-    def _validate_name(cls, value: str) -> str:
-        if _NAME_RE.fullmatch(value) is None:
-            raise ValueError("name 必须是小写 kebab-case")
-        return value
-
-
-class SkillDiagnostic(BaseModel):
+@dataclass(frozen=True, slots=True)
+class SkillDiagnostic:
     """Skill 发现期产生的结构化 warning。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     code: str
     message: str
     path: Path | None = None
-    detail: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("code", "message")
-    @classmethod
-    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError(f"{info.field_name} 不能为空")
-        return normalized
+    detail: dict[str, str] = field(default_factory=dict)
 
 
 class SkillDiscoveryOptions(BaseModel):

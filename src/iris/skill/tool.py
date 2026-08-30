@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -56,8 +56,7 @@ class LoadSkillTool(BaseTool):
         self.definition = ToolDefinition(
             name="load_skill",
             description=(
-                "按 catalog 中的 skill name 读取对应 SKILL.md 指令；"
-                "只返回 Markdown，不执行脚本"
+                "按 catalog 中的 skill name 读取对应 SKILL.md 指令；只返回 Markdown，不执行脚本"
             ),
             input_schema=schema_from_pydantic_model(LoadSkillInput),
             capabilities={ToolCapability.READ},
@@ -81,7 +80,7 @@ class LoadSkillTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """复查 live path 后通过共享文件服务读取 Skill。"""
-        input_data = LoadSkillInput.model_validate(params)
+        input_data = cast(LoadSkillInput, params)
         try:
             metadata = self.registry.get(input_data.name)
         except IrisSkillNotFoundError:

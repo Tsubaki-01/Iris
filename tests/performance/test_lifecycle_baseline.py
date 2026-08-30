@@ -83,6 +83,7 @@ def _create_port(
         store=store,
         run=created.run,
         activation_id="activation_1",
+        cursor=before,
         clock=lambda: _NOW,
         event_sink=[],
     )

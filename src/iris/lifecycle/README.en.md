@@ -3,8 +3,10 @@
 # `iris.lifecycle`
 
 `iris.lifecycle` is the pure data and synchronous store contract for logical runs. It defines
-immutable run/session/activation/checkpoint/tool-call/event/result models, JSON-safe validation,
-projections, and CAS commands. It owns neither execution control flow nor a concrete database.
+immutable run/session/activation/checkpoint/tool-call/event/result boundary models, JSON-safe
+validation, projections, and CAS commands. Persisted models use Pydantic to validate raw/load data;
+same-process commands are frozen slots dataclasses carrying already typed facts. The package owns
+neither execution control flow nor a concrete database.
 
 ## Dependency boundary
 
@@ -42,6 +44,10 @@ provider clients, tasks, locks, signals, or callbacks.
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
 Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
+Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
+typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
+SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and
+encoders retain JSON-safe guarantees.
 `SessionSnapshot` still exposes only `session_id`, CAS `revision`, and complete `messages`. Revision
 advances once per non-empty message delta regardless of how many messages that delta contains.
 Persistence message counts and ordinals do not enter lifecycle public models or commands.

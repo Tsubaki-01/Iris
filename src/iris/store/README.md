@@ -42,6 +42,9 @@ Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所�
 checkpoint、tool call 与 interaction 更新分别使用 revision、sequence 或 version CAS
 predicates；lane、activation、interaction、tool facts 与 run 在同一事务中增量写入，events
 保持 append-only。任一 SQL 失败都会触发完整 transaction rollback，不暴露半更新状态。
+两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
+再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
+load/recovery 边界。
 schema v2 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
 CAS 推进 metadata；完整 `SessionSnapshot` 读取仍按 ordinal 重建并校验 `1..message_count`。

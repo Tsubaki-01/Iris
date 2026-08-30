@@ -93,7 +93,7 @@ class WorkspacePolicy:
         raw_path = Path(path)
         candidate = raw_path if raw_path.is_absolute() else root / raw_path
         resolved = candidate.resolve(strict=False)
-        if not self.is_within_workspace(resolved, root):
+        if not _is_resolved_within(resolved, root):
             raise IrisToolValidationError(
                 "PATH_OUTSIDE_WORKSPACE: 路径不在 workspace 内",
                 path=path,
@@ -103,11 +103,19 @@ class WorkspacePolicy:
 
     def is_within_workspace(self, path: Path, workspace_root: Path) -> bool:
         """判断路径是否在 workspace 内。"""
-        try:
-            path.resolve(strict=False).relative_to(workspace_root.resolve())
-        except ValueError:
-            return False
-        return True
+        return _is_resolved_within(
+            path.resolve(strict=False),
+            workspace_root.resolve(strict=False),
+        )
+
+
+def _is_resolved_within(path: Path, root: Path) -> bool:
+    """判断两个已 resolve 路径的包含关系。"""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 class PermissionPolicy:

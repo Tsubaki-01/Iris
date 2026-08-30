@@ -23,7 +23,7 @@ class ContextSlot(BaseModel):
 
     name: str
     content: Any
-    order: int = 100
+    order: int = Field(default=100, strict=True)
     attributes: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
 
@@ -36,13 +36,6 @@ class ContextSlot(BaseModel):
             raise IrisContextError("context slot 名称不能为空")
         if not _is_safe_xml_name(value):
             raise IrisContextError("context slot 名称必须是安全的 XML 标签名")
-        return value
-
-    @field_validator("order", mode="before")
-    @classmethod
-    def _validate_order(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise IrisContextError("context slot 顺序不能是布尔值")
         return value
 
     @field_validator("attributes")
@@ -58,7 +51,7 @@ class ContextSection(BaseModel):
     """单个固定消息位置的模板、字符上限和 slot。"""
 
     template: Path | None = None
-    max_chars: int | None = None
+    max_chars: int | None = Field(default=None, strict=True, gt=0)
     slots: list[ContextSlot] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
@@ -68,20 +61,6 @@ class ContextSection(BaseModel):
     def _validate_template(cls, value: Path | None) -> Path | None:
         if value is not None and not value.is_absolute():
             raise IrisContextError("context 模板路径必须是绝对路径", path=str(value))
-        return value
-
-    @field_validator("max_chars", mode="before")
-    @classmethod
-    def _validate_max_chars_type(cls, value: Any) -> Any:
-        if isinstance(value, bool):
-            raise IrisContextError("context section 字符上限不能是布尔值")
-        return value
-
-    @field_validator("max_chars")
-    @classmethod
-    def _validate_max_chars(cls, value: int | None) -> int | None:
-        if value is not None and value <= 0:
-            raise IrisContextError("context section 字符上限必须为正数")
         return value
 
 

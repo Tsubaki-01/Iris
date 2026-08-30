@@ -6,6 +6,7 @@ from datetime import datetime
 
 from ..exceptions import IrisRunStateError
 from ..lifecycle.models import RunToolCallRecord, ToolCallPhase
+from ..lifecycle.transitions import mark_tool_call_outcome_unknown
 from ..message.message import Msg
 from ..tools.base import ToolErrorInfo, ToolResult
 
@@ -23,14 +24,7 @@ def build_terminal_tool_closure(
 ) -> tuple[RunToolCallRecord, Msg]:
     """按 durable claim phase 构造 terminal tool fact 与模型可见 closer。"""
     if record.phase is ToolCallPhase.CLAIMED:
-        updated = RunToolCallRecord.model_validate(
-            record.model_dump()
-            | {
-                "phase": ToolCallPhase.OUTCOME_UNKNOWN,
-                "version": record.version + 1,
-                "updated_at": now,
-            }
-        )
+        updated = mark_tool_call_outcome_unknown(record, now=now)
         error = ToolErrorInfo(
             code="TOOL_OUTCOME_UNKNOWN",
             message=_OUTCOME_UNKNOWN_MESSAGE,

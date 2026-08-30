@@ -40,8 +40,9 @@ def test_ask_question_input_rejects_empty_or_duplicate_values(value: dict[str, o
 
 
 def test_ask_question_tool_builds_question_prompt() -> None:
-    prompt = AskQuestionTool().build_interaction_prompt(
-        params={"question": "是否继续？", "options": ["继续", "取消"]},
+    tool = AskQuestionTool()
+    prompt = tool.build_interaction_prompt(
+        params=AskQuestionInput(question="是否继续？", options=["继续", "取消"]),
     )
 
     assert isinstance(prompt, QuestionPrompt)
@@ -91,7 +92,7 @@ def test_ask_question_tool_rejects_direct_execution() -> None:
     with pytest.raises(IrisHITLError):
         asyncio.run(
             tool.arun(
-                {"question": "是否继续？"},
+                AskQuestionInput(question="是否继续？"),
                 ToolExecutionContext(workspace_root="."),
             )
         )

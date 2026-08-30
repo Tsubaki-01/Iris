@@ -3,8 +3,9 @@
 # `iris.lifecycle`
 
 `iris.lifecycle` 是 logical run 的纯数据与同步 store contract。它定义不可变 run/session/
-activation/checkpoint/tool-call/event/result 模型、JSON-safe validation、投影函数和 CAS commands，
-但不拥有运行控制流或具体数据库。
+activation/checkpoint/tool-call/event/result 边界模型、JSON-safe validation、投影函数和 CAS
+commands，但不拥有运行控制流或具体数据库。持久化模型使用 Pydantic 校验 raw/load 数据；
+同进程 command 使用 frozen slots dataclass，只携带调用方已经类型化的事实。
 
 ## 依赖边界
 
@@ -44,6 +45,9 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
 每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
+Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
+更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
+checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。
 `SessionSnapshot` 继续只公开 `session_id`、CAS `revision` 和完整 `messages`。revision 每次非空
 message delta 只推进一次，与 delta 中的消息条数无关；持久化层的 message count 与 ordinal
 不进入 lifecycle 公共模型或 command。

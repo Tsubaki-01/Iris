@@ -6,7 +6,10 @@ import json
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, TypeVar
@@ -67,12 +70,21 @@ from ..lifecycle.store import (
     RunCommit,
     SuspendRun,
 )
+from ..lifecycle.transitions import (
+    abandon_activation,
+    claim_tool_call,
+    commit_tool_call,
+    commit_tool_usage,
+    replace_run,
+    reserve_model_step,
+    settle_activation,
+)
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._terminal_closure import build_terminal_tool_closure
 
-_CommandT = TypeVar("_CommandT", bound=BaseModel)
+_CommandT = TypeVar("_CommandT")
 _ReadT = TypeVar("_ReadT")
 _RESPONSE_ADAPTER = TypeAdapter(HumanInteractionResponse)
 
@@ -434,7 +446,7 @@ class SQLiteStore:
         self,
         connection: sqlite3.Connection,
         operation: str,
-        command: BaseModel,
+        command: object,
     ) -> RunCommit | None:
         """把 process-local replay 刷新为当前 durable facts。"""
         replay = self._replays.get(_replay_key(operation, command))
@@ -464,16 +476,14 @@ class SQLiteStore:
             if replay.interaction is not None
             else None
         )
-        return replay.model_copy(
-            deep=True,
-            update={
-                "run": run,
-                "session": session,
-                "checkpoint": checkpoint,
-                "interaction": interaction,
-                "events": (),
-                "result": self._select_result(connection, run, operation=operation),
-            },
+        return dataclass_replace(
+            replay,
+            run=run,
+            session=session,
+            checkpoint=checkpoint,
+            interaction=interaction,
+            events=(),
+            result=self._select_result(connection, run, operation=operation),
         )
 
     def _require_run(
@@ -713,9 +723,8 @@ class SQLiteStore:
             status=ActivationStatus.ACTIVE,
             started_at=command.now,
         )
-        rebound = RunCheckpoint.model_validate(
-            checkpoint.model_dump()
-            | {
+        rebound = checkpoint.model_copy(
+            update={
                 "sequence": checkpoint.sequence + 1,
                 "activation_id": activation.activation_id,
             }
@@ -780,13 +789,10 @@ class SQLiteStore:
                 run.current_activation_id,
                 operation=operation,
             )
-            settled = ActivationRecord.model_validate(
-                activation.model_dump()
-                | {
-                    "status": ActivationStatus.SETTLED,
-                    "outcome": ActivationOutcome.FAILED,
-                    "ended_at": command.now,
-                }
+            settled = settle_activation(
+                activation,
+                outcome=ActivationOutcome.FAILED,
+                ended_at=command.now,
             )
             sequence = run.last_event_sequence + 1
             updated = _replace_run(
@@ -824,9 +830,7 @@ class SQLiteStore:
                 result=project_result(updated),
             )
 
-        usage = RunUsage.model_validate(
-            run.usage.model_dump() | {"model_steps_reserved": run.usage.model_steps_reserved + 1}
-        )
+        usage = reserve_model_step(run.usage)
         updated_checkpoint = checkpoint.model_copy(
             update={"model_steps_reserved": usage.model_steps_reserved}
         )
@@ -979,15 +983,10 @@ class SQLiteStore:
         if run.cancellation_requested_at is not None:
             raise IrisRunStateError("已请求取消的 run 不接受新的 tool call claim")
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
-        claimed = RunToolCallRecord.model_validate(
-            tool_call.model_dump()
-            | {
-                "phase": ToolCallPhase.CLAIMED,
-                "claim_activation_id": command.activation_id,
-                "version": tool_call.version + 1,
-                "updated_at": command.now,
-                "claimed_at": command.now,
-            }
+        claimed = claim_tool_call(
+            tool_call,
+            activation_id=command.activation_id,
+            now=command.now,
         )
         sequence = run.last_event_sequence + 1
         updated = _replace_run(
@@ -1079,19 +1078,12 @@ class SQLiteStore:
             next_session_revision,
             run.usage,
         )
-        committed_call = RunToolCallRecord.model_validate(
-            tool_call.model_dump()
-            | {
-                "phase": ToolCallPhase.COMMITTED,
-                "result": command.result,
-                "version": tool_call.version + 1,
-                "updated_at": command.now,
-                "committed_at": command.now,
-            }
+        committed_call = commit_tool_call(
+            tool_call,
+            result=command.result,
+            now=command.now,
         )
-        usage = RunUsage.model_validate(
-            run.usage.model_dump() | {"tool_calls_committed": run.usage.tool_calls_committed + 1}
-        )
+        usage = commit_tool_usage(run.usage)
         sequence = run.last_event_sequence + 1
         updated = _replace_run(
             run,
@@ -1210,13 +1202,10 @@ class SQLiteStore:
             command.activation_id,
             operation=operation,
         )
-        settled = ActivationRecord.model_validate(
-            activation.model_dump()
-            | {
-                "status": ActivationStatus.SETTLED,
-                "outcome": ActivationOutcome.SUSPENDED,
-                "ended_at": command.now,
-            }
+        settled = settle_activation(
+            activation,
+            outcome=ActivationOutcome.SUSPENDED,
+            ended_at=command.now,
         )
         sequence = run.last_event_sequence + 1
         updated = _replace_run(
@@ -1649,13 +1638,10 @@ class SQLiteStore:
                 run.current_activation_id,
                 operation=operation,
             )
-            settled = ActivationRecord.model_validate(
-                activation.model_dump()
-                | {
-                    "status": ActivationStatus.SETTLED,
-                    "outcome": _activation_outcome(command.stop_reason),
-                    "ended_at": command.now,
-                }
+            settled = settle_activation(
+                activation,
+                outcome=_activation_outcome(command.stop_reason),
+                ended_at=command.now,
             )
         else:
             activation = None
@@ -1800,13 +1786,10 @@ class SQLiteStore:
             if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN
             else ActivationOutcome.RECOVERED
         )
-        abandoned = ActivationRecord.model_validate(
-            activation.model_dump()
-            | {
-                "status": ActivationStatus.ABANDONED,
-                "outcome": abandoned_outcome,
-                "ended_at": command.now,
-            }
+        abandoned = abandon_activation(
+            activation,
+            outcome=abandoned_outcome,
+            ended_at=command.now,
         )
         first_sequence = run.last_event_sequence + 1
         abandoned_event = _make_event(
@@ -1965,9 +1948,8 @@ class SQLiteStore:
                 status=ActivationStatus.ACTIVE,
                 started_at=command.now,
             )
-            rebound = RunCheckpoint.model_validate(
-                checkpoint.model_dump()
-                | {
+            rebound = checkpoint.model_copy(
+                update={
                     "sequence": checkpoint.sequence + 1,
                     "activation_id": activation_next.activation_id,
                     "resumability": CheckpointResumability.SAFE,
@@ -3150,8 +3132,8 @@ def _make_event(
 
 
 def _replace_run(run: RunRecord, **changes: Any) -> RunRecord:
-    """以领域模型验证后的字段替换构造新 run。"""
-    return RunRecord.model_validate(run.model_dump() | changes)
+    """应用已经过 store delta 检查的字段替换。"""
+    return replace_run(run, **changes)
 
 
 def _validate_checkpoint_replacement(
@@ -3229,8 +3211,8 @@ def _activation_outcome(stop_reason: RunStopReason) -> ActivationOutcome:
     }.get(stop_reason, ActivationOutcome.FAILED)
 
 
-def _replay_key(operation: str, command: BaseModel) -> str:
-    payload = command.model_dump(mode="json")
+def _replay_key(operation: str, command: object) -> str:
+    payload = _jsonable(command)
     return f"{operation}:{json.dumps(payload, allow_nan=False, sort_keys=True)}"
 
 
@@ -3239,10 +3221,7 @@ def _stored_activation_outcome(activation: ActivationRecord) -> str | None:
 
 
 def _dump_json(value: object) -> str:
-    if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json")
-    elif isinstance(value, list) and value and isinstance(value[0], BaseModel):
-        value = [item.model_dump(mode="json") for item in value]
+    value = _jsonable(value)
     return json.dumps(
         value,
         allow_nan=False,
@@ -3250,6 +3229,23 @@ def _dump_json(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def _jsonable(value: object) -> object:
+    """把 durable/replay 输入投影为严格 JSON 值。"""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: _jsonable(getattr(value, item.name)) for item in fields(value)}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _load_json(value: str) -> Any:

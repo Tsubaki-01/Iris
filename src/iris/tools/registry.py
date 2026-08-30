@@ -71,20 +71,16 @@ class ToolRegistry:
     #               Tool Registration
     # ==========================================
     # region
-    def register(self, tool: BaseTool, *, on_conflict: str = "raise") -> None:
+    def register(self, tool: BaseTool) -> None:
         """注册对象式工具。
 
         确保新工具的主名称与别名与现有系统完全隔离，不产生冲突。
 
         Args:
             tool (BaseTool): 要注册的工具实例。
-            on_conflict (str): 发生同名时的决策策略。
-
         Raises:
-            IrisToolValidationError: 当名称、别名产生冲突或 on_conflict 不为 raise 时。
+            IrisToolValidationError: 当名称或别名产生冲突时。
         """
-        if on_conflict != "raise":
-            raise IrisToolValidationError("阶段 1 只支持 raise 冲突策略", on_conflict=on_conflict)
         self._validate_available_name(tool.definition.name)
         for alias in tool.definition.aliases:
             self._validate_available_name(alias)

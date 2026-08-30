@@ -167,6 +167,11 @@ The package-level public surface is exactly:
 
 Frontmatter helpers, internal regular expressions, and `LoadSkillInput` are implementation details.
 
+Directory discovery is the sole owner of Skill-name regex checks and description
+normalization/truncation. `SkillMetadata` is a trusted projection of that scan, and configured
+`max_description_chars` directly controls the truncation limit. `SkillDiagnostic` is a frozen slots
+dataclass used only by discovery results.
+
 ## Maintenance and verification
 
 | Change | Main location | Tests |

@@ -80,17 +80,9 @@ class MemorySearchToolInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str
-    limit: int = 8
+    limit: int = Field(default=8, gt=0, le=100)
     categories: list[MemoryCategory] = Field(default_factory=list)
     kinds: list[MemoryItemKind] = Field(default_factory=list)
-
-    @field_validator("limit")
-    @classmethod
-    def _validate_limit(cls, value: int) -> int:
-        """限制搜索返回数量。"""
-        if value <= 0:
-            raise ValueError("limit 必须为正数")
-        return min(value, 100)
 
 
 class MemoryListToolInput(BaseModel):
@@ -98,16 +90,8 @@ class MemoryListToolInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    limit: int = 50
+    limit: int = Field(default=50, gt=0, le=100)
     category: MemoryCategory | None = None
-
-    @field_validator("limit")
-    @classmethod
-    def _validate_limit(cls, value: int) -> int:
-        """限制列表返回数量。"""
-        if value <= 0:
-            raise ValueError("limit 必须为正数")
-        return min(value, 100)
 
 
 class MemoryGetToolInput(BaseModel):
@@ -168,7 +152,7 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
         context: ToolExecutionContext,
     ) -> ToolResult:
         """适配工具协议并调用具体记忆业务。"""
-        input_data = cast(InputT, self.input_type.model_validate(params))
+        input_data = cast(InputT, params)
         return await self._impl(input_data, context)
 
     @abstractmethod
@@ -210,7 +194,7 @@ class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
             for scope in scopes:
                 results.extend(
                     self.service.recall(
-                        MemoryQuery(
+                        MemoryQuery.model_construct(
                             scope=scope,
                             text=params.query,
                             categories=params.categories,

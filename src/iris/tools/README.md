@@ -105,7 +105,7 @@ tool_obj = registry.register_function(
 
 公共方法：
 
-- `register(tool, on_conflict="raise")`: 注册 `BaseTool` 实例；当前只支持 `raise` 冲突策略。
+- `register(tool)`: 注册 `BaseTool` 实例；名称或别名冲突时直接抛出校验错误。
 - `register_function(func, ...)`: 创建 `CallableTool` 并注册，支持 `name`、`description`、`input_model`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。显式参数优先于 `@tool` 元数据。
 - `get(name)`: 按主名称或别名获取工具，未找到时抛出工具不存在错误。
 - `view(include_groups=None, allow=None, deny=None)`: 创建只读过滤视图。
@@ -139,18 +139,17 @@ executor = ToolExecutor(
 - `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
   `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(tool_call, prompt)`，
   不会运行 middleware、circuit breaker、artifact 或工具本体。
-- `execute_prepared(prepared, context, approved_tool_call_id=None, effect_guard=None)`: 重新校验
-  当前状态后执行一条预检调用；lifecycle runtime 会注入 required effect guard。
+- `execute_prepared(prepared, context, approved_tool_call_id=None, effect_guard=None)`: 刷新当前
+  permission 后执行一条已验证调用；lifecycle runtime 会注入 required effect guard。
 
-预检阶段由唯一 `_prepare_call()` 完成 registry lookup、输入校验和 policy check，不运行工具
-生命周期。`execute_many()` 按输入顺序流式 prepare，每条调用在当前执行阶段只 lookup、校验和
-鉴权一次，再使用 `PreparedToolCall.tool` 与 `validated_params` 判断连续只读并发批次；
-classifier 异常会保守降级为串行执行。`execute_prepared()` 属于新的恢复执行阶段，因此会重新
-`_prepare_call()`，再按 `preflight_result` / `DENY`、human protocol guard、精确 approve 的
-优先级授权；通过后依次检查 circuit breaker、cancellation、effect guard、cancellation，随后才
-进入 middleware `before_call` → `tool.arun()` → artifact → middleware after hooks → breaker
-记录。guard 失败时不会进入任何工具 effect；claim 后取消会作为独立控制流向 runtime 传播。
-一次阶段内 policy 只检查一次，历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
+预检阶段由唯一 `_prepare_call()` 完成 registry lookup、输入 schema 校验和初次 policy check，
+并在 `PreparedToolCall` 中同时保留 typed `validated_input` 与供 middleware/fingerprint 使用的
+`arguments`。Runtime 在同一 tool batch 内复用该 plan；`execute_prepared()` 只刷新 permission，
+不会再次 lookup、降级为 dict 或重复 schema 校验。刷新后按 `preflight_result` / `DENY`、human
+protocol guard、精确 approve 的优先级授权；通过后依次检查 circuit breaker、cancellation、
+effect guard、cancellation，随后才进入 middleware `before_call` → `tool.arun()` → artifact →
+middleware after hooks → breaker 记录。guard 失败时不会进入任何工具 effect；claim 后取消会
+作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
 并发 context copy 会共享原始 `read_state` 和 `cancellation` live object；signal 不会进入
@@ -159,7 +158,7 @@ guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
 `read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
 
-`ToolExecutor` 只提供分类、重校验和单调用执行原语；lifecycle active path 由 runtime 在它之上
+`ToolExecutor` 只提供分类、permission refresh 和单调用执行原语；lifecycle active path 由 runtime 在它之上
 使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
 HITL、preflight result 与 unsafe 调用保持屏障语义。每个调用仍有自己的 durable claim，body
 完成顺序不决定 result 顺序，claim telemetry 顺序也不是 ordinal 契约。未声明的同步 callable

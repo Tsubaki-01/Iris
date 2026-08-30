@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
@@ -53,11 +54,6 @@ def _model_cases() -> tuple[tuple[type[BaseModel], dict[str, Any], str], ...]:
     return (
         (SkillMetadata, _metadata_values(), "name"),
         (
-            SkillDiagnostic,
-            {"code": "name_mismatch", "message": "Name differs"},
-            "code",
-        ),
-        (
             SkillDiscoveryOptions,
             {
                 "workspace_root": Path("C:/workspace"),
@@ -104,6 +100,15 @@ def test_skill_models_forbid_extra_fields() -> None:
             model_type.model_validate({**values, "unexpected": True})
 
 
+def test_skill_diagnostic_is_frozen_process_local_dataclass() -> None:
+    diagnostic = SkillDiagnostic(code="name_mismatch", message="Name differs")
+
+    with pytest.raises(FrozenInstanceError):
+        diagnostic.code = "changed"  # type: ignore[misc]
+    with pytest.raises(TypeError, match="unexpected"):
+        SkillDiagnostic(code="name_mismatch", message="Name differs", unexpected=True)  # type: ignore[call-arg]
+
+
 def test_skill_scope_only_contains_project() -> None:
     assert tuple(SkillScope) == (SkillScope.PROJECT,)
     assert SkillScope.PROJECT.value == "project"
@@ -115,46 +120,11 @@ def test_skill_constants_are_stable() -> None:
     assert MAX_DESCRIPTION_CHARS == 1024
 
 
-@pytest.mark.parametrize(
-    "name",
-    ("example", "example-skill", "skill2", "2-skill"),
-)
-def test_skill_metadata_accepts_lowercase_kebab_case_names(name: str) -> None:
-    metadata = SkillMetadata(**_metadata_values(name=name))
-
-    assert metadata.name == name
-
-
-@pytest.mark.parametrize(
-    "name",
-    ("Example", "example_skill", "example skill", "-example", "example-", ""),
-)
-def test_skill_metadata_rejects_invalid_names(name: str) -> None:
-    with pytest.raises(ValidationError, match="name"):
-        SkillMetadata(**_metadata_values(name=name))
-
-
-def test_skill_metadata_normalizes_and_truncates_description() -> None:
-    metadata = SkillMetadata(
-        **_metadata_values(description=f"  {'字' * (MAX_DESCRIPTION_CHARS + 1)}  ")
-    )
-
-    assert metadata.description == "字" * MAX_DESCRIPTION_CHARS
-    assert metadata.description_truncated is True
-
-
 def test_skill_metadata_preserves_precomputed_truncation() -> None:
-    metadata = SkillMetadata(
-        **_metadata_values(description="Short", description_truncated=True)
-    )
+    metadata = SkillMetadata(**_metadata_values(description="Short", description_truncated=True))
 
     assert metadata.description == "Short"
     assert metadata.description_truncated is True
-
-
-def test_skill_metadata_rejects_blank_description() -> None:
-    with pytest.raises(ValidationError, match="description"):
-        SkillMetadata(**_metadata_values(description="   "))
 
 
 @pytest.mark.parametrize("max_chars", (True, False, 0, -1, "10"))
@@ -167,12 +137,3 @@ def test_discovery_options_require_a_strict_positive_description_limit(
             roots=((SkillScope.PROJECT, Path("C:/workspace/.agents/skills")),),
             max_description_chars=max_chars,  # type: ignore[arg-type]
         )
-
-
-@pytest.mark.parametrize("field_name", ("code", "message"))
-def test_diagnostic_rejects_blank_required_text(field_name: str) -> None:
-    values = {"code": "invalid_skill", "message": "Invalid skill"}
-    values[field_name] = "   "
-
-    with pytest.raises(ValidationError, match=field_name):
-        SkillDiagnostic(**values)

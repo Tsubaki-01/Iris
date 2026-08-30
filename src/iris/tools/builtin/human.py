@@ -65,13 +65,12 @@ class AskQuestionTool(BaseTool):
     def build_interaction_prompt(
         self,
         *,
-        params: AskQuestionInput | dict[str, Any],
+        params: AskQuestionInput,
     ) -> QuestionPrompt:
         """将已验证输入转换为向人展示的问题。"""
-        input_data = AskQuestionInput.model_validate(params)
-        return QuestionPrompt(
-            question=input_data.question,
-            options=input_data.options,
+        return QuestionPrompt.model_construct(
+            question=params.question,
+            options=params.options,
         )
 
     async def arun(
@@ -80,8 +79,7 @@ class AskQuestionTool(BaseTool):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """拒绝绕过 runtime 直接执行 human question。"""
-        del context
-        AskQuestionInput.model_validate(params)
+        del params, context
         raise IrisHITLError("HITL_PROTOCOL_ERROR: ask_question 必须由 runtime 处理")
 
 

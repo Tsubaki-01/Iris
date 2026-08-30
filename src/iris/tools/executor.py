@@ -15,9 +15,10 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from ..exceptions import (
     IrisCancellationRequestedError,
@@ -58,23 +59,24 @@ class ToolEffectGuard(Protocol):
         """仅在 durable effect claim 成功后返回。"""
 
 
-class PreparedToolCall(BaseModel):
+@dataclass(frozen=True, slots=True)
+class PreparedToolCall:
     """无副作用预检后的一条工具调用计划。"""
 
     tool_use: ToolUseBlock
     tool: BaseTool | None = None
-    validated_params: dict[str, Any] = Field(default_factory=dict)
+    validated_input: BaseModel | dict[str, Any] | None = None
+    arguments: dict[str, Any] = field(default_factory=dict)
     permission: PermissionDecision | None = None
     human_request: HumanInteractionRequest | None = None
     preflight_result: ToolResult | None = None
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-
-class ToolBatchPlan(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ToolBatchPlan:
     """保持原始顺序的一组工具预检结果。"""
 
-    calls: list[PreparedToolCall] = Field(default_factory=list)
+    calls: tuple[PreparedToolCall, ...] = ()
 
     @property
     def first_human_gate(self) -> PreparedToolCall | None:
@@ -201,7 +203,7 @@ class ToolExecutor:
     ) -> ToolBatchPlan:
         """在不触发执行生命周期的情况下预检一批工具调用。"""
         calls = [self._prepare_call(tool_use, context) for tool_use in tool_uses]
-        return ToolBatchPlan(calls=calls)
+        return ToolBatchPlan(calls=tuple(calls))
 
     async def execute_prepared(
         self,
@@ -211,8 +213,8 @@ class ToolExecutor:
         approved_tool_call_id: str | None = None,
         effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
-        """重新验证当前权限后执行一条预检调用。"""
-        current = self._prepare_call(prepared.tool_use, context)
+        """刷新当前权限后执行一条已完成输入校验的调用。"""
+        current = self._refresh_permission(prepared, context)
         return await self._execute_current(
             current,
             context,
@@ -256,52 +258,19 @@ class ToolExecutor:
         tool: BaseTool | None = None
         try:
             tool = self.registry.get(tool_use.name)
-            params = tool.validate_input(tool_use.input)
-            raw_params = params.model_dump() if isinstance(params, BaseModel) else dict(params)
-            decision = self.permission_policy.check(tool, raw_params, context)
-            preflight_result: ToolResult | None = None
-            if decision.effect is PermissionEffect.DENY:
-                preflight_result = self._error_result(
-                    tool_use,
-                    "PERMISSION_ERROR",
-                    decision.reason,
-                    details={
-                        "require_confirmation": False,
-                        "effect": decision.effect.value,
-                        **decision.metadata,
-                    },
-                )
-            elif (
-                tool.definition.group == "human"
-                and decision.effect is PermissionEffect.REQUIRE_HUMAN
-            ):
-                preflight_result = self._error_result(
-                    tool_use,
-                    "PERMISSION_ERROR",
-                    "human interaction tool 不能同时要求额外人工授权",
-                    details={
-                        "require_confirmation": True,
-                        "effect": decision.effect.value,
-                        **decision.metadata,
-                    },
-                )
-            human_request = None
-            if preflight_result is None:
-                human_request = _human_interaction_request(
-                    tool_use,
-                    tool,
-                    raw_params,
-                    decision,
-                    context,
-                )
-            return PreparedToolCall(
+            validated_input = tool.validate_input(tool_use.input)
+            arguments = (
+                validated_input.model_dump()
+                if isinstance(validated_input, BaseModel)
+                else dict(validated_input)
+            )
+            prepared = PreparedToolCall(
                 tool_use=tool_use,
                 tool=tool,
-                validated_params=raw_params,
-                permission=decision,
-                human_request=human_request,
-                preflight_result=preflight_result,
+                validated_input=validated_input,
+                arguments=arguments,
             )
+            return self._refresh_permission(prepared, context)
         except IrisToolNotFoundError:
             return PreparedToolCall(
                 tool_use=tool_use,
@@ -323,6 +292,84 @@ class ToolExecutor:
                 tool=tool,
                 preflight_result=self._error_result(tool_use, "PERMISSION_ERROR", str(exc)),
             )
+
+    def _refresh_permission(
+        self,
+        prepared: PreparedToolCall,
+        context: ToolExecutionContext,
+    ) -> PreparedToolCall:
+        """只刷新已校验调用的权限与 HITL 投影。"""
+        tool = prepared.tool
+        validated_input = prepared.validated_input
+        if tool is None or validated_input is None:
+            return prepared
+        try:
+            decision = self.permission_policy.check(tool, prepared.arguments, context)
+            preflight_result = self._permission_preflight_result(
+                prepared.tool_use,
+                tool,
+                decision,
+            )
+            human_request = (
+                None
+                if preflight_result is not None
+                else _human_interaction_request(
+                    prepared.tool_use,
+                    tool,
+                    validated_input,
+                    prepared.arguments,
+                    decision,
+                    context,
+                )
+            )
+            return replace(
+                prepared,
+                permission=decision,
+                human_request=human_request,
+                preflight_result=preflight_result,
+            )
+        except Exception as exc:
+            return replace(
+                prepared,
+                permission=None,
+                human_request=None,
+                preflight_result=self._error_result(
+                    prepared.tool_use,
+                    "PERMISSION_ERROR",
+                    str(exc),
+                ),
+            )
+
+    def _permission_preflight_result(
+        self,
+        tool_use: ToolUseBlock,
+        tool: BaseTool,
+        decision: PermissionDecision,
+    ) -> ToolResult | None:
+        """把当前 permission decision 投影为预检错误。"""
+        if decision.effect is PermissionEffect.DENY:
+            return self._error_result(
+                tool_use,
+                "PERMISSION_ERROR",
+                decision.reason,
+                details={
+                    "require_confirmation": False,
+                    "effect": decision.effect.value,
+                    **decision.metadata,
+                },
+            )
+        if tool.definition.group == "human" and decision.effect is PermissionEffect.REQUIRE_HUMAN:
+            return self._error_result(
+                tool_use,
+                "PERMISSION_ERROR",
+                "human interaction tool 不能同时要求额外人工授权",
+                details={
+                    "require_confirmation": True,
+                    "effect": decision.effect.value,
+                    **decision.metadata,
+                },
+            )
+        return None
 
     def _permission_error(
         self,
@@ -381,7 +428,8 @@ class ToolExecutor:
         """执行已通过当前鉴权的调用及其生命周期。"""
         tool_use = prepared.tool_use
         tool = cast(BaseTool, prepared.tool)
-        params = prepared.validated_params
+        validated_input = cast(BaseModel | dict[str, Any], prepared.validated_input)
+        arguments = prepared.arguments
         context.call_id = tool_use.id
         context.tool_name = tool_use.name
         if self.circuit_breaker is not None:
@@ -401,12 +449,12 @@ class ToolExecutor:
         if context.cancellation is not None:
             context.cancellation.raise_if_requested()
         try:
-            middleware_error = await self._run_before_call(tool, params, context)
+            middleware_error = await self._run_before_call(tool, arguments, context)
             if middleware_error is not None:
                 self._record_breaker_result(tool.name, middleware_error)
                 return middleware_error
             try:
-                result = await tool.arun(params, context)
+                result = await tool.arun(validated_input, context)
             except IrisCancellationRequestedError:
                 raise
             except Exception as exc:
@@ -534,8 +582,8 @@ class ToolExecutor:
             return False
         try:
             return prepared.tool.is_read_only(
-                prepared.validated_params
-            ) and prepared.tool.is_concurrency_safe(prepared.validated_params)
+                prepared.arguments
+            ) and prepared.tool.is_concurrency_safe(prepared.arguments)
         except Exception:
             return False
 
@@ -698,7 +746,8 @@ def _copy_context_for_parallel_call(
 def _human_interaction_request(
     tool_use: ToolUseBlock,
     tool: BaseTool,
-    params: dict[str, Any],
+    validated_input: BaseModel | dict[str, Any],
+    arguments: dict[str, Any],
     decision: PermissionDecision,
     context: ToolExecutionContext,
 ) -> HumanInteractionRequest | None:
@@ -706,13 +755,13 @@ def _human_interaction_request(
     if tool.definition.group == "human":
         builder = getattr(tool, "build_interaction_prompt", None)
         if callable(builder):
-            prompt = builder(params=params)
+            prompt = builder(params=validated_input)
     elif decision.effect is PermissionEffect.REQUIRE_HUMAN:
         prompt = PermissionPrompt(reason=decision.reason)
     if prompt is None:
         return None
 
-    tool_call = _tool_call_snapshot(tool_use, tool, params, context)
+    tool_call = _tool_call_snapshot(tool_use, tool, arguments, context)
     return HumanInteractionRequest(tool_call=tool_call, prompt=prompt)
 
 

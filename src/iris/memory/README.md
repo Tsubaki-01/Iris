@@ -150,6 +150,8 @@ result = await runner.start(
 
 工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；默认
 可同时读取自身 scope 和约定的 workspace-shared scope，并按 item ID 去重。
+`MemoryQuery`、`memory_search` 与 `memory_list` 的 `limit` 都声明为 `1..100`；工具输入在 raw
+边界验证后投影为 trusted `MemoryQuery`，不会重复校验相同范围。
 工具会先在事件循环执行 access policy，再把完整的多 scope 读取作为一个 service job 调度；
 不会按 scope 重复切换线程。
 

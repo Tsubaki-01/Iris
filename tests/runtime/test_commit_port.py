@@ -66,6 +66,7 @@ def _store_commit_port(
         store=store,
         run=created.run,
         activation_id="activation_1",
+        cursor=before,
         clock=lambda: NOW,
         event_sink=[] if event_sink is None else event_sink,
         durable_event_callback=durable_event_callback,
@@ -267,6 +268,7 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
         store=owner,
         run=created.run,
         activation_id="activation_1",
+        cursor=before,
         clock=lambda: NOW,
         event_sink=events,
     )

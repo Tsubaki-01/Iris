@@ -13,7 +13,10 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
+from dataclasses import replace as dataclass_replace
 from datetime import datetime
+from enum import Enum
 from threading import RLock
 from typing import Any, Protocol
 
@@ -66,6 +69,15 @@ from ..lifecycle.store import (
     ResumeWaitingRun,
     RunCommit,
     SuspendRun,
+)
+from ..lifecycle.transitions import (
+    abandon_activation,
+    claim_tool_call,
+    commit_tool_call,
+    commit_tool_usage,
+    replace_run,
+    reserve_model_step,
+    settle_activation,
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
@@ -245,9 +257,8 @@ class InMemoryLifecycleStore:
                 status=ActivationStatus.ACTIVE,
                 started_at=command.now,
             )
-            rebound = RunCheckpoint.model_validate(
-                checkpoint.model_dump()
-                | {
+            rebound = checkpoint.model_copy(
+                update={
                     "sequence": checkpoint.sequence + 1,
                     "activation_id": activation.activation_id,
                 }
@@ -303,10 +314,7 @@ class InMemoryLifecycleStore:
             run = self._require_active(command)
             if run.usage.model_steps_reserved >= run.options.limits.max_model_steps:
                 return self._finish_budget_exhausted(run, command.now, command)
-            usage = RunUsage.model_validate(
-                run.usage.model_dump()
-                | {"model_steps_reserved": run.usage.model_steps_reserved + 1}
-            )
+            usage = reserve_model_step(run.usage)
             checkpoint = self._require_checkpoint(run.run_id).model_copy(
                 update={"model_steps_reserved": usage.model_steps_reserved}
             )
@@ -413,15 +421,10 @@ class InMemoryLifecycleStore:
                 raise IrisRunStateError("只有 prepared tool call 可以 claim")
             if run.cancellation_requested_at is not None:
                 raise IrisRunStateError("已请求取消的 run 不接受新的 tool call claim")
-            claimed = RunToolCallRecord.model_validate(
-                tool_call.model_dump()
-                | {
-                    "phase": ToolCallPhase.CLAIMED,
-                    "claim_activation_id": command.activation_id,
-                    "version": tool_call.version + 1,
-                    "updated_at": command.now,
-                    "claimed_at": command.now,
-                }
+            claimed = claim_tool_call(
+                tool_call,
+                activation_id=command.activation_id,
+                now=command.now,
             )
             sequence = run.last_event_sequence + 1
             updated = self._replace_run(
@@ -490,20 +493,12 @@ class InMemoryLifecycleStore:
                 next_session.revision,
                 run.usage,
             )
-            committed_call = RunToolCallRecord.model_validate(
-                tool_call.model_dump()
-                | {
-                    "phase": ToolCallPhase.COMMITTED,
-                    "result": command.result,
-                    "version": tool_call.version + 1,
-                    "updated_at": command.now,
-                    "committed_at": command.now,
-                }
+            committed_call = commit_tool_call(
+                tool_call,
+                result=command.result,
+                now=command.now,
             )
-            usage = RunUsage.model_validate(
-                run.usage.model_dump()
-                | {"tool_calls_committed": run.usage.tool_calls_committed + 1}
-            )
+            usage = commit_tool_usage(run.usage)
             sequence = run.last_event_sequence + 1
             updated = self._replace_run(
                 run,
@@ -585,13 +580,10 @@ class InMemoryLifecycleStore:
                 update={"interaction_id": interaction.interaction_id}
             )
             activation = self._require_activation(command.activation_id)
-            settled = ActivationRecord.model_validate(
-                activation.model_dump()
-                | {
-                    "status": ActivationStatus.SETTLED,
-                    "outcome": ActivationOutcome.SUSPENDED,
-                    "ended_at": command.now,
-                }
+            settled = settle_activation(
+                activation,
+                outcome=ActivationOutcome.SUSPENDED,
+                ended_at=command.now,
             )
             sequence = run.last_event_sequence + 1
             updated = self._replace_run(
@@ -873,13 +865,10 @@ class InMemoryLifecycleStore:
             if run.phase is RunPhase.ACTIVE:
                 activation = self._require_activation(run.current_activation_id)
                 outcome = self._activation_outcome(command.stop_reason)
-                settled = ActivationRecord.model_validate(
-                    activation.model_dump()
-                    | {
-                        "status": ActivationStatus.SETTLED,
-                        "outcome": outcome,
-                        "ended_at": command.now,
-                    }
+                settled = settle_activation(
+                    activation,
+                    outcome=outcome,
+                    ended_at=command.now,
                 )
             else:
                 activation = None
@@ -994,13 +983,10 @@ class InMemoryLifecycleStore:
                 if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN
                 else ActivationOutcome.RECOVERED
             )
-            abandoned = ActivationRecord.model_validate(
-                activation.model_dump()
-                | {
-                    "status": ActivationStatus.ABANDONED,
-                    "outcome": abandoned_outcome,
-                    "ended_at": command.now,
-                }
+            abandoned = abandon_activation(
+                activation,
+                outcome=abandoned_outcome,
+                ended_at=command.now,
             )
             first_sequence = run.last_event_sequence + 1
             abandoned_event = self._event(
@@ -1151,9 +1137,8 @@ class InMemoryLifecycleStore:
                     status=ActivationStatus.ACTIVE,
                     started_at=command.now,
                 )
-                rebound = RunCheckpoint.model_validate(
-                    checkpoint.model_dump()
-                    | {
+                rebound = checkpoint.model_copy(
+                    update={
                         "sequence": checkpoint.sequence + 1,
                         "activation_id": activation_next.activation_id,
                         "resumability": CheckpointResumability.SAFE,
@@ -1367,7 +1352,7 @@ class InMemoryLifecycleStore:
 
     @staticmethod
     def _replace_run(run: RunRecord, **changes: Any) -> RunRecord:
-        return RunRecord.model_validate(run.model_dump() | changes)
+        return replace_run(run, **changes)
 
     @staticmethod
     def _event(
@@ -1577,13 +1562,10 @@ class InMemoryLifecycleStore:
         command: ReserveModelStep,
     ) -> RunCommit:
         activation = self._require_activation(run.current_activation_id)
-        settled = ActivationRecord.model_validate(
-            activation.model_dump()
-            | {
-                "status": ActivationStatus.SETTLED,
-                "outcome": ActivationOutcome.FAILED,
-                "ended_at": now,
-            }
+        settled = settle_activation(
+            activation,
+            outcome=ActivationOutcome.FAILED,
+            ended_at=now,
         )
         sequence = run.last_event_sequence + 1
         updated = self._replace_run(
@@ -1619,11 +1601,11 @@ class InMemoryLifecycleStore:
         return self._store_replay("reserve_model_step", command, commit)
 
     @staticmethod
-    def _replay_key(operation: str, command: BaseModel) -> str:
-        payload = command.model_dump(mode="json")
+    def _replay_key(operation: str, command: object) -> str:
+        payload = _jsonable(command)
         return f"{operation}:{json.dumps(payload, allow_nan=False, sort_keys=True)}"
 
-    def _load_replay(self, operation: str, command: BaseModel) -> RunCommit | None:
+    def _load_replay(self, operation: str, command: object) -> RunCommit | None:
         replay = self._replays.get(self._replay_key(operation, command))
         if replay is None:
             return None
@@ -1635,28 +1617,43 @@ class InMemoryLifecycleStore:
             if replay.interaction is not None
             else None
         )
-        current = replay.model_copy(
-            deep=True,
-            update={
-                "run": deepcopy(run),
-                "session": deepcopy(session),
-                "checkpoint": deepcopy(checkpoint),
-                "interaction": deepcopy(interaction),
-                "events": (),
-                "result": deepcopy(self._results.get(run.run_id)),
-            },
+        current = dataclass_replace(
+            replay,
+            run=deepcopy(run),
+            session=deepcopy(session),
+            checkpoint=deepcopy(checkpoint),
+            interaction=deepcopy(interaction),
+            events=(),
+            result=deepcopy(self._results.get(run.run_id)),
         )
         return deepcopy(current)
 
     def _store_replay(
         self,
         operation: str,
-        command: BaseModel,
+        command: object,
         commit: RunCommit,
     ) -> RunCommit:
         isolated = deepcopy(commit)
         self._replays[self._replay_key(operation, command)] = isolated
         return deepcopy(isolated)
+
+
+def _jsonable(value: object) -> object:
+    """把 replay key 的内部 command 投影为稳定 JSON 值。"""
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if is_dataclass(value) and not isinstance(value, type):
+        return {item.name: _jsonable(getattr(value, item.name)) for item in fields(value)}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 __all__ = ["InMemoryLifecycleStore"]

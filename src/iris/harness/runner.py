@@ -225,11 +225,7 @@ class AgentRunner:
 
         ``observer_event_timeout_s`` 必须是有限正数；默认 30 秒。
         """
-        if (
-            isinstance(observer_event_timeout_s, bool)
-            or not math.isfinite(observer_event_timeout_s)
-            or observer_event_timeout_s <= 0
-        ):
+        if not math.isfinite(observer_event_timeout_s) or observer_event_timeout_s <= 0:
             raise ValueError("observer_event_timeout_s 必须是有限正数")
         self.runtime = runtime
         self.store = store
@@ -241,10 +237,7 @@ class AgentRunner:
         self.interaction_service = interaction_service or HumanInteractionService()
         # HITL 决定必须只落在 runner 的 aggregate transaction 里；带自有 store 的实现会
         # 造成第二条持久化路径，因此在装配期直接拒绝。
-        if hasattr(self.interaction_service, "store") or any(
-            not callable(getattr(self.interaction_service, name, None))
-            for name in ("create_pending", "validate_response", "project_response")
-        ):
+        if hasattr(self.interaction_service, "store"):
             raise IrisRunStateError("runner interaction service 必须是无状态领域服务")
         self.environment_fingerprint = compute_environment_fingerprint(runtime)
         self._active: dict[str, ActiveActivation] = {}
@@ -403,6 +396,7 @@ class AgentRunner:
             store=self.store,
             run=created.run,
             activation_id=activation_id,
+            cursor=cursor,
             clock=self._now,
             event_sink=active.events,
             durable_event_callback=durable_event_callback,
@@ -561,7 +555,12 @@ class AgentRunner:
             raise IrisRunConflictError("rebound checkpoint cursor 与 waiting checkpoint 不匹配")
         # HITL 领域模型与 runtime 输入模型是两套边界类型，批准分支需要显式转换。
         runtime_projection = (
-            RuntimeApprovedToolCall.model_validate(projection.model_dump())
+            RuntimeApprovedToolCall.model_construct(
+                interaction_id=projection.interaction_id,
+                tool_call_id=projection.tool_call_id,
+                tool_name=projection.tool_name,
+                fingerprint=projection.fingerprint,
+            )
             if isinstance(projection, ApprovedToolCall)
             else projection
         )
@@ -577,6 +576,7 @@ class AgentRunner:
             store=self.store,
             run=begun.run,
             activation_id=activation_id,
+            cursor=cursor,
             clock=self._now,
             event_sink=active.events,
             durable_event_callback=durable_event_callback,
@@ -811,7 +811,7 @@ class AgentRunner:
             return self._require_result(run.run_id)
         if recovered.checkpoint is None or recovered_cursor is None or new_activation_id is None:
             raise IrisRunRecoveryError("recover commit 缺少 rebound activation facts")
-        if RuntimeCursor.model_validate(recovered.checkpoint.engine_cursor) != recovered_cursor:
+        if recovered.checkpoint.engine_cursor != recovered_cursor.model_dump(mode="json"):
             raise IrisRunConflictError("recover rebound checkpoint cursor 已变化")
 
         # --- 5. 绑定新 activation 并继续推进 ---
@@ -826,6 +826,7 @@ class AgentRunner:
             store=self.store,
             run=recovered.run,
             activation_id=new_activation_id,
+            cursor=recovered_cursor,
             clock=self._now,
             event_sink=active.events,
             interaction_service=self.interaction_service,
@@ -1046,21 +1047,17 @@ class AgentRunner:
             expiry = (
                 interaction.expires_at if interaction.status is InteractionStatus.PENDING else None
             )
-            deadline_due = deadline is not None and now >= deadline
-            expiry_due = expiry is not None and now >= expiry
-            if deadline_due and expiry_due:
-                if deadline is None or expiry is None:  # pragma: no cover - 已由 due facts 收窄
-                    raise IrisRunStateError("waiting due facts 不完整")
+            if deadline is not None and expiry is not None and now >= deadline and now >= expiry:
                 stop_reason = (
                     RunStopReason.DEADLINE_EXCEEDED
                     if deadline <= expiry
                     else RunStopReason.INTERACTION_EXPIRED
                 )
                 close_reason = stop_reason.value
-            elif deadline_due:
+            elif deadline is not None and now >= deadline:
                 stop_reason = RunStopReason.DEADLINE_EXCEEDED
                 close_reason = "deadline_exceeded"
-            elif expiry_due:
+            elif expiry is not None and now >= expiry:
                 stop_reason = RunStopReason.INTERACTION_EXPIRED
                 close_reason = "interaction_expired"
         if stop_reason is None:
@@ -1200,7 +1197,6 @@ class AgentRunner:
         port: StoreRuntimeCommitPort,
     ) -> None:
         """把被中断的 async operation 映射为可证明的 durable outcome。"""
-        del port  # settlement 走 runner 自己的 finish_run，不复用已收口的 activation port。
         current = self.store.load_run(active.run_id)
         if current is None:
             raise IrisRunNotFoundError("run 在 cancellation 期间消失", run_id=active.run_id)
@@ -1247,16 +1243,12 @@ class AgentRunner:
         port: StoreRuntimeCommitPort,
     ) -> None:
         """校验 engine outcome 与 durable 事实一致后结算 run。"""
-        del port  # settlement 走 runner 自己的 finish_run，不复用已收口的 activation port。
         current = self.store.load_run(active.run_id)
         if current is None:
             raise IrisRunNotFoundError("run 在 activation 期间消失", run_id=active.run_id)
         # engine 的最终 cursor 必须已经落库，否则说明有 commit 丢失或被其它 activation 覆盖。
         checkpoint = self.store.load_checkpoint(active.run_id)
-        if (
-            checkpoint is None
-            or RuntimeCursor.model_validate(checkpoint.engine_cursor) != result.cursor
-        ):
+        if port.cursor != result.cursor or checkpoint != port.checkpoint:
             raise IrisRunConflictError("engine outcome cursor 与 durable checkpoint 不匹配")
         if current.phase is RunPhase.TERMINAL:
             return

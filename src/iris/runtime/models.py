@@ -9,14 +9,9 @@ from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
-from pydantic_core import PydanticSerializationError
 
 from ..hitl import HumanInteraction
-from ..lifecycle.models import (
-    RunErrorInfo,
-    RuntimeExecutionOptions,
-    validate_json_safe,
-)
+from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions
 from ..message import Msg, ToolUseBlock
 from ..tools import ToolResult
 
@@ -50,16 +45,6 @@ class RuntimeCursor(_FrozenRuntimeModel):
     assistant_message: Msg | None = None
     read_state: dict[str, Any] | None = None
 
-    @field_validator("read_state")
-    @classmethod
-    def _validate_read_state(
-        cls,
-        value: dict[str, Any] | None,
-    ) -> dict[str, Any] | None:
-        if value is None:
-            return None
-        return validate_json_safe(value, field_name="read_state")
-
     @model_validator(mode="after")
     def _validate_position(self) -> RuntimeCursor:
         call_ids = [call.id for call in self.tool_calls]
@@ -92,11 +77,6 @@ class RuntimeCursor(_FrozenRuntimeModel):
                 raise ValueError("outcome_ready cursor 必须包含 assistant message")
             if self.next_tool_index != len(self.tool_calls):
                 raise ValueError("outcome_ready cursor 不能包含未提交工具调用")
-        try:
-            serialized = self.model_dump(mode="json")
-        except (PydanticSerializationError, TypeError, ValueError) as exc:
-            raise ValueError("runtime cursor 必须是 JSON-safe") from exc
-        validate_json_safe(serialized, field_name="runtime cursor")
         return self
 
 
@@ -154,14 +134,8 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
                 raise ValueError("初始 recover activation 必须包含非空 input")
         elif self.input is not None:
             raise ValueError("非初始 recover activation 不能重复携带用户 input")
-        if self.interaction_projection is not None:
-            if self.cursor.position != "tool_batch":
-                raise ValueError("interaction projection 必须绑定 tool_batch cursor")
-            try:
-                projection = self.interaction_projection.model_dump(mode="json")
-            except (PydanticSerializationError, TypeError, ValueError) as exc:
-                raise ValueError("interaction projection 必须是 JSON-safe") from exc
-            validate_json_safe(projection, field_name="interaction projection")
+        if self.interaction_projection is not None and self.cursor.position != "tool_batch":
+            raise ValueError("interaction projection 必须绑定 tool_batch cursor")
         return self
 
 

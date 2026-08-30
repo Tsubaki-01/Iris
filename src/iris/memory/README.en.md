@@ -131,8 +131,10 @@ tool-payload helpers are not extension contracts.
 `register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
 `READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
 scope; `MemoryAccessPolicy` derives read/write scopes from trusted host context and can include the
-workspace-shared scope. Tools evaluate that policy on the event loop, then submit the entire
-multi-scope read as one service job rather than switching threads once per scope.
+workspace-shared scope. `MemoryQuery`, `memory_search`, and `memory_list` all declare a `1..100`
+limit. After raw tool input passes that boundary, it is projected to a trusted `MemoryQuery`
+without repeating the same range validation. Tools evaluate access policy on the event loop, then
+submit the entire multi-scope read as one service job rather than switching threads once per scope.
 
 `FileMemoryMirror` creates the fixed Memory/User/Feedback/Reference/Tasks/Sessions projection and
 can deterministically rebuild active items plus the most recent 100 events for one scope. It is not

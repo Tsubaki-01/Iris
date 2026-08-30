@@ -148,9 +148,7 @@ def _scan_root(
             continue
 
         try:
-            has_skill_file = any(
-                child.name == SKILL_FILE_NAME for child in candidate.iterdir()
-            )
+            has_skill_file = any(child.name == SKILL_FILE_NAME for child in candidate.iterdir())
         except OSError as exc:
             diagnostics.append(
                 SkillDiagnostic(
@@ -220,24 +218,13 @@ def _load_skill(
     max_description_chars: int,
 ) -> SkillMetadata:
     """严格加载单个 Skill 目录并构造不含正文的元数据。"""
-    if _NAME_RE.fullmatch(skill_dir.name) is None:
-        raise IrisSkillFormatError(
-            "Skill 目录名必须是小写 kebab-case",
-            path=str(skill_dir.resolve(strict=False)),
-            name=skill_dir.name,
-        )
-
     resolved_workspace = workspace_root
     resolved_root = root
     resolved_skill_dir = skill_dir.resolve(strict=False)
 
     try:
         skill_file = next(
-            (
-                child
-                for child in skill_dir.iterdir()
-                if child.name == SKILL_FILE_NAME
-            ),
+            (child for child in skill_dir.iterdir() if child.name == SKILL_FILE_NAME),
             None,
         )
     except OSError as exc:
@@ -310,21 +297,17 @@ def _load_skill(
     raw_name = frontmatter.get("name")
     declared_name = None if raw_name is None else str(raw_name)
     extra_frontmatter = {
-        key: value
-        for key, value in frontmatter.items()
-        if key not in {"name", "description"}
+        key: value for key, value in frontmatter.items() if key not in {"name", "description"}
     }
     del _body
 
-    return SkillMetadata(
+    return SkillMetadata.model_construct(
         name=skill_dir.name,
         description=description,
         scope=scope,
         skill_file=resolved_skill_file,
         root_dir=resolved_skill_dir,
-        relative_skill_file=resolved_skill_file.relative_to(
-            resolved_workspace
-        ).as_posix(),
+        relative_skill_file=resolved_skill_file.relative_to(resolved_workspace).as_posix(),
         root_index=root_index,
         description_truncated=description_truncated,
         declared_name=declared_name,

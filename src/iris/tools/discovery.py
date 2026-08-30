@@ -10,9 +10,9 @@ import json
 import math
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from ..exceptions import IrisToolValidationError
 from ..message import TextBlock
@@ -43,7 +43,16 @@ class ToolSearchInput(BaseModel):
 
     query: str
     include_groups: list[str] | None = None
-    limit: int = 10
+    limit: int = Field(default=10, gt=0, le=50)
+
+    @field_validator("query")
+    @classmethod
+    def _validate_query(cls, value: str) -> str:
+        """规范化并拒绝空白查询。"""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("query 不能为空")
+        return normalized
 
     def normalized_groups(self) -> set[str] | None:
         """返回去重后的组过滤集合。
@@ -226,7 +235,11 @@ class ToolSearchTool(BaseTool):
             input_schema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "搜索关键词。"},
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "搜索关键词。",
+                    },
                     "include_groups": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -235,6 +248,8 @@ class ToolSearchTool(BaseTool):
                     "limit": {
                         "type": "integer",
                         "default": 10,
+                        "minimum": 1,
+                        "maximum": 50,
                         "description": "最大返回数量。",
                     },
                 },
@@ -289,11 +304,6 @@ class ToolSearchTool(BaseTool):
         except ValueError as exc:
             raise IrisToolValidationError("tool_search 参数校验失败", error=str(exc)) from exc
 
-        if not value.query.strip():
-            raise IrisToolValidationError("tool_search query 不能为空")
-        if value.limit < 1:
-            raise IrisToolValidationError("tool_search limit 必须大于 0")
-
         return value
 
     async def arun(
@@ -311,10 +321,7 @@ class ToolSearchTool(BaseTool):
             ToolResult: 包含检索出的候选工具摘要组成的成功负载结构。
         """
         del context
-        if isinstance(params, ToolSearchInput):
-            search_input = params
-        else:
-            search_input = ToolSearchInput.model_validate(params)
+        search_input = cast(ToolSearchInput, params)
 
         matches = self.registry.search_deferred(
             search_input.query,
@@ -367,12 +374,10 @@ def _validated_query(query: str, limit: int) -> tuple[str, dict[str, float], int
         IrisToolValidationError: 如果最终词汇全为空则抛异常。
     """
     normalized_query = query.strip().lower()
-    if not normalized_query:
-        raise IrisToolValidationError("tool_search query 不能为空")
     query_terms = _token_weights(normalized_query)
     if not query_terms:
         raise IrisToolValidationError("tool_search query 必须包含可搜索文本")
-    return normalized_query, query_terms, min(max(limit, 1), 50)
+    return normalized_query, query_terms, limit
 
 
 def _bm25_score(

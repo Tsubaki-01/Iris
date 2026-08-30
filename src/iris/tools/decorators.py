@@ -15,12 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from ..exceptions import IrisToolValidationError
-from .base import (
-    CallableExecutionMode,
-    ToolCapability,
-    _validated_callable_execution_mode,
-)
+from .base import CallableExecutionMode, ToolCapability
 
 # endregion
 
@@ -83,10 +78,6 @@ def tool(
         ...     return "content"
     """
 
-    validated_mode = _validated_callable_execution_mode(execution_mode)
-    if concurrency_safe is not None and not isinstance(concurrency_safe, bool):
-        raise IrisToolValidationError("callable concurrency_safe 必须是 bool")
-
     def decorator(func: F) -> F:
         func.__dict__["iris_tool_name"] = name
         func.__dict__["iris_tool_description"] = description
@@ -99,8 +90,8 @@ def tool(
         func.__dict__["iris_tool_version"] = version
         func.__dict__["iris_tool_deprecated"] = deprecated
         func.__dict__["iris_tool_deprecation_message"] = deprecation_message
-        if validated_mode is not None:
-            func.__dict__["iris_tool_execution_mode"] = validated_mode
+        if execution_mode is not None:
+            func.__dict__["iris_tool_execution_mode"] = execution_mode
         if concurrency_safe is not None:
             func.__dict__["iris_tool_concurrency_safe"] = concurrency_safe
         if registry is not None:
