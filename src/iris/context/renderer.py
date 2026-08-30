@@ -21,6 +21,14 @@ class ContextXmlRenderer:
         """将一个 section 的 slot 渲染为 XML。"""
         if not _is_safe_xml_name(root_tag):
             raise IrisContextError("context XML 根标签必须是安全的 XML 名称")
+        return self._render_trusted_section(root_tag, slots)
+
+    def _render_trusted_section(
+        self,
+        root_tag: str,
+        slots: list[ContextSlot],
+    ) -> str:
+        """渲染框架已验证或固定定义的 XML 根标签。"""
         rendered_slots = [self.render_slot(slot) for slot in slots]
         body = "\n".join(_indent(slot_xml, spaces=2) for slot_xml in rendered_slots)
         return f"<{root_tag}>\n{body}\n</{root_tag}>"

@@ -228,7 +228,7 @@ async def test_deadline_signal_before_effect_guard_prevents_new_tool_effect(
             context: ToolExecutionContext,
         ) -> PermissionDecision:
             self.checks += 1
-            if self.checks == 3:
+            if self.checks == 2:
                 assert context.cancellation is not None
                 clock.advance(seconds=2)
                 cast(Any, context.cancellation).request_deadline()
@@ -241,11 +241,12 @@ async def test_deadline_signal_before_effect_guard_prevents_new_tool_effect(
     registry = ToolRegistry()
     registry.register_function(effect, description="副作用")
     store = InMemoryLifecycleStore()
+    policy = DeadlineOnExecutePolicy()
     runner = AgentRunner(
         runtime=build_runtime(
             tmp_path,
             registry=registry,
-            permission_policy=DeadlineOnExecutePolicy(),
+            permission_policy=policy,
             provider=StaticProvider(
                 tool_response(ToolUseBlock(id="deadline-effect-1", name="effect", input={}))
             ),
@@ -261,6 +262,7 @@ async def test_deadline_signal_before_effect_guard_prevents_new_tool_effect(
 
     assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
     assert effects == []
+    assert policy.checks == 2
     [tool_call] = store.list_tool_calls("run-deadline-effect")
     assert tool_call.phase is ToolCallPhase.PREPARED
     [tool_result] = store.load_session("default").messages[-1].tool_results

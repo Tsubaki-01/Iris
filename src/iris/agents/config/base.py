@@ -211,7 +211,7 @@ class AgentContextConfig(BaseModel):
             raise ValueError("context.path 不能为空")
         config_path: Path | None = (info.context or {}).get("config_path")
         if config_path is not None:
-            p = Path(value) if isinstance(value, str) else Path(value)
+            p = Path(value)
             if not p.is_absolute():
                 return (config_path.parent / p).resolve()
         return value
@@ -241,18 +241,6 @@ class AgentConfig(BaseModel):
     session: SessionConfig = Field(default_factory=SessionConfig)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _validate_prompt_source_keys(cls, data: Any) -> Any:
-        """校验 system 和 context 配置键只能二选一。"""
-        if not isinstance(data, dict):
-            return data
-        has_system = "system" in data
-        has_context = "context" in data
-        if has_system == has_context:
-            raise ValueError("system 和 context 必须且只能配置一个")
-        return data
 
     @model_validator(mode="before")
     @classmethod

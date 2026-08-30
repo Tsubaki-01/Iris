@@ -69,7 +69,7 @@ type SubmissionFailureReason = Literal[
 
 
 def _require_positive_capacity(value: int, *, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if value <= 0:
         raise ValueError(f"{name} 必须是正整数")
 
 
@@ -166,7 +166,8 @@ class _EventPageReader(Protocol):
     ) -> list[RunEvent]: ...
 
 
-class _PendingInput(BaseModel):
+@dataclass(frozen=True, slots=True)
+class _PendingInput:
     """尚未证明 durable delivery 的单条 transient input。
 
     Attributes:
@@ -177,28 +178,11 @@ class _PendingInput(BaseModel):
         options (AgentRunOptions | None): 仅 follow-up 可携带，用于其未来的 run create。
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
-
     submission_id: str
     input: str
     mode: SubmissionMode
     run_id: str
     options: AgentRunOptions | None = None
-
-    @field_validator("submission_id", "input", "run_id")
-    @classmethod
-    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError(f"{info.field_name} 不能为空")
-        return normalized
-
-    @model_validator(mode="after")
-    def _validate_options(self) -> _PendingInput:
-        # steer 加入的是已存在 run，其 options 早已 durable，不能再被覆盖。
-        if self.mode == "steer" and self.options is not None:
-            raise ValueError("steer input 不接受 run options")
-        return self
 
 
 class _PendingInputQueue:
@@ -593,7 +577,7 @@ class _SessionSteeringPort:
                 return None
             # 已离开队列但尚未证明 durable delivery，暂存等待 acknowledge/fail 回调结算。
             manager._claimed_steer[item.submission_id] = item
-            return SteeringInput(
+            return SteeringInput.model_construct(
                 submission_id=item.submission_id,
                 message=Msg.user(
                     item.input,

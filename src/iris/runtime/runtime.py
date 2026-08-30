@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from ..exceptions import (
@@ -24,6 +25,7 @@ from ..message import LLMRequest, Msg
 from ..tools import (
     CancellationSignal,
     PreparedToolCall,
+    ToolBatchPlan,
     ToolRegistryView,
     ToolResult,
 )
@@ -54,6 +56,14 @@ from .tool_bridge import ToolBridge
 
 _MAX_PARALLEL_TOOL_CALLS = 8
 _logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ModelStepAdvance:
+    """一次已提交模型步骤及其同进程工具计划。"""
+
+    cursor: RuntimeCursor
+    plan: ToolBatchPlan | None = None
 
 
 class AgentRuntime:
@@ -88,6 +98,7 @@ class AgentRuntime:
         )
         interaction_projection = activation.interaction_projection
         projection_validated = False
+        plan: ToolBatchPlan | None = None
 
         while True:
             # --- 2. 收口 activation 状态 ---
@@ -123,22 +134,25 @@ class AgentRuntime:
                 )
                 if isinstance(model_outcome, RuntimeActivationResult):
                     return model_outcome
-                cursor = model_outcome
+                cursor = model_outcome.cursor
+                plan = model_outcome.plan
+                projection_validated = False
                 continue
 
             # --- 4. 预检工具批次 ---
             # 为当前 assistant 消息重建执行计划，并校验恢复投影与 cursor 是否一致。
-            plan = self.environment.tool_bridge.preflight_once(
-                assistant_message=cast(Msg, cursor.assistant_message),
-                session_id=activation.session_id,
-                run_id=activation.run_id,
-                agent_id=self.environment.agent_config.name,
-                workspace_root=self.environment.workspace_root,
-                permission_mode=self.environment.agent_config.permissions.writes,
-                metadata={"activation_id": activation.activation_id},
-                tools_enabled=activation.options.include_tools,
-                cancellation=cancellation,
-            )
+            if plan is None:
+                plan = self.environment.tool_bridge.preflight_once(
+                    assistant_message=cast(Msg, cursor.assistant_message),
+                    session_id=activation.session_id,
+                    run_id=activation.run_id,
+                    agent_id=self.environment.agent_config.name,
+                    workspace_root=self.environment.workspace_root,
+                    permission_mode=self.environment.agent_config.permissions.writes,
+                    metadata={"activation_id": activation.activation_id},
+                    tools_enabled=activation.options.include_tools,
+                    cancellation=cancellation,
+                )
             if not projection_validated:
                 _validate_interaction_projection(
                     interaction_projection,
@@ -378,7 +392,7 @@ class AgentRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-        result_slots: list[ToolResult | BaseException | None] = []
+        result_slots: list[ToolResult | BaseException] = []
         infrastructure_errors: list[tuple[int, BaseException]] = []
         for offset, task in enumerate(tasks):
             if task.cancelled():
@@ -418,8 +432,6 @@ class AgentRuntime:
             if isinstance(slot, BaseException):
                 interrupted = True
                 break
-            if slot is None:
-                raise IrisRunConflictError("并发工具窗口缺少已观察结果")
             _, prepared = window[offset]
             guard = guards[offset]
             tool_call = guard.call_for(prepared.tool_use.id) or build_runtime_tool_call(
@@ -528,8 +540,7 @@ class AgentRuntime:
             steering is not None
             and next_index == len(cursor.tool_calls)
             and not (
-                result.is_error
-                and activation.options.tool_error_policy is ToolErrorPolicy.STOP
+                result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP
             )
             and not _activation_cancelled(commits, cancellation)
             and not _deadline_expired(commits)
@@ -583,7 +594,7 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None,
-    ) -> RuntimeCursor | RuntimeActivationResult:
+    ) -> _ModelStepAdvance | RuntimeActivationResult:
         """执行并 required commit 一次 provider step。"""
         snapshot = commits.load_session()
         if snapshot.session_id != activation.session_id:
@@ -679,17 +690,6 @@ class AgentRuntime:
                 outcome=RuntimeActivationOutcome.CANCELLED,
                 cursor=cursor,
             )
-        plan = self.environment.tool_bridge.preflight_once(
-            assistant_message=assistant,
-            session_id=activation.session_id,
-            run_id=activation.run_id,
-            agent_id=self.environment.agent_config.name,
-            workspace_root=self.environment.workspace_root,
-            permission_mode=self.environment.agent_config.permissions.writes,
-            metadata={"activation_id": activation.activation_id},
-            tools_enabled=activation.options.include_tools,
-            cancellation=cancellation,
-        )
         message_delta = (*turn_messages, assistant)
         read_state = _read_state_snapshot(
             self.environment.tool_bridge.read_state(activation.session_id)
@@ -747,7 +747,7 @@ class AgentRuntime:
                     activation=activation,
                     submission_id=claimed_input.submission_id,
                 )
-                return committed
+                return _ModelStepAdvance(cursor=committed)
 
             cursor_after = RuntimeCursor(
                 position="outcome_ready",
@@ -775,6 +775,17 @@ class AgentRuntime:
                 assistant_message=assistant,
             )
 
+        plan = self.environment.tool_bridge.preflight_once(
+            assistant_message=assistant,
+            session_id=activation.session_id,
+            run_id=activation.run_id,
+            agent_id=self.environment.agent_config.name,
+            workspace_root=self.environment.workspace_root,
+            permission_mode=self.environment.agent_config.permissions.writes,
+            metadata={"activation_id": activation.activation_id},
+            tools_enabled=activation.options.include_tools,
+            cancellation=cancellation,
+        )
         cursor_after = RuntimeCursor(
             position="tool_batch",
             step_index=cursor.step_index,
@@ -833,7 +844,7 @@ class AgentRuntime:
         )
         if committed != cursor_after:
             raise IrisRunConflictError("model-step commit 返回了意外 cursor")
-        return committed
+        return _ModelStepAdvance(cursor=committed, plan=plan)
 
     def _suspend_existing_batch(
         self,

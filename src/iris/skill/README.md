@@ -159,6 +159,10 @@ description 的变化同样会改变 fingerprint。更新配置或 Skill metadat
 
 frontmatter helper、内部正则和 `LoadSkillInput` 都是实现细节。
 
+目录扫描是 Skill name regex 与 description 规范化/截断的唯一 owner；`SkillMetadata` 是扫描结果
+的 trusted projection，配置的 `max_description_chars` 会直接决定截断上限。`SkillDiagnostic` 是
+仅在发现流程内传递的 frozen slots dataclass。
+
 ## 维护与验证
 
 | 修改内容 | 主要位置 | 对应测试 |

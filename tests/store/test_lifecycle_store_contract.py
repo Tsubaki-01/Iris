@@ -7,6 +7,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, cast
@@ -52,6 +53,7 @@ from iris.lifecycle import (
     RunControlSnapshot,
     RunErrorInfo,
     RunLimits,
+    RunStopReason,
     RunToolCallRecord,
     RunUsage,
     SuspendRun,
@@ -591,7 +593,7 @@ def test_session_lane_read_tracks_non_terminal_owner_without_mutation(
             run_id="run-1",
             expected_run_revision=waiting.run.revision,
             activation_id=None,
-            stop_reason="cancelled",
+            stop_reason=RunStopReason.CANCELLED,
             now=_T2,
         )
     )
@@ -621,7 +623,7 @@ def test_session_lane_read_tracks_non_terminal_owner_without_mutation(
             run_id="run-2",
             expected_run_revision=requested.run.revision,
             activation_id="activation-2",
-            stop_reason="cancelled",
+            stop_reason=RunStopReason.CANCELLED,
             now=_T3,
         )
     )
@@ -790,11 +792,10 @@ def test_claim_batch_respects_durable_cancellation_fence(
     )
     first = lifecycle_store.claim_tool_call(first_command)
     second = lifecycle_store.claim_tool_call(
-        first_command.model_copy(
-            update={
-                "expected_run_revision": first.run.revision,
-                "tool_call_id": "call-2",
-            }
+        replace(
+            first_command,
+            expected_run_revision=first.run.revision,
+            tool_call_id="call-2",
         )
     )
     cancelled = lifecycle_store.request_cancellation(
@@ -812,11 +813,10 @@ def test_claim_batch_respects_durable_cancellation_fence(
     assert replay.events == ()
     with pytest.raises(IrisRunStateError, match="取消"):
         lifecycle_store.claim_tool_call(
-            first_command.model_copy(
-                update={
-                    "expected_run_revision": cancelled.run.revision,
-                    "tool_call_id": "call-3",
-                }
+            replace(
+                first_command,
+                expected_run_revision=cancelled.run.revision,
+                tool_call_id="call-3",
             )
         )
     assert lifecycle_store.list_events("run-1") == events_after_cancel
@@ -956,18 +956,17 @@ def test_resolve_exact_response_replays_but_different_response_conflicts(
     assert replay.events == ()
     assert replay.run.revision == resolved.run.revision
     refreshed_replay = lifecycle_store.resolve_interaction(
-        command.model_copy(
-            update={
-                "expected_run_revision": resolved.run.revision,
-                "expected_interaction_version": resolved.interaction.version,
-            }
+        replace(
+            command,
+            expected_run_revision=resolved.run.revision,
+            expected_interaction_version=resolved.interaction.version,
         )
     )
     assert refreshed_replay.events == ()
     assert refreshed_replay.run == resolved.run
     with pytest.raises(IrisRunConflictError):
         lifecycle_store.resolve_interaction(
-            command.model_copy(update={"response": QuestionInteractionResponse(answer="停止")})
+            replace(command, response=QuestionInteractionResponse(answer="停止"))
         )
 
 
@@ -1207,7 +1206,7 @@ def test_cancellation_request_is_once_only_and_does_not_release_active_lane(
 
     assert lifecycle_store.request_cancellation(command).events == ()
     refreshed_replay = lifecycle_store.request_cancellation(
-        command.model_copy(update={"expected_run_revision": requested.run.revision})
+        replace(command, expected_run_revision=requested.run.revision)
     )
     assert refreshed_replay.events == ()
     assert refreshed_replay.run == requested.run
@@ -1269,7 +1268,7 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
         run_id="run-1",
         expected_run_revision=created.run.revision,
         activation_id="activation-1",
-        stop_reason="completed",
+        stop_reason=RunStopReason.COMPLETED,
         assistant_message=Msg.assistant("done"),
         now=_T1,
     )
@@ -1311,7 +1310,7 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
         run_id="run-1",
         expected_run_revision=claim_revision,
         activation_id="activation-1",
-        stop_reason="outcome_unknown",
+        stop_reason=RunStopReason.OUTCOME_UNKNOWN,
         error=RunErrorInfo(
             code="TOOL_OUTCOME_UNKNOWN",
             message="工具结果不可证明",
@@ -1414,7 +1413,7 @@ def test_safe_recovery_rejects_unresolved_durable_claim(
                 expected_run_revision=claimed.run.revision,
                 expected_activation_id="activation-1",
                 expected_checkpoint_sequence=claimed.checkpoint.sequence,
-                recovery_disposition="resume",
+                recovery_disposition=RecoveryDisposition.RESUME,
                 new_activation_id="activation-recovery",
                 now=_T3,
             )

@@ -96,7 +96,7 @@ class ToolCallSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 
-    @field_validator("tool_call_id", "tool_name", "workspace_root", "fingerprint")
+    @field_validator("tool_call_id", "tool_name", "workspace_root")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -187,7 +187,7 @@ class ApprovedToolCall(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    @field_validator("interaction_id", "tool_call_id", "tool_name", "fingerprint")
+    @field_validator("interaction_id", "tool_call_id", "tool_name")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))

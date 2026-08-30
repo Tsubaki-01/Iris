@@ -83,8 +83,9 @@ change public config, schemas, models, or exports.
 
 Only consecutive candidates share a window. STOP, HITL, preflight results,
 WRITE/EXECUTE/NETWORK/MCP/AGENT calls, unsafe calls, and classification failures are serial
-barriers; later calls cannot start across them. Every child still revalidates and records its own
-exact durable claim before entering the body. Bodies may finish out of order, while result
+barriers; later calls cannot start across them. The batch reuses its first typed tool plan. Before
+entering the body, each child refreshes permission and records its own exact durable claim without
+repeating schema validation. Bodies may finish out of order, while result
 messages, cursors, session history, checkpoints, and committed events advance only as the original
 ordinal prefix. The order of multiple `TOOL_CALL_CLAIMED` telemetry events is not contractual.
 

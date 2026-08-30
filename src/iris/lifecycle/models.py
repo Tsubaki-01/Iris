@@ -608,7 +608,7 @@ class RunToolCallRecord(_FrozenModel):
     claimed_at: datetime | None = None
     committed_at: datetime | None = None
 
-    @field_validator("run_id", "tool_call_id", "tool_name", "fingerprint")
+    @field_validator("run_id", "tool_call_id", "tool_name")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -694,7 +694,7 @@ class RunEvent(_FrozenModel):
 
 def snapshot_run(record: RunRecord) -> RunSnapshot:
     """从权威 record 生成不可变 public snapshot。"""
-    return RunSnapshot(
+    return RunSnapshot.model_construct(
         run_id=record.run_id,
         session_id=record.session_id,
         agent_id=record.agent_id,
@@ -728,15 +728,12 @@ def project_result(
     """
     if record.phase is RunPhase.ACTIVE:
         raise IrisRunStateError("active run 不产生 RunResult", run_id=record.run_id)
-    try:
-        return RunResult(
-            run=snapshot_run(record),
-            assistant_message=record.assistant_message,
-            pending_interaction=interaction,
-            error=record.error,
-        )
-    except ValueError as exc:
-        raise IrisRunStateError("run result facts 不一致", run_id=record.run_id) from exc
+    return RunResult.model_construct(
+        run=snapshot_run(record),
+        assistant_message=record.assistant_message,
+        pending_interaction=interaction,
+        error=record.error,
+    )
 
 
 __all__ = [

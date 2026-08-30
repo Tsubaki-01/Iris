@@ -96,7 +96,7 @@ async def test_valid_skill_returns_markdown_and_records_real_read_path(
     tool = LoadSkillTool(registry)
     context = ToolExecutionContext(workspace_root=tmp_path)
 
-    result = await tool.arun({"name": "example-skill"}, context)
+    result = await tool.arun(LoadSkillInput(name="example-skill"), context)
 
     expected = "\n".join(skill_file.read_text(encoding="utf-8").splitlines()[:1000])
     assert result.is_error is False
@@ -133,7 +133,7 @@ async def test_missing_registry_name_returns_retryable_error(tmp_path: Path) -> 
     registry, _ = _registry(tmp_path)
 
     result = await LoadSkillTool(registry).arun(
-        {"name": "missing-skill"},
+        LoadSkillInput(name="missing-skill"),
         ToolExecutionContext(workspace_root=tmp_path),
     )
 
@@ -160,7 +160,7 @@ async def test_post_discovery_symlink_escape_returns_path_error_without_secret(
 
     with caplog.at_level(logging.WARNING, logger="iris.skill.tool"):
         result = await LoadSkillTool(registry).arun(
-            {"name": "example-skill"},
+            LoadSkillInput(name="example-skill"),
             ToolExecutionContext(workspace_root=tmp_path),
         )
 
@@ -188,7 +188,7 @@ async def test_post_discovery_sibling_retarget_returns_path_error_without_secret
     _symlink_or_skip(skill_file, sibling_file)
 
     result = await LoadSkillTool(registry).arun(
-        {"name": "example-skill"},
+        LoadSkillInput(name="example-skill"),
         ToolExecutionContext(workspace_root=tmp_path),
     )
 
@@ -204,7 +204,7 @@ async def test_deleted_skill_file_returns_retryable_read_error(tmp_path: Path) -
     skill_file.unlink()
 
     result = await LoadSkillTool(registry).arun(
-        {"name": "example-skill"},
+        LoadSkillInput(name="example-skill"),
         ToolExecutionContext(workspace_root=tmp_path),
     )
 
@@ -224,7 +224,7 @@ async def test_non_utf8_skill_returns_retryable_read_error(tmp_path: Path) -> No
     skill_file.write_bytes(b"\xff\xfe\x00")
 
     result = await LoadSkillTool(registry).arun(
-        {"name": "example-skill"},
+        LoadSkillInput(name="example-skill"),
         ToolExecutionContext(workspace_root=tmp_path),
     )
 
@@ -240,7 +240,7 @@ async def test_loader_preserves_file_service_thousand_line_limit(tmp_path: Path)
     registry, _ = _registry(tmp_path, body=body)
 
     result = await LoadSkillTool(registry).arun(
-        {"name": "example-skill"},
+        LoadSkillInput(name="example-skill"),
         ToolExecutionContext(workspace_root=tmp_path),
     )
 

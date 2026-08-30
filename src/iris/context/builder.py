@@ -97,7 +97,7 @@ class ContextBuilder:
                 template_context,
             )
         else:
-            rendered = self.xml_renderer.render_section(
+            rendered = self.xml_renderer._render_trusted_section(
                 _ROOT_TAGS[section_name],
                 enabled_slots,
             )

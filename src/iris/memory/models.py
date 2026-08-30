@@ -230,8 +230,8 @@ class MemoryItem(BaseModel):
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     reason: str = ""
-    confidence: float | None = None
-    importance: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
@@ -248,14 +248,6 @@ class MemoryItem(BaseModel):
             raise ValueError("记忆正文不能为空")
         return value
 
-    @field_validator("confidence", "importance")
-    @classmethod
-    def _validate_score(cls, value: float | None) -> float | None:
-        """校验置信度与重要性分数范围。"""
-        if value is not None and not 0.0 <= value <= 1.0:
-            raise ValueError("记忆分数必须在 0.0 到 1.0 之间")
-        return value
-
 
 class MemoryCandidate(BaseModel):
     """从 L1 episode 抽取出的待处理候选记忆。"""
@@ -266,8 +258,8 @@ class MemoryCandidate(BaseModel):
     category: MemoryCategory = MemoryCategory.USER
     suggested_level: MemoryLevel = MemoryLevel.SEMANTIC
     text: str
-    confidence: float | None = None
-    importance: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
     reason: str
     status: MemoryCandidateStatus = MemoryCandidateStatus.PENDING
     created_at: str = Field(default_factory=_now_iso)
@@ -293,14 +285,6 @@ class MemoryCandidate(BaseModel):
             raise ValueError("候选记忆正文和原因不能为空")
         return value
 
-    @field_validator("confidence", "importance")
-    @classmethod
-    def _validate_score(cls, value: float | None) -> float | None:
-        """校验候选分数范围。"""
-        if value is not None and not 0.0 <= value <= 1.0:
-            raise ValueError("候选记忆分数必须在 0.0 到 1.0 之间")
-        return value
-
 
 class MemoryItemPatch(BaseModel):
     """长期记忆条目的部分更新。"""
@@ -309,8 +293,8 @@ class MemoryItemPatch(BaseModel):
     category: MemoryCategory | None = None
     kind: MemoryItemKind | None = None
     status: MemoryItemStatus | None = None
-    confidence: float | None = None
-    importance: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
     artifacts: list[MemoryArtifactRef] | None = None
     metadata: dict[str, Any] | None = None
 
@@ -322,14 +306,6 @@ class MemoryItemPatch(BaseModel):
         """校验更新正文不能是空白。"""
         if value is not None and not value.strip():
             raise ValueError("记忆正文不能为空")
-        return value
-
-    @field_validator("confidence", "importance")
-    @classmethod
-    def _validate_optional_score(cls, value: float | None) -> float | None:
-        """校验可选分数范围。"""
-        if value is not None and not 0.0 <= value <= 1.0:
-            raise ValueError("记忆分数必须在 0.0 到 1.0 之间")
         return value
 
 
@@ -357,18 +333,10 @@ class MemoryQuery(BaseModel):
     item_ids: list[str] = Field(default_factory=list)
     categories: list[MemoryCategory] = Field(default_factory=list)
     kinds: list[MemoryItemKind] = Field(default_factory=list)
-    limit: int = 10
+    limit: int = Field(default=10, gt=0, le=100)
     include_deleted: bool = False
 
     model_config = {"use_enum_values": False}
-
-    @field_validator("limit")
-    @classmethod
-    def _validate_limit(cls, value: int) -> int:
-        """校验并限制召回数量上限。"""
-        if value <= 0:
-            raise ValueError("记忆查询 limit 必须为正数")
-        return min(value, 100)
 
 
 class MemorySearchResult(BaseModel):
@@ -392,8 +360,8 @@ class MemoryWriteInput(BaseModel):
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     actor: MemoryActor = MemoryActor.SDK
-    confidence: float | None = None
-    importance: float | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -405,14 +373,6 @@ class MemoryWriteInput(BaseModel):
         """校验写入正文与原因不能为空。"""
         if not value.strip():
             raise ValueError("记忆写入正文和原因不能为空")
-        return value
-
-    @field_validator("confidence", "importance")
-    @classmethod
-    def _validate_write_score(cls, value: float | None) -> float | None:
-        """校验写入分数范围。"""
-        if value is not None and not 0.0 <= value <= 1.0:
-            raise ValueError("记忆分数必须在 0.0 到 1.0 之间")
         return value
 
 

@@ -30,6 +30,7 @@ from iris.lifecycle import (
     RunCheckpoint,
     RunCommit,
     RunErrorInfo,
+    RunStopReason,
     RunToolCallRecord,
     RunUsage,
     SuspendRun,
@@ -340,7 +341,7 @@ def test_partial_session_message_insert_rolls_back_terminal_closure(
                         run_id="run-1",
                         expected_run_revision=claimed.run.revision,
                         activation_id="act-1",
-                        stop_reason="outcome_unknown",
+                        stop_reason=RunStopReason.OUTCOME_UNKNOWN,
                         error=RunErrorInfo(
                             code="TOOL_OUTCOME_UNKNOWN",
                             message="工具结果不可证明",

@@ -58,6 +58,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         store: LifecycleStore,
         run: RunRecord,
         activation_id: str,
+        cursor: RuntimeCursor,
         clock: Callable[[], datetime],
         event_sink: list[RunEvent],
         durable_event_callback: Callable[[RunEvent], None] | None = None,
@@ -68,9 +69,12 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         checkpoint = store.load_checkpoint(run.run_id)
         if checkpoint is None or checkpoint.activation_id != activation_id:
             raise IrisRunConflictError("commit port checkpoint activation 不匹配")
+        if checkpoint.engine_cursor != cursor.model_dump(mode="json"):
+            raise IrisRunConflictError("commit port cursor 与 durable checkpoint 不匹配")
         self._store = store
         self._run = run
         self._checkpoint = checkpoint
+        self._cursor = cursor
         self._session_revision = store.load_session(run.session_id).revision
         self._activation_id = activation_id
         self._clock = clock
@@ -87,6 +91,16 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
     def run(self) -> RunRecord:
         """返回最近一次成功 store commit 的 run record。"""
         return self._run
+
+    @property
+    def cursor(self) -> RuntimeCursor:
+        """返回最近一次成功 store commit 的 typed cursor。"""
+        return self._cursor
+
+    @property
+    def checkpoint(self) -> RunCheckpoint:
+        """返回最近一次成功 store commit 的 durable checkpoint。"""
+        return self._checkpoint
 
     def revoke(self) -> None:
         """撤销该 activation 后续所有 mutation 权限。"""
@@ -162,8 +176,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 now=now,
             )
         )
-        self._accept(stored)
-        return self._stored_cursor(commit.cursor_after)
+        return self._accept_checkpoint(stored, checkpoint, commit.cursor_after)
 
     def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
         """验证 exact prepared subject 并在 effect 前 durable claim。"""
@@ -238,8 +251,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 now=self._clock(),
             )
         )
-        self._accept(stored)
-        return self._stored_cursor(commit.cursor_after)
+        return self._accept_checkpoint(stored, checkpoint, commit.cursor_after)
 
     def suspend(self, suspension: RuntimeSuspension) -> RuntimeSuspensionResult:
         """原子提交模型事实、pending interaction 与 waiting result。"""
@@ -283,12 +295,12 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 now=now,
             )
         )
-        self._accept(stored)
+        committed_cursor = self._accept_checkpoint(stored, checkpoint, suspension.cursor)
         self._writable = False
         if stored.interaction is None:
             raise IrisRunStateError("suspend commit 缺少 durable interaction")
         return RuntimeSuspensionResult(
-            cursor=self._stored_cursor(suspension.cursor),
+            cursor=committed_cursor,
             interaction=stored.interaction,
         )
 
@@ -311,6 +323,19 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         if commit.session is not None:
             self._session_revision = commit.session.revision
         self._record_events(commit.events)
+
+    def _accept_checkpoint(
+        self,
+        commit: RunCommit,
+        expected_checkpoint: RunCheckpoint,
+        cursor: RuntimeCursor,
+    ) -> RuntimeCursor:
+        """接受精确 checkpoint commit 并推进同进程 typed cursor。"""
+        self._accept(commit)
+        if self._checkpoint != expected_checkpoint:
+            raise IrisRunConflictError("store 返回了意外 checkpoint")
+        self._cursor = cursor
+        return cursor
 
     def _require_writable(self) -> None:
         if not self._writable:
@@ -404,7 +429,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 )
 
     def _require_cursor(self, cursor: RuntimeCursor) -> None:
-        if RuntimeCursor.model_validate(self._checkpoint.engine_cursor) != cursor:
+        if self._cursor != cursor:
             raise IrisRunConflictError("runtime cursor 与 durable checkpoint 不匹配")
 
     def _require_runtime_call(self, call: RuntimeToolCall) -> None:
@@ -545,12 +570,6 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             step_index=suspension.cursor.step_index,
             expires_at=expires_at,
         )
-
-    def _stored_cursor(self, expected: RuntimeCursor) -> RuntimeCursor:
-        actual = RuntimeCursor.model_validate(self._checkpoint.engine_cursor)
-        if actual != expected:
-            raise IrisRunConflictError("store 返回的 checkpoint cursor 与 commit 不匹配")
-        return actual
 
 
 __all__ = ["StoreRuntimeCommitPort"]

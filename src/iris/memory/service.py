@@ -149,7 +149,7 @@ class MemoryService:
         Returns:
             MemoryItem: 构造完整并被持久化后的权威长期记忆记录。
         """
-        item = MemoryItem(
+        item = MemoryItem.model_construct(
             scope=input.scope,
             text=input.text,
             category=input.category,

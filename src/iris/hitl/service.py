@@ -19,7 +19,6 @@ from .models import (
     HumanInteractionRequest,
     HumanInteractionResponse,
     InteractionStatus,
-    PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
 
@@ -40,7 +39,7 @@ class HumanInteractionService:
             raise IrisRunStateError("只有 active run 可以创建 interaction", run_id=run.run_id)
         if run.pending_interaction_id is not None:
             raise IrisRunStateError("active run 已包含 pending interaction", run_id=run.run_id)
-        normalized_expiry = _aware_utc(expires_at, field_name="expires_at")
+        normalized_expiry = _optional_aware_utc(expires_at, field_name="expires_at")
         if normalized_expiry is not None and normalized_expiry <= run.updated_at:
             raise IrisRunStateError("interaction expiry 必须晚于创建时间", run_id=run.run_id)
         return HumanInteraction(
@@ -64,8 +63,6 @@ class HumanInteractionService:
     ) -> None:
         """校验一次 response 是否能安全绑定当前 durable waiting facts。"""
         normalized_now = _aware_utc(now, field_name="now")
-        if normalized_now is None:  # pragma: no cover - ``now`` 的签名不允许 None
-            raise IrisRunStateError("now 不能为空")
         if run.phase is not RunPhase.WAITING:
             raise IrisRunStateError("只有 waiting run 可以接收 interaction response")
         if (
@@ -107,8 +104,6 @@ class HumanInteractionService:
                 content=[TextBlock(text=response.answer)],
                 data={"answer": response.answer},
             )
-        if not isinstance(response, PermissionInteractionResponse):
-            raise HITLResponseMismatchError("未知 interaction response 类型")
         if response.decision == "reject":
             return ToolResult(
                 tool_use_id=subject.tool_call_id,
@@ -127,12 +122,20 @@ class HumanInteractionService:
         )
 
 
-def _aware_utc(value: datetime | None, *, field_name: str) -> datetime | None:
-    if value is None:
-        return None
+def _aware_utc(value: datetime, *, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise IrisRunStateError(f"{field_name} 必须包含时区")
     return value.astimezone(UTC)
+
+
+def _optional_aware_utc(
+    value: datetime | None,
+    *,
+    field_name: str,
+) -> datetime | None:
+    if value is None:
+        return None
+    return _aware_utc(value, field_name=field_name)
 
 
 __all__ = ["HumanInteractionService"]

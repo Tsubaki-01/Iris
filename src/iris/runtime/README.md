@@ -82,8 +82,9 @@ callback 自身的异常只记录日志，不会覆盖 durable 结果。传入 `
 本次能力没有改变 public config、schema、model 或导出。
 
 窗口只覆盖连续候选。STOP、HITL、preflight result、WRITE/EXECUTE/NETWORK/MCP/AGENT，以及任一
-不安全或分类失败的调用都是串行屏障，后序调用不能跨过屏障启动。每个 child 在 body 前仍会
-独立 revalidate 并提交 exact durable claim；body 可以乱序结束，但 result message、cursor、
+不安全或分类失败的调用都是串行屏障，后序调用不能跨过屏障启动。整个 batch 复用首次生成的
+typed tool plan；每个 child 在 body 前只刷新 permission 并提交 exact durable claim，不重复
+schema validation。body 可以乱序结束，但 result message、cursor、
 session history、checkpoint 和 committed event 只按原始 ordinal 的连续前缀推进。多个
 `TOOL_CALL_CLAIMED` telemetry event 的先后顺序不是契约。
 

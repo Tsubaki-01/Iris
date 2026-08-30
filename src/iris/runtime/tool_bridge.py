@@ -82,7 +82,7 @@ class ToolBridge:
                         preflight_result=_not_allowed_result(call),
                     )
                 )
-        return ToolBatchPlan(calls=calls)
+        return ToolBatchPlan(calls=tuple(calls))
 
     def read_state(self, session_id: str) -> Any | None:
         """返回 session 当前保存的文件读取状态。"""

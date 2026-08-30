@@ -81,11 +81,14 @@ middleware, and open-circuit failures to stable error codes. `execute_many()` ru
 read-only concurrency-safe calls concurrently and serializes writes or unsafe calls while preserving
 result order and shared file read state. Classification failure conservatively falls back to serial.
 
-`prepare_many()` performs registry lookup, validation, and policy checks without running middleware,
-the breaker, artifact persistence, or tool side effects. It returns `PreparedToolCall` objects and a
-human request where required. `execute_prepared()` begins a new stage, revalidates current state,
-accepts an approval only for the exact tool-call ID, and optionally accepts a `ToolEffectGuard`.
-Historical approval never overrides current deny, schema, workspace, or stale-read checks.
+`register(tool)` adds a `BaseTool` and raises a validation error on name or alias conflicts.
+`prepare_many()` performs registry lookup, input-schema validation, and the initial policy check
+without running middleware, the breaker, artifact persistence, or tool side effects. Each
+`PreparedToolCall` retains both typed `validated_input` and normalized `arguments`. Runtime reuses
+that plan for the complete tool batch. `execute_prepared()` refreshes permission only; it does not
+repeat registry lookup, schema validation, or a typed-model-to-dict round trip. It accepts approval
+only for the exact tool-call ID and optionally accepts a `ToolEffectGuard`. Historical approval
+never overrides current deny, workspace, or stale-read checks.
 
 `PermissionPolicy.fingerprint_payload()` is the lifecycle resumability contract for permission
 state. It must return deterministic JSON-safe data; custom policies must implement it explicitly
@@ -111,7 +114,7 @@ The blocking I/O in `read_file`, `list_files`, and `grep_search` runs in worker 
 and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A read returns an
 immutable `ReadFileRecord` observation that the event loop merges only after a successful await.
 
-`ToolExecutor` provides classification, revalidation, and per-call execution primitives only. The
+`ToolExecutor` provides classification, permission refresh, and per-call execution primitives only. The
 lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
 Only consecutive read-only and concurrency-safe calls can enter a window; STOP, HITL, preflight
 results, and unsafe calls remain barriers. Every call keeps its own durable claim. Body completion

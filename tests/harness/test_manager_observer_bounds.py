@@ -91,14 +91,6 @@ def test_session_manager_rejects_non_positive_capacities(
     with pytest.raises(ValueError, match=keyword):
         SessionManager(runner, "session-invalid-capacity", **{keyword: 0})
 
-    if keyword == "max_pending_steer":
-        with pytest.raises(ValueError, match=keyword):
-            SessionManager(
-                runner,
-                "session-invalid-capacity-type",
-                max_pending_steer=cast(int, 1.5),
-            )
-
 
 @pytest.mark.asyncio
 async def test_busy_admission_rejects_before_queue_or_event_side_effects(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, Self
+from typing import Protocol
 
 from pydantic import (
     BaseModel,
@@ -17,13 +17,11 @@ from pydantic import (
     Field,
     ValidationInfo,
     field_validator,
-    model_validator,
 )
-from pydantic_core import PydanticSerializationError
 
 from ..exceptions import IrisRunConflictError, IrisRunStateError
 from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerprint
-from ..lifecycle import CheckpointResumability, SessionSnapshot, validate_json_safe
+from ..lifecycle import CheckpointResumability, SessionSnapshot
 from ..message import Msg
 from ..tools import PreparedToolCall, ToolEffectGuard, ToolResult
 from .models import RuntimeActivationInput, RuntimeCursor
@@ -35,16 +33,6 @@ class _FrozenCommitModel(BaseModel):
     """Required commit facts 的不可变模型基类。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
-
-    @model_validator(mode="after")
-    def _validate_json_safe_fact(self) -> Self:
-        """拒绝 required commit fact 中不可持久化的 live object。"""
-        try:
-            serialized = self.model_dump(mode="json")
-        except (PydanticSerializationError, TypeError, ValueError) as exc:
-            raise ValueError("required commit fact 必须是 JSON-safe") from exc
-        validate_json_safe(serialized, field_name="required commit fact")
-        return self
 
 
 class ModelStepReservation(_FrozenCommitModel):
@@ -85,11 +73,6 @@ class RuntimeToolCall(_FrozenCommitModel):
         if not normalized:
             raise ValueError(f"{info.field_name} 不能为空")
         return normalized
-
-    @field_validator("arguments")
-    @classmethod
-    def _validate_arguments(cls, value: dict[str, object]) -> dict[str, object]:
-        return validate_json_safe(value, field_name="arguments")
 
 
 class ToolCallClaim(_FrozenCommitModel):
@@ -206,7 +189,7 @@ def build_runtime_tool_call(
 ) -> RuntimeToolCall:
     """把一条 revalidated/preflight 调用转换为 durable tool fact。"""
     arguments: dict[str, object] = dict(
-        prepared.validated_params or prepared.tool_use.input
+        prepared.arguments if prepared.validated_input is not None else prepared.tool_use.input
     )
     fingerprint = make_call_fingerprint(
         session_id=activation.session_id,

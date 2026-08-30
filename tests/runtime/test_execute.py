@@ -15,7 +15,7 @@ from fakes import (
     resume_activation,
     start_activation,
 )
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -61,6 +61,7 @@ from iris.tools import (
     PermissionPolicy,
     ReadFileState,
     ToolCapability,
+    ToolDefinition,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
@@ -123,6 +124,37 @@ def _tool_batch_response(calls: list[ToolUseBlock]) -> LLMResponse:
         output_tokens=3,
         total_tokens=8,
     )
+
+
+class _CountingSerialTool(BaseTool):
+    """记录 runtime tool batch 对每条输入的校验次数。"""
+
+    definition = ToolDefinition(
+        name="counting_serial",
+        description="记录串行工具校验次数",
+        input_schema={"type": "object"},
+        capabilities={ToolCapability.WRITE},
+    )
+
+    def __init__(self) -> None:
+        self.validation_calls: dict[str, int] = {}
+
+    def validate_input(self, params: dict[str, Any]) -> dict[str, Any]:
+        value = str(params["value"])
+        self.validation_calls[value] = self.validation_calls.get(value, 0) + 1
+        return {"value": value}
+
+    async def arun(
+        self,
+        params: BaseModel | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        assert isinstance(params, dict)
+        return ToolResult(
+            tool_use_id=context.call_id,
+            tool_name=context.tool_name,
+            content=[TextBlock(text=str(params["value"]))],
+        )
 
 
 def test_steering_input_requires_user_message() -> None:
@@ -605,6 +637,39 @@ async def test_execute_steers_only_after_final_ordered_tool_result(
         ("acknowledge", "submission-1", None),
         ("claim", activation.run_id, activation.activation_id),
     ]
+
+
+@pytest.mark.asyncio
+async def test_execute_validates_serial_tool_batch_once_per_call(tmp_path: Path) -> None:
+    """同一 activation 的串行工具批次复用首次 preflight 计划。"""
+    tool = _CountingSerialTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    calls = [
+        ToolUseBlock(
+            id=f"counting-{index}",
+            name=tool.name,
+            input={"value": str(index)},
+        )
+        for index in range(5)
+    ]
+    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
+    runtime = _runtime(
+        provider=provider,
+        tmp_path=tmp_path,
+        registry=registry,
+        permission_policy=DefaultPermissionPolicy(write_mode="allow"),
+    )
+    activation = start_activation()
+
+    result = await runtime.execute(
+        activation,
+        commits=FakeRuntimeCommitPort(activation),
+        cancellation=MutableCancellationSignal(),
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert tool.validation_calls == {str(index): 1 for index in range(5)}
 
 
 @pytest.mark.asyncio
