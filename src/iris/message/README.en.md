@@ -33,7 +33,8 @@ flowchart LR
     Msg --> Conversation["Conversation"]
     Conversation --> Request["LLMRequest"]
     Request --> Provider["iris.providers"]
-    Provider --> Response["LLMResponse"]
+    Provider --> Stream["ModelStreamEvent"]
+    Stream --> Response["complete LLMResponse terminal"]
     Response --> Assistant["response.to_msg()"]
 ```
 
@@ -42,8 +43,10 @@ package boundary.
 
 ## Public API
 
-`iris.message.__all__` contains exactly `Role`, `TextBlock`, `ToolUseBlock`, `ToolResultBlock`,
-`ContentBlock`, `Msg`, `Conversation`, `LLMRequest`, and `LLMResponse`.
+`iris.message.__all__` exposes the message/conversation/request/response contracts plus the
+provider-neutral streaming contracts. The latter include `ModelStreamScope`, `ModelBlockRef`,
+`ModelUsageSnapshot`, block and response event models, the discriminated `ModelStreamEvent` union,
+`ModelStreamFinalization`, and the safe `ProviderStreamError` DTO.
 
 ### Messages and blocks
 
@@ -79,14 +82,38 @@ and metadata. `to_msg()` creates an assistant message and copies provider, model
 and usage into message metadata. Parsing a raw provider response is `ProviderClient`'s job, not an
 `LLMResponse` method.
 
+### `ModelStreamEvent`
+
+`streaming.py` defines the frozen Pydantic events that replace raw provider chunks before they
+leave `iris.providers`. Events share one `ModelStreamScope`, a provider-owned sequence starting at
+1, and an aware UTC timestamp. Block deltas carry both the relative `delta` and the current channel
+`snapshot`.
+
+Only `ModelResponseCompleted` carries a complete `LLMResponse`. Failed and cancelled terminals do
+not carry a committable response, and partial events do not imply that session history, a
+checkpoint, or durable storage changed. Tool arguments become a final `ToolUseBlock` only after
+the provider block is complete.
+
+```python
+from iris.message import ModelBlockDelta, ModelResponseCompleted, ModelStreamEvent
+
+
+def consume(event: ModelStreamEvent) -> str | None:
+    if isinstance(event, ModelBlockDelta) and event.channel == "text":
+        return event.delta
+    if isinstance(event, ModelResponseCompleted):
+        return event.response.to_msg().text
+    return None
+```
+
 ## Errors and boundaries
 
 Direct model validation failures raise Pydantic `ValidationError`; `Msg.from_dict()` raises
 `ValueError` for an unknown block type. Runtime may normalize such failures at its own execution
 boundary, but this package does not wrap them itself.
 
-The package does not map provider messages, make network calls, generate/execute tool schemas,
-persist history, or manage context budgets.
+The package does not pull raw provider streams, make network calls, map provider errors,
+generate/execute tool schemas, persist history, or manage context budgets.
 
 ## Maintenance
 
@@ -94,9 +121,10 @@ persist history, or manage context budgets.
 | --- | --- | --- |
 | Message construction and conversation/request assembly | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
 | Request/response models and `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
+| Provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
 | Provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
 
 ```bash
-uv run pytest tests/runtime/test_assembler.py tests/test_provider_client.py
-uv run ruff check src/iris/message tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run ruff check src/iris/message tests/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```

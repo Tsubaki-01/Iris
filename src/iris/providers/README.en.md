@@ -3,9 +3,9 @@
 # `iris.providers`
 
 `iris.providers` is Iris's model-call boundary. It maps `iris.message.LLMRequest` to LiteLLM Chat
-Completion calls and normalizes responses and failures back into Iris types. The active path is
-non-streaming Chat Completion only; Responses API, streaming, injectable HTTP clients, historical
-adapter APIs, and `close()` are not public capabilities.
+Completion calls and normalizes responses and failures back into Iris types. The active path
+supports both `complete()` and `stream()` for Chat Completion; Responses API, BIDI/realtime,
+injectable HTTP clients, historical adapter APIs, and `close()` are not public capabilities.
 
 ## Quick start
 
@@ -35,9 +35,9 @@ flowchart LR
     Config["iris.config"] --> Factory
     Factory --> Client["ProviderClient"]
     Request["LLMRequest"] --> Client
-    Client --> Mapper["internal OpenAIChatMapper"]
+    Client --> Mapper["internal OpenAIChatMapper / _streaming"]
     Mapper --> LiteLLM["litellm.acompletion"]
-    LiteLLM --> Response["LLMResponse / IrisProviderError"]
+    LiteLLM --> Response["LLMResponse / ModelStreamEvent"]
 ```
 
 `OpenAIChatMapper` is internal and is not exported from `iris.providers`.
@@ -83,8 +83,24 @@ sent as a request-body field; the gateway receives model `deepseek-ai/DeepSeek-V
 `ProviderClient` fields are `provider`, `litellm_provider`, `api_key`, `base_url`, `timeout`, and
 `headers`; Pydantic `extra="forbid"` rejects removed `adapter` and `http_client` arguments.
 `complete()` maps Iris messages to OpenAI Chat shapes, calls `litellm.acompletion()` with a correctly
-prefixed model, and returns `LLMResponse`. Runtime currently mounts OpenAI Chat function schemas for
-all providers on this LiteLLM bridge.
+prefixed model, and returns `LLMResponse`. `stream()` requires `request.stream=True`, requests the
+usage tail, directly pulls the raw async iterator, and yields only `ModelStreamEvent`. It continues
+past block completion until a finish reason and usage tail are complete, then emits one completed
+terminal carrying an `LLMResponse` built through the same final mapper. The raw iterator is closed
+in `finally`; no background producer or intermediate queue is created.
+
+```python
+from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg
+
+request = LLMRequest(model="gpt-4o", messages=[Msg.user("Hello")], stream=True)
+async for event in client.stream(request):
+    if isinstance(event, ModelBlockDelta) and event.channel == "text":
+        print(event.delta, end="")
+    elif isinstance(event, ModelResponseCompleted):
+        final_response = event.response
+```
+
+Runtime currently mounts OpenAI Chat function schemas for all providers on this LiteLLM bridge.
 
 ## Errors and limitations
 
@@ -92,19 +108,25 @@ all providers on this LiteLLM bridge.
 - 429 becomes `IrisRateLimitExceededError`.
 - 408, connection, and timeout errors become `IrisAPIConnectionError`.
 - other provider failures become `IrisProviderError`.
+- raw stream protocol/order/tool-JSON failures become a safe failed terminal with
+  `PROVIDER_STREAM_PROTOCOL_ERROR`.
+- EOF before a finish reason becomes a safe failed terminal with `PROVIDER_STREAM_INTERRUPTED`.
 - missing keys become `IrisConfigError`; invalid routes become `IrisValidationError`.
 
-`stream=True` and `provider_options["api_style"] != "chat"` are rejected before network I/O.
+`complete()` rejects `stream=True`; `stream()` rejects `stream=False`; both reject a non-Chat
+`api_style` before network I/O. Streaming network/protocol failures are represented by one safe
+terminal without raw exception, header, or key details. Local `asyncio.CancelledError` propagates.
 
 ## Maintenance
 
 | Change | Main location | Tests |
 | --- | --- | --- |
 | LiteLLM kwargs, response, and errors | `client.py` | `tests/test_provider_client.py` |
+| Raw stream aggregation, terminal, and cleanup | `_streaming.py` | `tests/providers/test_streaming.py` |
 | Chat mapping | `openai.py` | `tests/test_provider_client.py` |
 | Registry, routing, key precedence, and environment configuration | `factory.py`, `../config.py` | No dedicated tests yet |
 
 ```bash
-uv run pytest tests/test_provider_client.py
-uv run ruff check src/iris/providers tests/test_provider_client.py
+uv run pytest tests/providers/test_streaming.py tests/test_provider_client.py
+uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```

@@ -33,7 +33,8 @@ flowchart LR
     Msg --> Conversation["Conversation"]
     Conversation --> Request["LLMRequest"]
     Request --> Provider["iris.providers"]
-    Provider --> Response["LLMResponse"]
+    Provider --> Stream["ModelStreamEvent"]
+    Stream --> Response["完整 LLMResponse terminal"]
     Response --> Assistant["response.to_msg()"]
 ```
 
@@ -41,7 +42,7 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 
 ## 公开接口
 
-`iris.message.__all__` 只包含以下九项：
+`iris.message.__all__` 公开以下稳定契约组：
 
 - `Role`: `system`、`user`、`assistant`、`tool` 角色枚举。
 - `TextBlock`: 文本内容块。
@@ -52,6 +53,14 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 - `Conversation`: 有序消息集合。
 - `LLMRequest`: 一次 provider-neutral 模型请求。
 - `LLMResponse`: 一次 provider-neutral 模型响应。
+- `ModelStreamScope`、`ModelBlockRef`、`ModelUsageSnapshot`：一次 provider attempt、
+  内容块和 token 用量的稳定标识。
+- `ModelResponseStarted`、`ModelBlockStarted`、`ModelBlockDelta`、
+  `ModelBlockCompleted`、`ModelUsageUpdated` 与三个 response terminal：
+  provider-neutral streaming event models。
+- `ModelStreamEvent`：以上事件的 discriminated union；`ModelStreamFinalization`：
+  completed/failed/cancelled 终态投影。
+- `ProviderStreamError`：不含 raw exception、header 或凭据的安全错误 DTO。
 
 ### `Msg`
 
@@ -92,6 +101,29 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 `to_msg()` 创建 assistant `Msg`，并把 provider、model、finish reason 与 usage 放入消息元数据。
 原始厂商响应到 `LLMResponse` 的解析由 provider client 完成，不属于该模型的方法。
 
+### `ModelStreamEvent`
+
+`streaming.py` 定义 provider raw chunk 离开 `iris.providers` 前必须转换成的 frozen Pydantic
+事件。每条事件携带同一个 `ModelStreamScope`、从 1 连续的 provider sequence 和 aware UTC
+时间；block delta 同时提供相对 `delta` 与当前 channel 的完整 `snapshot`。
+
+只有 `ModelResponseCompleted` 携带完整 `LLMResponse`。`ModelResponseFailed` 和
+`ModelResponseCancelled` 不提供可提交响应；partial event 也不表示 session、checkpoint 或
+durable store 已更新。工具参数只有在 provider block 完成后才由 provider 边界解析成最终
+`ToolUseBlock`。
+
+```python
+from iris.message import ModelBlockDelta, ModelResponseCompleted, ModelStreamEvent
+
+
+def consume(event: ModelStreamEvent) -> str | None:
+    if isinstance(event, ModelBlockDelta) and event.channel == "text":
+        return event.delta
+    if isinstance(event, ModelResponseCompleted):
+        return event.response.to_msg().text
+    return None
+```
+
 ## 错误与边界
 
 这些对象是 Pydantic 模型；直接构造时的字段错误表现为 `pydantic.ValidationError`。
@@ -101,7 +133,7 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 本包不负责：
 
 - LiteLLM/OpenAI/Anthropic 消息格式映射；
-- 网络请求、重试、流式传输或错误映射；
+- provider raw stream 拉取、网络请求、重试或错误映射；
 - 工具 schema 生成与执行；
 - history 持久化或上下文预算管理。
 
@@ -111,9 +143,10 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 | --- | --- | --- |
 | 消息构造与 conversation/request 装配 | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
 | 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
+| provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
 | provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
 
 ```bash
-uv run pytest tests/runtime/test_assembler.py tests/test_provider_client.py
-uv run ruff check src/iris/message tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py
+uv run ruff check src/iris/message tests/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```

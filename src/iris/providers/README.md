@@ -6,8 +6,8 @@
 Chat Completion 调用，并把响应与异常归一化回 Iris 类型。runtime、message 和 tools 不需要
 了解厂商 wire format。
 
-当前 active path 只支持非流式 Chat Completion；Responses API、streaming、可注入 HTTP
-client、历史 adapter API 与 `close()` 都不是公开能力。
+当前 active path 支持 LiteLLM Chat Completion 的 `complete()` 与 `stream()`；Responses API、
+BIDI/realtime、可注入 HTTP client、历史 adapter API 与 `close()` 都不是公开能力。
 
 ## 快速开始
 
@@ -37,9 +37,9 @@ flowchart LR
     Config["iris.config"] --> Factory
     Factory --> Client["ProviderClient"]
     Request["LLMRequest"] --> Client
-    Client --> Mapper["OpenAIChatMapper 内部实现"]
+    Client --> Mapper["OpenAIChatMapper / _streaming 内部实现"]
     Mapper --> LiteLLM["litellm.acompletion"]
-    LiteLLM --> Response["LLMResponse / IrisProviderError"]
+    LiteLLM --> Response["LLMResponse / ModelStreamEvent"]
 ```
 
 `OpenAIChatMapper` 是内部实现，不从 `iris.providers` 顶层导出，调用方不应依赖它。
@@ -51,7 +51,7 @@ flowchart LR
 - `ModelRoute(provider, model)`：冻结的路由模型。
 - `parse_model_route(model)`：按第一个 `/` 解析 `provider/model`。
 - `create_provider_client(...)`：根据路由、配置与显式参数装配 client。
-- `ProviderClient`：执行一次非流式 Chat Completion。
+- `ProviderClient`：执行一次完整或流式 Chat Completion。
 
 ### 路由与配置
 
@@ -103,6 +103,27 @@ Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
 - 只透传当前实现支持的请求选项；
 - 返回 provider-neutral `LLMResponse`。
 
+`stream(request)`：
+
+- 要求 `request.stream=True`，并向 LiteLLM 请求 usage tail；
+- 直接拉取 raw async iterator，不建立后台 producer 或中间 queue；
+- 在内部 `_streaming.py` 中分配 attempt-local scope、block identity 与连续 sequence；
+- 产出 `ModelStreamEvent`，绝不暴露 LiteLLM chunk；
+- 收到 finish reason 后继续消费 usage tail，EOF 时生成唯一 completed terminal；
+- completed terminal 复用 complete mapper 构造完整 `LLMResponse`；
+- `finally` 关闭支持 `aclose()` 的 raw iterator。
+
+```python
+from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg
+
+request = LLMRequest(model="gpt-4o", messages=[Msg.user("你好")], stream=True)
+async for event in client.stream(request):
+    if isinstance(event, ModelBlockDelta) and event.channel == "text":
+        print(event.delta, end="")
+    elif isinstance(event, ModelResponseCompleted):
+        final_response = event.response
+```
+
 即使 Iris provider id 是 Anthropic 或 DeepSeek，runtime 当前仍挂载 OpenAI Chat function
 schema，由 LiteLLM chat bridge 处理。这是 active path 的明确限制。
 
@@ -112,20 +133,26 @@ schema，由 LiteLLM chat bridge 处理。这是 active path 的明确限制。
 - `429` → `IrisRateLimitExceededError`；
 - `408`、连接或超时类异常 → `IrisAPIConnectionError`；
 - 其他 provider 异常 → `IrisProviderError`；
+- raw stream chunk/order/tool JSON 协议错误 → safe `response.failed`，code 为
+  `PROVIDER_STREAM_PROTOCOL_ERROR`；
+- finish reason 前 EOF → safe `response.failed`，code 为 `PROVIDER_STREAM_INTERRUPTED`；
 - 缺少 API key → `IrisConfigError`；
 - 无效 route string → `IrisValidationError`。
 
-`stream=True` 或 `provider_options["api_style"] != "chat"` 会在网络调用前被拒绝。
+`complete()` 拒绝 `stream=True`，`stream()` 拒绝 `stream=False`；两者都在网络调用前拒绝
+`provider_options["api_style"] != "chat"`。流式网络/协议失败通过唯一 safe terminal 返回，
+不会泄露 raw exception、header 或 key；本地 `asyncio.CancelledError` 原样传播。
 
 ## 维护与验证
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | LiteLLM kwargs、响应与异常映射 | `client.py` | `tests/test_provider_client.py` |
+| raw stream聚合、终态与cleanup | `_streaming.py` | `tests/providers/test_streaming.py` |
 | Chat message/tool 映射 | `openai.py` | `tests/test_provider_client.py` |
 | provider 注册、路由、密钥优先级与环境配置 | `factory.py`, `../config.py` | 当前无专用测试 |
 
 ```bash
-uv run pytest tests/test_provider_client.py
-uv run ruff check src/iris/providers tests/test_provider_client.py
+uv run pytest tests/providers/test_streaming.py tests/test_provider_client.py
+uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```

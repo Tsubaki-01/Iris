@@ -14,8 +14,9 @@ Example:
 # region imports
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, cast
+from uuid import uuid4
 
 import litellm
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,8 @@ from ..exceptions import (
     IrisRateLimitExceededError,
 )
 from ..message.llm import LLMRequest, LLMResponse
+from ..message.streaming import ModelStreamEvent, ModelStreamScope
+from ._streaming import _iter_litellm_events, failed_before_start
 from .openai import OpenAIChatMapper
 
 # endregion
@@ -93,6 +96,54 @@ class ProviderClient(BaseModel):
             raise self._map_litellm_error(exc) from exc
         return self._from_litellm_response(response)
 
+    async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        """发送流式Chat Completion请求并产出标准事件。
+
+        Args:
+            request: `stream=True`的provider-neutral模型请求。
+
+        Yields:
+            不包含LiteLLM raw对象的连续模型流式事件。
+
+        Raises:
+            IrisProviderError: 请求未启用stream或使用非Chat API风格。
+            asyncio.CancelledError: 本地consumer task被取消。
+        """
+        if not request.stream:
+            raise IrisProviderError(
+                "stream() 不支持 stream=False",
+                provider=self.provider,
+            )
+        self._validate_api_style(request)
+        scope = ModelStreamScope(
+            model_stream_id=f"model-stream-{uuid4().hex}",
+            provider=self.provider,
+            model=request.model,
+            attempt=1,
+        )
+        kwargs = self._to_litellm_kwargs(request)
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+        try:
+            raw_stream = await litellm.acompletion(**kwargs)
+        except Exception as exc:
+            yield failed_before_start(
+                scope=scope,
+                error=self._map_litellm_error(exc),
+                as_mapping=self._as_mapping,
+                response_mapper=self._from_litellm_response,
+            )
+            return
+
+        async for event in _iter_litellm_events(
+            cast(AsyncIterator[Any], raw_stream),
+            scope=scope,
+            as_mapping=self._as_mapping,
+            response_mapper=self._from_litellm_response,
+            error_mapper=self._map_litellm_error,
+        ):
+            yield event
+
     def _validate_api_style(self, request: LLMRequest) -> None:
         """拒绝本阶段不支持的非 Chat API 风格。"""
         api_style = request.provider_options.get("api_style", "chat")
@@ -153,6 +204,7 @@ class ProviderClient(BaseModel):
         message = self._get(choice, "message", {}) or {}
         usage = self._get(data, "usage", {}) or {}
         raw_object = self._get(data, "object", "")
+        reasoning = self._get(message, "reasoning_content", self._get(message, "reasoning", ""))
         return LLMResponse(
             provider=self.provider,
             id=str(self._get(data, "id", "") or ""),
@@ -162,6 +214,7 @@ class ProviderClient(BaseModel):
             input_tokens=int(self._get(usage, "prompt_tokens", 0) or 0),
             output_tokens=int(self._get(usage, "completion_tokens", 0) or 0),
             total_tokens=int(self._get(usage, "total_tokens", 0) or 0),
+            reasoning=reasoning if isinstance(reasoning, str) else "",
             metadata={"raw_object": raw_object} if raw_object else {},
         )
 

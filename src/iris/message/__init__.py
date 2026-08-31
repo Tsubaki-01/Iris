@@ -21,6 +21,26 @@ from iris.message.message import (
     ToolUseBlock,
 )
 
+from .streaming import (
+    ModelBlockCompleted,
+    ModelBlockDelta,
+    ModelBlockKind,
+    ModelBlockRef,
+    ModelBlockStarted,
+    ModelDeltaChannel,
+    ModelResponseCancelled,
+    ModelResponseCompleted,
+    ModelResponseFailed,
+    ModelResponseStarted,
+    ModelStreamEvent,
+    ModelStreamFinalization,
+    ModelStreamFinalStatus,
+    ModelStreamScope,
+    ModelUsageSnapshot,
+    ModelUsageUpdated,
+    ProviderStreamError,
+)
+
 # endregion
 
 __all__ = [
@@ -28,7 +48,24 @@ __all__ = [
     "Conversation",
     "LLMRequest",
     "LLMResponse",
+    "ModelBlockCompleted",
+    "ModelBlockDelta",
+    "ModelBlockKind",
+    "ModelBlockRef",
+    "ModelBlockStarted",
+    "ModelDeltaChannel",
+    "ModelResponseCancelled",
+    "ModelResponseCompleted",
+    "ModelResponseFailed",
+    "ModelResponseStarted",
+    "ModelStreamEvent",
+    "ModelStreamFinalization",
+    "ModelStreamFinalStatus",
+    "ModelStreamScope",
+    "ModelUsageSnapshot",
+    "ModelUsageUpdated",
     "Msg",
+    "ProviderStreamError",
     "Role",
     "TextBlock",
     "ToolResultBlock",
