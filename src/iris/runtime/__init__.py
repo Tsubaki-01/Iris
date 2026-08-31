@@ -12,7 +12,12 @@ from .commit import (
     RuntimeToolResultCommit,
     ToolCallClaim,
 )
-from .environment import RuntimeEnvironment, RuntimeProvider
+from .environment import (
+    RuntimeEnvironment,
+    RuntimeProvider,
+    StreamingRuntimeProvider,
+    streaming_provider_for,
+)
 from .factory import RuntimeFactory
 from .models import (
     RuntimeActivationInput,
@@ -23,6 +28,7 @@ from .models import (
 )
 from .runtime import AgentRuntime
 from .steering import RuntimeSteeringPort, SteeringInput
+from .streaming import RuntimeEventSink, RuntimeStreamEvent
 from .tool_bridge import ToolBridge
 
 __all__ = [
@@ -37,8 +43,10 @@ __all__ = [
     "RuntimeCursor",
     "RuntimeFactory",
     "RuntimeEnvironment",
+    "RuntimeEventSink",
     "RuntimeModelStepCommit",
     "RuntimeProvider",
+    "RuntimeStreamEvent",
     "RuntimeSteeringPort",
     "RuntimeMessageAssembler",
     "RuntimeSuspension",
@@ -48,4 +56,6 @@ __all__ = [
     "ToolCallClaim",
     "ToolBridge",
     "SteeringInput",
+    "StreamingRuntimeProvider",
+    "streaming_provider_for",
 ]

@@ -14,14 +14,15 @@ Example:
 # region imports
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
 from ..memory import MemoryContextBuilder, MemoryService
-from ..message import LLMRequest, LLMResponse
+from ..message import LLMRequest, LLMResponse, ModelStreamEvent
 from ..tools import ToolExecutor, ToolRegistry
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
@@ -48,6 +49,37 @@ class RuntimeProvider(Protocol):
         Returns:
             LLMResponse: Provider 归一化后的响应。
         """
+
+
+@runtime_checkable
+class StreamingRuntimeProvider(Protocol):
+    """Runtime 可选检测的 provider streaming capability。"""
+
+    def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        """返回一次 provider-neutral typed event stream。
+
+        Args:
+            request (LLMRequest): 已启用 streaming 的可信请求。
+
+        Returns:
+            AsyncIterator[ModelStreamEvent]: 顺序产生的模型流式事件。
+        """
+
+
+def streaming_provider_for(
+    provider: RuntimeProvider,
+) -> StreamingRuntimeProvider | None:
+    """返回 provider 的独立 streaming capability。
+
+    Args:
+        provider (RuntimeProvider): Runtime 当前绑定的 complete capability。
+
+    Returns:
+        StreamingRuntimeProvider | None: 可用的 stream capability；缺失时返回 ``None``。
+    """
+    if isinstance(provider, StreamingRuntimeProvider):
+        return provider
+    return None
 
 
 def _default_tool_bridge() -> ToolBridge:
@@ -93,4 +125,9 @@ class RuntimeEnvironment:
         self.workspace_root = self.workspace_root.resolve()
 
 
-__all__ = ["RuntimeEnvironment", "RuntimeProvider"]
+__all__ = [
+    "RuntimeEnvironment",
+    "RuntimeProvider",
+    "StreamingRuntimeProvider",
+    "streaming_provider_for",
+]

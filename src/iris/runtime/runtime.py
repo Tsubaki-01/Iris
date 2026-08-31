@@ -13,6 +13,8 @@ from ..exceptions import (
     HITLCheckpointInvalidError,
     IrisCancellationRequestedError,
     IrisError,
+    IrisProviderStreamError,
+    IrisProviderStreamInterruptedError,
     IrisRunConflictError,
 )
 from ..hitl import (
@@ -21,7 +23,15 @@ from ..hitl import (
     QuestionPrompt,
 )
 from ..lifecycle import CheckpointResumability, RunErrorInfo, ToolErrorPolicy
-from ..message import LLMRequest, Msg
+from ..message import (
+    LLMRequest,
+    LLMResponse,
+    ModelResponseCancelled,
+    ModelResponseCompleted,
+    ModelResponseFailed,
+    Msg,
+    ToolUseBlock,
+)
 from ..tools import (
     CancellationSignal,
     PreparedToolCall,
@@ -40,7 +50,7 @@ from .commit import (
     ToolCallClaim,
     build_runtime_tool_call,
 )
-from .environment import RuntimeEnvironment
+from .environment import RuntimeEnvironment, streaming_provider_for
 from .memory_context import prepare_activation_memory_context_input
 from .models import (
     RuntimeActivationInput,
@@ -50,6 +60,11 @@ from .models import (
     RuntimeCursor,
 )
 from .steering import RuntimeSteeringPort
+from .streaming import (
+    RuntimeEventSink,
+    _LiveToolEffectGuard,
+    _runtime_stream_event,
+)
 from .tool_bridge import ToolBridge
 
 # endregion
@@ -64,6 +79,14 @@ class _ModelStepAdvance:
 
     cursor: RuntimeCursor
     plan: ToolBatchPlan | None = None
+
+
+class _RuntimeSinkEmissionError(Exception):
+    """标记 model event sink error，使其绕过 provider error 归一化。"""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 class AgentRuntime:
@@ -84,10 +107,21 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None = None,
+        stream_sink: RuntimeEventSink | None = None,
     ) -> RuntimeActivationResult:
         """按 durable cursor 分阶段推进唯一的 model/tool inner loop。
 
         阶段边界由 cursor 位置驱动，只有对应事实提交成功后才进入下一阶段。
+
+        Args:
+            activation (RuntimeActivationInput): 本次推进的可信 activation 输入。
+            commits (RuntimeCommitPort): Required durable fact 提交端口。
+            cancellation (CancellationSignal): Activation-scope 取消信号。
+            steering (RuntimeSteeringPort | None): 可选瞬时输入端口。
+            stream_sink (RuntimeEventSink | None): 可选同步 live event sink。
+
+        Returns:
+            RuntimeActivationResult: 当前 activation 的 engine outcome。
         """
         # --- 1. 恢复 activation 现场 ---
         # 从 checkpoint 还原工具共享状态，并保留本次 resume 的 HITL 投影。
@@ -131,6 +165,7 @@ class AgentRuntime:
                     commits=commits,
                     cancellation=cancellation,
                     steering=steering,
+                    stream_sink=stream_sink,
                 )
                 if isinstance(model_outcome, RuntimeActivationResult):
                     return model_outcome
@@ -142,6 +177,13 @@ class AgentRuntime:
             # --- 4. 预检工具批次 ---
             # 为当前 assistant 消息重建执行计划，并校验恢复投影与 cursor 是否一致。
             if plan is None:
+                _emit_tool_preparing(
+                    stream_sink,
+                    activation=activation,
+                    cursor=cursor,
+                    tool_calls=cursor.tool_calls[cursor.next_tool_index :],
+                    start_ordinal=cursor.next_tool_index + 1,
+                )
                 plan = self.environment.tool_bridge.preflight_once(
                     assistant_message=cast(Msg, cursor.assistant_message),
                     session_id=activation.session_id,
@@ -177,6 +219,7 @@ class AgentRuntime:
                         commits=commits,
                         cancellation=cancellation,
                         steering=steering,
+                        stream_sink=stream_sink,
                     )
                     if isinstance(window_outcome, RuntimeActivationResult):
                         return window_outcome
@@ -231,7 +274,7 @@ class AgentRuntime:
                         cursor=cursor,
                         assistant_message=cursor.assistant_message,
                     )
-                guard = CommitPortToolEffectGuard(
+                durable_guard = CommitPortToolEffectGuard(
                     activation=activation,
                     cursor=cursor,
                     commits=commits,
@@ -241,6 +284,17 @@ class AgentRuntime:
                         if approved_projection is not None
                         else None
                     ),
+                )
+                guard = (
+                    _LiveToolEffectGuard(
+                        guard=durable_guard,
+                        sink=stream_sink,
+                        activation=activation,
+                        step_index=cursor.step_index,
+                        tool_ordinal=cursor.next_tool_index + 1,
+                    )
+                    if stream_sink is not None
+                    else durable_guard
                 )
                 timeout = _tool_timeout_seconds(activation, commits)
                 try:
@@ -310,6 +364,7 @@ class AgentRuntime:
                 result=result,
                 cancellation=cancellation,
                 steering=steering,
+                stream_sink=stream_sink,
             )
             if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
@@ -334,6 +389,7 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None,
+        stream_sink: RuntimeEventSink | None,
     ) -> RuntimeCursor | RuntimeActivationResult:
         """执行一个有界安全窗口，并按模型 ordinal 提交结果。"""
         prepared_calls = [prepared for _, prepared in window]
@@ -341,7 +397,7 @@ class AgentRuntime:
             activation.session_id,
             prepared_calls,
         )
-        guards = [
+        durable_guards = [
             CommitPortToolEffectGuard(
                 activation=activation,
                 cursor=cursor,
@@ -350,6 +406,20 @@ class AgentRuntime:
                 tool_index=tool_index,
             )
             for tool_index, _ in window
+        ]
+        guards = [
+            (
+                _LiveToolEffectGuard(
+                    guard=guard,
+                    sink=stream_sink,
+                    activation=activation,
+                    step_index=cursor.step_index,
+                    tool_ordinal=tool_index + 1,
+                )
+                if stream_sink is not None
+                else guard
+            )
+            for (tool_index, _), guard in zip(window, durable_guards, strict=True)
         ]
         tasks: list[asyncio.Task[ToolResult]] = []
         runtime_cancelled_tasks: set[asyncio.Task[ToolResult]] = set()
@@ -450,6 +520,7 @@ class AgentRuntime:
                 result=slot,
                 cancellation=cancellation,
                 steering=steering,
+                stream_sink=stream_sink,
             )
 
         if interrupted:
@@ -514,6 +585,7 @@ class AgentRuntime:
         result: ToolResult,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None,
+        stream_sink: RuntimeEventSink | None,
     ) -> RuntimeCursor:
         """封装既有的单步 result commit 与 cursor 推进。"""
         next_index = cursor.next_tool_index + 1
@@ -584,6 +656,18 @@ class AgentRuntime:
                 activation=activation,
                 submission_id=claimed_input.submission_id,
             )
+        if stream_sink is not None:
+            stream_sink.emit(
+                _runtime_stream_event(
+                    "tool.completed",
+                    activation=activation,
+                    step_index=tool_call.step_index,
+                    tool_call_id=tool_call.tool_call_id,
+                    tool_name=tool_call.tool_name,
+                    tool_ordinal=tool_call.ordinal,
+                    tool_result=result,
+                )
+            )
         return committed_cursor
 
     async def _execute_model_step(
@@ -594,6 +678,7 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None,
+        stream_sink: RuntimeEventSink | None,
     ) -> _ModelStepAdvance | RuntimeActivationResult:
         """执行并 required commit 一次 provider step。"""
         snapshot = commits.load_session()
@@ -659,14 +744,33 @@ class AgentRuntime:
                 cursor=cursor,
             )
 
+        if stream_sink is not None:
+            stream_sink.emit(
+                _runtime_stream_event(
+                    "model.step.started",
+                    activation=activation,
+                    step_index=cursor.step_index,
+                )
+            )
+
         try:
-            operation = self.environment.provider.complete(request)
-            response = (
+            operation = self._execute_provider_request(
+                request=request,
+                activation=activation,
+                cursor=cursor,
+                stream_sink=stream_sink,
+            )
+            provider_outcome = (
                 await asyncio.wait_for(operation, timeout=remaining)
                 if remaining is not None
                 else await operation
             )
+            if isinstance(provider_outcome, RuntimeActivationResult):
+                return provider_outcome
+            response = provider_outcome
             assistant = response.to_msg()
+        except _RuntimeSinkEmissionError as exc:
+            raise exc.error from exc
         except TimeoutError as exc:
             if remaining is not None and _deadline_expired(commits):
                 return RuntimeActivationResult(
@@ -775,6 +879,13 @@ class AgentRuntime:
                 assistant_message=assistant,
             )
 
+        _emit_tool_preparing(
+            stream_sink,
+            activation=activation,
+            cursor=cursor,
+            tool_calls=tuple(assistant.tool_calls),
+            start_ordinal=1,
+        )
         plan = self.environment.tool_bridge.preflight_once(
             assistant_message=assistant,
             session_id=activation.session_id,
@@ -846,6 +957,54 @@ class AgentRuntime:
             raise IrisRunConflictError("model-step commit 返回了意外 cursor")
         return _ModelStepAdvance(cursor=committed, plan=plan)
 
+    async def _execute_provider_request(
+        self,
+        *,
+        request: LLMRequest,
+        activation: RuntimeActivationInput,
+        cursor: RuntimeCursor,
+        stream_sink: RuntimeEventSink | None,
+    ) -> LLMResponse | RuntimeActivationResult:
+        """执行 complete 或 direct-pull stream，并只返回完整响应。"""
+        if stream_sink is None:
+            return await self.environment.provider.complete(request)
+
+        provider = streaming_provider_for(self.environment.provider)
+        if provider is None:
+            return _failed_activation(
+                cursor,
+                IrisProviderStreamError(
+                    "Provider 不支持 runtime streaming capability",
+                    provider=self.environment.agent_config.model.provider,
+                ),
+            )
+
+        stream_request = request.model_copy(update={"stream": True})
+        async for model_event in provider.stream(stream_request):
+            try:
+                stream_sink.emit(
+                    _runtime_stream_event(
+                        "model.event",
+                        activation=activation,
+                        step_index=cursor.step_index,
+                        model_event=model_event,
+                    )
+                )
+            except Exception as exc:
+                raise _RuntimeSinkEmissionError(exc) from exc
+            if isinstance(model_event, ModelResponseCompleted):
+                return model_event.response
+            if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
+                return _provider_stream_failure(cursor, model_event)
+
+        return _failed_activation(
+            cursor,
+            IrisProviderStreamInterruptedError(
+                "Provider stream 在合法终态前结束",
+                provider=self.environment.agent_config.model.provider,
+            ),
+        )
+
     def _suspend_existing_batch(
         self,
         *,
@@ -909,6 +1068,53 @@ def _parallel_tool_window(
             break
         window.append((index, prepared))
     return tuple(window) if len(window) >= 2 else ()
+
+
+def _emit_tool_preparing(
+    sink: RuntimeEventSink | None,
+    *,
+    activation: RuntimeActivationInput,
+    cursor: RuntimeCursor,
+    tool_calls: Sequence[ToolUseBlock],
+    start_ordinal: int,
+) -> None:
+    """在完整 tool calls 进入 preflight 前发布 preparing facts。"""
+    if sink is None:
+        return
+    for ordinal, tool_call in enumerate(tool_calls, start=start_ordinal):
+        sink.emit(
+            _runtime_stream_event(
+                "tool.preparing",
+                activation=activation,
+                step_index=cursor.step_index,
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                tool_ordinal=ordinal,
+            )
+        )
+
+
+def _provider_stream_failure(
+    cursor: RuntimeCursor,
+    event: ModelResponseFailed | ModelResponseCancelled,
+) -> RuntimeActivationResult:
+    """把 provider stream terminal 映射为未提交的 activation failure。"""
+    error = event.error
+    return RuntimeActivationResult(
+        outcome=RuntimeActivationOutcome.FAILED,
+        cursor=cursor,
+        assistant_message=cursor.assistant_message,
+        error=RunErrorInfo(
+            code=error.code if error is not None else "PROVIDER_STREAM_ERROR",
+            message=error.message if error is not None else "Provider stream cancelled",
+            source="provider",
+            details={
+                "retryable": error.retryable if error is not None else False,
+                "semantic_output_emitted": event.semantic_output_emitted,
+                "model_stream_id": event.scope.model_stream_id,
+            },
+        ),
+    )
 
 
 def _settle_steering_input(

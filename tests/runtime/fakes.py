@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 from iris.agents import AgentConfig
@@ -13,7 +13,7 @@ from iris.hitl import (
 )
 from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
 from iris.memory import MemoryContextBuilder, MemoryService
-from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
 from iris.runtime import (
     AgentRuntime,
     ModelStepReservation,
@@ -519,6 +519,32 @@ class FakeProvider:
         if not self._responses:
             raise IrisProviderError("FakeProvider 响应已耗尽", provider="fake")
         return self._responses.pop(0)
+
+
+class FakeStreamingProvider(FakeProvider):
+    """测试用 streaming provider，按请求顺序返回 typed event streams。"""
+
+    def __init__(
+        self,
+        streams: Sequence[Sequence[ModelStreamEvent]],
+        responses: Sequence[LLMResponse] = (),
+    ) -> None:
+        super().__init__(responses)
+        self._streams = [list(events) for events in streams]
+        self._stream_requests: list[LLMRequest] = []
+
+    @property
+    def stream_requests(self) -> list[LLMRequest]:
+        """返回已捕获的流式请求快照。"""
+        return list(self._stream_requests)
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        """记录请求并依次产出下一组 typed events。"""
+        self._stream_requests.append(request)
+        if not self._streams:
+            raise IrisProviderError("FakeStreamingProvider 流已耗尽", provider="fake")
+        for event in self._streams.pop(0):
+            yield event
 
 
 def build_runtime(

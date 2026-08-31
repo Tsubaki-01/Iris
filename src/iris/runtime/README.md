@@ -34,6 +34,7 @@ result = await runtime.execute(
     commits=commit_port,
     cancellation=cancellation_signal,
     steering=steering_port,  # 可选；省略时保持原行为
+    stream_sink=stream_sink,  # 可选；启用同进程 live event
 )
 ```
 
@@ -54,6 +55,27 @@ cursor 位置只有：
 无工具的 provider response 会以 `CheckpointResumability.OUTCOME_READY` 提交。工具 effect 前
 必须 durable claim，result 后必须 durable commit；claim 后无法证明结果时返回
 `TOOL_OUTCOME_UNKNOWN`，不得重放 effect。
+
+## 可选 live streaming
+
+`stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
+`RuntimeProvider.complete()`，请求的 `stream` 为 `False`。传入同步 `RuntimeEventSink` 时，
+runtime 通过独立的 `StreamingRuntimeProvider` structural capability 检测 `stream()`；capability
+缺失会以 `PROVIDER_STREAM_ERROR/provider` 失败，不回退到 `complete()`，也不伪造 token。
+
+streaming 路径只复制当前可信请求并把 `stream` 设为 `True`，然后在 provider async iterator 上
+direct-pull。Runtime 先发布 `model.step.started`，再把每条 `ModelStreamEvent` 包装为
+`model.event` 同步交给 sink。partial、usage 和 provider terminal 都只是 live facts；只有
+`response.completed` 携带的完整 `LLMResponse` 会进入既有 `to_msg()`、steering、tool preflight
+与 `RuntimeModelStepCommit` 路径。failed/cancelled terminal 或合法终态前 EOF 不提交 assistant、
+history、checkpoint 或工具调用。Provider completed 也不代表 durable commit 已成功。
+
+工具 live event 保持既有 effect gate：完整 `ToolUseBlock` 才发布 `tool.preparing` 并进入
+preflight；`tool.started` 只在 permission refresh、activation fence 与 durable claim 成功后、
+middleware/body 前发布；`tool.completed` 只在 ordered `commit_tool_result()` 成功后携带完整
+`ToolResult` 发布。并发工具 body 可以乱序结束，但 completed event 仍按 model ordinal。
+Runtime 不 await sink、不创建 queue，也不捕获自定义 sink 的异常；publisher 隔离由后续
+harness-owned sink 负责。
 
 ## Runtime steering
 
@@ -136,8 +158,10 @@ registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过
 
 ## 公开接口
 
-包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、provider/assembler/tool
-bridge、`RuntimeSteeringPort`、`SteeringInput`，以及 activation/commit-port contracts。不存在 complete-run options/status/result、
+包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、
+`StreamingRuntimeProvider`、`streaming_provider_for()`、`RuntimeEventSink`、
+`RuntimeStreamEvent`、provider/assembler/tool bridge、`RuntimeSteeringPort`、`SteeringInput`，以及
+activation/commit-port contracts。不存在 complete-run options/status/result、
 `run_turn()`、`run_loop()`、`resume()` 或旧 checkpoint helper。
 
 ## 验证

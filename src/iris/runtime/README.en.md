@@ -34,6 +34,7 @@ result = await runtime.execute(
     commits=commit_port,
     cancellation=cancellation_signal,
     steering=steering_port,  # optional; omission preserves existing behavior
+    stream_sink=stream_sink,  # optional; enables in-process live events
 )
 ```
 
@@ -49,6 +50,30 @@ Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provid
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
 engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
+
+## Optional live streaming
+
+`stream_sink=None` preserves the complete-only path exactly: runtime continues to call
+`RuntimeProvider.complete()` with `stream=False`. With a synchronous `RuntimeEventSink`, runtime
+uses the independent structural `StreamingRuntimeProvider` capability to detect `stream()`.
+Missing capability fails with `PROVIDER_STREAM_ERROR/provider`; runtime neither falls back to
+`complete()` nor fabricates tokens.
+
+The streaming path copies the trusted request with `stream=True` and direct-pulls the provider
+async iterator. Runtime emits `model.step.started`, then synchronously wraps each
+`ModelStreamEvent` as `model.event`. Partials, usage, and provider terminals remain live facts.
+Only the complete `LLMResponse` carried by `response.completed` enters the existing `to_msg()`,
+steering, tool-preflight, and `RuntimeModelStepCommit` path. A failed/cancelled terminal or EOF
+before a legal terminal commits no assistant message, history, checkpoint, or tool call. Provider
+completion does not imply that the durable commit succeeded.
+
+Tool live events preserve the existing effect gate. Runtime emits `tool.preparing` only for a
+complete `ToolUseBlock` before preflight; it emits `tool.started` after permission refresh,
+activation fencing, and a successful durable claim but before middleware/body; it emits
+`tool.completed` with the complete `ToolResult` only after ordered `commit_tool_result()` succeeds.
+Parallel tool bodies may finish out of order, while completed events retain model ordinal order.
+Runtime does not await the sink, create a queue, or catch custom sink errors; a later
+harness-owned sink isolates publisher failures.
 
 ## Runtime steering
 
@@ -142,8 +167,9 @@ A `skills.root` escape, missing `skills.require` entry, or name/alias collision 
 
 ## Public API
 
-Package exports cover `AgentRuntime`, factory/environment, provider/assembler/tool bridge,
-`RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
+Package exports cover `AgentRuntime`, factory/environment, `StreamingRuntimeProvider`,
+`streaming_provider_for()`, `RuntimeEventSink`, `RuntimeStreamEvent`, provider/assembler/tool
+bridge, `RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
 options/status/results, `run_turn()`, `run_loop()`,
 `resume()`, and old checkpoint helpers do not exist.
 
