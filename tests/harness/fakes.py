@@ -8,6 +8,7 @@ from pathlib import Path
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
+from iris.harness.streaming import LiveFact
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import (
     AgentRuntime,
@@ -15,6 +16,7 @@ from iris.runtime import (
     RuntimeActivationResult,
     RuntimeCommitPort,
     RuntimeEnvironment,
+    RuntimeEventSink,
     RuntimeMessageAssembler,
     RuntimeSteeringPort,
     ToolBridge,
@@ -73,6 +75,7 @@ class CountingAgentRuntime(AgentRuntime):
     def __init__(self, runtime: AgentRuntime) -> None:
         super().__init__(runtime.environment)
         self.execute_calls = 0
+        self.stream_sinks: list[RuntimeEventSink | None] = []
 
     async def execute(
         self,
@@ -81,15 +84,38 @@ class CountingAgentRuntime(AgentRuntime):
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None = None,
+        stream_sink: RuntimeEventSink | None = None,
     ) -> RuntimeActivationResult:
         """记录调用后委托给真实 inner engine。"""
         self.execute_calls += 1
+        self.stream_sinks.append(stream_sink)
         return await super().execute(
             activation,
             commits=commits,
             cancellation=cancellation,
             steering=steering,
+            stream_sink=stream_sink,
         )
+
+
+class RecordingPublisher:
+    """按调用顺序记录 trusted live facts。"""
+
+    def __init__(self) -> None:
+        self.facts: list[LiveFact] = []
+
+    def publish(self, fact: LiveFact) -> None:
+        """记录一条 live fact。"""
+        self.facts.append(fact)
+
+
+class FailingPublisher(RecordingPublisher):
+    """记录调用后同步抛错的 publisher。"""
+
+    def publish(self, fact: LiveFact) -> None:
+        """记录 fact 并模拟 observation failure。"""
+        super().publish(fact)
+        raise RuntimeError("模拟 publisher 失败")
 
 
 def text_response(text: str = "完成") -> LLMResponse:
@@ -164,7 +190,9 @@ def build_runtime(
 __all__ = [
     "BlockingProvider",
     "CountingAgentRuntime",
+    "FailingPublisher",
     "FrozenClock",
+    "RecordingPublisher",
     "StaticProvider",
     "build_runtime",
     "text_response",

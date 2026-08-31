@@ -23,7 +23,7 @@ from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
@@ -41,6 +41,9 @@ from ..lifecycle import (
 from ..message import Msg
 from ..runtime import SteeringInput
 from .runner import AgentRunner
+
+if TYPE_CHECKING:
+    from .streaming import LivePublisher
 
 # endregion
 
@@ -642,6 +645,7 @@ class SessionManager:
     Attributes:
         _runner (AgentRunner): 唯一 durable owner。
         _session_id (str): 绑定的 session id。
+        _submission_publisher (LivePublisher | None): 可选 submission side-channel publisher。
         _lock (asyncio.Lock): 串行化全部 transient 状态变更。
         _pending (_PendingInputQueue): steer / follow-up 两条 FIFO。
         _claimed_steer (dict[str, _PendingInput]): 已 claim 但未结算的 steer input。
@@ -672,6 +676,7 @@ class SessionManager:
         max_pending_follow_up: int = _DEFAULT_MAX_PENDING_FOLLOW_UP,
         max_buffered_submission_events: int = _DEFAULT_MAX_BUFFERED_SUBMISSION_EVENTS,
         max_tracked_durable_runs: int = _DEFAULT_MAX_TRACKED_DURABLE_RUNS,
+        submission_publisher: LivePublisher | None = None,
     ) -> None:
         """绑定 runner 与 session id，初始化全部 process-local 状态。"""
         normalized_session_id = session_id.strip()
@@ -679,6 +684,7 @@ class SessionManager:
             raise IrisRunStateError("session_id 不能为空")
         self._runner = runner
         self._session_id = normalized_session_id
+        self._submission_publisher = submission_publisher
         self._lock = asyncio.Lock()
         self._pending = _PendingInputQueue(
             max_steer=max_pending_steer,
@@ -1303,6 +1309,30 @@ class SessionManager:
             self._event_buffer.add_pending(event)
         else:
             self._event_buffer.add_terminal(event)
+        self._publish_submission_event(event)
+
+    def _publish_submission_event(self, event: SubmissionEvent) -> None:
+        """Best-effort 发布已成功写入原 buffer 的 submission side-channel fact。"""
+        publisher = self._submission_publisher
+        if publisher is None:
+            return
+        from .streaming import SessionSubmissionEvent
+
+        fact = SessionSubmissionEvent(session_id=self._session_id, event=event)
+        try:
+            publisher.publish(fact)
+        except Exception:
+            logger.warning(
+                "live publisher 处理 submission fact 失败",
+                extra={
+                    "publisher": type(publisher).__qualname__,
+                    "fact_kind": f"submission.{event.state}",
+                    "session_id": self._session_id,
+                    "run_id": event.run_id,
+                    "submission_id": event.submission_id,
+                },
+                exc_info=True,
+            )
 
     # endregion
 

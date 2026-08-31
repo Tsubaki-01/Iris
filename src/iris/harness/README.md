@@ -34,15 +34,29 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 - `recover(run_id, expected_activation_id=...)`：对 active run 要求精确 fence。safe checkpoint
   创建 recover activation，outcome-ready 只补 terminal，unresolved claim 结算为
   `outcome_unknown`；
-- `get_run()`、`get_result()`、`list_events(after_sequence=0, limit=None)`：无副作用 durable
-  reads；`limit` 如提供必须是正整数。
+- `get_session()`、`get_run()`、`get_result()`、`list_tool_calls()` 和
+  `list_events(after_sequence=0, limit=None)`：无副作用 durable reads；`limit` 如提供必须是
+  正整数。
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
 
+## Live publisher 组合
+
+Host 可把同一个 `LivePublisher`（通常是 `LiveStreamBroker`）通过 `live_publisher=` 注入
+`AgentRunner`。Runner 会把每个 activation 的 `RuntimeStreamEvent` 和每条新 committed
+`RunEvent` 同步交给 publisher；未注入时不构造 runtime sink。Publisher 是 best-effort
+观察面：普通异常只记录不含 payload 的 warning，不会回滚 durable mutation、取消 run 或改变
+`RunResult`。
+
+`AgentRunner.from_config()` 与 `from_config_path()` 只把 publisher 交给 runner，
+`RuntimeFactory` 不拥有 broker 或 fan-out。Host 可通过 `get_session()`、`get_run()`、
+`get_result()`、`list_tool_calls()` 和 `list_events()` 从 exact runner/store 补读 durable facts，
+这些读取不会触发 live 发布。
+
 ## 单 session 输入管理
 
-`SessionManager(runner, session_id)` 绑定一个 exact runner 与一个 session。它适合需要在当前 run
-执行期间接收新普通输入的 host：
+`SessionManager(runner, session_id, submission_publisher=...)` 绑定一个 exact runner 与一个
+session。它适合需要在当前 run 执行期间接收新普通输入的 host：
 
 ```python
 import asyncio
@@ -78,6 +92,11 @@ Idle 时，`submit(input, mode=None, options=...)` 在 run create 已 durable co
 run 的 steer。Busy receipt 只表示 `pending`；最终 delivery/failure 只通过 `events()` 报告。
 该单消费者 stream 原样混合 durable `RunEvent` 与 transient `SubmissionEvent`，不创建 session-global
 sequence。Idle submit 不产生 `SubmissionEvent`。
+
+可选 `submission_publisher` 只提供 submission side channel。Manager 会先把原
+`SubmissionEvent` 成功写入上述单消费者 buffer，再 best-effort 发布带 session identity 的
+`SessionSubmissionEvent`；发布失败不重复 buffer 写入，也不改变 receipt。Run events、HITL 和
+result 仍以原 manager/runner 契约为准。
 
 Manager 默认最多分别排队 64 条 steer 与 64 条 follow-up，最多保留 256 个 transient submission
 event 槽位，并跟踪 64 个尚未被 consumer 追平的 durable run。可通过
@@ -154,8 +173,9 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 ## 公开接口
 
 `iris.harness` 导出 `AgentRunner`、`SessionManager`、`SubmitReceipt`、`SubmissionEvent`、
-`SessionEvent`，以及 run request/options/limits/runtime options、phase/stop reason/usage/error/
-snapshot/result 和 run events/observer。Store commands 仍属于 `iris.lifecycle`。
+`SessionSubmissionEvent`、`SessionEvent`、`LiveFact`、`LivePublisher`，以及 run
+request/options/limits/runtime options、phase/stop reason/usage/error/snapshot/result 和 run
+events/observer。Store commands 仍属于 `iris.lifecycle`。
 
 ## 验证
 

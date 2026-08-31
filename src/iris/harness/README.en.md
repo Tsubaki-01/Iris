@@ -35,16 +35,32 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 - `recover()` requires the exact active activation fence. Safe checkpoints create a recover
   activation, outcome-ready checkpoints only finalize, and unresolved claims become
   `outcome_unknown`.
-- `get_run()`, `get_result()`, and `list_events(after_sequence=0, limit=None)` are side-effect-free
-  durable reads. When provided, `limit` must be a positive integer.
+- `get_session()`, `get_run()`, `get_result()`, `list_tool_calls()`, and
+  `list_events(after_sequence=0, limit=None)` are side-effect-free durable reads. When provided,
+  `limit` must be a positive integer.
 
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
 
+## Live publisher composition
+
+A host may inject the same `LivePublisher` (typically a `LiveStreamBroker`) into `AgentRunner`
+through `live_publisher=`. The runner synchronously publishes each activation's
+`RuntimeStreamEvent` values and every newly committed `RunEvent`; without a publisher, it creates
+no runtime sink. The publisher is a best-effort observation plane. An ordinary exception produces
+a payload-free warning and cannot roll back a durable mutation, cancel a run, or change its
+`RunResult`.
+
+`AgentRunner.from_config()` and `from_config_path()` pass the publisher only to the runner;
+`RuntimeFactory` owns neither the broker nor fan-out. A host can refill durable facts from the
+exact runner/store through `get_session()`, `get_run()`, `get_result()`, `list_tool_calls()`, and
+`list_events()`. These reads never publish live facts.
+
 ## Per-session input management
 
-`SessionManager(runner, session_id)` binds one exact runner and one session. It is intended for a
-host that must accept new ordinary input while the current run is executing:
+`SessionManager(runner, session_id, submission_publisher=...)` binds one exact runner and one
+session. It is intended for a host that must accept new ordinary input while the current run is
+executing:
 
 ```python
 import asyncio
@@ -83,6 +99,12 @@ does not block a steer that can still enter the current run. A busy receipt mean
 the final delivery or failure is reported through `events()`. This single-consumer stream mixes raw
 durable `RunEvent` values with transient `SubmissionEvent` values and adds no session-global
 sequence. Idle submissions emit no `SubmissionEvent`.
+
+The optional `submission_publisher` is only a submission side channel. The manager first writes
+the original `SubmissionEvent` to the single-consumer buffer above, then best-effort publishes a
+`SessionSubmissionEvent` carrying the session identity. A publisher failure neither repeats the
+buffer write nor changes the receipt. Run events, HITL, and results retain their existing
+manager/runner contracts.
 
 By default, a manager queues at most 64 steers and 64 follow-ups, reserves 256 transient submission
 event slots, and tracks 64 durable runs that the consumer has not caught up with. Hosts may set
@@ -170,9 +192,10 @@ the provider commit and is not injected again.
 
 ## Public API
 
-`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `SubmissionEvent`, and
-`SessionEvent`; run request/options/limits/runtime options; phase, stop reason, usage, error,
-snapshot, and result; plus run events and observers. Store commands remain in `iris.lifecycle`.
+`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `SubmissionEvent`,
+`SessionSubmissionEvent`, `SessionEvent`, `LiveFact`, and `LivePublisher`; run
+request/options/limits/runtime options; phase, stop reason, usage, error, snapshot, and result;
+plus run events and observers. Store commands remain in `iris.lifecycle`.
 
 ## Verification
 

@@ -24,7 +24,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import (
@@ -65,6 +65,8 @@ from ..lifecycle import (
     RunResult,
     RunSnapshot,
     RunStopReason,
+    RunToolCallRecord,
+    SessionSnapshot,
     ToolCallPhase,
     snapshot_run,
 )
@@ -76,15 +78,20 @@ from ..runtime import (
     RuntimeActivationResult,
     RuntimeApprovedToolCall,
     RuntimeCursor,
+    RuntimeEventSink,
     RuntimeFactory,
     RuntimeProvider,
     RuntimeSteeringPort,
+    RuntimeStreamEvent,
 )
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal
 from ._commit_port import StoreRuntimeCommitPort
 from ._fingerprint import compute_environment_fingerprint
 from .observer import RunEventObserver
+
+if TYPE_CHECKING:
+    from .streaming import LiveFact, LivePublisher
 
 # endregion
 
@@ -120,6 +127,17 @@ class _SystemClock:
 
     def now(self) -> datetime:
         return datetime.now(UTC)
+
+
+class _RunnerPublisherRelay:
+    """把 runtime sink 的 publish 调用交给 runner 的故障隔离边界。"""
+
+    def __init__(self, runner: AgentRunner) -> None:
+        self._runner = runner
+
+    def publish(self, fact: LiveFact) -> None:
+        """委托 runner 发布一条 trusted fact。"""
+        self._runner._publish_live_fact(fact)
 
 
 class _MutableCancellationSignal(CancellationSignal):
@@ -198,6 +216,7 @@ class AgentRunner:
         store (LifecycleStore): 权威 durable store。
         observers (tuple[RunEventObserver, ...]): settlement 后 best-effort 的事件观察者。
         observer_event_timeout_s (float): 单个 observer event 的有限等待秒数。
+        _live_publisher (LivePublisher | None): 可选的同进程 live fact publisher。
         clock (Clock): aware UTC 时间源。
         interaction_service (HumanInteractionService): 无状态 HITL 领域服务。
         environment_fingerprint (str): 环境指纹，用于拒绝跨环境 resume/recover。
@@ -220,6 +239,7 @@ class AgentRunner:
         observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         interaction_service: HumanInteractionService | None = None,
+        live_publisher: LivePublisher | None = None,
     ) -> None:
         """绑定 engine、durable store 与观察者，装配唯一 lifecycle owner。
 
@@ -240,6 +260,13 @@ class AgentRunner:
         if hasattr(self.interaction_service, "store"):
             raise IrisRunStateError("runner interaction service 必须是无状态领域服务")
         self.environment_fingerprint = compute_environment_fingerprint(runtime)
+        self._live_publisher = live_publisher
+        if live_publisher is None:
+            self._stream_sink: RuntimeEventSink | None = None
+        else:
+            from .streaming import _RuntimeLiveSink
+
+            self._stream_sink = _RuntimeLiveSink(_RunnerPublisherRelay(self))
         self._active: dict[str, ActiveActivation] = {}
 
     @classmethod
@@ -254,6 +281,7 @@ class AgentRunner:
         observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         api_key: str | None = None,
+        live_publisher: LivePublisher | None = None,
     ) -> AgentRunner:
         """从 agent 配置路径装配 engine 与唯一 lifecycle store。"""
         config_path = Path(path)
@@ -267,6 +295,7 @@ class AgentRunner:
             observer_event_timeout_s=observer_event_timeout_s,
             clock=clock,
             api_key=api_key,
+            live_publisher=live_publisher,
         )
 
     @classmethod
@@ -282,6 +311,7 @@ class AgentRunner:
         observer_event_timeout_s: float = 30.0,
         clock: Clock | None = None,
         api_key: str | None = None,
+        live_publisher: LivePublisher | None = None,
     ) -> AgentRunner:
         """从已校验配置装配 engine；durable ownership 只属于 harness。"""
         runtime = RuntimeFactory.from_config(
@@ -300,6 +330,7 @@ class AgentRunner:
             observers=observers,
             observer_event_timeout_s=observer_event_timeout_s,
             clock=clock,
+            live_publisher=live_publisher,
         )
 
     # endregion
@@ -399,7 +430,9 @@ class AgentRunner:
             cursor=cursor,
             clock=self._now,
             event_sink=active.events,
-            durable_event_callback=durable_event_callback,
+            durable_event_callback=self._compose_durable_event_callback(
+                durable_event_callback
+            ),
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -579,7 +612,9 @@ class AgentRunner:
             cursor=cursor,
             clock=self._now,
             event_sink=active.events,
-            durable_event_callback=durable_event_callback,
+            durable_event_callback=self._compose_durable_event_callback(
+                durable_event_callback
+            ),
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -650,6 +685,8 @@ class AgentRunner:
                     committed.events,
                     active.durable_event_callback,
                 )
+            else:
+                self._record_events([], committed.events)
         # 必须在 durable 请求落库之后才 signal，否则本地中断可能领先于持久化事实。
         # activation id 相等是 fence：跨进程或已换代的 activation 不受本进程 signal 影响。
         active = self._active.get(run.run_id)
@@ -746,7 +783,9 @@ class AgentRunner:
             cursor = run.last_event_sequence
             settled = self._settle_waiting_if_due(run, interaction, now=self._now())
             if settled is not None:
-                await self._deliver_events(self.store.list_events(run.run_id, cursor))
+                events: list[RunEvent] = []
+                self._record_events(events, self.store.list_events(run.run_id, cursor))
+                await self._deliver_events(events)
                 return settled
             raise IrisRunStateError(
                 "waiting run 必须通过 resume 继续",
@@ -806,8 +845,10 @@ class AgentRunner:
                 now=self._now(),
             )
         )
+        recovered_events: list[RunEvent] = []
+        self._record_events(recovered_events, recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(list(recovered.events))
+            await self._deliver_events(recovered_events)
             return self._require_result(run.run_id)
         if recovered.checkpoint is None or recovered_cursor is None or new_activation_id is None:
             raise IrisRunRecoveryError("recover commit 缺少 rebound activation facts")
@@ -820,7 +861,7 @@ class AgentRunner:
             run_id=run.run_id,
             activation_id=new_activation_id,
             signal=_MutableCancellationSignal(),
-            events=list(recovered.events),
+            events=recovered_events,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -829,6 +870,7 @@ class AgentRunner:
             cursor=recovered_cursor,
             clock=self._now,
             event_sink=active.events,
+            durable_event_callback=self._compose_durable_event_callback(None),
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -1088,12 +1130,24 @@ class AgentRunner:
             raise IrisRunNotFoundError("run 不存在", run_id=run_id)
         return snapshot_run(record)
 
+    def get_session(self, session_id: str) -> SessionSnapshot:
+        """读取 exact runner store 中的 session durable snapshot。"""
+        normalized = session_id.strip()
+        if not normalized:
+            raise IrisRunStateError("session_id 不能为空")
+        return self.store.load_session(normalized)
+
     def get_result(self, run_id: str) -> RunResult | None:
         """读取 waiting/terminal durable result；active run 返回 ``None``。"""
         normalized = self._required_id(run_id)
         if self.store.load_run(normalized) is None:
             raise IrisRunNotFoundError("run 不存在", run_id=run_id)
         return self.store.load_result(normalized)
+
+    def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]:
+        """读取一个已存在 logical run 的全部 durable tool calls。"""
+        run = self.get_run(run_id)
+        return self.store.list_tool_calls(run.run_id)
 
     def list_events(
         self,
@@ -1155,6 +1209,7 @@ class AgentRunner:
                     commits=port,
                     cancellation=active.signal,
                     steering=active.steering,
+                    stream_sink=self._stream_sink,
                 )
             )
             # --- 2. 把每种退出路径映射为 durable outcome ---
@@ -1451,8 +1506,8 @@ class AgentRunner:
             raise IrisRunStateError("run_id 不能为空")
         return normalized
 
-    @staticmethod
     def _record_events(
+        self,
         target: list[RunEvent],
         events: Sequence[RunEvent],
         durable_event_callback: Callable[[RunEvent], None] | None = None,
@@ -1469,15 +1524,71 @@ class AgentRunner:
                 continue
             keys.add(key)
             target.append(event)
-            if durable_event_callback is None:
-                continue
-            try:
-                durable_event_callback(event)
-            except Exception:
-                logger.exception(
-                    "durable event callback 处理失败",
-                    extra={"run_id": event.run_id, "sequence": event.sequence},
-                )
+            if durable_event_callback is not None:
+                try:
+                    durable_event_callback(event)
+                except Exception:
+                    logger.exception(
+                        "durable event callback 处理失败",
+                        extra={"run_id": event.run_id, "sequence": event.sequence},
+                    )
+            self._publish_live_fact(event)
+
+    def _publish_live_fact(self, fact: LiveFact) -> None:
+        """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
+        publisher = self._live_publisher
+        if publisher is None:
+            return
+        if isinstance(fact, RunEvent):
+            fact_kind = fact.kind.value
+            run_id = fact.run_id
+            session_id = fact.session_id
+            activation_id = fact.activation_id
+        elif isinstance(fact, RuntimeStreamEvent):
+            fact_kind = fact.kind
+            run_id = fact.run_id
+            session_id = fact.session_id
+            activation_id = fact.activation_id
+        else:
+            fact_kind = f"submission.{fact.event.state}"
+            run_id = fact.event.run_id
+            session_id = fact.session_id
+            activation_id = None
+        try:
+            publisher.publish(fact)
+        except Exception:
+            logger.warning(
+                "live publisher 处理 runner fact 失败",
+                extra={
+                    "publisher": type(publisher).__qualname__,
+                    "fact_kind": fact_kind,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "activation_id": activation_id,
+                },
+                exc_info=True,
+            )
+
+    def _compose_durable_event_callback(
+        self,
+        callback: Callable[[RunEvent], None] | None,
+    ) -> Callable[[RunEvent], None] | None:
+        """组合既有 callback 与 publisher，供 commit port relay 新事件。"""
+        if callback is None and self._live_publisher is None:
+            return None
+
+        def relay(event: RunEvent) -> None:
+            if callback is not None:
+                try:
+                    callback(event)
+                except Exception:
+                    logger.exception(
+                        "durable event callback 处理失败",
+                        extra={"run_id": event.run_id, "sequence": event.sequence},
+                    )
+            self._publish_live_fact(event)
+
+        return relay
 
     # endregion
 

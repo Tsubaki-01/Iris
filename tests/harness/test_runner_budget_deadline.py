@@ -26,6 +26,7 @@ from iris.runtime import (
     RuntimeActivationOutcome,
     RuntimeActivationResult,
     RuntimeCommitPort,
+    RuntimeEventSink,
     RuntimeSteeringPort,
 )
 from iris.store import InMemoryLifecycleStore
@@ -64,8 +65,9 @@ class DeadlineSignalRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None = None,
+        stream_sink: RuntimeEventSink | None = None,
     ) -> RuntimeActivationResult:
-        del commits, steering
+        del commits, steering, stream_sink
         self.clock.advance(seconds=2)
         cast(Any, cancellation).request_deadline()
         return RuntimeActivationResult(
