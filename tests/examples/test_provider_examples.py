@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
+from io import StringIO
+
 import pytest
 
-from examples.provider.basic import build_request, complete_once
+from examples.provider.basic import build_request, stream_once
 from examples.provider.trace import TracingProvider
-from iris.exceptions import IrisProviderError
-from iris.message import LLMRequest, LLMResponse, Msg, TextBlock
+from iris.exceptions import IrisProviderStreamError
+from iris.message import (
+    LLMRequest,
+    LLMResponse,
+    ModelBlockDelta,
+    ModelBlockRef,
+    ModelResponseCompleted,
+    ModelResponseFailed,
+    ModelStreamEvent,
+    ModelStreamScope,
+    Msg,
+    ProviderStreamError,
+    TextBlock,
+)
 from iris.providers import create_provider_client
 
 
@@ -21,20 +37,53 @@ def _response(text: str = "完成") -> LLMResponse:
     )
 
 
-class StaticProvider:
-    def __init__(self, response: LLMResponse) -> None:
-        self.response = response
+def _stream_events(response: LLMResponse) -> list[ModelStreamEvent]:
+    scope = ModelStreamScope(
+        model_stream_id="stream-1",
+        provider=response.provider,
+        model=response.model,
+        attempt=1,
+    )
+    block = ModelBlockRef(index=0, block_id="text-0", kind="text")
+    occurred_at = datetime.now(UTC)
+    return [
+        ModelBlockDelta(
+            scope=scope,
+            sequence=1,
+            occurred_at=occurred_at,
+            block=block,
+            channel="text",
+            delta="你",
+            snapshot="你",
+        ),
+        ModelBlockDelta(
+            scope=scope,
+            sequence=2,
+            occurred_at=occurred_at,
+            block=block,
+            channel="text",
+            delta="好",
+            snapshot="你好",
+        ),
+        ModelResponseCompleted(
+            scope=scope,
+            sequence=3,
+            occurred_at=occurred_at,
+            response=response,
+            semantic_output_emitted=True,
+        ),
+    ]
+
+
+class StreamingProvider:
+    def __init__(self, events: Sequence[ModelStreamEvent]) -> None:
+        self.events = events
         self.requests: list[LLMRequest] = []
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
+    async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
         self.requests.append(request)
-        return self.response
-
-
-class FailingProvider:
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        del request
-        raise IrisProviderError("调用失败", provider="fake")
+        for event in self.events:
+            yield event
 
 
 def test_build_request_uses_provider_internal_model() -> None:
@@ -54,22 +103,67 @@ def test_current_provider_factory_constructs_without_legacy_adapter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_complete_once_uses_injected_runtime_provider() -> None:
-    provider = StaticProvider(_response("你好"))
+async def test_stream_once_writes_text_deltas_and_returns_completed_response() -> None:
+    provider = StreamingProvider(_stream_events(_response("你好")))
     request = build_request(model="fake-model", prompt="问题")
-    response = await complete_once(provider, request)
+    output = StringIO()
+
+    response = await stream_once(provider, request, output=output)
+
+    assert output.getvalue() == "你好"
     assert response.to_msg().text == "你好"
-    assert provider.requests == [request]
+    assert provider.requests == [request.model_copy(update={"stream": True})]
 
 
 @pytest.mark.asyncio
-async def test_tracing_provider_records_response_and_error() -> None:
+async def test_stream_once_raises_safe_provider_terminal_error() -> None:
+    response = _response()
+    completed = _stream_events(response)[-1]
+    assert isinstance(completed, ModelResponseCompleted)
+    failed = ModelResponseFailed(
+        scope=completed.scope,
+        sequence=1,
+        occurred_at=completed.occurred_at,
+        error=ProviderStreamError(
+            code="PROVIDER_STREAM_ERROR",
+            message="调用失败",
+            retryable=True,
+        ),
+        semantic_output_emitted=False,
+    )
+
+    with pytest.raises(IrisProviderStreamError, match="调用失败"):
+        await stream_once(
+            StreamingProvider([failed]),
+            build_request(model="fake-model", prompt="问题"),
+            output=StringIO(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_tracing_provider_records_stream_response_and_safe_error() -> None:
     request = LLMRequest(model="fake-model", messages=[Msg.user("问题")])
-    traced = TracingProvider(StaticProvider(_response("成功")))
-    assert (await traced.complete(request)).to_msg().text == "成功"
+    traced = TracingProvider(StreamingProvider(_stream_events(_response("成功"))))
+
+    events = [event async for event in traced.stream(request)]
+
+    assert isinstance(events[-1], ModelResponseCompleted)
     assert traced.records[0].snapshot()["response"] is not None
 
-    failing = TracingProvider(FailingProvider())
-    with pytest.raises(IrisProviderError):
-        await failing.complete(request)
-    assert "IrisProviderError" in (failing.records[0].error or "")
+    failed = ModelResponseFailed(
+        scope=events[-1].scope,
+        sequence=1,
+        occurred_at=events[-1].occurred_at,
+        error=ProviderStreamError(
+            code="PROVIDER_STREAM_ERROR",
+            message="调用失败",
+            retryable=True,
+        ),
+        semantic_output_emitted=False,
+    )
+    failing = TracingProvider(StreamingProvider([failed]))
+
+    emitted = [event async for event in failing.stream(request)]
+
+    assert emitted == [failed]
+    assert failing.records[0].error == "PROVIDER_STREAM_ERROR: 调用失败"

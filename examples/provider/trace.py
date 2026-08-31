@@ -1,4 +1,4 @@
-"""使用进程内包装器记录一次 provider 调用。
+"""使用进程内包装器记录一次 provider 流式调用。
 
 Example:
     from examples.provider.trace import TracingProvider
@@ -10,16 +10,24 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from collections.abc import Sequence
+import sys
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from iris.config import init_config, is_config_initialized
-from iris.message import LLMRequest, LLMResponse
+from iris.message import (
+    LLMRequest,
+    LLMResponse,
+    ModelResponseCancelled,
+    ModelResponseCompleted,
+    ModelResponseFailed,
+    ModelStreamEvent,
+)
 from iris.providers import create_provider_client, parse_model_route
-from iris.runtime import RuntimeProvider
+from iris.runtime import StreamingRuntimeProvider
 
-from .basic import build_request
+from .basic import build_request, stream_once
 
 # endregion
 
@@ -58,34 +66,34 @@ class TraceRecord:
 
 
 class TracingProvider:
-    """记录调用后委托给另一个 RuntimeProvider。
+    """记录流式调用并委托给另一个 StreamingRuntimeProvider。
 
     Attributes:
-        delegate (RuntimeProvider): 实际执行调用的 provider。
+        delegate (StreamingRuntimeProvider): 实际执行流式调用的 provider。
         records (list[TraceRecord]): 按调用顺序保存的进程内记录。
 
     Example:
         provider = TracingProvider(delegate=client)
-        response = await provider.complete(request)
+        events = [event async for event in provider.stream(request)]
     """
 
-    def __init__(self, delegate: RuntimeProvider) -> None:
+    def __init__(self, delegate: StreamingRuntimeProvider) -> None:
         """创建包裹指定 provider 的记录器。
 
         Args:
-            delegate (RuntimeProvider): 实际完成请求的 provider。
+            delegate (StreamingRuntimeProvider): 实际完成流式请求的 provider。
         """
         self.delegate = delegate
         self.records: list[TraceRecord] = []
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """记录一次调用结果后返回委托响应。
+    async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        """记录一次流式调用并逐条转发委托事件。
 
         Args:
             request (LLMRequest): 待发送的 provider-neutral 请求。
 
-        Returns:
-            LLMResponse: 委托 provider 返回的标准化响应。
+        Yields:
+            ModelStreamEvent: 委托 provider 顺序产生的流式事件。
 
         Raises:
             Exception: 委托 provider 调用失败时原样传播。
@@ -93,16 +101,25 @@ class TracingProvider:
         record = TraceRecord(request=request)
         self.records.append(record)
         try:
-            response = await self.delegate.complete(request)
+            async for event in self.delegate.stream(request):
+                if isinstance(event, ModelResponseCompleted):
+                    record.response = event.response
+                elif isinstance(event, ModelResponseFailed):
+                    record.error = f"{event.error.code}: {event.error.message}"
+                elif isinstance(event, ModelResponseCancelled):
+                    record.error = (
+                        f"{event.error.code}: {event.error.message}"
+                        if event.error is not None
+                        else "PROVIDER_STREAM_CANCELLED: Provider 取消流式响应"
+                    )
+                yield event
         except Exception as exc:
             record.error = f"{exc.__class__.__name__}: {exc}"
             raise
-        record.response = response
-        return response
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """运行一次带进程内追踪的 provider 调用。
+    """运行一次带进程内追踪的 provider 流式调用。
 
     Args:
         argv (Sequence[str] | None): 可选命令行参数；省略时读取当前进程参数。
@@ -114,7 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         SystemExit: 命令行参数不合法或请求帮助时抛出。
         Exception: 配置或 provider 调用失败时原样传播。
     """
-    parser = argparse.ArgumentParser(description="追踪 Iris provider 调用。")
+    parser = argparse.ArgumentParser(description="追踪 Iris provider 流式调用。")
     parser.add_argument("--model", default="deepseek/deepseek-chat")
     parser.add_argument("--prompt", default="用一句话介绍 Iris。")
     parser.add_argument("--env-file", type=Path)
@@ -126,8 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         init_config(env_file=str(env_file) if env_file is not None else None)
     provider = TracingProvider(create_provider_client(route))
     request = build_request(model=route.model, prompt=args.prompt)
-    response = asyncio.run(provider.complete(request))
-    print(response.to_msg().text)
+    asyncio.run(stream_once(provider, request, output=sys.stdout))
+    print()
     trace = [record.snapshot() for record in provider.records]
     print(json.dumps(trace, ensure_ascii=False, indent=2))
     return 0
