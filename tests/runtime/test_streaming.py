@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -71,9 +71,7 @@ def _agent_config() -> AgentConfig:
 
 def _context_input() -> ContextBuildInput:
     return ContextBuildInput(
-        system=ContextSection(
-            slots=[ContextSlot(name="instructions", content="遵守用户指令")]
-        )
+        system=ContextSection(slots=[ContextSlot(name="instructions", content="遵守用户指令")])
     )
 
 
@@ -245,6 +243,42 @@ class RecordingSink(RuntimeEventSink):
             self._callback(event)
 
 
+class _ClosableModelStream(AsyncIterator[ModelStreamEvent]):
+    """记录 Runtime 是否关闭 typed provider iterator。"""
+
+    def __init__(self, events: Sequence[ModelStreamEvent]) -> None:
+        self._events = iter(events)
+        self.closed = False
+
+    def __aiter__(self) -> _ClosableModelStream:
+        """返回当前 iterator。"""
+        return self
+
+    async def __anext__(self) -> ModelStreamEvent:
+        """返回下一条 typed model event。"""
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def aclose(self) -> None:
+        """记录 Runtime 已释放 provider iterator。"""
+        self.closed = True
+
+
+class _ClosableStreamingProvider(FakeProvider):
+    """返回可观察关闭状态的 typed stream provider。"""
+
+    def __init__(self, events: Sequence[ModelStreamEvent]) -> None:
+        super().__init__([])
+        self.iterator = _ClosableModelStream(events)
+
+    def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        """返回唯一受控 stream。"""
+        del request
+        return self.iterator
+
+
 def _runtime(
     provider: RuntimeProvider,
     tmp_path: Path,
@@ -329,6 +363,24 @@ async def test_streaming_success_emits_before_single_model_commit(tmp_path: Path
     assert [event.kind for event in model_events if event is not None] == [
         event.kind for event in _stream_events(response, stream_id="expected")
     ]
+
+
+@pytest.mark.asyncio
+async def test_streaming_terminal_closes_provider_iterator(tmp_path: Path) -> None:
+    """Runtime 读取 terminal 后仍关闭 provider typed iterator。"""
+    response = _text_response("完成")
+    provider = _ClosableStreamingProvider(_stream_events(response, stream_id="closable-stream"))
+    activation = start_activation()
+
+    result = await _runtime(provider, tmp_path).execute(
+        activation,
+        commits=FakeRuntimeCommitPort(activation),
+        cancellation=MutableCancellationSignal(),
+        stream_sink=RecordingSink(),
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert provider.iterator.closed
 
 
 @pytest.mark.asyncio

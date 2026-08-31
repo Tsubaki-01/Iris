@@ -980,22 +980,32 @@ class AgentRuntime:
             )
 
         stream_request = request.model_copy(update={"stream": True})
-        async for model_event in provider.stream(stream_request):
-            try:
-                stream_sink.emit(
-                    _runtime_stream_event(
-                        "model.event",
-                        activation=activation,
-                        step_index=cursor.step_index,
-                        model_event=model_event,
+        event_stream = provider.stream(stream_request)
+        try:
+            async for model_event in event_stream:
+                try:
+                    stream_sink.emit(
+                        _runtime_stream_event(
+                            "model.event",
+                            activation=activation,
+                            step_index=cursor.step_index,
+                            model_event=model_event,
+                        )
                     )
-                )
-            except Exception as exc:
-                raise _RuntimeSinkEmissionError(exc) from exc
-            if isinstance(model_event, ModelResponseCompleted):
-                return model_event.response
-            if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
-                return _provider_stream_failure(cursor, model_event)
+                except Exception as exc:
+                    raise _RuntimeSinkEmissionError(exc) from exc
+                if isinstance(model_event, ModelResponseCompleted):
+                    return model_event.response
+                if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
+                    return _provider_stream_failure(cursor, model_event)
+        finally:
+            # Terminal 会提前结束 async for，仍需释放 provider iterator 及其底层连接。
+            close = getattr(event_stream, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    _logger.warning("关闭 provider typed stream 失败", exc_info=True)
 
         return _failed_activation(
             cursor,

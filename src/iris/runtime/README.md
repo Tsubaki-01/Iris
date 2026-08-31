@@ -68,7 +68,8 @@ direct-pull。Runtime 先发布 `model.step.started`，再把每条 `ModelStream
 `model.event` 同步交给 sink。partial、usage 和 provider terminal 都只是 live facts；只有
 `response.completed` 携带的完整 `LLMResponse` 会进入既有 `to_msg()`、steering、tool preflight
 与 `RuntimeModelStepCommit` 路径。failed/cancelled terminal 或合法终态前 EOF 不提交 assistant、
-history、checkpoint 或工具调用。Provider completed 也不代表 durable commit 已成功。
+history、checkpoint 或工具调用。Runtime 在 terminal、EOF、失败或取消退出时显式关闭 typed
+provider iterator；清理失败只记录 warning。Provider completed 也不代表 durable commit 已成功。
 
 工具 live event 保持既有 effect gate：完整 `ToolUseBlock` 才发布 `tool.preparing` 并进入
 preflight；`tool.started` 只在 permission refresh、activation fence 与 durable claim 成功后、

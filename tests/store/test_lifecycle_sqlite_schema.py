@@ -24,6 +24,108 @@ _TABLES = {
     "session_run_lanes",
     "sessions",
 }
+_COLUMNS = {
+    "lifecycle_schema": ["component", "version"],
+    "sessions": ["session_id", "revision", "message_count", "updated_at"],
+    "session_messages": ["session_id", "ordinal", "message_json"],
+    "agent_runs": [
+        "run_id",
+        "session_id",
+        "agent_id",
+        "phase",
+        "stop_reason",
+        "request_json",
+        "options_json",
+        "environment_fingerprint",
+        "session_revision",
+        "run_revision",
+        "current_activation_id",
+        "pending_interaction_id",
+        "cancellation_requested_at",
+        "cancellation_reason",
+        "model_steps_reserved",
+        "model_steps_committed",
+        "tool_calls_committed",
+        "usage_json",
+        "assistant_message_json",
+        "error_json",
+        "checkpoint_sequence",
+        "last_event_sequence",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "finished_at",
+    ],
+    "session_run_lanes": ["session_id", "run_id", "revision", "acquired_at"],
+    "run_activations": [
+        "activation_id",
+        "run_id",
+        "ordinal",
+        "kind",
+        "status",
+        "outcome",
+        "started_at",
+        "ended_at",
+    ],
+    "run_checkpoints": [
+        "run_id",
+        "sequence",
+        "activation_id",
+        "checkpoint_version",
+        "cursor_json",
+        "session_revision",
+        "model_steps_reserved",
+        "model_steps_committed",
+        "environment_fingerprint",
+        "resumability",
+        "updated_at",
+    ],
+    "run_tool_calls": [
+        "run_id",
+        "tool_call_id",
+        "step_index",
+        "ordinal",
+        "tool_name",
+        "arguments_json",
+        "fingerprint",
+        "interaction_id",
+        "phase",
+        "claim_activation_id",
+        "result_json",
+        "version",
+        "prepared_at",
+        "updated_at",
+        "claimed_at",
+        "committed_at",
+    ],
+    "run_interactions": [
+        "interaction_id",
+        "run_id",
+        "session_id",
+        "step_index",
+        "tool_call_id",
+        "status",
+        "request_json",
+        "response_json",
+        "version",
+        "expires_at",
+        "created_at",
+        "resolved_at",
+        "closed_at",
+        "close_reason",
+    ],
+    "run_events": [
+        "run_id",
+        "sequence",
+        "session_id",
+        "kind",
+        "occurred_at",
+        "activation_id",
+        "step_index",
+        "correlation_id",
+        "payload_json",
+    ],
+}
 _NOW = "2026-01-02T03:04:00+00:00"
 
 
@@ -54,15 +156,21 @@ def test_empty_database_creates_exact_v2_schema_and_reopens(tmp_path: Path) -> N
             )
         }
         identity = connection.execute("SELECT component, version FROM lifecycle_schema").fetchall()
-        session_columns = [
-            row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
-        ]
+        columns = {
+            table: [row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()]
+            for table in _TABLES
+        }
+        triggers = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+        }
         message_fks = connection.execute("PRAGMA foreign_key_list(session_messages)").fetchall()
 
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run"}
+    assert triggers == set()
     assert identity == [("agent_lifecycle", 2)]
-    assert session_columns == ["session_id", "revision", "message_count", "updated_at"]
+    assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
     ]

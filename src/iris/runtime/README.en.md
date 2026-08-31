@@ -64,8 +64,9 @@ async iterator. Runtime emits `model.step.started`, then synchronously wraps eac
 `ModelStreamEvent` as `model.event`. Partials, usage, and provider terminals remain live facts.
 Only the complete `LLMResponse` carried by `response.completed` enters the existing `to_msg()`,
 steering, tool-preflight, and `RuntimeModelStepCommit` path. A failed/cancelled terminal or EOF
-before a legal terminal commits no assistant message, history, checkpoint, or tool call. Provider
-completion does not imply that the durable commit succeeded.
+before a legal terminal commits no assistant message, history, checkpoint, or tool call. Runtime
+explicitly closes the typed provider iterator on terminal, EOF, failure, or cancellation; cleanup
+failures produce a warning only. Provider completion does not imply that the durable commit succeeded.
 
 Tool live events preserve the existing effect gate. Runtime emits `tool.preparing` only for a
 complete `ToolUseBlock` before preflight; it emits `tool.started` after permission refresh,
