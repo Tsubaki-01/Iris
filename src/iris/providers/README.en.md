@@ -84,10 +84,11 @@ sent as a request-body field; the gateway receives model `deepseek-ai/DeepSeek-V
 `headers`; Pydantic `extra="forbid"` rejects removed `adapter` and `http_client` arguments.
 `complete()` maps Iris messages to OpenAI Chat shapes, calls `litellm.acompletion()` with a correctly
 prefixed model, and returns `LLMResponse`. `stream()` requires `request.stream=True`, requests the
-usage tail, directly pulls the raw async iterator, and yields only `ModelStreamEvent`. It continues
-past block completion until a finish reason and usage tail are complete, then emits one completed
-terminal carrying an `LLMResponse` built through the same final mapper. The raw iterator is closed
-in `finally`; no background producer or intermediate queue is created.
+usage tail, directly pulls the raw async iterator, and yields only `ModelStreamEvent`. After a finish
+reason, it accepts a usage-tail placeholder choice only when that choice carries no semantic delta;
+later text, thinking, tool-call, or repeated finish-reason data remains a protocol error. At EOF it
+emits one completed terminal carrying an `LLMResponse` built through the same final mapper. The raw
+iterator is closed in `finally`; no background producer or intermediate queue is created.
 
 The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
 `model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.

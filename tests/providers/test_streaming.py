@@ -115,6 +115,72 @@ async def test_provider_client_stream_aggregates_text_and_usage_tail(
 
 
 @pytest.mark.asyncio
+async def test_provider_client_stream_accepts_usage_tail_placeholder_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
+
+    raw_stream = _RawStream(
+        _chunk(delta={"content": "完成"}),
+        _chunk(finish_reason="stop"),
+        _chunk(
+            delta={
+                "content": None,
+                "role": None,
+                "function_call": None,
+                "tool_calls": None,
+            },
+            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        ),
+    )
+
+    async def fake_acompletion(**kwargs: Any) -> _RawStream:
+        return raw_stream
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+
+    events = await _collect(
+        ProviderClient(provider="deepseek", api_key="test-key"),
+        LLMRequest(model="deepseek-chat", messages=[Msg.user("你好")], stream=True),
+    )
+
+    terminal = events[-1]
+    assert isinstance(terminal, ModelResponseCompleted)
+    assert terminal.response.to_msg().text == "完成"
+    assert terminal.response.total_tokens == 3
+    assert raw_stream.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_client_stream_rejects_semantic_choice_after_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
+
+    raw_stream = _RawStream(
+        _chunk(finish_reason="stop"),
+        _chunk(
+            delta={"content": "迟到内容"},
+            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        ),
+    )
+
+    async def fake_acompletion(**kwargs: Any) -> _RawStream:
+        return raw_stream
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+
+    events = await _collect(
+        ProviderClient(provider="deepseek", api_key="test-key"),
+        LLMRequest(model="deepseek-chat", messages=[Msg.user("你好")], stream=True),
+    )
+
+    terminal = events[-1]
+    assert isinstance(terminal, ModelResponseFailed)
+    assert terminal.error.code == "PROVIDER_STREAM_PROTOCOL_ERROR"
+
+
+@pytest.mark.asyncio
 async def test_provider_client_stream_aggregates_split_tool_call_only_at_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

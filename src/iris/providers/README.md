@@ -112,7 +112,9 @@ Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2
 - 直接拉取 raw async iterator，不建立后台 producer 或中间 queue；
 - 在内部 `_streaming.py` 中分配 attempt-local scope、block identity 与连续 sequence；
 - 产出 `ModelStreamEvent`，绝不暴露 LiteLLM chunk；
-- 收到 finish reason 后继续消费 usage tail，EOF 时生成唯一 completed terminal；
+- 收到 finish reason 后继续消费 usage tail；允许 LiteLLM 保留无语义增量的占位 choice，
+  但仍拒绝后续文本、thinking、工具调用或重复 finish reason；
+- EOF 时生成唯一 completed terminal；
 - completed terminal 复用 complete mapper 构造完整 `LLMResponse`；
 - `finally` 关闭支持 `aclose()` 的 raw iterator。
 

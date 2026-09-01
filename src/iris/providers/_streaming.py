@@ -159,21 +159,22 @@ class ModelStreamAccumulator:
                 )
             )
 
-        if self._finish_reason and choices:
-            raise IrisProviderStreamProtocolError("finish reason 后不得再出现 choice")
-
         if choices:
             choice = choices[0]
             delta = self._delta(choice)
-            events.extend(self._consume_delta(delta))
             finish_reason = choice.get("finish_reason")
-            if finish_reason is not None and finish_reason != "":
-                if not isinstance(finish_reason, str):
-                    raise IrisProviderStreamProtocolError("finish_reason 必须是字符串")
-                if self._finish_reason:
-                    raise IrisProviderStreamProtocolError("provider 重复返回 finish reason")
-                self._finish_reason = finish_reason
-                events.extend(self._complete_blocks())
+            delta_events = self._consume_delta(delta)
+            # LiteLLM usage 尾包可能保留字段全为空的占位 choice。
+            if self._finish_reason:
+                if delta_events or (finish_reason is not None and finish_reason != ""):
+                    raise IrisProviderStreamProtocolError("finish reason 后不得再出现语义 choice")
+            else:
+                events.extend(delta_events)
+                if finish_reason is not None and finish_reason != "":
+                    if not isinstance(finish_reason, str):
+                        raise IrisProviderStreamProtocolError("finish_reason 必须是字符串")
+                    self._finish_reason = finish_reason
+                    events.extend(self._complete_blocks())
 
         if usage is not None:
             self._usage = self._usage_from_mapping(usage, complete=False)
