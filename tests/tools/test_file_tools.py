@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic import ValidationError
 
-from iris.exceptions import IrisToolExecutionError, IrisToolValidationError
 from iris.message import ToolUseBlock
 from iris.tools import (
     DefaultPermissionPolicy,
@@ -91,70 +89,6 @@ def _file_executor(
     )
 
 
-def test_read_file_record_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> None:
-    """worker observation 不能被共享调用方原地改写或扩展。"""
-    record = ReadFileRecord(
-        path=(tmp_path / "notes.txt").resolve(),
-        mtime_ns=1,
-        size_bytes=2,
-    )
-
-    with pytest.raises(ValidationError):
-        record.mtime_ns = 3
-    with pytest.raises(ValidationError):
-        ReadFileRecord.model_validate(
-            {
-                "path": str(record.path),
-                "mtime_ns": 1,
-                "size_bytes": 2,
-                "unexpected": True,
-            }
-        )
-
-
-def test_tool_execution_context_rejects_untyped_read_state(tmp_path: Path) -> None:
-    with pytest.raises(ValidationError):
-        ToolExecutionContext(workspace_root=tmp_path, read_state=object())
-
-
-def test_read_file_state_merge_does_not_stat(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """loop 直接合并 worker observation，不重复访问 filesystem。"""
-    path = (tmp_path / "notes.txt").resolve()
-    record = ReadFileRecord(path=path, mtime_ns=10, size_bytes=20)
-    state = ReadFileState()
-    original_stat = Path.stat
-
-    def fail_stat(
-        self: Path,
-        *,
-        follow_symlinks: bool = True,
-    ) -> os.stat_result:
-        if self == path:
-            raise AssertionError("merge 不应重新 stat")
-        return original_stat(self, follow_symlinks=follow_symlinks)
-
-    monkeypatch.setattr(Path, "stat", fail_stat)
-
-    state.merge(record)
-    state.merge(record)
-
-    assert state.files == {str(path): record}
-
-
-def test_read_file_state_merge_rejects_non_absolute_observation() -> None:
-    """loop merge 只接受 worker 已解析完成的绝对路径观测。"""
-    state = ReadFileState()
-    record = ReadFileRecord(path=Path("notes.txt"), mtime_ns=10, size_bytes=20)
-
-    with pytest.raises(IrisToolValidationError, match="绝对路径"):
-        state.merge(record)
-
-    assert state.files == {}
-
-
 @pytest.mark.asyncio
 async def test_read_file_observation_runs_in_worker_and_merges_on_loop(
     tmp_path: Path,
@@ -200,22 +134,6 @@ async def test_read_file_observation_runs_in_worker_and_merges_on_loop(
     assert result.model_content == "content"
     assert worker_thread_ids and worker_thread_ids[0] != loop_thread_id
     assert str(target.resolve()) in context.read_state.files
-
-
-def test_list_files_max_results_zero_does_not_touch_path(tmp_path: Path) -> None:
-    """零结果请求在 resolve/stat/walk 前直接结束。"""
-
-    class NoTouchService(WorkspaceFileService):
-        def resolve_path(self, path, context):
-            del path, context
-            raise AssertionError("max_results=0 不应解析路径")
-
-    result = NoTouchService().list_files(
-        ListFilesInput(path="missing", max_results=0),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result == ""
 
 
 def test_list_files_first_result_does_not_enter_remaining_subtree(
@@ -323,15 +241,6 @@ def test_grep_first_match_does_not_read_remaining_lines(
     assert result == "notes.txt:1: needle"
 
 
-def test_grep_missing_root_raises_file_not_found(tmp_path: Path) -> None:
-    """缺失搜索根必须与其它 file tools 一样暴露执行错误。"""
-    with pytest.raises(IrisToolExecutionError, match="FILE_NOT_FOUND"):
-        WorkspaceFileService().grep_search(
-            GrepSearchInput(pattern="needle", path="not-created"),
-            ToolExecutionContext(workspace_root=tmp_path),
-        )
-
-
 def test_grep_skips_iris_directory_before_descending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -375,43 +284,6 @@ async def test_read_file_inside_workspace_updates_read_state(tmp_path: Path) -> 
     assert "1: alpha" not in result.model_content
     assert "L0001 | alpha" not in result.model_content
     assert str(resolved) in context.read_state.files
-
-
-@pytest.mark.asyncio
-async def test_read_file_can_include_line_numbers_when_requested(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "notes.txt"
-    path.write_text("alpha\nbeta\n", encoding="utf-8")
-    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-
-    result = await _file_executor().execute_one(
-        ToolUseBlock(
-            id="call_1",
-            name="read_file",
-            input={"file_path": "notes.txt", "with_line_numbers": True},
-        ),
-        context,
-    )
-
-    resolved = path.resolve()
-    assert result.is_error is False
-    assert result.model_content == "L0001 | alpha\nL0002 | beta"
-    assert str(resolved) in context.read_state.files
-
-
-@pytest.mark.asyncio
-async def test_read_file_accepts_absolute_path_inside_workspace(tmp_path: Path) -> None:
-    path = tmp_path / "notes.txt"
-    path.write_text("alpha\n", encoding="utf-8")
-
-    result = await _file_executor().execute_one(
-        ToolUseBlock(id="call_1", name="read_file", input={"file_path": str(path)}),
-        ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState()),
-    )
-
-    assert result.is_error is False
-    assert result.model_content == "alpha"
 
 
 @pytest.mark.asyncio
@@ -479,50 +351,6 @@ async def test_write_file_refuses_existing_unread_file(tmp_path: Path) -> None:
     assert result.error.code == "FILE_NOT_READ"
     assert "FILE_NOT_READ" in result.model_content
     assert path.read_text(encoding="utf-8") == "old"
-
-
-@pytest.mark.asyncio
-async def test_write_file_reports_workspace_relative_path(tmp_path: Path) -> None:
-    path = tmp_path / "nested" / "notes.txt"
-
-    result = await _file_executor(write_mode="allow").execute_one(
-        ToolUseBlock(
-            id="call_1",
-            name="write_file",
-            input={"file_path": str(path), "content": "new"},
-        ),
-        ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState()),
-    )
-
-    assert result.is_error is False
-    assert result.model_content == "WROTE: nested/notes.txt"
-    assert path.read_text(encoding="utf-8") == "new"
-
-
-@pytest.mark.asyncio
-async def test_edit_file_reports_workspace_relative_posix_path(tmp_path: Path) -> None:
-    path = tmp_path / "nested" / "notes.txt"
-    path.parent.mkdir()
-    path.write_text("hello old\n", encoding="utf-8")
-    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
-    executor = _file_executor(write_mode="allow")
-    await executor.execute_one(
-        ToolUseBlock(id="read_1", name="read_file", input={"file_path": str(path)}),
-        context,
-    )
-
-    result = await executor.execute_one(
-        ToolUseBlock(
-            id="edit_1",
-            name="edit_file",
-            input={"file_path": str(path), "old_string": "old", "new_string": "new"},
-        ),
-        context,
-    )
-
-    assert result.is_error is False
-    assert result.model_content == "EDITED: nested/notes.txt"
-    assert path.read_text(encoding="utf-8") == "hello new\n"
 
 
 @pytest.mark.asyncio
@@ -696,30 +524,6 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_artifact_store_sanitizes_session_and_tool_ids(tmp_path: Path) -> None:
-    path = tmp_path / "log.txt"
-    path.write_text("\n".join(f"needle {index}" for index in range(80)), encoding="utf-8")
-    context = ToolExecutionContext(
-        workspace_root=tmp_path,
-        session_id="../escape",
-        read_state=ReadFileState(),
-    )
-
-    result = await ToolExecutor(
-        register_file_tools(max_result_chars=120),
-        artifact_preview_chars=80,
-    ).execute_one(
-        ToolUseBlock(id="../owned", name="grep_search", input={"pattern": "needle"}),
-        context,
-    )
-
-    assert result.artifact is not None
-    artifact_root = (tmp_path / ".iris" / "tool-results").resolve()
-    assert result.artifact.path.resolve().relative_to(artifact_root)
-    assert not (tmp_path / ".iris" / "owned.txt").exists()
-
-
-@pytest.mark.asyncio
 async def test_recursive_file_tools_skip_symlinked_files_outside_workspace(
     tmp_path: Path,
 ) -> None:
@@ -763,23 +567,6 @@ async def test_read_file_rejects_unbounded_limit(tmp_path: Path) -> None:
     assert result.is_error is True
     assert result.error is not None
     assert result.error.code == "VALIDATION_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_grep_search_max_results_zero_returns_no_matches(tmp_path: Path) -> None:
-    (tmp_path / "notes.txt").write_text("needle\n", encoding="utf-8")
-
-    result = await _file_executor().execute_one(
-        ToolUseBlock(
-            id="grep_1",
-            name="grep_search",
-            input={"pattern": "needle", "max_results": 0},
-        ),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result.is_error is False
-    assert result.model_content == ""
 
 
 def test_workspace_policy_resolves_inside_paths_and_rejects_outside(

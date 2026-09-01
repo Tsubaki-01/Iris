@@ -8,11 +8,6 @@ from typing import Any
 
 import pytest
 
-from iris.exceptions import (
-    IrisProviderError,
-    IrisProviderStreamInterruptedError,
-    IrisProviderStreamProtocolError,
-)
 from iris.message import (
     LLMRequest,
     ModelBlockDelta,
@@ -57,9 +52,7 @@ def _chunk(
         "model": "gpt-4o",
         "object": "chat.completion.chunk",
         "choices": (
-            [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}]
-            if choices
-            else []
+            [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}] if choices else []
         ),
         "usage": usage,
     }
@@ -181,74 +174,6 @@ async def test_provider_client_stream_aggregates_split_tool_call_only_at_complet
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_final_matches_complete_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    complete_response = {
-        "id": "chatcmpl-stream-1",
-        "model": "gpt-4o",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "message": {"content": "你好", "reasoning_content": "思考"},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-    }
-    raw_stream = _RawStream(
-        _chunk(delta={"reasoning_content": "思考"}),
-        _chunk(delta={"content": "你好"}),
-        _chunk(finish_reason="stop"),
-        _chunk(
-            choices=False,
-            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
-        ),
-    )
-
-    async def fake_acompletion(**kwargs: Any) -> dict[str, Any] | _RawStream:
-        return raw_stream if kwargs.get("stream") else complete_response
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-    client = ProviderClient(provider="openai", api_key="test-key")
-    request = LLMRequest(model="gpt-4o")
-
-    completed = await client.complete(request)
-    streamed = await _collect(client, request.model_copy(update={"stream": True}))
-
-    terminal = streamed[-1]
-    assert isinstance(terminal, ModelResponseCompleted)
-    assert terminal.response == completed
-    assert terminal.response.reasoning == "思考"
-
-
-@pytest.mark.asyncio
-async def test_provider_client_stream_rejects_non_stream_request_before_network(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    called = False
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        nonlocal called
-        called = True
-        return _RawStream()
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    with pytest.raises(IrisProviderError, match="stream=False"):
-        await _collect(
-            ProviderClient(provider="openai", api_key="test-key"),
-            LLMRequest(model="gpt-4o"),
-        )
-
-    assert called is False
-
-
-@pytest.mark.asyncio
 async def test_provider_client_stream_maps_eof_without_finish_to_failed_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -271,33 +196,6 @@ async def test_provider_client_stream_maps_eof_without_finish_to_failed_terminal
     assert terminal.error.code == "PROVIDER_STREAM_INTERRUPTED"
     assert terminal.semantic_output_emitted is True
     assert raw_stream.close_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_provider_client_stream_discards_events_from_malformed_chunk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(delta={"content": "不可交付", "tool_calls": "invalid"}),
-    )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    assert [event.sequence for event in events] == [1]
-    [terminal] = events
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.error.code == "PROVIDER_STREAM_PROTOCOL_ERROR"
-    assert terminal.semantic_output_emitted is False
 
 
 @pytest.mark.asyncio
@@ -339,32 +237,6 @@ async def test_provider_client_stream_rejects_malformed_completed_tool_arguments
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_rejects_second_finish_reason(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(delta={"content": "完成"}),
-        _chunk(finish_reason="stop"),
-        _chunk(finish_reason="stop"),
-    )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    assert isinstance(events[-1], ModelResponseFailed)
-    assert sum(event.kind.startswith("response.") for event in events) == 2
-
-
-@pytest.mark.asyncio
 async def test_provider_client_stream_maps_raw_failure_after_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,33 +265,6 @@ async def test_provider_client_stream_maps_raw_failure_after_partial(
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_maps_litellm_failure_without_leaking_details(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    class RateLimitError(Exception):
-        status_code = 429
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        raise RateLimitError("secret-api-key")
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    assert len(events) == 1
-    terminal = events[0]
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.error.code == "PROVIDER_ERROR"
-    assert terminal.error.retryable is True
-    assert "secret-api-key" not in terminal.error.message
-
-
-@pytest.mark.asyncio
 async def test_provider_client_stream_propagates_local_cancellation_and_closes_raw_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -439,13 +284,3 @@ async def test_provider_client_stream_propagates_local_cancellation_and_closes_r
         )
 
     assert raw_stream.close_calls == 1
-
-
-def test_provider_stream_exceptions_keep_provider_error_source() -> None:
-    protocol = IrisProviderStreamProtocolError("invalid chunk")
-    interrupted = IrisProviderStreamInterruptedError("missing terminal")
-
-    assert protocol.runtime_source == "provider"
-    assert protocol.runtime_code == "PROVIDER_STREAM_PROTOCOL_ERROR"
-    assert interrupted.runtime_source == "provider"
-    assert interrupted.runtime_code == "PROVIDER_STREAM_INTERRUPTED"

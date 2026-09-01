@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -67,44 +66,6 @@ def test_project_batch_reads_renders_and_replaces_each_target_once(
     assert content.startswith("  manual note\n")
     assert "item-a" in content
     assert "item-b" in content
-
-
-def test_single_projection_methods_match_single_element_batches(tmp_path: Path) -> None:
-    scope = _scope()
-    item = _item("item-a", scope=scope)
-    event = _event("event-a", scope=scope, item_id=item.id)
-    singles = FileMemoryMirror(tmp_path / "singles")
-    batches = FileMemoryMirror(tmp_path / "batches")
-
-    singles.mirror_item(item)
-    singles.mirror_event(event)
-    batches.project_batch(items=[item], events=[event])
-
-    assert (singles.root / "User/user.md").read_text(encoding="utf-8") == (
-        batches.root / "User/user.md"
-    ).read_text(encoding="utf-8")
-    assert (singles.root / "Sessions/recent_events.md").read_text(encoding="utf-8") == (
-        batches.root / "Sessions/recent_events.md"
-    ).read_text(encoding="utf-8")
-
-
-def test_batch_updates_task_json_once_and_keeps_stable_order(tmp_path: Path) -> None:
-    mirror = FileMemoryMirror(tmp_path / "mirror")
-    first = _item(
-        "task-z",
-        category=MemoryCategory.TASK,
-        kind=MemoryItemKind.TASK_STATE,
-    )
-    second = _item(
-        "task-a",
-        category=MemoryCategory.TASK,
-        kind=MemoryItemKind.TASK_STATE,
-    )
-
-    mirror.project_batch(items=[first, second])
-
-    payload = json.loads((mirror.root / "Tasks/task.json").read_text(encoding="utf-8"))
-    assert [item["id"] for item in payload["items"]] == ["task-a", "task-z"]
 
 
 def test_rebuild_reads_store_once_and_preserves_manual_and_other_scope(

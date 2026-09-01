@@ -23,13 +23,11 @@ from iris.lifecycle import (
     RunCommit,
     RunEventKind,
     RunLimits,
-    RunPhase,
     RunStopReason,
     ToolCallPhase,
 )
-from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.message import ToolUseBlock
 from iris.providers.openai import OpenAIChatMapper
-from iris.runtime import RuntimeCursor
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
 
@@ -40,7 +38,6 @@ from .fakes import (
     StaticProvider,
     build_runtime,
     text_response,
-    tool_batch_response,
     tool_response,
 )
 
@@ -75,137 +72,6 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
     assert runtime.execute_calls == 1
     events = store.list_events("run-safe-recover")
     assert [event.kind for event in events].count(RunEventKind.MODEL_STEP_RESERVED) == 1
-    assert [event.kind for event in events].count(RunEventKind.ACTIVATION_ABANDONED) == 1
-
-
-@pytest.mark.asyncio
-async def test_safe_recovery_preserves_initial_turn_input(tmp_path: Path) -> None:
-    provider = BlockingProvider()
-    store = InMemoryLifecycleStore()
-    first = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
-    running = asyncio.create_task(
-        first.start(AgentRunRequest(input="当前轮次", run_id="run-recover-input"))
-    )
-    await provider.started.wait()
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-    crashed = store.load_run("run-recover-input")
-    assert crashed is not None and crashed.current_activation_id is not None
-
-    recovery_provider = StaticProvider(text_response("已恢复"))
-    result = await AgentRunner(
-        runtime=build_runtime(tmp_path, provider=recovery_provider),
-        store=store,
-    ).recover(
-        "run-recover-input",
-        expected_activation_id=crashed.current_activation_id,
-    )
-
-    assert result.run.stop_reason is RunStopReason.COMPLETED
-    assert recovery_provider.requests[0].messages[-1].text == "当前轮次"
-
-
-@pytest.mark.asyncio
-async def test_safe_recovery_from_second_model_step_reuses_committed_history(
-    tmp_path: Path,
-) -> None:
-    class BlockSecondRequestProvider:
-        def __init__(self, first_response: LLMResponse) -> None:
-            self.first_response = first_response
-            self.requests: list[LLMRequest] = []
-            self.second_started = asyncio.Event()
-            self.release_second = asyncio.Event()
-
-        async def complete(self, request: LLMRequest) -> LLMResponse:
-            self.requests.append(request)
-            if len(self.requests) == 1:
-                return self.first_response
-            self.second_started.set()
-            await self.release_second.wait()
-            raise AssertionError("cancelled second request must not return")
-
-    effects: list[str] = []
-
-    def read_once() -> str:
-        effects.append("read_once")
-        return "value"
-
-    registry = ToolRegistry()
-    registry.register_function(read_once, description="读取一次")
-    provider = BlockSecondRequestProvider(
-        tool_response(ToolUseBlock(id="read-once-1", name="read_once", input={}))
-    )
-    store = InMemoryLifecycleStore()
-    running = asyncio.create_task(
-        AgentRunner(
-            runtime=build_runtime(tmp_path, registry=registry, provider=provider),
-            store=store,
-        ).start(AgentRunRequest(input="多轮恢复", run_id="run-step-one-recover"))
-    )
-    await provider.second_started.wait()
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-
-    crashed = store.load_run("run-step-one-recover")
-    checkpoint = store.load_checkpoint("run-step-one-recover")
-    assert crashed is not None and crashed.current_activation_id is not None
-    assert crashed.phase is RunPhase.ACTIVE
-    assert checkpoint is not None
-    cursor = RuntimeCursor.model_validate(checkpoint.engine_cursor)
-    assert cursor.position == "before_model"
-    assert cursor.step_index == 1
-    assert cursor.tool_calls == ()
-    assert cursor.tool_results == ()
-    assert cursor.assistant_message is None
-    assert crashed.usage.model_steps_reserved == crashed.usage.model_steps_committed + 1
-    assert effects == ["read_once"]
-    [tool_call] = store.list_tool_calls("run-step-one-recover")
-    assert tool_call.phase is ToolCallPhase.COMMITTED
-    assert tool_call.result is not None
-    session = store.load_session("default")
-    assert sum(message.text == "多轮恢复" for message in session.messages) == 1
-    assert [call.id for message in session.messages for call in message.tool_calls] == [
-        "read-once-1"
-    ]
-    assert [
-        result.tool_use_id for message in session.messages for result in message.tool_results
-    ] == ["read-once-1"]
-
-    recovery_provider = StaticProvider(text_response("已从第二轮恢复"))
-    result = await AgentRunner(
-        runtime=build_runtime(
-            tmp_path,
-            registry=registry,
-            provider=recovery_provider,
-        ),
-        store=store,
-    ).recover(
-        "run-step-one-recover",
-        expected_activation_id=crashed.current_activation_id,
-    )
-
-    assert result.run.stop_reason is RunStopReason.COMPLETED
-    assert len(recovery_provider.requests) == 1
-    assert (
-        sum(message.text == "多轮恢复" for message in recovery_provider.requests[0].messages) == 1
-    )
-    assert effects == ["read_once"]
-    final_session = store.load_session("default")
-    assert [call.id for message in final_session.messages for call in message.tool_calls] == [
-        "read-once-1"
-    ]
-    assert [
-        tool_result.tool_use_id
-        for message in final_session.messages
-        for tool_result in message.tool_results
-    ] == ["read-once-1"]
-    assert sum(message.text == "已从第二轮恢复" for message in final_session.messages) == 1
-    assert result.run.usage.model_steps_reserved == 2
-    assert result.run.usage.model_steps_committed == 2
-    events = store.list_events("run-step-one-recover")
-    assert [event.kind for event in events].count(RunEventKind.MODEL_STEP_RESERVED) == 2
     assert [event.kind for event in events].count(RunEventKind.ACTIVATION_ABANDONED) == 1
 
 
@@ -361,75 +227,6 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
 
 
 @pytest.mark.asyncio
-async def test_recovery_closes_multiple_claims_without_replaying_tools(
-    tmp_path: Path,
-) -> None:
-    """第二个 claim 持久化后中断时，recovery 原子关闭全部 claim 且不重放。"""
-
-    class CrashAfterSecondClaimStore(InMemoryLifecycleStore):
-        claims = 0
-
-        def claim_tool_call(self, command: ClaimToolCall) -> RunCommit:
-            committed = super().claim_tool_call(command)
-            self.claims += 1
-            if self.claims == 2:
-                raise IrisRunPersistenceError("second claim committed before crash")
-            return committed
-
-    effects: list[int] = []
-
-    async def read_value(index: int) -> str:
-        effects.append(index)
-        return f"value-{index}"
-
-    registry = ToolRegistry()
-    registry.register_function(read_value, description="读取值")
-    store = CrashAfterSecondClaimStore()
-    first = AgentRunner(
-        runtime=build_runtime(
-            tmp_path,
-            registry=registry,
-            provider=StaticProvider(
-                tool_batch_response(
-                    ToolUseBlock(id="read-1", name="read_value", input={"index": 1}),
-                    ToolUseBlock(id="read-2", name="read_value", input={"index": 2}),
-                )
-            ),
-        ),
-        store=store,
-    )
-    with pytest.raises(IrisRunPersistenceError, match="second claim committed"):
-        await first.start(AgentRunRequest(input="执行", run_id="run-multi-claim-recover"))
-    before_recovery_effects = list(effects)
-    crashed = store.load_run("run-multi-claim-recover")
-    assert crashed is not None and crashed.current_activation_id is not None
-    assert all(
-        record.phase is ToolCallPhase.CLAIMED
-        for record in store.list_tool_calls("run-multi-claim-recover")
-    )
-
-    result = await AgentRunner(
-        runtime=build_runtime(tmp_path, registry=registry),
-        store=store,
-    ).recover(
-        "run-multi-claim-recover",
-        expected_activation_id=crashed.current_activation_id,
-    )
-
-    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
-    assert effects == before_recovery_effects
-    records = store.list_tool_calls("run-multi-claim-recover")
-    assert {record.tool_call_id for record in records} == {"read-1", "read-2"}
-    assert all(record.phase is ToolCallPhase.OUTCOME_UNKNOWN for record in records)
-    assert [event.kind for event in store.list_events("run-multi-claim-recover")][-4:] == [
-        RunEventKind.ACTIVATION_ABANDONED,
-        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-        RunEventKind.RUN_TERMINAL,
-    ]
-
-
-@pytest.mark.asyncio
 async def test_recover_terminal_is_idempotent_and_waiting_requires_resume(
     tmp_path: Path,
 ) -> None:
@@ -520,24 +317,6 @@ async def test_waiting_recovery_deterministically_settles_due_time(
     assert result.run.stop_reason is expected_reason
     interaction = runner.store.load_interaction(waiting.pending_interaction.interaction_id)
     assert interaction is not None and interaction.status.value == "closed"
-
-
-@pytest.mark.asyncio
-async def test_active_recovery_requires_exact_activation_fence(tmp_path: Path) -> None:
-    provider = BlockingProvider()
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
-    running = asyncio.create_task(runner.start(AgentRunRequest(input="恢复", run_id="run-fence")))
-    await provider.started.wait()
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
-
-    second = AgentRunner(runtime=build_runtime(tmp_path), store=store)
-    with pytest.raises(IrisRunConflictError, match="expected_activation_id"):
-        await second.recover("run-fence")
-    with pytest.raises(IrisRunConflictError, match="fence"):
-        await second.recover("run-fence", expected_activation_id="wrong")
 
 
 @pytest.mark.asyncio

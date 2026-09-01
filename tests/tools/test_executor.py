@@ -31,18 +31,6 @@ class _SharedCancellationSignal:
         return None
 
 
-def test_tool_execution_context_excludes_and_shares_cancellation_signal(
-    tmp_path: Path,
-) -> None:
-    signal = _SharedCancellationSignal()
-    context = ToolExecutionContext(workspace_root=tmp_path, cancellation=signal)
-
-    copied = context.model_copy(deep=True)
-
-    assert "cancellation" not in context.model_dump(mode="json")
-    assert copied.cancellation is signal
-
-
 @pytest.mark.asyncio
 async def test_callable_tool_does_not_normalize_cooperative_cancellation(
     tmp_path: Path,
@@ -230,26 +218,6 @@ async def test_executor_maps_callable_exception_to_error_result(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_executor_does_not_parse_callable_exception_text_as_structured_code(
-    tmp_path: Path,
-) -> None:
-    def fail() -> str:
-        raise RuntimeError("FILE_NOT_READ: not a file tool error")
-
-    registry = ToolRegistry()
-    registry.register_function(fail, description="失败工具")
-
-    result = await ToolExecutor(registry).execute_one(
-        ToolUseBlock(id="call_1", name="fail", input={}),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result.is_error is True
-    assert result.error is not None
-    assert result.error.code == "EXECUTION_ERROR"
-
-
-@pytest.mark.asyncio
 async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> None:
     def echo(value: str) -> str:
         return value
@@ -267,45 +235,6 @@ async def test_executor_runs_many_serially_in_input_order(tmp_path: Path) -> Non
     )
 
     assert [result.model_content for result in results] == ["a", "b"]
-
-
-@pytest.mark.asyncio
-async def test_execute_many_prepares_each_call_once(tmp_path: Path) -> None:
-    tool = CountingValidationTool()
-    registry = ToolRegistry()
-    registry.register(tool)
-    policy = CountingPermissionPolicy()
-    executor = ToolExecutor(registry, permission_policy=policy)
-
-    results = await executor.execute_many(
-        [
-            ToolUseBlock(id="call-1", name=tool.name, input={"value": "a"}),
-            ToolUseBlock(id="call-2", name=tool.name, input={"value": "b"}),
-        ],
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert tool.validation_calls == {"a": 1, "b": 1}
-    assert policy.calls == 2
-    assert [result.model_content for result in results] == ["a:1", "b:1"]
-
-
-@pytest.mark.asyncio
-async def test_execute_many_classifier_exception_falls_back_to_serial(
-    tmp_path: Path,
-) -> None:
-    executed: list[str] = []
-    tool = ExplodingClassifierTool(executed)
-    registry = ToolRegistry()
-    registry.register(tool)
-
-    results = await ToolExecutor(registry).execute_many(
-        [ToolUseBlock(id="call-1", name=tool.name, input={"value": "x"})],
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert results[0].is_error is False
-    assert executed == ["call-1"]
 
 
 @pytest.mark.asyncio

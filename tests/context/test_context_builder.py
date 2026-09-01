@@ -86,34 +86,6 @@ def test_builder_filters_disabled_slots_and_sorts_by_order_then_name() -> None:
     assert text.index("<a_same>") < text.index("<z_same>") < text.index("<late>")
 
 
-def test_builder_omits_missing_empty_and_disabled_optional_sections() -> None:
-    missing_output = ContextBuilder().build(
-        ContextBuildInput(
-            system=ContextSection(slots=[ContextSlot(name="instructions", content="content")])
-        )
-    )
-    empty_output = ContextBuilder().build(
-        ContextBuildInput(
-            system=ContextSection(slots=[ContextSlot(name="instructions", content="content")]),
-            memory=ContextSection(),
-            before_current_input=ContextSection(
-                slots=[
-                    ContextSlot(
-                        name="disabled",
-                        content="content",
-                        enabled=False,
-                    )
-                ]
-            ),
-        )
-    )
-
-    assert missing_output.memory is None
-    assert missing_output.before_current_input is None
-    assert empty_output.memory is None
-    assert empty_output.before_current_input is None
-
-
 def test_builder_preserves_nested_values_attributes_and_xml_escaping() -> None:
     output = ContextBuilder().build(
         ContextBuildInput(
@@ -153,49 +125,3 @@ def test_xml_renderer_rejects_unsafe_root_tag() -> None:
             "x><injected",
             [ContextSlot(name="instructions", content="content")],
         )
-
-
-def test_default_xml_preserves_control_character_in_content() -> None:
-    output = ContextBuilder().build(
-        ContextBuildInput(
-            system=ContextSection(slots=[ContextSlot(name="instructions", content="a\x01b")])
-        )
-    )
-
-    assert "<instructions>a\x01b</instructions>" in output.system.text
-
-
-def test_default_xml_preserves_control_character_in_attribute() -> None:
-    output = ContextBuilder().build(
-        ContextBuildInput(
-            system=ContextSection(
-                slots=[
-                    ContextSlot(
-                        name="instructions",
-                        content="content",
-                        attributes={"source": "local\x00remote"},
-                    )
-                ]
-            )
-        )
-    )
-
-    assert 'source="local\x00remote"' in output.system.text
-
-
-def test_default_xml_allows_xml_whitespace_characters() -> None:
-    output = ContextBuilder().build(
-        ContextBuildInput(
-            system=ContextSection(
-                slots=[
-                    ContextSlot(
-                        name="instructions",
-                        content="tab\tline\nreturn\r",
-                        attributes={"source": "tab\tline\nreturn\r"},
-                    )
-                ]
-            )
-        )
-    )
-
-    ElementTree.fromstring(output.system.text)

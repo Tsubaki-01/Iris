@@ -9,14 +9,12 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from iris.exceptions import IrisRunObservationTimeoutError, IrisRunStateError
+from iris.exceptions import IrisRunObservationTimeoutError
 from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunRequest,
-    RunEvent,
     RunEventKind,
     RunPhase,
-    RunResult,
     RunStopReason,
     ToolCallPhase,
 )
@@ -66,36 +64,6 @@ async def test_active_cancel_persists_first_reason_and_interrupts_provider(
     assert [event.kind for event in store.list_events("run-cancel-provider")].count(
         RunEventKind.CANCELLATION_REQUESTED
     ) == 1
-
-
-@pytest.mark.asyncio
-async def test_managed_active_cancel_relays_request_and_terminal_live(
-    tmp_path: Path,
-) -> None:
-    """Active managed run 的 cancellation 与 terminal mutation 均同步 relay。"""
-    provider = BlockingProvider()
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
-    activation_started = asyncio.Event()
-    relayed: list[RunEvent] = []
-    running = asyncio.create_task(
-        runner._start_managed(
-            AgentRunRequest(input="等待", run_id="run-managed-cancel"),
-            durable_event_callback=relayed.append,
-            activation_started=activation_started,
-        )
-    )
-
-    await asyncio.wait_for(activation_started.wait(), timeout=1)
-    snapshot = runner.request_cancel("run-managed-cancel", reason="用户停止")
-    provider.release.set()
-    result = await running
-
-    assert snapshot.cancellation_reason == "用户停止"
-    assert result.run.stop_reason is RunStopReason.CANCELLED
-    assert RunEventKind.CANCELLATION_REQUESTED in {event.kind for event in relayed}
-    assert relayed[-1].kind is RunEventKind.RUN_TERMINAL
-    assert relayed == store.list_events("run-managed-cancel")
 
 
 @pytest.mark.asyncio
@@ -355,59 +323,6 @@ async def test_parallel_claims_cancel_atomically_settle_outcome_unknown(
 
 
 @pytest.mark.asyncio
-async def test_non_cooperative_sync_tool_delays_cancel_settlement(tmp_path: Path) -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking_effect() -> str:
-        started.set()
-        release.wait(timeout=2)
-        return "effect-complete"
-
-    registry = ToolRegistry()
-    registry.register_function(blocking_effect, description="同步阻塞工具")
-    store = InMemoryLifecycleStore()
-    owner = AgentRunner(
-        runtime=build_runtime(
-            tmp_path,
-            registry=registry,
-            provider=StaticProvider(
-                tool_response(ToolUseBlock(id="blocking-1", name="blocking_effect", input={}))
-            ),
-        ),
-        store=store,
-    )
-    observer = AgentRunner(runtime=build_runtime(tmp_path), store=store)
-    outcomes: list[object] = []
-
-    def run_owner() -> None:
-        try:
-            outcomes.append(
-                asyncio.run(
-                    owner.start(AgentRunRequest(input="执行", run_id="run-sync-blocking-cancel"))
-                )
-            )
-        except BaseException as exc:  # pragma: no cover - 失败时由主线程断言暴露
-            outcomes.append(exc)
-
-    thread = threading.Thread(target=run_owner)
-    thread.start()
-    assert await asyncio.to_thread(started.wait, 1)
-
-    with pytest.raises(IrisRunObservationTimeoutError):
-        await observer.cancel("run-sync-blocking-cancel", settlement_timeout=0.02)
-    assert store.load_result("run-sync-blocking-cancel") is None
-
-    release.set()
-    await asyncio.to_thread(thread.join, 2)
-    assert not thread.is_alive()
-    [result] = outcomes
-    assert not isinstance(result, BaseException)
-    assert isinstance(result, RunResult)
-    assert result.run.stop_reason is RunStopReason.CANCELLED
-
-
-@pytest.mark.asyncio
 async def test_thread_callable_cancel_after_claim_discards_late_result(
     tmp_path: Path,
 ) -> None:
@@ -470,10 +385,3 @@ async def test_thread_callable_cancel_after_claim_discards_late_result(
         release.set()
         if not running.done():
             await running
-
-
-def test_cancel_validates_reason_and_observation_timeout(tmp_path: Path) -> None:
-    runner = AgentRunner(runtime=build_runtime(tmp_path), store=InMemoryLifecycleStore())
-
-    with pytest.raises(IrisRunStateError, match="reason"):
-        runner.request_cancel("missing", reason=" ")

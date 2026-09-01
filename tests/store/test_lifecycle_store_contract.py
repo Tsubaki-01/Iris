@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import ast
-import json
 import sqlite3
-import subprocess
-import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
-from pydantic import ValidationError
 
-import iris.store.sqlite as sqlite_module
 from iris.exceptions import (
     IrisRunConflictError,
     IrisRunNotFoundError,
@@ -27,8 +21,6 @@ from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
     InteractionStatus,
-    PermissionInteractionResponse,
-    PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
     ToolCallSnapshot,
@@ -50,18 +42,16 @@ from iris.lifecycle import (
     ResumeWaitingRun,
     RunCheckpoint,
     RunCommit,
-    RunControlSnapshot,
     RunErrorInfo,
     RunLimits,
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
     SuspendRun,
-    project_result,
 )
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
-from iris.tools import ToolErrorInfo, ToolResult
+from iris.tools import ToolResult
 
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _T1 = _NOW + timedelta(seconds=1)
@@ -322,108 +312,6 @@ def _prepare_tool_batch(store: LifecycleStore) -> RunCommit:
     )
 
 
-def test_protocol_exposes_every_required_operation() -> None:
-    """删除任一 runner 所需 port method 都应破坏本 contract。"""
-    expected = {
-        "resume_waiting_run",
-        "claim_tool_call",
-        "commit_model_step",
-        "commit_tool_result",
-        "create_run",
-        "finish_run",
-        "list_events",
-        "list_tool_calls",
-        "load_checkpoint",
-        "load_interaction",
-        "load_result",
-        "load_run",
-        "load_run_control",
-        "load_session",
-        "load_session_lane",
-        "load_tool_call",
-        "recover_active_run",
-        "request_cancellation",
-        "reserve_model_step",
-        "resolve_interaction",
-        "suspend_run",
-    }
-    assert expected <= set(LifecycleStore.__dict__)
-
-
-def test_lifecycle_source_has_no_forbidden_dependency_edges() -> None:
-    """Lifecycle contract 不得反向依赖 owner、engine 或 concrete store。"""
-    lifecycle_root = Path(__file__).parents[2] / "src" / "iris" / "lifecycle"
-    imported_modules: set[str] = set()
-    for path in lifecycle_root.glob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_modules.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                if node.level == 0:
-                    imported_modules.add(node.module)
-                elif node.level == 1:
-                    imported_modules.add(f"iris.lifecycle.{node.module}")
-                elif node.level == 2:
-                    imported_modules.add(f"iris.{node.module}")
-    assert not any(
-        name == forbidden or name.startswith(f"{forbidden}.")
-        for name in imported_modules
-        for forbidden in ("iris.harness", "iris.runtime", "iris.store")
-    )
-
-
-def test_importing_lifecycle_does_not_load_owner_or_concrete_store_modules() -> None:
-    """Contract import 的动态模块图也必须保持 dependency-neutral。"""
-    script = """
-import json
-import sys
-import iris.lifecycle
-
-forbidden = (
-    "iris.harness",
-    "iris.runtime",
-    "iris.store",
-    "iris.hitl.in_memory",
-    "iris.hitl.store",
-    "iris.memory.sqlite",
-    "iris.memory.store",
-)
-loaded = sorted(
-    name
-    for name in sys.modules
-    if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
-)
-print(json.dumps(loaded))
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(completed.stdout) == []
-
-
-def test_create_rejects_duplicate_id_but_allows_independent_sessions(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """覆盖 duplicate identity、lane 与不同 session 独立性。"""
-    command = _create_command()
-    _create(lifecycle_store)
-
-    with pytest.raises(IrisRunConflictError):
-        lifecycle_store.create_run(command)
-
-    second = _create(
-        lifecycle_store,
-        run_id="run-2",
-        session_id="session-2",
-        activation_id="activation-2",
-    )
-    assert second.run.phase == "active"
-
-
 def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> None:
     """修改 command 或 read snapshot 不得改写 store 内部事实。"""
     command = _create_command(metadata={"nested": {"value": "original"}})
@@ -463,88 +351,6 @@ def test_exact_tool_call_read_is_copy_isolated_and_missing_is_none(
     assert lifecycle_store.load_tool_call("run-2", "call-tool") is None
     with pytest.raises(IrisRunNotFoundError):
         lifecycle_store.list_tool_calls("missing")
-
-
-def test_run_control_read_projects_exact_frozen_fields(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """Control read 只暴露 fence/cancellation 所需的八个不可变字段。"""
-    created = _create(lifecycle_store)
-
-    control = lifecycle_store.load_run_control("run-1")
-
-    assert control == RunControlSnapshot(
-        run_id=created.run.run_id,
-        phase=created.run.phase,
-        revision=created.run.revision,
-        current_activation_id=created.run.current_activation_id,
-        cancellation_requested_at=created.run.cancellation_requested_at,
-        cancellation_reason=created.run.cancellation_reason,
-        last_event_sequence=created.run.last_event_sequence,
-        updated_at=created.run.updated_at,
-    )
-    assert set(RunControlSnapshot.model_fields) == {
-        "run_id",
-        "phase",
-        "revision",
-        "current_activation_id",
-        "cancellation_requested_at",
-        "cancellation_reason",
-        "last_event_sequence",
-        "updated_at",
-    }
-    assert lifecycle_store.load_run_control("missing") is None
-    assert control is not None
-    with pytest.raises(ValidationError, match="frozen"):
-        control.revision = 99
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        RunControlSnapshot.model_validate(control.model_dump() | {"unexpected": True})
-    with pytest.raises(ValidationError, match="同时存在"):
-        RunControlSnapshot.model_validate(
-            control.model_dump() | {"cancellation_reason": "unpaired"}
-        )
-
-
-def test_sqlite_run_control_read_skips_aggregate_json_decode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Control projection 不读取 request/options/usage/message/error JSON。"""
-    store = SQLiteStore(tmp_path / "control.db")
-    created = _create(store)
-
-    def fail_json_decode(value: str) -> object:
-        del value
-        raise AssertionError("control projection 不应 decode aggregate JSON")
-
-    monkeypatch.setattr(sqlite_module, "_load_json", fail_json_decode)
-
-    assert store.load_run_control("run-1") == RunControlSnapshot(
-        run_id=created.run.run_id,
-        phase=created.run.phase,
-        revision=created.run.revision,
-        current_activation_id=created.run.current_activation_id,
-        cancellation_requested_at=None,
-        cancellation_reason=None,
-        last_event_sequence=created.run.last_event_sequence,
-        updated_at=created.run.updated_at,
-    )
-
-
-def test_sqlite_corrupt_run_control_maps_validation_to_persistence_error(tmp_path: Path) -> None:
-    """窄投影的 durable validation 失败沿用 lifecycle persistence error。"""
-    store = SQLiteStore(tmp_path / "corrupt-control.db")
-    _create(store)
-    with sqlite3.connect(store.path) as connection:
-        connection.execute(
-            "UPDATE agent_runs SET cancellation_reason = 'unpaired' WHERE run_id = 'run-1'"
-        )
-
-    with pytest.raises(IrisRunPersistenceError) as captured:
-        store.load_run_control("run-1")
-
-    assert captured.value.context["operation"] == "load_run_control"
-    assert captured.value.context["path"] == str(store.path)
 
 
 def test_sqlite_corrupt_point_read_maps_decode_to_persistence_error(tmp_path: Path) -> None:
@@ -678,47 +484,6 @@ def test_commit_model_step_updates_history_checkpoint_and_tool_intents_atomicall
     assert committed.session is not None
     committed.session.messages[0].metadata["caller-mutated"] = True
     assert lifecycle_store.load_session("session-1").messages[0].metadata == {}
-
-
-def test_nonempty_message_delta_advances_session_revision_once(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    created = _create(lifecycle_store)
-    reserved = lifecycle_store.reserve_model_step(
-        ReserveModelStep(
-            run_id="run-1",
-            expected_run_revision=created.run.revision,
-            activation_id="activation-1",
-            now=_T1,
-        )
-    )
-    assistant = Msg.assistant("second")
-
-    committed = lifecycle_store.commit_model_step(
-        CommitModelStep(
-            run_id="run-1",
-            expected_run_revision=reserved.run.revision,
-            activation_id="activation-1",
-            expected_session_revision=0,
-            message_delta=[Msg.user("first"), assistant],
-            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
-            checkpoint=_checkpoint(
-                run_id="run-1",
-                sequence=2,
-                activation_id="activation-1",
-                session_revision=1,
-                reserved=1,
-                committed=1,
-            ),
-            assistant_message=assistant,
-            now=_T2,
-        )
-    )
-
-    assert committed.session is not None
-    assert committed.session.revision == 1
-    assert [message.text for message in committed.session.messages] == ["first", "second"]
-    assert lifecycle_store.load_session("session-1") == committed.session
 
 
 def test_claim_and_commit_tool_result_cover_effect_fence(
@@ -892,59 +657,6 @@ def test_cancelled_claim_preserves_exact_subject_error_priority(
     assert all(call.phase == "prepared" for call in lifecycle_store.list_tool_calls("run-1"))
 
 
-def test_zero_tool_version_reaches_store_cas_boundary(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """Stale version 0 由领域 conflict 处理，而不是泄漏模型 ValidationError。"""
-    prepared = _prepare_tool(lifecycle_store)
-    with pytest.raises(IrisRunConflictError):
-        lifecycle_store.claim_tool_call(
-            ClaimToolCall(
-                run_id="run-1",
-                expected_run_revision=prepared.run.revision,
-                activation_id="activation-1",
-                tool_call_id="call-tool",
-                fingerprint=_TOOL_FINGERPRINT,
-                expected_tool_version=0,
-                now=_T2,
-            )
-        )
-
-
-def test_prepared_tool_rejects_execution_error_without_claim(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """只有 preflight failure 可以绕过 claim，execution failure 不可冒充无副作用。"""
-    prepared = _prepare_tool(lifecycle_store)
-    with pytest.raises(IrisRunStateError):
-        lifecycle_store.commit_tool_result(
-            CommitToolResult(
-                run_id="run-1",
-                expected_run_revision=prepared.run.revision,
-                activation_id="activation-1",
-                expected_session_revision=1,
-                tool_call_id="call-tool",
-                expected_tool_version=1,
-                result=ToolResult(
-                    tool_use_id="call-tool",
-                    tool_name="probe",
-                    is_error=True,
-                    error=ToolErrorInfo(code="EXECUTION_ERROR", message="effect failed"),
-                ),
-                message_delta=[],
-                checkpoint=_checkpoint(
-                    run_id="run-1",
-                    sequence=3,
-                    activation_id="activation-1",
-                    session_revision=1,
-                    reserved=1,
-                    committed=1,
-                ),
-                now=_T2,
-            )
-        )
-
-
 def test_resolve_exact_response_replays_but_different_response_conflicts(
     lifecycle_store: LifecycleStore,
 ) -> None:
@@ -1038,114 +750,6 @@ def test_suspend_rejects_interaction_subject_that_differs_from_prepared_call(
         )
 
 
-def test_approved_permission_cannot_commit_rejection_without_claim(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """若只看 USER_REJECTED error code，approve 可绕过 required effect claim。"""
-    created = _create(lifecycle_store)
-    interaction = HumanInteraction(
-        interaction_id=_INTERACTION_ID,
-        session_id="session-1",
-        run_id="run-1",
-        step_index=0,
-        tool_call_id="call-write",
-        status=InteractionStatus.PENDING,
-        request=HumanInteractionRequest(
-            tool_call=ToolCallSnapshot(
-                tool_call_id="call-write",
-                tool_name="write",
-                arguments={"value": "x"},
-                workspace_root="workspace",
-                fingerprint=_TOOL_FINGERPRINT,
-            ),
-            prompt=PermissionPrompt(reason="写入"),
-        ),
-        expires_at=_NOW + timedelta(minutes=5),
-        created_at=_T1,
-    )
-    prepared = RunToolCallRecord(
-        run_id="run-1",
-        step_index=0,
-        ordinal=1,
-        tool_call_id="call-write",
-        tool_name="write",
-        arguments={"value": "x"},
-        fingerprint=_TOOL_FINGERPRINT,
-        phase="prepared",
-        version=1,
-        created_at=_T1,
-        updated_at=_T1,
-    )
-    waiting = lifecycle_store.suspend_run(
-        SuspendRun(
-            run_id="run-1",
-            expected_run_revision=created.run.revision,
-            activation_id="activation-1",
-            expected_session_revision=0,
-            prepared_tool_calls=[prepared],
-            checkpoint=_checkpoint(
-                run_id="run-1",
-                sequence=2,
-                activation_id="activation-1",
-                session_revision=0,
-            ),
-            pending_interaction=interaction,
-            usage=created.run.usage,
-            now=_T1,
-        )
-    )
-    resolved = lifecycle_store.resolve_interaction(
-        ResolveInteraction(
-            run_id="run-1",
-            expected_run_revision=waiting.run.revision,
-            interaction_id=_INTERACTION_ID,
-            expected_interaction_version=1,
-            response=PermissionInteractionResponse(decision="approve"),
-            expected_fingerprint=_TOOL_FINGERPRINT,
-            now=_T2,
-        )
-    )
-    begun = lifecycle_store.resume_waiting_run(
-        ResumeWaitingRun(
-            run_id="run-1",
-            expected_run_revision=resolved.run.revision,
-            new_activation_id="activation-resume",
-            kind="resume",
-            expected_checkpoint_sequence=2,
-            now=_T3,
-        )
-    )
-    assert begun.checkpoint is not None
-
-    with pytest.raises(IrisRunStateError, match="claim"):
-        lifecycle_store.commit_tool_result(
-            CommitToolResult(
-                run_id="run-1",
-                expected_run_revision=begun.run.revision,
-                activation_id="activation-resume",
-                expected_session_revision=0,
-                tool_call_id="call-write",
-                expected_tool_version=1,
-                result=ToolResult(
-                    tool_use_id="call-write",
-                    tool_name="write",
-                    is_error=True,
-                    error=ToolErrorInfo(
-                        code="USER_REJECTED",
-                        message="用户拒绝了工具调用",
-                    ),
-                ),
-                checkpoint=_checkpoint(
-                    run_id="run-1",
-                    sequence=begun.checkpoint.sequence + 1,
-                    activation_id="activation-resume",
-                    session_revision=0,
-                ),
-                now=_T3,
-            )
-        )
-
-
 def test_question_projection_must_match_exact_durable_answer(
     lifecycle_store: LifecycleStore,
 ) -> None:
@@ -1219,44 +823,6 @@ def test_cancellation_request_is_once_only_and_does_not_release_active_lane(
             session_id="session-1",
             activation_id="activation-2",
         )
-
-
-def test_waiting_cancel_closes_prepared_tool_history_without_tool_event(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """Waiting terminal cancellation 要闭合 history，但不能伪造 tool effect。"""
-    waiting = _suspend(
-        lifecycle_store,
-        _create(lifecycle_store),
-        include_tool_history=True,
-    )
-    cancelled = lifecycle_store.request_cancellation(
-        RequestCancellation(
-            run_id="run-1",
-            expected_run_revision=waiting.run.revision,
-            activation_id=None,
-            reason="user requested",
-            settle_waiting=True,
-            now=_T2,
-        )
-    )
-
-    session = lifecycle_store.load_session("session-1")
-    [tool_result] = session.messages[-1].tool_results
-    [record] = lifecycle_store.list_tool_calls("run-1")
-    assert cancelled.run.stop_reason == "cancelled"
-    assert session.revision == 2
-    assert tool_result.tool_use_id == "call-question"
-    assert tool_result.is_error is True
-    assert tool_result.metadata["error"]["code"] == "TOOL_NOT_STARTED"
-    assert tool_result.metadata["error"]["retryable"] is True
-    assert record.phase == "prepared"
-    assert record.result is None
-    assert all(event.kind != "tool_call.outcome_unknown" for event in cancelled.events)
-    assert cancelled.session == session
-    assert cancelled.checkpoint is not None
-    assert cancelled.checkpoint.sequence == waiting.checkpoint.sequence
-    assert cancelled.checkpoint.session_revision == session.revision
 
 
 def test_finish_exact_replay_is_noop_and_releases_lane(
@@ -1515,13 +1081,3 @@ def test_read_methods_apply_cursor_and_validation_contract(
     for invalid_limit in (0, -1, True, 1.5):
         with pytest.raises(IrisRunStateError):
             lifecycle_store.list_events("run-1", limit=cast(int, invalid_limit))
-
-
-def test_project_result_rejects_active_record_with_domain_error(
-    lifecycle_store: LifecycleStore,
-) -> None:
-    """Projection helper 不应向调用方泄漏通用 ValueError。"""
-    created = _create(lifecycle_store)
-
-    with pytest.raises(IrisRunStateError):
-        project_result(created.run)

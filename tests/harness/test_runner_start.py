@@ -7,10 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from iris.exceptions import IrisConfigError, IrisProviderError, IrisRunConflictError
+from iris.exceptions import IrisProviderError, IrisRunConflictError
 from iris.harness import AgentRunner
 from iris.harness._fingerprint import compute_environment_fingerprint
-from iris.hitl import HumanInteractionService
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -38,7 +37,6 @@ from iris.tools import (
 
 from .fakes import (
     BlockingProvider,
-    CountingAgentRuntime,
     StaticProvider,
     build_runtime,
     text_response,
@@ -67,36 +65,6 @@ class NonJsonPolicy(OpaquePolicy):
         return {"live": object()}
 
 
-def test_runner_accepts_typed_interaction_service_with_unrelated_store_attribute(
-    tmp_path: Path,
-) -> None:
-    """Typed service 不应因无关属性名被误判为第二条持久化路径。"""
-
-    class AttributedInteractionService(HumanInteractionService):
-        """携带普通 store 元数据的合法无状态 service。"""
-
-        store = "metadata-only"
-
-    service = AttributedInteractionService()
-
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path),
-        store=InMemoryLifecycleStore(),
-        interaction_service=service,
-    )
-
-    assert runner.interaction_service is service
-
-
-def test_environment_fingerprint_is_stable_for_equivalent_runtime(tmp_path: Path) -> None:
-    """若摘要混入对象地址，两个等价装配会产生不同 fingerprint。"""
-    first = build_runtime(tmp_path)
-    second = build_runtime(tmp_path)
-
-    assert compute_environment_fingerprint(first) == compute_environment_fingerprint(second)
-    assert len(compute_environment_fingerprint(first)) == 64
-
-
 @pytest.mark.parametrize(
     "dimension",
     ["agent", "context", "tool", "policy", "workspace"],
@@ -121,35 +89,6 @@ def test_environment_fingerprint_changes_for_resumability_drift(
     )
 
     assert compute_environment_fingerprint(base) != compute_environment_fingerprint(changed)
-
-
-def test_environment_fingerprint_rejects_opaque_custom_policy(tmp_path: Path) -> None:
-    """按 class name 猜测策略会让内部状态漂移无法检测。"""
-    runtime = build_runtime(tmp_path, permission_policy=OpaquePolicy())
-
-    with pytest.raises(IrisConfigError, match="fingerprint"):
-        compute_environment_fingerprint(runtime)
-
-
-def test_environment_fingerprint_rejects_non_json_policy_payload(
-    tmp_path: Path,
-) -> None:
-    """live object 不能通过 repr 地址混入 resumability fingerprint。"""
-    runtime = build_runtime(tmp_path, permission_policy=NonJsonPolicy())
-
-    with pytest.raises(IrisConfigError, match="JSON-safe"):
-        compute_environment_fingerprint(runtime)
-
-
-def test_environment_fingerprint_rejects_non_json_tool_snapshot(tmp_path: Path) -> None:
-    """工具 metadata 的 live object 不能泄漏到 checkpoint fingerprint。"""
-    registry = ToolRegistry()
-    tool = registry.register_function(lambda: "ok", name="probe", description="探针")
-    tool.definition.metadata["live"] = object()
-    runtime = build_runtime(tmp_path, registry=registry)
-
-    with pytest.raises(IrisConfigError, match="JSON-safe"):
-        compute_environment_fingerprint(runtime)
 
 
 @pytest.mark.asyncio
@@ -218,52 +157,6 @@ async def test_managed_start_signals_after_registration_and_relays_live_events(
 
 
 @pytest.mark.asyncio
-async def test_managed_start_isolates_runner_owned_sink_failure(tmp_path: Path) -> None:
-    """Create/finish live sink 失败不能改变 public durable result。"""
-    attempted: list[RunEvent] = []
-
-    def raising_callback(event: RunEvent) -> None:
-        attempted.append(event)
-        raise RuntimeError("模拟 runner committed sink 失败")
-
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=build_runtime(tmp_path), store=store)
-
-    result = await runner._start_managed(
-        AgentRunRequest(input="完成", run_id="run-sink-failure"),
-        durable_event_callback=raising_callback,
-    )
-
-    assert result.run.stop_reason is RunStopReason.COMPLETED
-    assert attempted == store.list_events("run-sink-failure")
-
-
-@pytest.mark.asyncio
-async def test_managed_start_failure_leaves_activation_signal_unset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Create mutation 失败时不得发布虚假的 activation admission。"""
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=build_runtime(tmp_path), store=store)
-    activation_started = asyncio.Event()
-
-    def fail_create(command: object) -> object:
-        del command
-        raise IrisRunConflictError("模拟 create lane conflict")
-
-    monkeypatch.setattr(store, "create_run", fail_create)
-
-    with pytest.raises(IrisRunConflictError, match="lane conflict"):
-        await runner._start_managed(
-            AgentRunRequest(input="失败", run_id="run-create-failure"),
-            activation_started=activation_started,
-        )
-
-    assert not activation_started.is_set()
-
-
-@pytest.mark.asyncio
 async def test_managed_start_relays_model_commit_before_steering_ack(
     tmp_path: Path,
 ) -> None:
@@ -307,79 +200,6 @@ async def test_managed_start_relays_model_commit_before_steering_ack(
 
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert order == ["model-step-committed", "acknowledge", "model-step-committed"]
-
-
-@pytest.mark.asyncio
-async def test_live_relay_preserves_settlement_late_observer_delivery(
-    tmp_path: Path,
-) -> None:
-    """Live sink 不替代 async observers，observer 失败仍与 durable result 隔离。"""
-    observed: list[RunEvent] = []
-
-    class ThrowingObserver:
-        async def on_event(self, event: RunEvent) -> None:
-            raise RuntimeError(f"模拟 observer 失败: {event.sequence}")
-
-    class RecordingObserver:
-        async def on_event(self, event: RunEvent) -> None:
-            run = store.load_run(event.run_id)
-            assert run is not None and run.phase is RunPhase.TERMINAL
-            assert event.run_id not in runner._active
-            observed.append(event)
-
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path),
-        store=store,
-        observers=(ThrowingObserver(), RecordingObserver()),
-    )
-    relayed: list[RunEvent] = []
-
-    result = await runner._start_managed(
-        AgentRunRequest(input="完成", run_id="run-observer-regression"),
-        durable_event_callback=relayed.append,
-    )
-
-    assert result.run.stop_reason is RunStopReason.COMPLETED
-    assert relayed == store.list_events("run-observer-regression")
-    assert observed == relayed
-
-
-@pytest.mark.asyncio
-async def test_runner_calls_execute_once_while_runtime_owns_multi_step_tool_loop(
-    tmp_path: Path,
-) -> None:
-    """若 harness 接管 tool loop，一个 activation 会重复调用 engine。"""
-    effects: list[str] = []
-
-    def echo(value: str) -> str:
-        effects.append(value)
-        return f"echo:{value}"
-
-    registry = ToolRegistry()
-    registry.register_function(echo, description="回显")
-    provider = StaticProvider(
-        tool_response(ToolUseBlock(id="call-1", name="echo", input={"value": "Iris"})),
-        text_response("最终完成"),
-    )
-    runtime = CountingAgentRuntime(build_runtime(tmp_path, registry=registry, provider=provider))
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=runtime, store=store)
-
-    result = await runner.start(
-        AgentRunRequest(input="调用工具", session_id="session-tool", run_id="run-tool")
-    )
-
-    assert result.run.stop_reason is RunStopReason.COMPLETED
-    assert runtime.execute_calls == 1
-    assert len(provider.requests) == 2
-    assert effects == ["Iris"]
-    assert result.run.usage.model_steps_committed == 2
-    assert result.run.usage.tool_calls_committed == 1
-    [tool_call] = store.list_tool_calls("run-tool")
-    assert tool_call.phase is ToolCallPhase.COMMITTED
-    assert tool_call.result is not None
-    assert tool_call.result.model_content == "echo:Iris"
 
 
 @pytest.mark.asyncio

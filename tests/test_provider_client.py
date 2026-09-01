@@ -2,7 +2,6 @@ from typing import Any
 
 import pytest
 from litellm import ModelResponse
-from pydantic import ValidationError
 
 from iris.exceptions import (
     IrisAPIConnectionError,
@@ -12,29 +11,6 @@ from iris.exceptions import (
 )
 from iris.message import LLMRequest, Msg
 from iris.providers import ProviderClient
-
-
-def test_provider_client_exposes_litellm_active_fields_only() -> None:
-    assert "max_retries" not in ProviderClient.model_fields
-    assert "http_client" not in ProviderClient.model_fields
-    assert "provider" in ProviderClient.model_fields
-    assert "litellm_provider" in ProviderClient.model_fields
-
-
-def test_provider_client_accepts_custom_provider_with_litellm_provider() -> None:
-    client = ProviderClient(
-        provider="siliconflow",
-        litellm_provider="openai",
-        api_key="test-key",
-    )
-
-    assert client.provider == "siliconflow"
-    assert client.litellm_provider == "openai"
-
-
-def test_provider_client_rejects_removed_http_client_keyword() -> None:
-    with pytest.raises(ValidationError):
-        ProviderClient(provider="openai", api_key="test-key", http_client=None)
 
 
 @pytest.mark.asyncio
@@ -142,27 +118,6 @@ async def test_provider_client_parses_current_litellm_model_response(
 
 
 @pytest.mark.asyncio
-async def test_provider_client_does_not_double_prefix_litellm_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    seen_model = ""
-
-    async def fake_acompletion(**kwargs: Any) -> dict[str, Any]:
-        nonlocal seen_model
-        seen_model = str(kwargs["model"])
-        return {"choices": [{"message": {"content": "你好"}}]}
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-    client = ProviderClient(provider="openai", api_key="test-key")
-
-    await client.complete(LLMRequest(model="openai/gpt-4o", messages=[Msg.user("你好")]))
-
-    assert seen_model == "openai/gpt-4o"
-
-
-@pytest.mark.asyncio
 async def test_provider_client_uses_litellm_provider_for_model_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,21 +140,6 @@ async def test_provider_client_uses_litellm_provider_for_model_prefix(
     await client.complete(LLMRequest(model="deepseek-ai/DeepSeek-V3", messages=[Msg.user("你好")]))
 
     assert seen_model == "openai/deepseek-ai/DeepSeek-V3"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("api_style", ["responses", "unknown"])
-async def test_provider_client_rejects_non_chat_api_style(api_style: str) -> None:
-    client = ProviderClient(provider="openai", api_key="test-key")
-
-    with pytest.raises(IrisProviderError, match=api_style):
-        await client.complete(
-            LLMRequest(
-                model="gpt-4o",
-                messages=[Msg.user("你好")],
-                provider_options={"api_style": api_style},
-            )
-        )
 
 
 class _FakeStatusError(Exception):

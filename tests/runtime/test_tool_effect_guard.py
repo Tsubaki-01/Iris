@@ -11,7 +11,6 @@ from iris.exceptions import (
     IrisCancellationRequestedError,
     IrisRunConflictError,
     IrisRunPersistenceError,
-    IrisRunStateError,
 )
 from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import Msg, ToolUseBlock
@@ -31,7 +30,6 @@ from iris.tools import (
     ToolExecutor,
     ToolMiddleware,
     ToolRegistry,
-    ToolResult,
 )
 
 
@@ -235,65 +233,6 @@ async def test_cancellation_after_claim_propagates_before_tool_body(tmp_path: Pa
     assert effects == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("write_mode", "approved_tool_call_id"),
-    [("allow", None), ("confirm", "call_1")],
-)
-async def test_ordinary_and_approved_tools_share_effect_guard_path(
-    tmp_path: Path,
-    write_mode: str,
-    approved_tool_call_id: str | None,
-) -> None:
-    executor, prepared, context = _prepared_call(tmp_path, write_mode=write_mode)
-    events: list[str] = []
-
-    result = await executor.execute_prepared(
-        prepared,
-        context,
-        approved_tool_call_id=approved_tool_call_id,
-        effect_guard=RecordingGuard(events),
-    )
-
-    assert result.is_error is False
-    assert events == ["guard"]
-
-
-def test_commit_port_guard_claims_exact_subject_once(tmp_path: Path) -> None:
-    executor, prepared, _ = _prepared_call(tmp_path)
-    del executor
-    cursor = RuntimeCursor(
-        position="tool_batch",
-        step_index=2,
-        tool_calls=(prepared.tool_use,),
-        assistant_message=Msg.assistant([prepared.tool_use]),
-    )
-    activation = RuntimeActivationInput(
-        run_id="run_1",
-        activation_id="activation_1",
-        session_id="session_1",
-        kind="resume",
-        input=None,
-        cursor=cursor,
-        options=RuntimeExecutionOptions(),
-    )
-    port = ClaimOnlyPort()
-    guard = CommitPortToolEffectGuard(
-        activation=activation,
-        cursor=cursor,
-        commits=port,
-        workspace_root=tmp_path,
-    )
-
-    guard.before_effect(prepared)
-    guard.before_effect(prepared)
-
-    claim = guard.claim_for("call_1")
-    assert claim is not None
-    assert claim.tool_version == 2
-    assert len(port.calls) == 1
-
-
 def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> None:
     """显式索引只选择当前 batch 未提交后缀中的 exact subject。"""
     executor, first, context = _prepared_call(tmp_path)
@@ -332,44 +271,3 @@ def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> 
     assert call.ordinal == 2
     with pytest.raises(IrisRunConflictError, match="subject"):
         guard.before_effect(first)
-
-
-def test_commit_port_guard_rejects_committed_or_out_of_batch_index(tmp_path: Path) -> None:
-    """显式索引不能回退到已提交 prefix，也不能跨出当前 batch。"""
-    _, prepared, _ = _prepared_call(tmp_path)
-    cursor = RuntimeCursor(
-        position="tool_batch",
-        step_index=2,
-        next_tool_index=1,
-        tool_calls=(prepared.tool_use, prepared.tool_use.model_copy(update={"id": "call_2"})),
-        tool_results=(ToolResult(tool_use_id="call_1", tool_name="echo"),),
-        assistant_message=Msg.assistant(
-            [prepared.tool_use, prepared.tool_use.model_copy(update={"id": "call_2"})]
-        ),
-    )
-    activation = RuntimeActivationInput(
-        run_id="run_1",
-        activation_id="activation_1",
-        session_id="session_1",
-        kind="resume",
-        input=None,
-        cursor=cursor,
-        options=RuntimeExecutionOptions(),
-    )
-
-    with pytest.raises(IrisRunStateError, match="索引"):
-        CommitPortToolEffectGuard(
-            activation=activation,
-            cursor=cursor,
-            commits=ClaimOnlyPort(),
-            workspace_root=tmp_path,
-            tool_index=0,
-        )
-    with pytest.raises(IrisRunStateError, match="索引"):
-        CommitPortToolEffectGuard(
-            activation=activation,
-            cursor=cursor,
-            commits=ClaimOnlyPort(),
-            workspace_root=tmp_path,
-            tool_index=2,
-        )

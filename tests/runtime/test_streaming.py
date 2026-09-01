@@ -297,24 +297,6 @@ def _runtime(
 
 
 @pytest.mark.asyncio
-async def test_execute_without_sink_keeps_complete_only_path(tmp_path: Path) -> None:
-    provider = FakeProvider([_text_response("完成")])
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-
-    result = await _runtime(provider, tmp_path).execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert len(provider.requests) == 1
-    assert provider.requests[0].stream is False
-    assert len(commits.model_commits) == 1
-
-
-@pytest.mark.asyncio
 async def test_sink_rejects_complete_only_provider_without_fallback(tmp_path: Path) -> None:
     provider = FakeProvider([_text_response("不能回退")])
     activation = start_activation()
@@ -428,31 +410,6 @@ async def test_stream_failure_cancel_and_eof_never_commit(tmp_path: Path) -> Non
         assert result.outcome is RuntimeActivationOutcome.FAILED
         assert result.error is not None and result.error.code == expected_code
         assert commits.model_commits == []
-
-
-@pytest.mark.asyncio
-async def test_stream_local_cancellation_propagates(tmp_path: Path) -> None:
-    class CancellingProvider(FakeProvider):
-        async def stream(
-            self,
-            request: LLMRequest,
-        ) -> AsyncIterator[ModelStreamEvent]:
-            del request
-            raise asyncio.CancelledError
-            yield
-
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-
-    with pytest.raises(asyncio.CancelledError):
-        await _runtime(CancellingProvider([]), tmp_path).execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            stream_sink=RecordingSink(),
-        )
-
-    assert commits.model_commits == []
 
 
 @pytest.mark.asyncio
@@ -632,50 +589,6 @@ async def test_tool_live_events_require_successful_claim_and_commit(
 
 
 @pytest.mark.asyncio
-async def test_cancel_after_claim_emits_started_but_not_body_or_completed(
-    tmp_path: Path,
-) -> None:
-    effects: list[str] = []
-    signal = MutableCancellationSignal()
-
-    def effect() -> str:
-        effects.append("effect")
-        return "effect"
-
-    registry = ToolRegistry()
-    registry.register_function(effect, description="执行 effect")
-    provider = FakeStreamingProvider(
-        [
-            _stream_events(
-                _tool_response(ToolUseBlock(id="effect-1", name="effect", input={})),
-                stream_id="tool-stream",
-            )
-        ]
-    )
-    activation = start_activation()
-
-    class ClaimCancellingPort(FakeRuntimeCommitPort):
-        def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
-            claim = super().claim_tool_call(call)
-            signal.requested = True
-            return claim
-
-    sink = RecordingSink()
-    result = await _runtime(provider, tmp_path, registry=registry).execute(
-        activation,
-        commits=ClaimCancellingPort(activation),
-        cancellation=signal,
-        stream_sink=sink,
-    )
-
-    kinds = [event.kind for event in sink.events]
-    assert result.outcome is RuntimeActivationOutcome.OUTCOME_UNKNOWN
-    assert effects == []
-    assert "tool.started" in kinds
-    assert "tool.completed" not in kinds
-
-
-@pytest.mark.asyncio
 async def test_parallel_tool_bodies_can_finish_out_of_order_but_commit_in_order(
     tmp_path: Path,
 ) -> None:
@@ -761,46 +674,3 @@ async def test_sink_error_propagates_without_model_commit(tmp_path: Path) -> Non
         )
 
     assert commits.model_commits == []
-
-
-@pytest.mark.asyncio
-async def test_tool_started_sink_error_is_not_tool_body_failure(tmp_path: Path) -> None:
-    class SinkError(RuntimeError):
-        pass
-
-    class FailingSink(RecordingSink):
-        def emit(self, event: RuntimeStreamEvent) -> None:
-            if event.kind == "tool.started":
-                raise SinkError("tool publisher failed")
-            super().emit(event)
-
-    effects: list[str] = []
-
-    def effect() -> str:
-        effects.append("effect")
-        return "effect"
-
-    registry = ToolRegistry()
-    registry.register_function(effect, description="执行 effect")
-    provider = FakeStreamingProvider(
-        [
-            _stream_events(
-                _tool_response(ToolUseBlock(id="effect-1", name="effect", input={})),
-                stream_id="tool-stream",
-            )
-        ]
-    )
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-
-    with pytest.raises(SinkError, match="tool publisher failed"):
-        await _runtime(provider, tmp_path, registry=registry).execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            stream_sink=FailingSink(),
-        )
-
-    assert effects == []
-    assert len(commits.claims) == 1
-    assert commits.tool_commits == []

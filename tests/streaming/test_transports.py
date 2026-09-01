@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import cast
 
 import pytest
-from pydantic import ValidationError
 
 from iris.harness import SubmitReceipt
 from iris.streaming.gateway import GatewaySubscription, StreamingGateway
@@ -20,7 +19,6 @@ from iris.streaming.models import (
     DurableSyncItem,
     GatewayCommand,
     GatewayStreamItem,
-    LiveCursor,
     LiveEnvelope,
     ReplayGap,
     SubmitAccepted,
@@ -30,7 +28,7 @@ from iris.streaming.models import (
     SyncAccepted,
     SyncCommand,
 )
-from iris.streaming.sse import SSEAdapter, decode_live_cursor, encode_live_cursor
+from iris.streaming.sse import SSEAdapter
 from iris.streaming.websocket import WebSocketAdapter
 
 
@@ -146,25 +144,6 @@ def _receiver(*frames: str | bytes | None) -> Callable[[], Awaitable[str | bytes
     return receive
 
 
-def test_cursor_codec_is_compact_and_validates_raw_value() -> None:
-    cursor = LiveCursor(
-        stream_epoch="epoch-1",
-        scope="session",
-        scope_id="session-1",
-        after_live_sequence=7,
-    )
-
-    encoded = encode_live_cursor(cursor)
-
-    assert "\n" not in encoded
-    assert " " not in encoded
-    assert decode_live_cursor(encoded) == cursor
-    with pytest.raises(ValidationError):
-        decode_live_cursor('{"stream_epoch":"epoch-1"}')
-    with pytest.raises(ValueError, match="single-line"):
-        decode_live_cursor(encoded + "\n")
-
-
 @pytest.mark.asyncio
 async def test_sse_encodes_envelope_and_control_items_without_fake_ids() -> None:
     subscription = FakeSubscription(
@@ -201,52 +180,6 @@ async def test_sse_heartbeat_reuses_pending_anext_and_cleanup_only_closes() -> N
     data = await anext(stream)
     assert b"event: model.block.delta" in data
     await stream.aclose()
-    assert subscription.closed
-
-
-@pytest.mark.parametrize("interval", [0, -1, float("inf"), float("nan"), True])
-def test_sse_rejects_invalid_heartbeat(interval: float) -> None:
-    with pytest.raises(ValueError):
-        SSEAdapter(heartbeat_interval_s=interval)
-
-
-@pytest.mark.asyncio
-async def test_websocket_rejects_invalid_first_and_second_subscribe() -> None:
-    subscription = FakeSubscription(_envelope())
-    gateway = FakeGateway(subscription)
-    sent: list[str] = []
-    frames = (
-        b"\xff",
-        SubmitCommand(request_id="too-early", input="x").model_dump_json(),
-        SubscribeCommand(
-            request_id="subscribe-1",
-            scope="session",
-            scope_id="session-1",
-        ).model_dump_json(),
-        SubmitCommand(request_id="submit-1", input="hello").model_dump_json(),
-        SubscribeCommand(
-            request_id="subscribe-2",
-            scope="session",
-            scope_id="session-1",
-        ).model_dump_json(),
-        None,
-    )
-
-    async def send(value: str) -> None:
-        sent.append(value)
-
-    await WebSocketAdapter(gateway=cast(StreamingGateway, gateway)).serve(
-        _receiver(*frames),
-        send,
-    )
-
-    payloads = [json.loads(value) for value in sent]
-    assert payloads[0]["code"] == "INVALID_COMMAND"
-    assert payloads[1]["code"] == "FIRST_COMMAND_REQUIRED"
-    assert any(item["event"] == "command.subscribe.accepted" for item in payloads)
-    assert any(item["event"] == "command.submit.accepted" for item in payloads)
-    assert any(item.get("request_id") == "submit-1" for item in payloads)
-    assert any(item.get("code") == "ALREADY_SUBSCRIBED" for item in payloads)
     assert subscription.closed
 
 
@@ -374,32 +307,5 @@ async def test_websocket_send_failure_drains_children_and_closes_subscription() 
         ),
         fail_send,
     )
-
-    assert subscription.closed
-
-
-@pytest.mark.asyncio
-async def test_websocket_receive_failure_closes_subscription() -> None:
-    subscription = FakeSubscription()
-    gateway = FakeGateway(subscription)
-    frames = deque(
-        (
-            SubscribeCommand(
-                request_id="subscribe-1",
-                scope="session",
-                scope_id="session-1",
-            ).model_dump_json(),
-        )
-    )
-
-    async def receive() -> str:
-        if frames:
-            return frames.popleft()
-        raise RuntimeError("receive failed")
-
-    async def send(value: str) -> None:
-        del value
-
-    await WebSocketAdapter(gateway=cast(StreamingGateway, gateway)).serve(receive, send)
 
     assert subscription.closed

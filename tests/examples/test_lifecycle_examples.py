@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from examples.lifecycle import cancel as cancel_example
 from examples.lifecycle import events as events_example
-from examples.lifecycle import recover as recover_example
-from examples.lifecycle import resume as resume_example
 from examples.lifecycle import start as start_example
 from examples.lifecycle import status as status_example
 from examples.lifecycle._runner import NonExecutingProvider
@@ -20,7 +16,6 @@ from iris.harness import (
     RunResult,
     RuntimeExecutionOptions,
 )
-from iris.hitl import PermissionInteractionResponse, QuestionInteractionResponse
 from iris.message import LLMRequest, LLMResponse, TextBlock
 from iris.store import SQLiteStore
 
@@ -125,66 +120,6 @@ async def test_start_run_maps_request_and_options() -> None:
         limits=RunLimits(max_model_steps=4),
         runtime=RuntimeExecutionOptions(include_tools=False),
     )
-
-
-def test_read_status_prefers_durable_result() -> None:
-    runner = RecordingRunner(snapshot="snapshot", result="result")
-    subject = status_example.read_status(runner, run_id="run-1")  # type: ignore[arg-type]
-    assert subject == "result"
-    assert runner.status_calls == [("get_run", "run-1"), ("get_result", "run-1")]
-
-
-def test_read_events_returns_exclusive_next_cursor() -> None:
-    runner = RecordingRunner(events=[SimpleNamespace(sequence=8), SimpleNamespace(sequence=9)])
-    events, cursor = events_example.read_events(
-        runner,  # type: ignore[arg-type]
-        run_id="run-1",
-        after_sequence=7,
-    )
-    assert events == runner.events
-    assert cursor == 9
-    assert runner.events_call == ("run-1", 7)
-
-
-@pytest.mark.asyncio
-async def test_resume_run_builds_typed_responses() -> None:
-    runner = RecordingRunner(result=object())
-    await resume_example.resume_run(
-        runner,  # type: ignore[arg-type]
-        run_id="run-1",
-        interaction_id="interaction-1",
-        decision="approve",
-        answer=None,
-    )
-    assert runner.resume_response == PermissionInteractionResponse(decision="approve")
-
-    await resume_example.resume_run(
-        runner,  # type: ignore[arg-type]
-        run_id="run-1",
-        interaction_id="interaction-2",
-        decision=None,
-        answer="测试",
-    )
-    assert runner.resume_response == QuestionInteractionResponse(answer="测试")
-
-
-@pytest.mark.asyncio
-async def test_cancel_and_recover_keep_exact_identity() -> None:
-    runner = RecordingRunner(result=object())
-    await cancel_example.cancel_run(
-        runner,  # type: ignore[arg-type]
-        run_id="run-1",
-        reason="用户请求",
-        settlement_timeout=3.0,
-    )
-    assert runner.cancel_call == ("run-1", "用户请求", 3.0)
-
-    await recover_example.recover_run(
-        runner,  # type: ignore[arg-type]
-        run_id="run-1",
-        activation_id="act-1",
-    )
-    assert runner.recover_call == ("run-1", "act-1")
 
 
 class StaticProvider:

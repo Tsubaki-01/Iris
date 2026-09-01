@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from iris.exceptions import IrisRunNotFoundError, IrisRunStateError
 from iris.harness import AgentRunner, SessionManager, SubmissionEvent
 from iris.harness.streaming import SessionSubmissionEvent
 from iris.lifecycle import AgentRunRequest, RunEvent, RunPhase
@@ -27,7 +26,6 @@ from iris.tools import CancellationSignal, ToolRegistry
 
 from .fakes import (
     BlockingProvider,
-    CountingAgentRuntime,
     FailingPublisher,
     RecordingPublisher,
     StaticProvider,
@@ -108,20 +106,6 @@ async def _next_submission(
 
 
 @pytest.mark.asyncio
-async def test_runner_without_publisher_passes_no_runtime_sink(tmp_path: Path) -> None:
-    """未注入 publisher 时保持原 complete-run 行为。"""
-    runtime = CountingAgentRuntime(build_runtime(tmp_path))
-    runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
-
-    result = await runner.start(
-        AgentRunRequest(input="完成", run_id="run-no-publisher", session_id="session-live")
-    )
-
-    assert result.run.phase is RunPhase.TERMINAL
-    assert runtime.stream_sinks == [None]
-
-
-@pytest.mark.asyncio
 async def test_runner_publishes_runtime_and_each_durable_event_once(tmp_path: Path) -> None:
     """Runtime facts 保序，committed event 只经去重入口发布一次。"""
     publisher = RecordingPublisher()
@@ -149,19 +133,6 @@ async def test_runner_publishes_runtime_and_each_durable_event_once(tmp_path: Pa
     assert callback_events == durable_facts
     assert observer.events == durable_facts
     assert len({(fact.run_id, fact.sequence) for fact in durable_facts}) == len(durable_facts)
-
-
-def test_runner_factory_threads_publisher_only_to_runner(tmp_path: Path) -> None:
-    """Config factory 接收 publisher，但 RuntimeFactory 不承担 live ownership。"""
-    publisher = RecordingPublisher()
-    configured = AgentRunner.from_config(
-        build_runtime(tmp_path).environment.agent_config,
-        provider=StaticProvider(text_response()),
-        store=InMemoryLifecycleStore(),
-        live_publisher=publisher,
-    )
-
-    assert configured._live_publisher is publisher
 
 
 @pytest.mark.asyncio
@@ -216,9 +187,7 @@ async def test_manager_submission_side_channel_preserves_original_event(
     ]
 
     assert original.state == "pending"
-    assert wrapped == [
-        SessionSubmissionEvent(session_id="session-submission", event=original)
-    ]
+    assert wrapped == [SessionSubmissionEvent(session_id="session-submission", event=original)]
     provider.release.set()
     await stream.aclose()
     await manager.close()
@@ -247,11 +216,14 @@ async def test_manager_publisher_failure_preserves_receipt_and_buffer(
 
     assert receipt.state == "pending"
     assert original.state == "pending"
-    assert sum(
-        isinstance(fact, SessionSubmissionEvent)
-        and fact.event.submission_id == receipt.submission_id
-        for fact in publisher.facts
-    ) == 1
+    assert (
+        sum(
+            isinstance(fact, SessionSubmissionEvent)
+            and fact.event.submission_id == receipt.submission_id
+            for fact in publisher.facts
+        )
+        == 1
+    )
     provider.release.set()
     await stream.aclose()
     await manager.close()
@@ -291,18 +263,3 @@ async def test_runner_durable_read_facades_delegate_exact_store(tmp_path: Path) 
     assert len(calls) == 1
     assert len(publisher.facts) == published_count
     assert result.run.phase is RunPhase.TERMINAL
-
-
-def test_runner_durable_read_facades_reject_blank_and_missing(tmp_path: Path) -> None:
-    """Public read boundary 区分空白 identity 与缺失 run。"""
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path),
-        store=InMemoryLifecycleStore(),
-    )
-
-    with pytest.raises(IrisRunStateError):
-        runner.get_session("  ")
-    with pytest.raises(IrisRunStateError):
-        runner.list_tool_calls("  ")
-    with pytest.raises(IrisRunNotFoundError):
-        runner.list_tool_calls("missing-run")

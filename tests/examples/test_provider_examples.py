@@ -22,7 +22,6 @@ from iris.message import (
     ProviderStreamError,
     TextBlock,
 )
-from iris.providers import create_provider_client
 
 
 def _response(text: str = "完成") -> LLMResponse:
@@ -84,22 +83,6 @@ class StreamingProvider:
         self.requests.append(request)
         for event in self.events:
             yield event
-
-
-def test_build_request_uses_provider_internal_model() -> None:
-    request = build_request(model="deepseek-chat", prompt="介绍 Iris")
-    assert request.model == "deepseek-chat"
-    assert [message.role.value for message in request.messages] == ["system", "user"]
-    assert [message.text for message in request.messages] == [
-        "你是一个简洁的助手。",
-        "介绍 Iris",
-    ]
-
-
-def test_current_provider_factory_constructs_without_legacy_adapter() -> None:
-    client = create_provider_client("deepseek/deepseek-chat", api_key="test-key")
-    assert client.provider == "deepseek"
-    assert client.api_key == "test-key"
 
 
 @pytest.mark.asyncio

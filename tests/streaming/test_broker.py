@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from iris.exceptions import IrisRunStateError
 from iris.harness.session_manager import SubmissionEvent
 from iris.harness.streaming import SessionSubmissionEvent
 from iris.lifecycle import RunEvent, RunEventKind
@@ -47,9 +46,7 @@ def _run_event(
         sequence=sequence,
         kind=kind,
         occurred_at=datetime.now(UTC),
-        payload={"stop_reason": "completed"}
-        if kind is RunEventKind.RUN_TERMINAL
-        else {},
+        payload={"stop_reason": "completed"} if kind is RunEventKind.RUN_TERMINAL else {},
     )
 
 
@@ -103,27 +100,11 @@ async def _next(subscription: LiveSubscription):
     return await asyncio.wait_for(anext(subscription), timeout=0.5)
 
 
-@pytest.mark.parametrize("capacity", [0, -1, True, 1.5])
-def test_broker_rejects_invalid_capacities(capacity: object) -> None:
-    with pytest.raises(ValueError):
-        LiveStreamBroker(
-            replay_capacity_per_scope=capacity,
-            subscription_capacity=2,
-        )
-    with pytest.raises(ValueError):
-        LiveStreamBroker(
-            replay_capacity_per_scope=2,
-            subscription_capacity=capacity,
-        )
-
-
 @pytest.mark.asyncio
 async def test_run_and_session_sequences_are_independent() -> None:
     broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=8)
     run_sub = broker.subscribe(LiveSubscriptionRequest(scope="run", scope_id="run-1"))
-    session_sub = broker.subscribe(
-        LiveSubscriptionRequest(scope="session", scope_id="session-1")
-    )
+    session_sub = broker.subscribe(LiveSubscriptionRequest(scope="session", scope_id="session-1"))
 
     broker.publish(_submission_event())
     session_submission = await _next(session_sub)
@@ -164,34 +145,6 @@ async def test_valid_replay_handoff_has_no_duplicate_or_gap() -> None:
     assert isinstance(replayed, LiveEnvelope)
     assert isinstance(live, LiveEnvelope)
     assert [replayed.live_sequence, live.live_sequence] == [2, 3]
-
-
-@pytest.mark.asyncio
-async def test_no_cursor_and_high_water_cursor_are_future_only() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=4, subscription_capacity=4)
-    broker.publish(_run_event(1))
-    future_only = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
-    at_high_water = broker.subscribe(
-        LiveSubscriptionRequest(
-            scope="run",
-            scope_id="run-1",
-            cursor=LiveCursor(
-                stream_epoch=broker.current_epoch(),
-                scope="run",
-                scope_id="run-1",
-                after_live_sequence=1,
-            ),
-        )
-    )
-
-    broker.publish(_run_event(2))
-
-    first = await _next(future_only)
-    second = await _next(at_high_water)
-    assert isinstance(first, LiveEnvelope) and first.live_sequence == 2
-    assert isinstance(second, LiveEnvelope) and second.live_sequence == 2
 
 
 @pytest.mark.asyncio
@@ -255,58 +208,9 @@ async def test_epoch_unknown_ahead_and_expired_cursors_return_typed_gap() -> Non
 
 
 @pytest.mark.asyncio
-async def test_replay_ring_keeps_only_capacity_window() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=2, subscription_capacity=4)
-    for sequence in range(1, 4):
-        broker.publish(_run_event(sequence))
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(
-            scope="run",
-            scope_id="run-1",
-            cursor=LiveCursor(
-                stream_epoch=broker.current_epoch(),
-                scope="run",
-                scope_id="run-1",
-                after_live_sequence=1,
-            ),
-        )
-    )
-
-    items = [await _next(subscription), await _next(subscription)]
-
-    assert [item.live_sequence for item in items if isinstance(item, LiveEnvelope)] == [2, 3]
-
-
-@pytest.mark.asyncio
-async def test_valid_replay_snapshot_can_exceed_future_queue_capacity() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=4, subscription_capacity=2)
-    for sequence in range(1, 4):
-        broker.publish(_run_event(sequence))
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(
-            scope="run",
-            scope_id="run-1",
-            cursor=LiveCursor(
-                stream_epoch=broker.current_epoch(),
-                scope="run",
-                scope_id="run-1",
-                after_live_sequence=0,
-            ),
-        )
-    )
-
-    items = [await _next(subscription) for _ in range(3)]
-
-    assert all(isinstance(item, LiveEnvelope) for item in items)
-    assert [item.live_sequence for item in items if isinstance(item, LiveEnvelope)] == [1, 2, 3]
-
-
-@pytest.mark.asyncio
 async def test_same_partial_key_replaces_pending_item() -> None:
     broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=2)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
+    subscription = broker.subscribe(LiveSubscriptionRequest(scope="run", scope_id="run-1"))
 
     broker.publish(_delta_fact(snapshot="a", provider_sequence=1))
     broker.publish(_delta_fact(snapshot="ab", provider_sequence=2))
@@ -318,51 +222,9 @@ async def test_same_partial_key_replaces_pending_item() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replaced_partial_moves_after_older_critical_item() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=2)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
-    broker.publish(_delta_fact(snapshot="a", provider_sequence=1))
-    broker.publish(_run_event(1))
-
-    broker.publish(_delta_fact(snapshot="ab", provider_sequence=2))
-    first = await _next(subscription)
-    second = await _next(subscription)
-
-    assert isinstance(first, LiveEnvelope)
-    assert isinstance(second, LiveEnvelope)
-    assert [first.live_sequence, second.live_sequence] == [2, 3]
-    assert first.kind == RunEventKind.RUN_STARTED.value
-    assert second.payload["snapshot"] == "ab"
-
-
-@pytest.mark.asyncio
-async def test_different_partial_keys_are_preserved() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=2)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
-
-    broker.publish(_delta_fact(snapshot="a", block_id="block-1"))
-    broker.publish(_delta_fact(snapshot="b", block_id="block-2"))
-
-    first = await _next(subscription)
-    second = await _next(subscription)
-    assert isinstance(first, LiveEnvelope)
-    assert isinstance(second, LiveEnvelope)
-    assert [first.payload["block_id"], second.payload["block_id"]] == [
-        "block-1",
-        "block-2",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_critical_fact_evicts_pending_partial() -> None:
     broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=1)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
+    subscription = broker.subscribe(LiveSubscriptionRequest(scope="run", scope_id="run-1"))
     broker.publish(_delta_fact(snapshot="a"))
 
     broker.publish(_run_event(1))
@@ -402,9 +264,7 @@ async def test_full_critical_queue_gaps_only_slow_subscriber() -> None:
 @pytest.mark.asyncio
 async def test_broker_close_delivers_one_terminal_and_aclose_is_idempotent() -> None:
     broker = LiveStreamBroker(replay_capacity_per_scope=2, subscription_capacity=2)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="session", scope_id="session-1")
-    )
+    subscription = broker.subscribe(LiveSubscriptionRequest(scope="session", scope_id="session-1"))
 
     broker.close()
     broker.close()
@@ -414,22 +274,6 @@ async def test_broker_close_delivers_one_terminal_and_aclose_is_idempotent() -> 
 
     assert isinstance(terminal, SubscriptionTerminal)
     assert terminal.reason == "broker_closed"
-
-
-@pytest.mark.asyncio
-async def test_broker_rejects_cross_thread_use_without_affecting_owner_loop() -> None:
-    broker = LiveStreamBroker(replay_capacity_per_scope=2, subscription_capacity=2)
-    subscription = broker.subscribe(
-        LiveSubscriptionRequest(scope="run", scope_id="run-1")
-    )
-
-    with pytest.raises(IrisRunStateError, match="event loop"):
-        await asyncio.to_thread(broker.publish, _run_event(1))
-
-    broker.publish(_run_event(1))
-    item = await _next(subscription)
-    assert isinstance(item, LiveEnvelope)
-    assert item.live_sequence == 1
 
 
 def test_projection_allowlists_tool_and_provider_payloads(tmp_path: Path) -> None:

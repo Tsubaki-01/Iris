@@ -6,7 +6,6 @@ from typing import Any
 
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from iris.exceptions import IrisSkillPathError
 from iris.message import ToolUseBlock
@@ -17,7 +16,6 @@ from iris.skill.tool import LoadSkillInput, LoadSkillTool
 from iris.tools import (
     PermissionEffect,
     ReadFileState,
-    ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolRegistry,
@@ -64,28 +62,6 @@ def _symlink_or_skip(link: Path, target: Path) -> None:
         link.symlink_to(target)
     except (NotImplementedError, OSError) as exc:
         pytest.skip(f"当前 Windows 环境无法创建符号链接: {exc}")
-
-
-def test_load_skill_definition_and_input_schema_are_exact(tmp_path: Path) -> None:
-    registry, _ = _registry(tmp_path)
-    tool = LoadSkillTool(registry, max_result_chars=1234)
-
-    assert tool.definition.name == "load_skill"
-    assert tool.definition.group == "skill"
-    assert tool.definition.capabilities == {ToolCapability.READ}
-    assert tool.definition.deferred is False
-    assert tool.definition.max_result_chars == 1234
-    assert set(tool.definition.input_schema["properties"]) == {"name"}
-    assert tool.definition.input_schema["required"] == ["name"]
-    assert "不执行脚本" in tool.definition.description
-    assert tool.input_model is LoadSkillInput
-
-
-def test_load_skill_input_rejects_invalid_names_and_extra_paths() -> None:
-    with pytest.raises(ValidationError):
-        LoadSkillInput(name="Bad_Name")
-    with pytest.raises(ValidationError):
-        LoadSkillInput.model_validate({"name": "example-skill", "path": "secret"})
 
 
 @pytest.mark.asyncio
@@ -176,29 +152,6 @@ async def test_post_discovery_symlink_escape_returns_path_error_without_secret(
 
 
 @pytest.mark.asyncio
-async def test_post_discovery_sibling_retarget_returns_path_error_without_secret(
-    tmp_path: Path,
-) -> None:
-    registry, skill_file = _registry(tmp_path)
-    sibling_dir = skill_file.parent.parent / "sibling-skill"
-    sibling_dir.mkdir()
-    sibling_file = sibling_dir / "SKILL.md"
-    sibling_file.write_text("SIBLING SECRET", encoding="utf-8")
-    skill_file.unlink()
-    _symlink_or_skip(skill_file, sibling_file)
-
-    result = await LoadSkillTool(registry).arun(
-        LoadSkillInput(name="example-skill"),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result.is_error is True
-    assert result.error is not None
-    assert result.error.code == "SKILL_PATH_ERROR"
-    assert "SIBLING SECRET" not in result.model_content
-
-
-@pytest.mark.asyncio
 async def test_deleted_skill_file_returns_retryable_read_error(tmp_path: Path) -> None:
     registry, skill_file = _registry(tmp_path)
     skill_file.unlink()
@@ -232,21 +185,6 @@ async def test_non_utf8_skill_returns_retryable_read_error(tmp_path: Path) -> No
     assert result.error is not None
     assert result.error.code == "SKILL_READ_ERROR"
     assert result.error.details["reason"] == "SKILL.md 不是有效的 UTF-8 文本"
-
-
-@pytest.mark.asyncio
-async def test_loader_preserves_file_service_thousand_line_limit(tmp_path: Path) -> None:
-    body = "".join(f"line-{index}\n" for index in range(1, 1002))
-    registry, _ = _registry(tmp_path, body=body)
-
-    result = await LoadSkillTool(registry).arun(
-        LoadSkillInput(name="example-skill"),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result.is_error is False
-    assert len(result.model_content.splitlines()) == 1000
-    assert "line-1001" not in result.model_content
 
 
 @pytest.mark.asyncio

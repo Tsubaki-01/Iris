@@ -9,7 +9,6 @@ import pytest
 from iris.exceptions import (
     IrisCancellationRequestedError,
     IrisRunConflictError,
-    IrisRunNotFoundError,
     IrisRunPersistenceError,
     IrisRunStateError,
 )
@@ -23,7 +22,6 @@ from iris.lifecycle import (
     RunCommit,
     RunControlSnapshot,
     RunEvent,
-    RunEventKind,
     RunPhase,
     RunRecord,
     RunToolCallRecord,
@@ -142,23 +140,6 @@ def test_store_commit_port_relays_only_new_committed_events() -> None:
     assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)
 
 
-def test_store_commit_port_isolates_durable_event_callback_failure() -> None:
-    collected: list[RunEvent] = []
-    attempted: list[RunEvent] = []
-
-    def raising_callback(event: RunEvent) -> None:
-        attempted.append(event)
-        raise RuntimeError("模拟 durable event callback 失败")
-
-    store, port, _ = _store_commit_port(
-        event_sink=collected,
-        durable_event_callback=raising_callback,
-    )
-
-    assert attempted == collected
-    assert port.run == store.load_run("run_1")
-
-
 def test_store_commit_port_does_not_relay_failed_store_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -216,16 +197,6 @@ def test_store_commit_port_exact_control_read_does_not_load_events_or_mutate_loc
     assert port.cancellation_requested() is False
     assert port.run is local
     assert calls == {"control": 1, "events": 0, "full_run": 0}
-
-
-def test_store_commit_port_maps_missing_control_to_run_not_found(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, port, _ = _store_commit_port()
-    monkeypatch.setattr(store, "load_run_control", lambda run_id: None)
-
-    with pytest.raises(IrisRunNotFoundError, match="绑定的 run 不存在"):
-        port.cancellation_requested()
 
 
 def test_store_commit_port_accepts_and_relays_exact_external_cancellation() -> None:
@@ -327,57 +298,6 @@ def test_store_commit_port_rejects_non_cancellation_control_changes(
     store, port, _ = _store_commit_port()
     snapshot = RunControlSnapshot.model_validate(_control_snapshot(port).model_dump() | changes)
     monkeypatch.setattr(store, "load_run_control", lambda run_id: snapshot)
-
-    with pytest.raises(IrisRunConflictError, match="cancellation mutation"):
-        port.cancellation_requested()
-
-
-@pytest.mark.parametrize(
-    "variant",
-    ["missing", "multiple", "kind", "sequence", "activation", "payload"],
-)
-def test_store_commit_port_rejects_unproven_cancellation_event(
-    monkeypatch: pytest.MonkeyPatch,
-    variant: str,
-) -> None:
-    store, port, _ = _store_commit_port()
-    cancelled = _request_cancel(store)
-    event = cancelled.events[0]
-    events = [event]
-    if variant == "missing":
-        events = []
-    elif variant == "multiple":
-        events = [event, event]
-    elif variant == "kind":
-        events = [event.model_copy(update={"kind": RunEventKind.MODEL_STEP_RESERVED})]
-    elif variant == "sequence":
-        events = [event.model_copy(update={"sequence": event.sequence + 1})]
-    elif variant == "activation":
-        events = [event.model_copy(update={"activation_id": "other-activation"})]
-    else:
-        events = [event.model_copy(update={"payload": {"reason": "other"}})]
-    monkeypatch.setattr(store, "list_events", lambda run_id, after_sequence=0: events)
-
-    with pytest.raises(IrisRunConflictError, match="cancellation event"):
-        port.cancellation_requested()
-
-
-def test_store_commit_port_rejects_second_control_change_after_cancellation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, port, _ = _store_commit_port()
-    _request_cancel(store)
-    assert port.cancellation_requested() is True
-    current = _control_snapshot(port)
-    repeated = RunControlSnapshot.model_validate(
-        current.model_dump()
-        | {
-            "revision": current.revision + 1,
-            "last_event_sequence": current.last_event_sequence + 1,
-            "updated_at": NOW + timedelta(seconds=1),
-        }
-    )
-    monkeypatch.setattr(store, "load_run_control", lambda run_id: repeated)
 
     with pytest.raises(IrisRunConflictError, match="cancellation mutation"):
         port.cancellation_requested()

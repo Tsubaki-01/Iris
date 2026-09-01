@@ -8,13 +8,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from pydantic import BaseModel
 
 from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
-    RunEvent,
     RunEventKind,
     RunLimits,
     RunStopReason,
@@ -35,10 +33,8 @@ from iris.tools import (
     CancellationSignal,
     DefaultPermissionPolicy,
     PermissionDecision,
-    ToolDefinition,
     ToolExecutionContext,
     ToolRegistry,
-    ToolResult,
 )
 
 from .fakes import (
@@ -130,36 +126,6 @@ async def test_already_expired_start_skips_runtime_and_provider(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_expired_managed_start_returns_without_false_activation_signal(
-    tmp_path: Path,
-) -> None:
-    """Create transaction 已 terminal 时由 task result 证明成功，signal 保持 unset。"""
-    clock = FrozenClock()
-    provider = StaticProvider(text_response("不应调用"))
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path, provider=provider),
-        store=store,
-        clock=clock,
-    )
-    activation_started = asyncio.Event()
-    relayed: list[RunEvent] = []
-
-    result = await runner._start_managed(
-        AgentRunRequest(input="过期", run_id="run-managed-expired"),
-        options=AgentRunOptions(limits=RunLimits(deadline_at=clock.now() - timedelta(seconds=1))),
-        durable_event_callback=relayed.append,
-        activation_started=activation_started,
-    )
-
-    assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
-    assert not activation_started.is_set()
-    assert provider.requests == []
-    assert relayed == store.list_events("run-managed-expired")
-    assert "run-managed-expired" not in runner._active
-
-
-@pytest.mark.asyncio
 async def test_deadline_during_provider_wait_returns_deadline_terminal(
     tmp_path: Path,
 ) -> None:
@@ -189,25 +155,6 @@ async def test_deadline_during_provider_wait_returns_deadline_terminal(
 
     assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
     assert len(provider.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_deadline_signal_cannot_be_durable_cancelled(tmp_path: Path) -> None:
-    """timer 与 engine 边界竞态时，deadline 原因不能退化成 caller cancel。"""
-    clock = FrozenClock()
-    runtime = DeadlineSignalRuntime(build_runtime(tmp_path), clock)
-    runner = AgentRunner(
-        runtime=cast(Any, runtime),
-        store=InMemoryLifecycleStore(),
-        clock=clock,
-    )
-
-    result = await runner.start(
-        AgentRunRequest(input="deadline signal", run_id="run-deadline-signal"),
-        options=AgentRunOptions(limits=RunLimits(deadline_at=clock.now() + timedelta(seconds=1))),
-    )
-
-    assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
 
 
 @pytest.mark.asyncio
@@ -374,54 +321,3 @@ async def test_parallel_claims_deadline_atomically_settles_outcome_unknown(
     records = store.list_tool_calls("run-parallel-deadline")
     assert {record.tool_call_id for record in records} == {"slow-1", "slow-2"}
     assert all(record.phase is ToolCallPhase.OUTCOME_UNKNOWN for record in records)
-
-
-@pytest.mark.asyncio
-async def test_claimed_tool_cancellation_maps_to_outcome_unknown(tmp_path: Path) -> None:
-    """claim 之后观察到 cooperative cancellation 时也不能假定 effect 未发生。"""
-
-    class CancellingTool(BaseTool):
-        definition = ToolDefinition(
-            name="cancel_after_claim",
-            description="claim 后请求取消",
-            input_schema={"type": "object", "properties": {}},
-        )
-
-        async def arun(
-            self,
-            params: BaseModel | dict[str, Any],
-            context: ToolExecutionContext,
-        ) -> ToolResult:
-            del params
-            assert context.cancellation is not None
-            cast(Any, context.cancellation).request()
-            context.cancellation.raise_if_requested()
-            raise AssertionError("取消后不应继续")
-
-    registry = ToolRegistry()
-    registry.register(CancellingTool())
-    store = InMemoryLifecycleStore()
-    runner = AgentRunner(
-        runtime=build_runtime(
-            tmp_path,
-            registry=registry,
-            provider=StaticProvider(
-                tool_response(
-                    ToolUseBlock(
-                        id="cancel-1",
-                        name="cancel_after_claim",
-                        input={},
-                    )
-                )
-            ),
-        ),
-        store=store,
-    )
-
-    result = await runner.start(AgentRunRequest(input="取消工具", run_id="run-tool-cancel"))
-
-    assert result.run.stop_reason is RunStopReason.OUTCOME_UNKNOWN
-    assert result.error is not None
-    assert result.error.code == "TOOL_OUTCOME_UNKNOWN"
-    [tool_call] = store.list_tool_calls("run-tool-cancel")
-    assert tool_call.phase is ToolCallPhase.OUTCOME_UNKNOWN

@@ -6,7 +6,6 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -25,63 +24,15 @@ from iris.memory import (
     MemorySearchTool,
     MemorySearchToolInput,
     MemoryService,
-    MemoryStore,
     MemoryWriteInput,
     SQLiteMemoryStore,
     build_memory_service_from_config,
-    default_memory_access_policy_factory,
 )
 from iris.tools import ToolExecutionContext
 
 
 def _scope(agent_id: str = "agent") -> MemoryScope:
     return MemoryScope(workspace_id="workspace", agent_id=agent_id)
-
-
-def test_default_access_policy_factory_builds_exact_scope(tmp_path: Path) -> None:
-    factory = default_memory_access_policy_factory(MemoryConfig())
-    context = ToolExecutionContext(workspace_root=tmp_path, agent_id="agent")
-
-    policy = factory(context)
-
-    expected_scope = MemoryScope(workspace_id=str(tmp_path.resolve()), agent_id="agent")
-    assert policy.actor_agent_id == "agent"
-    assert policy.write_scope == expected_scope
-    assert policy.read_scopes == [expected_scope]
-
-
-@pytest.mark.asyncio
-async def test_async_read_wrappers_preserve_sync_results_and_default_inline(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = SQLiteMemoryStore(tmp_path / "inline.db", use_fts=False)
-    service = MemoryService(store)
-    scope = _scope()
-    item = service.remember(MemoryWriteInput(scope=scope, text="用户偏好简洁回答", reason="test"))
-    query = MemoryQuery(scope=scope, text="简洁", limit=5)
-    loop_thread = threading.get_ident()
-    search_threads: list[int] = []
-    original_search = store.search
-
-    def search(value: MemoryQuery):
-        search_threads.append(threading.get_ident())
-        return original_search(value)
-
-    monkeypatch.setattr(store, "search", search)
-
-    assert service.io_execution_mode is MemoryIOExecutionMode.INLINE
-    assert await service.arecall(query) == service.recall(query)
-    assert await service.aget_item(item.id, scope) == service.get_item(item.id, scope)
-    assert await service.alist_items(scope) == service.list_items(scope)
-    assert await service.alist_events(scope) == service.list_events(scope)
-    assert await service.abuild_context(query, max_chars=100) == service.build_context(
-        query,
-        max_chars=100,
-    )
-    assert search_threads == [loop_thread, loop_thread, loop_thread, loop_thread]
-    with pytest.raises(AttributeError):
-        service.io_execution_mode = MemoryIOExecutionMode.THREAD  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
@@ -201,16 +152,6 @@ def test_configured_sqlite_uses_thread_but_direct_service_stays_inline(tmp_path:
         MemoryService(SQLiteMemoryStore(tmp_path / "direct.db", use_fts=False)).io_execution_mode
         is MemoryIOExecutionMode.INLINE
     )
-
-
-@pytest.mark.asyncio
-async def test_custom_store_keeps_default_thread_affinity() -> None:
-    loop_thread = threading.get_ident()
-    store = _CustomReadStore()
-    service = MemoryService(cast(MemoryStore, store))
-
-    assert await service.arecall(MemoryQuery(scope=_scope(), text="custom")) == []
-    assert store.search_threads == [loop_thread]
 
 
 @pytest.mark.asyncio

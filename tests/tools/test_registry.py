@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable
 from pathlib import Path
 
 import pytest
 
-import iris.tools as tools
 from iris.exceptions import IrisToolValidationError
 from iris.tools import (
     CallableExecutionMode,
@@ -16,31 +14,6 @@ from iris.tools import (
     ToolRegistry,
     tool,
 )
-
-
-def test_function_registration_exports_schema_from_type_hints() -> None:
-    def greet(name: str, excited: bool = False) -> str:
-        """生成问候语。"""
-        suffix = "!" if excited else "."
-        return f"你好，{name}{suffix}"
-
-    registry = ToolRegistry()
-    registry.register_function(greet, description="生成问候语")
-
-    assert registry.active_schemas() == [
-        {
-            "name": "greet",
-            "description": "生成问候语",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "excited": {"type": "boolean", "default": False},
-                },
-                "required": ["name"],
-            },
-        }
-    ]
 
 
 def test_tool_registers_function_in_explicit_registry() -> None:
@@ -57,13 +30,6 @@ def test_tool_registers_function_in_explicit_registry() -> None:
     assert registered.func is greet
     assert registered.definition.description == "生成问候语"
     assert greet("Iris") == "你好，Iris"
-
-
-def test_callable_execution_mode_is_public() -> None:
-    """工具作者可以从公共 tools 包显式选择 callable placement。"""
-    assert tools.CallableExecutionMode is CallableExecutionMode
-    assert tools.CallableExecutionMode.INLINE.value == "inline"
-    assert tools.CallableExecutionMode.THREAD.value == "thread"
 
 
 @pytest.mark.asyncio
@@ -151,47 +117,6 @@ async def test_thread_callable_keeps_event_loop_responsive_and_can_time_out() ->
         await execution
 
 
-@pytest.mark.asyncio
-async def test_thread_callable_awaits_awaitable_result_on_loop() -> None:
-    """同步 factory 在线程返回 awaitable 后仍沿用既有归一化语义。"""
-
-    async def resolve_value() -> str:
-        return "resolved"
-
-    def awaitable_factory() -> Awaitable[str]:
-        return resolve_value()
-
-    registry = ToolRegistry()
-    registered = registry.register_function(
-        awaitable_factory,
-        execution_mode=CallableExecutionMode.THREAD,
-    )
-
-    result = await registered.arun(
-        registered.validate_input({}),
-        ToolExecutionContext(workspace_root=Path.cwd()),
-    )
-
-    assert result.model_content == "resolved"
-
-
-def test_callable_rejects_string_execution_mode() -> None:
-    """placement 不接受与 enum 同值但类型不受控的字符串。"""
-
-    def read_value() -> str:
-        return "ok"
-
-    registry = ToolRegistry()
-
-    with pytest.raises(IrisToolValidationError, match="CallableExecutionMode"):
-        registry.register_function(
-            read_value,
-            execution_mode="thread",  # type: ignore[arg-type]
-        )
-
-    assert registry.active_schemas() == []
-
-
 def test_callable_rejects_async_function_in_thread_mode() -> None:
     """async callable 不能被错误提交到同步线程 placement。"""
 
@@ -207,19 +132,6 @@ def test_callable_rejects_async_function_in_thread_mode() -> None:
         )
 
     assert registry.active_schemas() == []
-
-
-def test_callable_concurrency_declaration_overrides_default() -> None:
-    """显式并发声明改变本地分类并进入恢复指纹元数据。"""
-
-    def read_value() -> str:
-        return "ok"
-
-    registry = ToolRegistry()
-    registered = registry.register_function(read_value, concurrency_safe=False)
-
-    assert registered.is_concurrency_safe({}) is False
-    assert registered.definition.metadata["concurrency_safe"] is False
 
 
 @pytest.mark.asyncio

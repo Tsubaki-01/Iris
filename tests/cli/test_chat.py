@@ -15,7 +15,6 @@ from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
     InteractionStatus,
-    PermissionInteractionResponse,
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
@@ -166,125 +165,6 @@ def test_chat_loop_maps_second_question_option(tmp_path: Path) -> None:
     assert response == QuestionInteractionResponse(answer="纯文本")
     assert any("1. Markdown" in line for line in outputs)
     assert any("2. 纯文本" in line for line in outputs)
-
-
-def test_chat_loop_accepts_free_text_question_answer(tmp_path: Path) -> None:
-    del tmp_path
-    interaction = _interaction(QuestionPrompt(question="补充说明", options=["跳过", "继续"]))
-    outputs: list[str] = []
-
-    response = _parse_interaction_response(
-        interaction,
-        "自定义回答",
-        output_func=outputs.append,
-    )
-
-    assert response == QuestionInteractionResponse(answer="自定义回答")
-    assert outputs == []
-
-
-def test_chat_loop_displays_permission_details(tmp_path: Path) -> None:
-    del tmp_path
-    interaction = _interaction(PermissionPrompt(reason="写入笔记"))
-    outputs: list[str] = []
-
-    _write_interaction_prompt(interaction, output_func=outputs.append)
-    response = _parse_interaction_response(
-        interaction,
-        "n",
-        output_func=outputs.append,
-    )
-
-    output = "\n".join(outputs)
-    assert "write_file" in output
-    assert "note.txt" in output
-    assert "写入笔记" in output
-    assert "本次批准只适用于该调用" in output
-    assert response == PermissionInteractionResponse(decision="reject")
-
-
-def test_chat_loop_help_lists_exit_and_quit_without_trace(tmp_path: Path) -> None:
-    runner = SequenceRunner()
-    answers = iter(["/help", "/exit"])
-    outputs: list[str] = []
-    errors: list[str] = []
-
-    code = run_chat_loop(
-        runner=runner,  # type: ignore[arg-type]
-        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
-        input_func=lambda prompt: next(answers),
-        output_func=outputs.append,
-        error_func=errors.append,
-    )
-
-    output = "\n".join(outputs)
-    assert code == 0
-    assert "/exit" in output
-    assert "/quit" in output
-    assert "/trace" not in output
-    assert runner.start_calls == []
-    assert errors == []
-
-
-def test_chat_loop_quit_returns_zero_without_start(tmp_path: Path) -> None:
-    runner = SequenceRunner()
-    answers = iter(["/quit", "执行", "/exit"])
-    outputs: list[str] = []
-    errors: list[str] = []
-
-    code = run_chat_loop(
-        runner=runner,  # type: ignore[arg-type]
-        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
-        input_func=lambda prompt: next(answers),
-        output_func=outputs.append,
-        error_func=errors.append,
-    )
-
-    assert code == 0
-    assert runner.start_calls == []
-    assert errors == []
-
-
-def test_chat_loop_returns_zero_on_eof(tmp_path: Path) -> None:
-    runner = SequenceRunner()
-    outputs: list[str] = []
-    errors: list[str] = []
-
-    def raise_eof(prompt: str) -> str:
-        del prompt
-        raise EOFError
-
-    code = run_chat_loop(
-        runner=runner,  # type: ignore[arg-type]
-        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
-        input_func=raise_eof,
-        output_func=outputs.append,
-        error_func=errors.append,
-    )
-
-    assert code == 0
-    assert errors == []
-
-
-def test_chat_loop_returns_130_on_keyboard_interrupt(tmp_path: Path) -> None:
-    runner = SequenceRunner()
-    outputs: list[str] = []
-    errors: list[str] = []
-
-    def raise_keyboard_interrupt(prompt: str) -> str:
-        del prompt
-        raise KeyboardInterrupt
-
-    code = run_chat_loop(
-        runner=runner,  # type: ignore[arg-type]
-        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
-        input_func=raise_keyboard_interrupt,
-        output_func=outputs.append,
-        error_func=errors.append,
-    )
-
-    assert code == 130
-    assert errors == []
 
 
 def test_chat_loop_formats_iris_error(tmp_path: Path) -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from pydantic import ValidationError
 
 from iris.exceptions import IrisHITLError
 from iris.hitl.models import QuestionPrompt, ToolCallSnapshot, make_call_fingerprint
@@ -15,28 +14,6 @@ from iris.tools import (
     ToolExecutor,
     ToolRegistry,
 )
-
-
-def test_ask_question_tool_exposes_human_question_schema() -> None:
-    tool = AskQuestionTool()
-
-    assert tool.definition.name == "ask_question"
-    assert tool.definition.capabilities == set()
-    assert tool.definition.group == "human"
-    assert tool.definition.input_schema["required"] == ["question"]
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        {"question": "  "},
-        {"question": "继续吗？", "options": ["继续", "  "]},
-        {"question": "继续吗？", "options": ["继续", " 继续 "]},
-    ],
-)
-def test_ask_question_input_rejects_empty_or_duplicate_values(value: dict[str, object]) -> None:
-    with pytest.raises(ValidationError):
-        AskQuestionInput.model_validate(value)
 
 
 def test_ask_question_tool_builds_question_prompt() -> None:

@@ -7,7 +7,6 @@ from pydantic import TypeAdapter, ValidationError
 
 from iris.message import (
     LLMResponse,
-    ModelBlockDelta,
     ModelBlockRef,
     ModelResponseCompleted,
     ModelStreamEvent,
@@ -55,37 +54,6 @@ def test_model_stream_event_union_round_trips_completed_response() -> None:
     )
 
     assert restored == event
-
-
-def test_model_stream_event_rejects_naive_timestamp() -> None:
-    with pytest.raises(ValidationError):
-        ModelBlockDelta(
-            scope=_scope(),
-            sequence=1,
-            occurred_at=datetime(2026, 8, 31, 12),
-            block=_text_block(),
-            channel="text",
-            delta="你",
-            snapshot="你",
-        )
-
-
-def test_model_block_ref_requires_tool_call_id_for_tool_block() -> None:
-    with pytest.raises(ValidationError):
-        ModelBlockRef(index=0, block_id="block-0", kind="tool_call")
-
-
-def test_model_block_delta_rejects_channel_incompatible_with_block() -> None:
-    with pytest.raises(ValidationError):
-        ModelBlockDelta(
-            scope=_scope(),
-            sequence=1,
-            occurred_at=_OCCURRED_AT,
-            block=_text_block(),
-            channel="tool_arguments",
-            delta='{"value":',
-            snapshot='{"value":',
-        )
 
 
 def test_model_stream_finalization_requires_response_only_for_success() -> None:

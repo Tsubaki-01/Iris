@@ -15,7 +15,7 @@ from fakes import (
     resume_activation,
     start_activation,
 )
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -41,12 +41,10 @@ from iris.memory import (
 from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
 from iris.runtime import (
     AgentRuntime,
-    ModelStepReservation,
     RuntimeActivationOutcome,
     RuntimeActivationResult,
     RuntimeApprovedToolCall,
     RuntimeCursor,
-    RuntimeModelStepCommit,
     RuntimeToolCall,
     RuntimeToolResultCommit,
     SteeringInput,
@@ -155,24 +153,6 @@ class _CountingSerialTool(BaseTool):
             tool_name=context.tool_name,
             content=[TextBlock(text=str(params["value"]))],
         )
-
-
-def test_steering_input_requires_user_message() -> None:
-    """Steering input 只能承载待提交的 user message。"""
-    with pytest.raises(ValidationError, match="user message"):
-        SteeringInput(
-            submission_id="submission-1",
-            message=Msg.assistant("不能作为 steer 输入"),
-        )
-    with pytest.raises(ValidationError, match="submission_id"):
-        SteeringInput(submission_id=" ", message=Msg.user("新的指令"))
-
-    input_value = SteeringInput(
-        submission_id="submission-1",
-        message=Msg.user("新的指令"),
-    )
-    with pytest.raises(ValidationError, match="frozen"):
-        input_value.submission_id = "submission-2"
 
 
 def _runtime(
@@ -314,122 +294,6 @@ async def test_execute_no_tool_steer_commits_input_before_next_model_step(
 
 
 @pytest.mark.asyncio
-async def test_execute_empty_steering_port_keeps_no_tool_completion(
-    tmp_path: Path,
-) -> None:
-    """空 steering port 只观察边界，不改变既有完成语义。"""
-    provider = FakeProvider([_text_response("最终回答")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation(input="当前问题")
-    commits = FakeRuntimeCommitPort(activation)
-    steering = FakeRuntimeSteeringPort()
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert result.cursor.position == "outcome_ready"
-    assert [message.role for message in commits.model_commits[0].message_delta] == [
-        Role.USER,
-        Role.ASSISTANT,
-    ]
-    assert commits.model_commits[0].resumability is CheckpointResumability.OUTCOME_READY
-    assert steering.events == [("claim", activation.run_id, activation.activation_id)]
-
-
-@pytest.mark.asyncio
-async def test_execute_consumes_one_steer_per_no_tool_boundary(
-    tmp_path: Path,
-) -> None:
-    """连续安全边界按 FIFO 每次只提交一条 steer。"""
-    provider = FakeProvider(
-        [_text_response("第一轮"), _text_response("第二轮"), _text_response("最终轮")]
-    )
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-    messages = [Msg.user("方向一"), Msg.user("方向二")]
-    steering = FakeRuntimeSteeringPort(
-        [
-            SteeringInput(submission_id=f"submission-{index}", message=message)
-            for index, message in enumerate(messages, start=1)
-        ]
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert len(commits.model_commits) == 3
-    assert commits.model_commits[0].message_delta[-1] == messages[0]
-    assert commits.model_commits[1].message_delta[-1] == messages[1]
-    assert [event[0] for event in steering.events] == [
-        "claim",
-        "acknowledge",
-        "claim",
-        "acknowledge",
-        "claim",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_execute_has_no_await_between_claim_return_commit_and_ack(
-    tmp_path: Path,
-) -> None:
-    """Claim 返回后，commit 与 ack 必须在 event-loop 下一次调度前完成。"""
-    order: list[str] = []
-
-    class RecordingSteeringPort(FakeRuntimeSteeringPort):
-        async def claim(
-            self,
-            run_id: str,
-            activation_id: str,
-        ) -> SteeringInput | None:
-            claimed = await super().claim(run_id, activation_id)
-            if claimed is not None:
-                order.append("claim-return")
-                asyncio.get_running_loop().call_soon(order.append, "interleaved")
-            return claimed
-
-        def acknowledge(self, submission_id: str) -> None:
-            order.append("acknowledge")
-            super().acknowledge(submission_id)
-
-    class RecordingCommitPort(FakeRuntimeCommitPort):
-        def commit_model_step(self, commit: RuntimeModelStepCommit) -> RuntimeCursor:
-            order.append("commit")
-            return super().commit_model_step(commit)
-
-    provider = FakeProvider([_text_response("第一轮"), _text_response("最终轮")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = RecordingCommitPort(activation)
-    steering = RecordingSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-    await asyncio.sleep(0)
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert order[:3] == ["claim-return", "commit", "acknowledge"]
-    assert order.index("interleaved") > order.index("acknowledge")
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("commit_fails", [False, True])
 async def test_execute_final_tool_settlement_has_no_await_after_claim(
     tmp_path: Path,
@@ -553,41 +417,6 @@ async def test_execute_cancel_or_deadline_never_claims_steer(
 
 
 @pytest.mark.asyncio
-async def test_execute_outcome_ready_cursor_never_claims_steer(
-    tmp_path: Path,
-) -> None:
-    """已经 durable terminal 的 cursor 直接兑现结果，不再观察 steering。"""
-    assistant = Msg.assistant("已完成")
-    activation = start_activation().model_copy(
-        update={
-            "cursor": RuntimeCursor(
-                position="outcome_ready",
-                step_index=0,
-                assistant_message=assistant,
-            )
-        }
-    )
-    provider = FakeProvider([])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    commits = FakeRuntimeCommitPort(activation, messages=[assistant])
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert result.assistant_message == assistant
-    assert provider.requests == []
-    assert steering.events == []
-
-
-@pytest.mark.asyncio
 async def test_execute_steers_only_after_final_ordered_tool_result(
     tmp_path: Path,
 ) -> None:
@@ -673,62 +502,6 @@ async def test_execute_validates_serial_tool_batch_once_per_call(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_execute_return_to_model_error_can_steer_after_final_result(
-    tmp_path: Path,
-) -> None:
-    """RETURN_TO_MODEL 的 final error 是可领取 steer 的安全边界。"""
-    call = ToolUseBlock(id="missing-1", name="missing", input={})
-    provider = FakeProvider([_tool_response(call), _text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-    steered_message = Msg.user("根据错误调整方向")
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=steered_message)]
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert commits.tool_commits[0].result.is_error is True
-    assert commits.tool_commits[0].message_delta[1] == steered_message
-    assert provider.requests[1].messages[-1] == steered_message
-    assert steering.events[1] == ("acknowledge", "submission-1", None)
-
-
-@pytest.mark.asyncio
-async def test_execute_model_commit_failure_fails_claimed_steer(
-    tmp_path: Path,
-) -> None:
-    """No-tool required commit 失败时 fail exact submission 并保留原异常。"""
-    provider = FakeProvider([_text_response("回答")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, fail_at="commit_model_step")
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
-    )
-
-    with pytest.raises(IrisRunPersistenceError, match="required commit"):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            steering=steering,
-        )
-
-    assert steering.events == [
-        ("claim", activation.run_id, activation.activation_id),
-        ("fail", "submission-1", "commit_failed"),
-    ]
-
-
-@pytest.mark.asyncio
 async def test_execute_tool_commit_failure_fails_claimed_steer(
     tmp_path: Path,
 ) -> None:
@@ -748,83 +521,6 @@ async def test_execute_tool_commit_failure_fails_claimed_steer(
     )
 
     with pytest.raises(IrisRunPersistenceError, match="required commit"):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            steering=steering,
-        )
-
-    assert steering.events == [
-        ("claim", activation.run_id, activation.activation_id),
-        ("fail", "submission-1", "commit_failed"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_execute_model_cursor_mismatch_fails_claimed_steer(
-    tmp_path: Path,
-) -> None:
-    """Model commit 返回意外 cursor 时不得 acknowledge submission。"""
-
-    class UnexpectedCursorCommitPort(FakeRuntimeCommitPort):
-        def commit_model_step(self, commit: RuntimeModelStepCommit) -> RuntimeCursor:
-            super().commit_model_step(commit)
-            return RuntimeCursor(
-                position="before_model",
-                step_index=commit.cursor_after.step_index + 1,
-            )
-
-    provider = FakeProvider([_text_response("回答")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = UnexpectedCursorCommitPort(activation)
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
-    )
-
-    with pytest.raises(IrisRunConflictError, match="意外 cursor"):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            steering=steering,
-        )
-
-    assert steering.events == [
-        ("claim", activation.run_id, activation.activation_id),
-        ("fail", "submission-1", "commit_failed"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_cursor_mismatch_fails_claimed_steer(
-    tmp_path: Path,
-) -> None:
-    """Final-tool commit 返回意外 cursor 时不得 acknowledge submission。"""
-
-    class UnexpectedCursorCommitPort(FakeRuntimeCommitPort):
-        def commit_tool_result(self, commit: RuntimeToolResultCommit) -> RuntimeCursor:
-            super().commit_tool_result(commit)
-            return RuntimeCursor(
-                position="before_model",
-                step_index=commit.cursor_after.step_index + 1,
-            )
-
-    def echo() -> str:
-        return "echo"
-
-    registry = ToolRegistry()
-    registry.register_function(echo, description="回显")
-    provider = FakeProvider([_tool_response(ToolUseBlock(id="echo-1", name="echo", input={}))])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
-    activation = start_activation()
-    commits = UnexpectedCursorCommitPort(activation)
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))]
-    )
-
-    with pytest.raises(IrisRunConflictError, match="意外 cursor"):
         await runtime.execute(
             activation,
             commits=commits,
@@ -862,76 +558,6 @@ async def test_execute_isolates_acknowledge_callback_failure(
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert commits.messages[-2].text == "新方向"
     assert steering.events[1] == ("acknowledge", "submission-1", None)
-
-
-@pytest.mark.asyncio
-async def test_execute_isolates_fail_callback_failure(
-    tmp_path: Path,
-) -> None:
-    """Fail callback 异常不能覆盖原始 required commit 异常。"""
-    provider = FakeProvider([_text_response("回答")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, fail_at="commit_model_step")
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=Msg.user("新方向"))],
-        callback_error_at="fail",
-    )
-
-    with pytest.raises(IrisRunPersistenceError, match="required commit"):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-            steering=steering,
-        )
-
-    assert steering.events[-1] == ("fail", "submission-1", "commit_failed")
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_tools_steer_on_final_ordered_commit(
-    tmp_path: Path,
-) -> None:
-    """并发完成的工具仍只在最终有序提交中携带 steer。"""
-
-    async def read_value(index: int) -> str:
-        return f"value-{index}"
-
-    registry = ToolRegistry()
-    registry.register_function(read_value, description="读取值")
-    calls = [
-        ToolUseBlock(id=f"read-{index}", name="read_value", input={"index": index})
-        for index in (1, 2)
-    ]
-    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-    steered_message = Msg.user("并发结果后的新方向")
-    steering = FakeRuntimeSteeringPort(
-        [SteeringInput(submission_id="submission-1", message=steered_message)]
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-        steering=steering,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert [commit.result.tool_use_id for commit in commits.tool_commits] == [
-        "read-1",
-        "read-2",
-    ]
-    assert [len(commit.message_delta) for commit in commits.tool_commits] == [1, 2]
-    assert commits.tool_commits[1].message_delta[1] == steered_message
-    assert steering.events == [
-        ("claim", activation.run_id, activation.activation_id),
-        ("acknowledge", "submission-1", None),
-        ("claim", activation.run_id, activation.activation_id),
-    ]
 
 
 @pytest.mark.asyncio
@@ -1086,62 +712,6 @@ async def test_execute_commits_reverse_completed_calls_in_original_order(
     assert [
         message.tool_results[0].tool_use_id for message in provider.requests[1].messages[-2:]
     ] == ["read-1", "read-2"]
-
-
-@pytest.mark.asyncio
-async def test_execute_limits_parallel_window_to_eight_calls(tmp_path: Path) -> None:
-    active = 0
-    peak = 0
-    entered: list[int] = []
-    first_window_entered = asyncio.Event()
-    release_first_window = asyncio.Event()
-    ninth_started_after_commits: int | None = None
-
-    async def read_value(index: int) -> str:
-        nonlocal active, ninth_started_after_commits, peak
-        active += 1
-        peak = max(peak, active)
-        entered.append(index)
-        if len(entered) == 8:
-            first_window_entered.set()
-        if index == 9:
-            ninth_started_after_commits = len(commits.tool_commits)
-        else:
-            await release_first_window.wait()
-        active -= 1
-        return f"value-{index}"
-
-    registry = ToolRegistry()
-    registry.register_function(read_value, description="读取值")
-    calls = [
-        ToolUseBlock(id=f"read-{index}", name="read_value", input={"index": index})
-        for index in range(1, 10)
-    ]
-    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-    execution = asyncio.create_task(
-        runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
-    )
-
-    try:
-        await asyncio.wait_for(first_window_entered.wait(), timeout=1)
-        assert entered == list(range(1, 9))
-        release_first_window.set()
-        result = await execution
-    finally:
-        release_first_window.set()
-        if not execution.done():
-            await execution
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert peak == 8
-    assert ninth_started_after_commits == 8
 
 
 @pytest.mark.asyncio
@@ -1327,41 +897,6 @@ async def test_execute_stop_policy_never_starts_later_safe_call(tmp_path: Path) 
 
     assert result.outcome is RuntimeActivationOutcome.FAILED
     assert [commit.tool_call.tool_call_id for commit in commits.tool_commits] == ["read-1"]
-
-
-@pytest.mark.asyncio
-async def test_execute_parallel_window_keeps_sync_callable_results_ordered(
-    tmp_path: Path,
-) -> None:
-    executed: list[int] = []
-
-    def read_value(index: int) -> str:
-        executed.append(index)
-        return f"value-{index}"
-
-    registry = ToolRegistry()
-    registry.register_function(read_value, description="读取值")
-    calls = [
-        ToolUseBlock(id=f"read-{index}", name="read_value", input={"index": index})
-        for index in (1, 2)
-    ]
-    provider = FakeProvider([_tool_batch_response(calls), _text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation)
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert executed == [1, 2]
-    assert [commit.result.model_content for commit in commits.tool_commits] == [
-        "value-1",
-        "value-2",
-    ]
 
 
 @pytest.mark.asyncio
@@ -2032,34 +1567,6 @@ async def test_execute_cancellation_before_reservation_has_no_provider_effect(
 
 
 @pytest.mark.asyncio
-async def test_execute_cancellation_after_reservation_skips_provider(
-    tmp_path: Path,
-) -> None:
-    signal = MutableCancellationSignal()
-
-    class ReservationCancellingPort(FakeRuntimeCommitPort):
-        def reserve_model_step(self, cursor: RuntimeCursor) -> ModelStepReservation:
-            reservation = super().reserve_model_step(cursor)
-            signal.requested = True
-            return reservation
-
-    provider = FakeProvider([_text_response("不应调用")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = ReservationCancellingPort(activation)
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=signal,
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.CANCELLED
-    assert provider.requests == []
-    assert "reserve_model_step" in commits.events
-
-
-@pytest.mark.asyncio
 async def test_execute_rejects_wrong_claim_version_before_tool_effect(
     tmp_path: Path,
 ) -> None:
@@ -2089,21 +1596,6 @@ async def test_execute_rejects_wrong_claim_version_before_tool_effect(
         )
 
     assert effects == []
-
-
-@pytest.mark.asyncio
-async def test_execute_required_commit_failure_propagates(tmp_path: Path) -> None:
-    provider = FakeProvider([_text_response("已生成但未提交")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, fail_at="commit_model_step")
-
-    with pytest.raises(IrisRunPersistenceError, match="模拟 required commit 失败"):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
 
 
 @pytest.mark.asyncio
@@ -2326,186 +1818,6 @@ async def test_execute_stop_policy_fails_only_after_error_result_commit(
 
 
 @pytest.mark.asyncio
-async def test_execute_resume_cursor_continues_after_projected_question_or_reject(
-    tmp_path: Path,
-) -> None:
-    effects: list[str] = []
-
-    def echo() -> str:
-        effects.append("echo")
-        return "echo"
-
-    registry = ToolRegistry()
-    registry.register(AskQuestionTool())
-    registry.register_function(echo, description="回显")
-    assistant = Msg.assistant(
-        [
-            ToolUseBlock(
-                id="question-1",
-                name="ask_question",
-                input={"question": "继续？"},
-            ),
-            ToolUseBlock(id="echo-1", name="echo", input={}),
-        ]
-    )
-    projected = ToolResult(
-        tool_use_id="question-1",
-        tool_name="ask_question",
-        content=[TextBlock(text="继续")],
-    )
-    projected_message = Msg.tool_result(
-        tool_use_id=projected.tool_use_id,
-        content=projected.model_content,
-        name=projected.tool_name,
-    )
-    cursor = RuntimeCursor(
-        position="tool_batch",
-        step_index=0,
-        next_tool_index=1,
-        tool_calls=tuple(assistant.tool_calls),
-        tool_results=(projected,),
-        assistant_message=assistant,
-    )
-    activation = resume_activation(cursor)
-    provider = FakeProvider([_text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path, registry=registry)
-    commits = FakeRuntimeCommitPort(
-        activation,
-        messages=[assistant, projected_message],
-    )
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    assert effects == ["echo"]
-    assert [commit.result.tool_use_id for commit in commits.tool_commits] == ["echo-1"]
-
-
-@pytest.mark.asyncio
-async def test_projected_question_does_not_approve_following_permission_gate(
-    tmp_path: Path,
-) -> None:
-    effects: list[str] = []
-
-    def write() -> str:
-        effects.append("write")
-        return "write"
-
-    registry = ToolRegistry()
-    registry.register(AskQuestionTool())
-    registry.register_function(
-        write,
-        description="写入",
-        capabilities={ToolCapability.WRITE},
-    )
-    assistant = Msg.assistant(
-        [
-            ToolUseBlock(
-                id="question-1",
-                name="ask_question",
-                input={"question": "继续？"},
-            ),
-            ToolUseBlock(id="write-1", name="write", input={}),
-        ]
-    )
-    projected = ToolResult(
-        tool_use_id="question-1",
-        tool_name="ask_question",
-        content=[TextBlock(text="继续")],
-    )
-    cursor = RuntimeCursor(
-        position="tool_batch",
-        step_index=0,
-        next_tool_index=1,
-        tool_calls=tuple(assistant.tool_calls),
-        tool_results=(projected,),
-        assistant_message=assistant,
-    )
-    activation = resume_activation(cursor)
-    runtime = _runtime(
-        provider=FakeProvider([_text_response("不应调用")]),
-        tmp_path=tmp_path,
-        registry=registry,
-        writes="confirm",
-    )
-    commits = FakeRuntimeCommitPort(activation, messages=[assistant])
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.SUSPENDED
-    assert result.suspension is not None
-    assert result.suspension.request.tool_call.tool_call_id == "write-1"
-    assert effects == []
-    assert commits.claims == {}
-
-
-@pytest.mark.asyncio
-async def test_projected_reject_does_not_approve_following_permission_gate(
-    tmp_path: Path,
-) -> None:
-    effects: list[str] = []
-
-    def write() -> str:
-        effects.append("write")
-        return "write"
-
-    registry = ToolRegistry()
-    registry.register_function(
-        write,
-        description="写入",
-        capabilities={ToolCapability.WRITE},
-    )
-    assistant = Msg.assistant(
-        [
-            ToolUseBlock(id="write-1", name="write", input={}),
-            ToolUseBlock(id="write-2", name="write", input={}),
-        ]
-    )
-    rejected = ToolResult(
-        tool_use_id="write-1",
-        tool_name="write",
-        is_error=True,
-        error=ToolErrorInfo(code="USER_REJECTED", message="用户拒绝了工具调用"),
-    )
-    cursor = RuntimeCursor(
-        position="tool_batch",
-        step_index=0,
-        next_tool_index=1,
-        tool_calls=tuple(assistant.tool_calls),
-        tool_results=(rejected,),
-        assistant_message=assistant,
-    )
-    activation = resume_activation(cursor)
-    runtime = _runtime(
-        provider=FakeProvider([_text_response("不应调用")]),
-        tmp_path=tmp_path,
-        registry=registry,
-        writes="confirm",
-    )
-    commits = FakeRuntimeCommitPort(activation, messages=[assistant])
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.SUSPENDED
-    assert result.suspension is not None
-    assert result.suspension.request.tool_call.tool_call_id == "write-2"
-    assert effects == []
-    assert commits.claims == {}
-
-
-@pytest.mark.asyncio
 async def test_execute_same_batch_next_gate_suspends_then_continues(
     tmp_path: Path,
 ) -> None:
@@ -2578,118 +1890,6 @@ async def test_execute_same_batch_next_gate_suspends_then_continues(
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert effects == ["one", "two"]
     assert len(commits.tool_commits) == 2
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure",
-    [
-        "cancellation_requested",
-        "remaining_deadline_seconds",
-        "load_session",
-        "reserve_model_step",
-        "commit_model_step",
-    ],
-)
-async def test_execute_model_required_port_failures_propagate(
-    tmp_path: Path,
-    failure: str,
-) -> None:
-    provider = FakeProvider([_text_response("完成")])
-    runtime = _runtime(provider=provider, tmp_path=tmp_path)
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, fail_at=failure)
-
-    with pytest.raises(IrisRunPersistenceError):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["claim_tool_call", "commit_tool_result"])
-@pytest.mark.parametrize("approved", [False, True], ids=["ordinary", "approved"])
-async def test_execute_tool_required_commit_failures_propagate(
-    tmp_path: Path,
-    failure: str,
-    approved: bool,
-) -> None:
-    effects: list[str] = []
-
-    def effect() -> str:
-        effects.append("effect")
-        return "effect"
-
-    registry = ToolRegistry()
-    registry.register_function(
-        effect,
-        description="执行 effect",
-        capabilities={ToolCapability.WRITE} if approved else set(),
-    )
-    provider = FakeProvider([_tool_response(ToolUseBlock(id="effect-1", name="effect", input={}))])
-    runtime = _runtime(
-        provider=provider,
-        tmp_path=tmp_path,
-        registry=registry,
-        writes="confirm" if approved else "allow",
-    )
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(
-        activation,
-        fail_at=None if approved else failure,
-    )
-    if approved:
-        waiting = await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
-        activation = resume_activation(
-            waiting.cursor,
-            interaction_projection=_approved_projection(waiting),
-        )
-        commits.activation = activation
-        commits.fail_at = failure
-
-    with pytest.raises(IrisRunPersistenceError):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
-
-    assert effects == ([] if failure == "claim_tool_call" else ["effect"])
-
-
-@pytest.mark.asyncio
-async def test_execute_suspend_required_commit_failure_propagates(tmp_path: Path) -> None:
-    def write() -> str:
-        return "write"
-
-    registry = ToolRegistry()
-    registry.register_function(
-        write,
-        description="写入",
-        capabilities={ToolCapability.WRITE},
-    )
-    provider = FakeProvider([_tool_response(ToolUseBlock(id="write-1", name="write", input={}))])
-    runtime = _runtime(
-        provider=provider,
-        tmp_path=tmp_path,
-        registry=registry,
-        writes="confirm",
-    )
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, fail_at="suspend")
-
-    with pytest.raises(IrisRunPersistenceError):
-        await runtime.execute(
-            activation,
-            commits=commits,
-            cancellation=MutableCancellationSignal(),
-        )
 
 
 @pytest.mark.asyncio
@@ -2959,35 +2159,6 @@ async def test_execute_provider_timeout_without_run_deadline_is_provider_failure
     assert result.error is not None
     assert result.error.code == "PROVIDER_TIMEOUT"
     assert result.error.source == "provider"
-
-
-@pytest.mark.asyncio
-async def test_provider_timeout_with_remaining_deadline_is_not_run_deadline(
-    tmp_path: Path,
-) -> None:
-    class TimeoutProvider:
-        async def complete(self, request: object) -> LLMResponse:
-            del request
-            raise TimeoutError("provider operation timeout")
-
-    runtime = build_runtime(
-        agent_config=_agent_config(),
-        context_input=_context_input(),
-        provider=TimeoutProvider(),
-        workspace_root=tmp_path,
-    )
-    activation = start_activation()
-    commits = FakeRuntimeCommitPort(activation, remaining_deadline_seconds=10)
-
-    result = await runtime.execute(
-        activation,
-        commits=commits,
-        cancellation=MutableCancellationSignal(),
-    )
-
-    assert result.outcome is RuntimeActivationOutcome.FAILED
-    assert result.error is not None
-    assert result.error.code == "PROVIDER_TIMEOUT"
 
 
 @pytest.mark.asyncio

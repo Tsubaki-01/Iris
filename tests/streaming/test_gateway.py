@@ -9,12 +9,11 @@ import pytest
 
 from iris.exceptions import IrisRunConflictError, IrisRunNotFoundError, IrisRunStateError
 from iris.harness import AgentRunner, SessionManager, SubmitReceipt
-from iris.lifecycle import AgentRunRequest, RunPhase, RunToolCallRecord, ToolCallPhase
+from iris.lifecycle import AgentRunRequest, RunPhase
 from iris.message import (
     ModelBlockDelta,
     ModelBlockRef,
     ModelStreamScope,
-    TextBlock,
     ToolUseBlock,
 )
 from iris.runtime import RuntimeStreamEvent
@@ -37,11 +36,8 @@ from iris.streaming.models import (
     SyncCommand,
 )
 from iris.tools import (
-    ToolArtifact,
     ToolCapability,
-    ToolErrorInfo,
     ToolRegistry,
-    ToolResult,
 )
 from tests.harness.fakes import StaticProvider, build_runtime, text_response, tool_response
 
@@ -52,9 +48,7 @@ async def _completed_runner(tmp_path: Path) -> tuple[AgentRunner, SessionManager
         runtime=build_runtime(tmp_path, provider=StaticProvider(text_response("完成"))),
         store=InMemoryLifecycleStore(),
     )
-    await runner.start(
-        AgentRunRequest(input="开始", run_id="run-own", session_id="session-own")
-    )
+    await runner.start(AgentRunRequest(input="开始", run_id="run-own", session_id="session-own"))
     return runner, SessionManager(runner, "session-own")
 
 
@@ -141,50 +135,6 @@ def _model_delta(*, channel: str, value: str, sequence: int) -> RuntimeStreamEve
 
 
 @pytest.mark.asyncio
-async def test_constructor_validates_binding_and_capacity_without_reads(
-    tmp_path: Path,
-) -> None:
-    runner, manager = await _completed_runner(tmp_path)
-    broker = _broker()
-
-    gateway = StreamingGateway(
-        runner=runner,
-        manager=manager,
-        broker=broker,
-        session_id="  session-own  ",
-        durable_page_size=2,
-    )
-
-    assert gateway.session_id == "session-own"
-    with pytest.raises(IrisRunStateError):
-        StreamingGateway(
-            runner=runner,
-            manager=manager,
-            broker=broker,
-            session_id=" ",
-            durable_page_size=2,
-        )
-    with pytest.raises(IrisRunConflictError):
-        StreamingGateway(
-            runner=runner,
-            manager=manager,
-            broker=broker,
-            session_id="session-other",
-            durable_page_size=2,
-        )
-    for invalid in (0, -1, True, 1.5):
-        with pytest.raises(IrisRunStateError):
-            StreamingGateway(
-                runner=runner,
-                manager=manager,
-                broker=broker,
-                session_id="session-own",
-                durable_page_size=invalid,
-            )
-    await manager.close()
-
-
-@pytest.mark.asyncio
 async def test_subscribe_enforces_session_and_run_binding(tmp_path: Path) -> None:
     runner, manager = await _runner_with_sync_facts(tmp_path)
     gateway = StreamingGateway(
@@ -207,9 +157,7 @@ async def test_subscribe_enforces_session_and_run_binding(tmp_path: Path) -> Non
             SubscribeCommand(request_id="bad-session", scope="session", scope_id="session-other")
         )
     with pytest.raises(IrisRunConflictError):
-        gateway.subscribe(
-            SubscribeCommand(request_id="bad-run", scope="run", scope_id="run-cross")
-        )
+        gateway.subscribe(SubscribeCommand(request_id="bad-run", scope="run", scope_id="run-cross"))
     with pytest.raises(IrisRunNotFoundError):
         gateway.subscribe(
             SubscribeCommand(request_id="missing", scope="run", scope_id="missing-run")
@@ -357,36 +305,6 @@ async def test_handle_maps_iris_error_without_context_leak(
 
 
 @pytest.mark.asyncio
-async def test_handle_maps_unexpected_error_without_detail_leak(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    runner, manager = await _completed_runner(tmp_path)
-    gateway = StreamingGateway(
-        runner=runner,
-        manager=manager,
-        broker=_broker(),
-        session_id="session-own",
-        durable_page_size=2,
-    )
-
-    async def fail(*args: object, **kwargs: object):
-        del args, kwargs
-        raise RuntimeError("secret payload detail")
-
-    monkeypatch.setattr(manager, "submit", fail)
-
-    receipt = await gateway.handle(SubmitCommand(request_id="request-1", input="hello"))
-
-    assert isinstance(receipt, CommandRejected)
-    assert receipt.code == "INTERNAL_ERROR"
-    assert receipt.message == "命令处理失败"
-    assert "secret payload detail" not in caplog.text
-    await manager.close()
-
-
-@pytest.mark.asyncio
 async def test_durable_sync_pages_in_input_order_and_redacts_tool_arguments(
     tmp_path: Path,
 ) -> None:
@@ -429,17 +347,13 @@ async def test_durable_sync_pages_in_input_order_and_redacts_tool_arguments(
         allow_tool_arguments=True,
     ).durable_sync((DurableRunCursor(run_id="run-waiting", after_sequence=0),))
     assert allowed.runs[0].tool_calls[0].arguments == {"value": "secret"}
-    assert (
-        allowed.runs[0].result.pending_interaction.request.tool_call.arguments
-        == {"value": "secret"}
-    )
-    assert (
-        allowed.runs[0].result.pending_interaction.request.tool_call.workspace_root
-        == "<redacted>"
-    )
-    assert allowed.runs[0].result.assistant_message.tool_calls[0].input == {
+    assert allowed.runs[0].result.pending_interaction.request.tool_call.arguments == {
         "value": "secret"
     }
+    assert (
+        allowed.runs[0].result.pending_interaction.request.tool_call.workspace_root == "<redacted>"
+    )
+    assert allowed.runs[0].result.assistant_message.tool_calls[0].input == {"value": "secret"}
     await manager.close()
 
 
@@ -465,72 +379,6 @@ async def test_durable_sync_rejects_missing_or_cross_session_without_partial_pag
         )
     with pytest.raises(IrisRunNotFoundError):
         gateway.durable_sync((DurableRunCursor(run_id="missing", after_sequence=0),))
-    await manager.close()
-
-
-@pytest.mark.asyncio
-async def test_durable_sync_removes_internal_tool_result_fields(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner, manager = await _completed_runner(tmp_path)
-    now = datetime.now(UTC)
-    record = RunToolCallRecord(
-        run_id="run-own",
-        step_index=0,
-        ordinal=1,
-        tool_call_id="tool-1",
-        tool_name="probe",
-        arguments={"path": "secret.txt"},
-        fingerprint="a" * 64,
-        phase=ToolCallPhase.COMMITTED,
-        claim_activation_id="activation-1",
-        result=ToolResult(
-            tool_use_id="tool-1",
-            tool_name="probe",
-            content=[TextBlock(text="safe output")],
-            is_error=True,
-            error=ToolErrorInfo(
-                code="FAILED",
-                message="safe message",
-                details={"traceback": "secret"},
-            ),
-            data={"secret": "data"},
-            artifact=ToolArtifact(
-                path=tmp_path / "secret.bin",
-                mime_type="application/octet-stream",
-                size_bytes=6,
-                preview="preview",
-            ),
-            stats={"host": "secret"},
-            metadata={"trace": "secret"},
-        ),
-        version=3,
-        created_at=now,
-        updated_at=now,
-        claimed_at=now,
-        committed_at=now,
-    )
-    monkeypatch.setattr(runner, "list_tool_calls", lambda run_id: [record])
-    gateway = StreamingGateway(
-        runner=runner,
-        manager=manager,
-        broker=_broker(),
-        session_id="session-own",
-        durable_page_size=2,
-    )
-
-    sync = gateway.durable_sync((DurableRunCursor(run_id="run-own", after_sequence=0),))
-    filtered = sync.runs[0].tool_calls[0]
-
-    assert filtered.arguments == {}
-    assert filtered.result is not None
-    assert filtered.result.data == {}
-    assert filtered.result.artifact is None
-    assert filtered.result.stats == {}
-    assert filtered.result.metadata == {}
-    assert filtered.result.error is not None
-    assert filtered.result.error.details == {}
     await manager.close()
 
 

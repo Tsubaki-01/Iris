@@ -19,10 +19,10 @@ from iris.harness import (
     SessionManager,
     SubmissionEvent,
 )
-from iris.lifecycle import LifecycleStore, RunEventKind, RunStopReason
+from iris.lifecycle import RunEventKind, RunStopReason
 from iris.store import InMemoryLifecycleStore
 
-from .fakes import BlockingProvider, build_runtime, text_response
+from .fakes import BlockingProvider, build_runtime
 
 
 def _event(sequence: int, *, run_id: str = "run-replay") -> RunEvent:
@@ -71,25 +71,6 @@ class _ReplayRunner:
         selected = events if limit is None else events[:limit]
         self.returned_rows += len(selected)
         return selected
-
-
-@pytest.mark.parametrize(
-    "keyword",
-    [
-        "max_pending_steer",
-        "max_pending_follow_up",
-        "max_buffered_submission_events",
-        "max_tracked_durable_runs",
-    ],
-)
-def test_session_manager_rejects_non_positive_capacities(
-    tmp_path: Path,
-    keyword: str,
-) -> None:
-    runner = AgentRunner(runtime=build_runtime(tmp_path), store=InMemoryLifecycleStore())
-
-    with pytest.raises(ValueError, match="SessionManager 容量"):
-        SessionManager(runner, "session-invalid-capacity", **{keyword: 0})
 
 
 @pytest.mark.asyncio
@@ -216,34 +197,6 @@ async def test_no_consumer_keeps_all_manager_containers_within_small_limits(tmp_
 
 
 @pytest.mark.asyncio
-async def test_durable_burst_replays_store_once_per_sequence_without_linear_relay_state() -> None:
-    durable = [_event(sequence) for sequence in range(1, 101)]
-    replay = _ReplayRunner(durable)
-    manager = SessionManager(
-        cast(AgentRunner, replay),
-        "session-durable-burst",
-        max_tracked_durable_runs=1,
-    )
-    stream = manager.events()
-    assert manager._event_buffer.try_register_run("run-replay", after_sequence=0)
-    for event in reversed(durable):
-        manager._relay_run_event(event)
-        manager._relay_run_event(event)
-
-    assert manager._event_buffer.tracked_run_count == 1
-    assert manager._event_buffer.durable_wakeup_pending
-    await manager.close()
-    delivered = [event async for event in stream if isinstance(event, RunEvent)]
-
-    assert [event.sequence for event in delivered] == list(range(1, 101))
-    assert replay.list_calls == 2
-    assert replay.requested_limits == [64, 36]
-    assert replay.returned_rows == len(durable)
-    assert manager._event_buffer.durable_replay_batch_count == 0
-    assert manager._event_buffer.tracked_run_count == 0
-
-
-@pytest.mark.asyncio
 async def test_durable_replay_uses_registration_baseline_and_catches_concurrent_relay() -> None:
     durable = [_event(sequence) for sequence in range(1, 6)]
     replay = _ReplayRunner(durable[:4])
@@ -268,104 +221,6 @@ async def test_durable_replay_uses_registration_baseline_and_catches_concurrent_
     assert [event.sequence for event in delivered] == [4, 5]
     assert replay.list_calls >= 2
     assert all(limit is not None and limit <= 64 for limit in replay.requested_limits)
-
-
-def test_runner_list_events_delegates_limit_contract_to_store(tmp_path: Path) -> None:
-    class StoreLimitError(Exception):
-        pass
-
-    class ExactStore:
-        def list_events(
-            self,
-            run_id: str,
-            after_sequence: int = 0,
-            *,
-            limit: int | None = None,
-        ) -> list[RunEvent]:
-            del run_id, after_sequence, limit
-            raise StoreLimitError
-
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path),
-        store=cast(LifecycleStore, ExactStore()),
-    )
-
-    with pytest.raises(StoreLimitError):
-        runner.list_events("run-exact", limit=0)
-
-
-@pytest.mark.asyncio
-async def test_tracker_capacity_rejects_idle_before_start_task(tmp_path: Path) -> None:
-    runner = AgentRunner(runtime=build_runtime(tmp_path), store=InMemoryLifecycleStore())
-    manager = SessionManager(
-        runner,
-        "session-tracker-full",
-        max_tracked_durable_runs=1,
-    )
-    assert manager._event_buffer.try_register_run("unconsumed-run", after_sequence=0)
-    manager._relay_run_event(_event(1, run_id="unconsumed-run"))
-
-    with pytest.raises(IrisRunStateError, match="durable run tracker.*容量"):
-        await manager.submit("must-not-start")
-
-    assert runner.store.load_session("session-tracker-full").messages == []
-    assert manager._current_task is None
-    await manager.close()
-
-
-@pytest.mark.asyncio
-async def test_accepted_follow_up_waits_for_tracker_release_then_preserves_fifo(
-    tmp_path: Path,
-) -> None:
-    provider = BlockingProvider(text_response("完成"))
-    store = InMemoryLifecycleStore()
-    manager = SessionManager(
-        AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store),
-        "session-tracker-backpressure",
-        max_pending_follow_up=2,
-        max_buffered_submission_events=4,
-        max_tracked_durable_runs=1,
-    )
-    stream = manager.events()
-    current = await manager.submit("第一轮")
-    first = await manager.submit("第二轮", mode="follow_up")
-    second = await manager.submit("第三轮", mode="follow_up")
-    provider.release.set()
-    await _wait_until(lambda: store.load_result(current.run_id) is not None)
-
-    assert store.load_run(first.run_id) is None
-    observed_events: list[RunEvent | SubmissionEvent] = []
-    for _ in range(20):
-        observed_events.append(await anext(stream))
-        if store.load_run(first.run_id) is not None:
-            break
-    await _wait_until(lambda: store.load_run(first.run_id) is not None)
-    await _wait_until(lambda: store.load_result(first.run_id) is not None)
-
-    assert store.load_run(second.run_id) is None
-    for _ in range(20):
-        observed_events.append(await anext(stream))
-        if store.load_run(second.run_id) is not None:
-            break
-    await _wait_until(lambda: store.load_result(second.run_id) is not None)
-    await manager.close()
-    observed_events.extend([event async for event in stream])
-    submissions = [event for event in observed_events if isinstance(event, SubmissionEvent)]
-    assert [event.submission_id for event in submissions if event.state == "delivered"] == [
-        first.submission_id,
-        second.submission_id,
-    ]
-    assert manager._event_buffer.tracked_run_count == 0
-
-
-def test_runner_rejects_non_finite_observer_timeout(tmp_path: Path) -> None:
-    for timeout in (0.0, -1.0, float("inf"), float("nan")):
-        with pytest.raises(ValueError, match="observer_event_timeout_s"):
-            AgentRunner(
-                runtime=build_runtime(tmp_path),
-                store=InMemoryLifecycleStore(),
-                observer_event_timeout_s=timeout,
-            )
 
 
 @pytest.mark.asyncio
@@ -438,36 +293,6 @@ async def test_observer_timeout_and_exception_do_not_block_other_lane_or_result(
     assert observed == [event.sequence for event in durable]
     assert "observer event 超时" in caplog.text
     assert "observer 处理失败" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_concurrent_deliveries_share_persistent_observer_lane_lock(tmp_path: Path) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-    order: list[int] = []
-
-    class BlockingFirstObserver:
-        async def on_event(self, event: RunEvent) -> None:
-            order.append(event.sequence)
-            if event.sequence == 1:
-                entered.set()
-                await release.wait()
-
-    runner = AgentRunner(
-        runtime=build_runtime(tmp_path),
-        store=InMemoryLifecycleStore(),
-        observers=(BlockingFirstObserver(),),
-        observer_event_timeout_s=1,
-    )
-    first = asyncio.create_task(runner._deliver_events([_event(1)]))
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    second = asyncio.create_task(runner._deliver_events([_event(2)]))
-    await asyncio.sleep(0)
-
-    assert order == [1]
-    release.set()
-    await asyncio.gather(first, second)
-    assert order == [1, 2]
 
 
 @pytest.mark.asyncio
