@@ -10,7 +10,7 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from iris.exceptions import IrisToolValidationError
+from iris.exceptions import IrisToolExecutionError, IrisToolValidationError
 from iris.message import ToolUseBlock
 from iris.tools import (
     DefaultPermissionPolicy,
@@ -110,6 +110,11 @@ def test_read_file_record_is_frozen_and_forbids_extra_fields(tmp_path: Path) -> 
                 "unexpected": True,
             }
         )
+
+
+def test_tool_execution_context_rejects_untyped_read_state(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        ToolExecutionContext(workspace_root=tmp_path, read_state=object())
 
 
 def test_read_file_state_merge_does_not_stat(
@@ -318,14 +323,13 @@ def test_grep_first_match_does_not_read_remaining_lines(
     assert result == "notes.txt:1: needle"
 
 
-def test_grep_missing_root_preserves_empty_result(tmp_path: Path) -> None:
-    """旧 rglob 对缺失搜索根返回空，streaming 实现保持该兼容语义。"""
-    result = WorkspaceFileService().grep_search(
-        GrepSearchInput(pattern="needle", path="not-created"),
-        ToolExecutionContext(workspace_root=tmp_path),
-    )
-
-    assert result == ""
+def test_grep_missing_root_raises_file_not_found(tmp_path: Path) -> None:
+    """缺失搜索根必须与其它 file tools 一样暴露执行错误。"""
+    with pytest.raises(IrisToolExecutionError, match="FILE_NOT_FOUND"):
+        WorkspaceFileService().grep_search(
+            GrepSearchInput(pattern="needle", path="not-created"),
+            ToolExecutionContext(workspace_root=tmp_path),
+        )
 
 
 def test_grep_skips_iris_directory_before_descending(

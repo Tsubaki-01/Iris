@@ -4,7 +4,10 @@
 写入和删除能力仍由 Python SDK 暴露，不在 Stage 4 默认注册为工具。
 
 Example:
-    registry = register_memory_tools(service=service, scope_factory=factory)
+    registry = register_memory_tools(
+        service=service,
+        access_policy_factory=policy_factory,
+    )
 """
 
 # region imports
@@ -18,7 +21,6 @@ from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..exceptions import IrisMemoryError
 from ..message import TextBlock
 from ..tools import (
     BaseTool,
@@ -43,7 +45,6 @@ from .service import MemoryService
 # endregion
 
 InputT = TypeVar("InputT", bound=BaseModel)
-MemoryScopeFactory = Callable[[ToolExecutionContext], MemoryScope]
 MemoryAccessPolicyFactory = Callable[[ToolExecutionContext], "MemoryAccessPolicy"]
 
 
@@ -276,26 +277,17 @@ MEMORY_TOOL_CLASSES: tuple[type[MemoryTool[Any]], ...] = (
 )
 
 
-def default_memory_scope_factory(config: MemoryConfig) -> MemoryScopeFactory:
-    """基于 memory config 和工具上下文构造 scope factory。"""
+def default_memory_access_policy_factory(
+    config: MemoryConfig,
+) -> MemoryAccessPolicyFactory:
+    """基于 memory config 构造默认记忆访问策略工厂。"""
 
-    def _factory(context: ToolExecutionContext) -> MemoryScope:
-        return config.scope.to_scope(
+    def _factory(context: ToolExecutionContext) -> MemoryAccessPolicy:
+        scope = config.scope.to_scope(
             workspace_id=str(context.workspace_root.resolve(strict=False)),
             agent_id=context.agent_id or "default",
             session_id=context.session_id or None,
         )
-
-    return _factory
-
-
-def access_policy_factory_from_scope_factory(
-    scope_factory: MemoryScopeFactory,
-) -> MemoryAccessPolicyFactory:
-    """把旧单 scope factory 包装为默认读写同 scope 的访问策略。"""
-
-    def _factory(context: ToolExecutionContext) -> MemoryAccessPolicy:
-        scope = scope_factory(context)
         return MemoryAccessPolicy(
             actor_agent_id=context.agent_id or scope.agent_id,
             write_scope=scope,
@@ -305,18 +297,10 @@ def access_policy_factory_from_scope_factory(
     return _factory
 
 
-def default_memory_access_policy_factory(
-    config: MemoryConfig,
-) -> MemoryAccessPolicyFactory:
-    """基于 memory config 构造默认记忆访问策略工厂。"""
-    return access_policy_factory_from_scope_factory(default_memory_scope_factory(config))
-
-
 def register_memory_tools(
     *,
     service: MemoryService,
-    scope_factory: MemoryScopeFactory | None = None,
-    access_policy_factory: MemoryAccessPolicyFactory | None = None,
+    access_policy_factory: MemoryAccessPolicyFactory,
     registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
 ) -> ToolRegistry:
@@ -324,10 +308,8 @@ def register_memory_tools(
 
     Args:
         service (MemoryService): 供所有记忆工具共享的服务实例。
-        scope_factory (MemoryScopeFactory | None): 兼容旧调用方的单 scope 工厂。
-            未提供 `access_policy_factory` 时会自动包装成读写同 scope 的访问策略。
-        access_policy_factory (MemoryAccessPolicyFactory | None): 基于工具执行上下文生成
-            read/write scope 分离访问策略的工厂，推荐由 runtime 为 subagent 挂载。
+        access_policy_factory (MemoryAccessPolicyFactory): 基于工具执行上下文生成
+            read/write scope 分离访问策略的工厂。
         registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
 
@@ -335,13 +317,6 @@ def register_memory_tools(
         ToolRegistry: 已注册 `memory_search`、`memory_list` 和 `memory_get` 的 registry。
             如果传入了 `registry`，返回值就是同一个对象，便于和文件工具等其它工具组合注册。
     """
-    if access_policy_factory is None:
-        if scope_factory is None:
-            raise IrisMemoryError(
-                "注册 memory tools 必须提供 scope_factory 或 access_policy_factory"
-            )
-        access_policy_factory = access_policy_factory_from_scope_factory(scope_factory)
-    # 允许调用方把记忆工具追加到已有 registry；未传入时保持独立注册入口的旧行为。
     registry = registry or ToolRegistry()
     for tool_cls in MEMORY_TOOL_CLASSES:
         registry.register(

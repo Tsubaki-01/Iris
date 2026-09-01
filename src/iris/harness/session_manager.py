@@ -71,11 +71,6 @@ type SubmissionFailureReason = Literal[
 # endregion
 
 
-def _require_positive_capacity(value: int, *, name: str) -> None:
-    if value <= 0:
-        raise ValueError(f"{name} 必须是正整数")
-
-
 class SubmitReceipt(BaseModel):
     """一次普通输入 admission 的不可变即时回执。
 
@@ -201,8 +196,6 @@ class _PendingInputQueue:
     """
 
     def __init__(self, *, max_steer: int, max_follow_up: int) -> None:
-        _require_positive_capacity(max_steer, name="max_pending_steer")
-        _require_positive_capacity(max_follow_up, name="max_pending_follow_up")
         self._max_steer = max_steer
         self._max_follow_up = max_follow_up
         self._steer: deque[_PendingInput] = deque()
@@ -225,9 +218,7 @@ class _PendingInputQueue:
         return len(self._follow_up) < self._max_follow_up
 
     def enqueue(self, item: _PendingInput) -> None:
-        """把 input 追加到对应 FIFO；满载时拒绝且不修改队列。"""
-        if not self.can_accept(item.mode):
-            raise IrisRunStateError(f"{item.mode} input 队列容量已满")
+        """把已通过 admission 的 input 追加到对应 FIFO。"""
         target = self._steer if item.mode == "steer" else self._follow_up
         target.append(item)
 
@@ -300,11 +291,6 @@ class _SessionEventBuffer:
         max_tracked_durable_runs: int,
         on_tracker_released: Callable[[], None],
     ) -> None:
-        _require_positive_capacity(
-            max_buffered_submission_events,
-            name="max_buffered_submission_events",
-        )
-        _require_positive_capacity(max_tracked_durable_runs, name="max_tracked_durable_runs")
         self._list_events = list_events
         self._max_buffered_submission_events = max_buffered_submission_events
         self._max_tracked_durable_runs = max_tracked_durable_runs
@@ -343,8 +329,6 @@ class _SessionEventBuffer:
 
     def add_pending(self, event: SubmissionEvent) -> None:
         """加入 pending event，并为 exact submission 保留一个 terminal 槽位。"""
-        if not self.can_reserve_submission_lifecycle():
-            raise IrisRunStateError("submission event buffer 容量已满")
         barriers = tuple(
             (run_id, tracker.observed_highest_sequence)
             for run_id, tracker in self._run_trackers.items()
@@ -367,23 +351,15 @@ class _SessionEventBuffer:
         self._submission_events.append(_BufferedSubmissionEvent(event, barriers))
         self._wakeup.set()
 
-    def can_register_run(self, run_id: str) -> bool:
-        return (
-            run_id in self._run_trackers or len(self._run_trackers) < self._max_tracked_durable_runs
-        )
-
-    def register_run(self, run_id: str, *, after_sequence: int) -> None:
-        """在启动 managed source 前登记不回放旧事件的 baseline。"""
-        if after_sequence < 0:
-            raise ValueError("after_sequence 不能为负数")
-        if run_id in self._run_trackers:
-            return
-        if not self.can_register_run(run_id):
-            raise IrisRunStateError("durable run tracker 容量已满")
+    def try_register_run(self, run_id: str, *, after_sequence: int) -> bool:
+        """容量允许时登记不回放旧事件的 durable baseline。"""
+        if len(self._run_trackers) >= self._max_tracked_durable_runs:
+            return False
         self._run_trackers[run_id] = _DurableRunTracker(
             observed_highest_sequence=after_sequence,
             delivered_highest_sequence=after_sequence,
         )
+        return True
 
     def discard_run(self, run_id: str) -> None:
         """移除未形成 durable run 的 tracker。"""
@@ -682,6 +658,16 @@ class SessionManager:
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise IrisRunStateError("session_id 不能为空")
+        if (
+            min(
+                max_pending_steer,
+                max_pending_follow_up,
+                max_buffered_submission_events,
+                max_tracked_durable_runs,
+            )
+            <= 0
+        ):
+            raise ValueError("SessionManager 容量必须是正数")
         self._runner = runner
         self._session_id = normalized_session_id
         self._submission_publisher = submission_publisher
@@ -748,7 +734,8 @@ class SessionManager:
                     raise IrisRunStateError("idle submit 的 mode 必须为 None")
                 submission_id = self._new_submission_id()
                 run_id = self._new_run_id()
-                self._event_buffer.register_run(run_id, after_sequence=0)
+                if not self._event_buffer.try_register_run(run_id, after_sequence=0):
+                    raise IrisRunStateError("durable run tracker 容量已满")
                 self._current_run_id = run_id
                 task, started = self._create_start_task_locked(
                     input=normalized_input,
@@ -1148,11 +1135,9 @@ class SessionManager:
         item = self._pending.peek_follow_up()
         if item is None:
             return
-        if not self._event_buffer.can_register_run(item.run_id):
+        if not self._event_buffer.try_register_run(item.run_id, after_sequence=0):
             return
-        self._event_buffer.register_run(item.run_id, after_sequence=0)
-        item = self._pending.pop_follow_up()
-        assert item is not None, "peek 后的 follow-up 必须仍在队首"
+        self._pending.pop_follow_up()
         self._current_run_id = item.run_id
         task, started = self._create_start_task_locked(
             input=item.input,

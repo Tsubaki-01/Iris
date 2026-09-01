@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,11 +23,13 @@ from iris.runtime import (
     ToolCallClaim,
 )
 from iris.tools import (
+    BaseTool,
     DefaultPermissionPolicy,
     PreparedToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
+    ToolMiddleware,
     ToolRegistry,
     ToolResult,
 )
@@ -126,9 +129,14 @@ async def test_effect_guard_runs_after_revalidation_before_middleware_and_tool(
         events.append("tool")
         return value
 
-    class Middleware:
-        def before_call(self, *args: object) -> None:
-            del args
+    class Middleware(ToolMiddleware):
+        async def before_call(
+            self,
+            tool: BaseTool,
+            params: dict[str, Any],
+            context: ToolExecutionContext,
+        ) -> None:
+            del tool, params, context
             events.append("middleware")
 
     registry = ToolRegistry()

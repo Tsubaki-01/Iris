@@ -137,8 +137,8 @@ result = await runner.start(
 - 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
   rule/no-op 实现；
 - 投影：`FileMemoryMirror`、`MemoryContextBuilder`；
-- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、access policy factory 与
-  `register_memory_tools()`。
+- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、
+  `default_memory_access_policy_factory()` 与 `register_memory_tools()`。
 
 完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
 接口：SQLite 私有 SQL helper、mirror marker 格式和工具 payload helper。
@@ -148,8 +148,10 @@ result = await runner.start(
 `register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
 `READ` 能力。当前没有模型可见的 remember/forget 工具；写入仍须通过 SDK 或上层策略显式完成。
 
-工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；默认
-可同时读取自身 scope 和约定的 workspace-shared scope，并按 item ID 去重。
+工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；宿主可
+显式加入约定的 workspace-shared scope，多 scope 结果按 item ID 去重。
+`register_memory_tools()` 必须直接接收 `access_policy_factory`；不再接受单 scope factory，
+也不会推断或包装旧契约。
 `MemoryQuery`、`memory_search` 与 `memory_list` 的 `limit` 都声明为 `1..100`；工具输入在 raw
 边界验证后投影为 trusted `MemoryQuery`，不会重复校验相同范围。
 工具会先在事件循环执行 access policy，再把完整的多 scope 读取作为一个 service job 调度；
@@ -167,6 +169,8 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
 以及可选 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
+公开 store 的 `list_items()`、`list_events()` 与 `list_candidates()` 对非 `1..100` 的 limit
+直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
 
 ## 限制与非目标
 

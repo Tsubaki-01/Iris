@@ -88,7 +88,7 @@ def test_session_manager_rejects_non_positive_capacities(
 ) -> None:
     runner = AgentRunner(runtime=build_runtime(tmp_path), store=InMemoryLifecycleStore())
 
-    with pytest.raises(ValueError, match=keyword):
+    with pytest.raises(ValueError, match="SessionManager 容量"):
         SessionManager(runner, "session-invalid-capacity", **{keyword: 0})
 
 
@@ -225,7 +225,7 @@ async def test_durable_burst_replays_store_once_per_sequence_without_linear_rela
         max_tracked_durable_runs=1,
     )
     stream = manager.events()
-    manager._event_buffer.register_run("run-replay", after_sequence=0)
+    assert manager._event_buffer.try_register_run("run-replay", after_sequence=0)
     for event in reversed(durable):
         manager._relay_run_event(event)
         manager._relay_run_event(event)
@@ -253,7 +253,7 @@ async def test_durable_replay_uses_registration_baseline_and_catches_concurrent_
         max_tracked_durable_runs=1,
     )
     stream = manager.events()
-    manager._event_buffer.register_run("run-replay", after_sequence=3)
+    assert manager._event_buffer.try_register_run("run-replay", after_sequence=3)
     manager._relay_run_event(durable[3])
 
     def append_during_read() -> None:
@@ -270,23 +270,28 @@ async def test_durable_replay_uses_registration_baseline_and_catches_concurrent_
     assert all(limit is not None and limit <= 64 for limit in replay.requested_limits)
 
 
-def test_runner_list_events_limit_preserves_legacy_custom_store(tmp_path: Path) -> None:
-    class LegacyStore:
-        def list_events(self, run_id: str, after_sequence: int = 0) -> list[RunEvent]:
-            return [
-                event
-                for event in (_event(1, run_id=run_id), _event(2, run_id=run_id))
-                if event.sequence > after_sequence
-            ]
+def test_runner_list_events_delegates_limit_contract_to_store(tmp_path: Path) -> None:
+    class StoreLimitError(Exception):
+        pass
+
+    class ExactStore:
+        def list_events(
+            self,
+            run_id: str,
+            after_sequence: int = 0,
+            *,
+            limit: int | None = None,
+        ) -> list[RunEvent]:
+            del run_id, after_sequence, limit
+            raise StoreLimitError
 
     runner = AgentRunner(
         runtime=build_runtime(tmp_path),
-        store=cast(LifecycleStore, LegacyStore()),
+        store=cast(LifecycleStore, ExactStore()),
     )
 
-    assert [event.sequence for event in runner.list_events("run-legacy", limit=1)] == [1]
-    with pytest.raises(IrisRunStateError, match="limit"):
-        runner.list_events("run-legacy", limit=0)
+    with pytest.raises(StoreLimitError):
+        runner.list_events("run-exact", limit=0)
 
 
 @pytest.mark.asyncio
@@ -297,7 +302,7 @@ async def test_tracker_capacity_rejects_idle_before_start_task(tmp_path: Path) -
         "session-tracker-full",
         max_tracked_durable_runs=1,
     )
-    manager._event_buffer.register_run("unconsumed-run", after_sequence=0)
+    assert manager._event_buffer.try_register_run("unconsumed-run", after_sequence=0)
     manager._relay_run_event(_event(1, run_id="unconsumed-run"))
 
     with pytest.raises(IrisRunStateError, match="durable run tracker.*容量"):

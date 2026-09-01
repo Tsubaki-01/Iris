@@ -113,7 +113,9 @@ other finite positive limits through `max_pending_steer`, `max_pending_follow_up
 pending and terminal event slots. If any required capacity is unavailable, it raises
 `IrisRunStateError` before publishing a receipt, queue entry, or event; events are never silently
 dropped. An accepted follow-up remains FIFO-blocked while the tracker is full and resumes after the
-consumer catches up. A new idle submit is rejected before task creation in the same situation.
+consumer catches up. A new idle submit is rejected before task creation in the same situation. One
+synchronous admission mutation owns both the durable-tracker capacity decision and baseline
+registration; there is no check-then-register path.
 
 HITL responses use only `manager.resume(interaction_id=..., response=...)`; they never enter the
 ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
@@ -124,11 +126,9 @@ stream, but neither cancels nor waits for the current run.
 The queue, receipt state, submission events, claims, and durable event watermarks exist only in the
 current process. Durable event payloads do not accumulate in an unbounded process-local queue: a
 callback advances a per-run observed watermark, and the consumer replays bounded batches from the
-authoritative store after its delivered watermark, at most 64 events per page. The built-in memory
-and SQLite stores apply `limit` before copying or decoding. The runner still slices results from a
-legacy custom store that lacks the new keyword, but that compatibility path cannot bound
-materialization inside the custom store; custom stores should add `limit`. A new manager does not
-scan, recover, or attach an existing active/waiting lane;
+authoritative store after its delivered watermark, at most 64 events per page. Every
+`LifecycleStore` implementation must accept `limit` and apply it before copying or decoding. A new
+manager does not scan, recover, or attach an existing active/waiting lane;
 a new idle submit is rejected by the store's session-lane CAS in that case. The runner/store remain
 authoritative for durable runs, history, checkpoints, interactions, cancellation, results, and
 `RunEvent` values.

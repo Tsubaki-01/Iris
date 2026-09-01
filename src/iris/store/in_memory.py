@@ -13,14 +13,10 @@ from __future__ import annotations
 import json
 from bisect import bisect_right
 from copy import deepcopy
-from dataclasses import fields, is_dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
-from enum import Enum
 from threading import RLock
 from typing import Any, Protocol
-
-from pydantic import BaseModel
 
 from ..exceptions import (
     IrisRunConflictError,
@@ -81,6 +77,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._serialization import jsonable as _jsonable
 from ._terminal_closure import build_terminal_tool_closure
 
 
@@ -1329,7 +1326,6 @@ class InMemoryLifecycleStore:
         run: RunRecord,
         expected_session_revision: int,
     ) -> SessionSnapshot:
-        self._require_lane(run)
         session = self._sessions.get(run.session_id, SessionSnapshot(session_id=run.session_id))
         if session.revision != expected_session_revision:
             raise IrisRunConflictError(
@@ -1637,23 +1633,6 @@ class InMemoryLifecycleStore:
         isolated = deepcopy(commit)
         self._replays[self._replay_key(operation, command)] = isolated
         return deepcopy(isolated)
-
-
-def _jsonable(value: object) -> object:
-    """把 replay key 的内部 command 投影为稳定 JSON 值。"""
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
-    if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: _jsonable(getattr(value, item.name)) for item in fields(value)}
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
 
 
 __all__ = ["InMemoryLifecycleStore"]

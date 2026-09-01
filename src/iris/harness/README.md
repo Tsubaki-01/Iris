@@ -104,7 +104,8 @@ event 槽位，并跟踪 64 个尚未被 consumer 追平的 durable run。可通
 `max_tracked_durable_runs` 关键字参数设置其它有限正整数。Busy admission 会同时预留 pending 与
 terminal event 槽位；任一容量不足时，在 receipt、队列和 event 发布前抛出 `IrisRunStateError`，不
 静默丢弃。已接纳的 follow-up 在 tracker 暂满时保留 FIFO，consumer 追平旧 run 后继续推进；新的
-idle submit 则在创建 task 前拒绝。
+idle submit 则在创建 task 前拒绝。Durable tracker 的容量判断与 baseline 登记由同一个同步
+admission mutation 完成，不使用 check-then-register 双阶段路径。
 
 HITL response 只走 `manager.resume(interaction_id=..., response=...)`，不进入普通输入队列。
 `interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
@@ -113,9 +114,8 @@ event stream，但不取消或等待当前 run。
 
 Queue、receipt 状态、submission events、claim 和 durable event 水位都只存在于当前进程。Durable
 event payload 不进入无界进程内队列；callback 只推进每个 run 的 observed watermark，consumer 按
-delivered watermark 从权威 store 以最多 64 条的 page 分批补读。内置 memory/SQLite store 在复制
-或解码前执行 `limit`；未实现新关键字参数的旧 custom store 仍由 runner 兼容切片，但其底层读取
-不具备该有界物化保证，custom store 应补充 `limit`。新 manager 不扫描、
+delivered watermark 从权威 store 以最多 64 条的 page 分批补读。所有 `LifecycleStore` 实现必须
+支持 `limit`，并在复制或解码前执行上限。新 manager 不扫描、
 恢复或 attach 既有 active/waiting lane；此时新的 idle submit 会由 store 的 session-lane CAS 拒绝。
 Durable run、history、checkpoint、interaction、cancellation、result 和 `RunEvent` 始终由 runner/store
 权威负责。

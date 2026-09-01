@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from litellm import ModelResponse
 from pydantic import ValidationError
 
 from iris.exceptions import (
@@ -109,6 +110,34 @@ async def test_provider_client_calls_litellm_with_openai_chat_kwargs(
     assert response.to_msg().text == "你好"
     assert response.input_tokens == 1
     assert response.output_tokens == 2
+    assert response.total_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_provider_client_parses_current_litellm_model_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
+
+    raw_response = ModelResponse(
+        id="chatcmpl-current",
+        model="gpt-4o",
+        choices=[{"message": {"content": "当前契约"}, "finish_reason": "stop"}],
+        usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+    )
+
+    async def fake_acompletion(**kwargs: Any) -> ModelResponse:
+        del kwargs
+        return raw_response
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+
+    response = await ProviderClient(provider="openai", api_key="test-key").complete(
+        LLMRequest(model="gpt-4o")
+    )
+
+    assert response.id == "chatcmpl-current"
+    assert response.to_msg().text == "当前契约"
     assert response.total_tokens == 3
 
 

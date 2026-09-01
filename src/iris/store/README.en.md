@@ -49,10 +49,13 @@ Mutations use `BEGIN IMMEDIATE` and load only the rows required to validate and 
 command. Run, session, checkpoint, tool-call, and interaction updates use revision, sequence, or
 version CAS predicates. Lane, activation, interaction, tool, and run changes use incremental writes
 in the same transaction, while events remain append-only. Any SQL failure causes a complete
-transaction rollback, so readers never observe half-committed facts. Both stores share lifecycle
-typed-transition helpers: a mutation checks the affected phase, fence, and delta, then applies
+transaction rollback, so readers never observe half-committed facts. For an active history
+mutation, the active precondition reads the lane fence once in the transaction and the following
+history precondition checks only the session revision. Both stores share lifecycle typed-transition
+helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
-load/recovery boundaries such as SQLite row decoding. Schema v2 keeps only revision,
+load/recovery boundaries such as SQLite row decoding, while one private store serializer projects
+replay keys and durable commands to JSON values. Schema v2 keeps only revision,
 message count, and update time in `sessions`; messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
 metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and

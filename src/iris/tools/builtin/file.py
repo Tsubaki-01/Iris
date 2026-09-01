@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import TextBlock
+from .._read_state import ReadFileRecord, ReadFileState
 from ..base import (
     BaseTool,
     ToolCapability,
@@ -32,7 +33,7 @@ from ..base import (
     ToolExecutionContext,
     ToolResult,
 )
-from ..permissions import ReadFileRecord, ReadFileState, WorkspacePolicy
+from ..permissions import WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
 
@@ -214,13 +215,9 @@ class WorkspaceFileService:
         Returns:
             ReadFileState: 可记录文件 mtime/size 的读取状态对象。
 
-        Raises:
-            IrisToolValidationError: 当上下文中已有不兼容的 read_state 时。
         """
         if context.read_state is None:
             context.read_state = ReadFileState()
-        if not isinstance(context.read_state, ReadFileState):
-            raise IrisToolValidationError("read_state 类型无效")
         return context.read_state
 
     def record_read(self, path: Path, context: ToolExecutionContext) -> None:
@@ -448,6 +445,7 @@ class WorkspaceFileService:
 
         Raises:
             IrisToolValidationError: 当正则表达式无效时。
+            IrisToolExecutionError: 当搜索起点不存在时。
         """
         if params.max_results == 0:
             return ""
@@ -459,7 +457,7 @@ class WorkspaceFileService:
         except re.error as exc:
             raise IrisToolValidationError("invalid regex pattern", pattern=params.pattern) from exc
         if not root.exists():
-            return ""
+            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不存在")
 
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []

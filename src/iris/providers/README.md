@@ -103,6 +103,9 @@ Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
 - 只透传当前实现支持的请求选项；
 - 返回 provider-neutral `LLMResponse`。
 
+Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2 的
+`model_dump()` 对象形态；不再调用 Pydantic v1 `.dict()` 兼容接口。
+
 `stream(request)`：
 
 - 要求 `request.stream=True`，并向 LiteLLM 请求 usage tail；

@@ -357,7 +357,9 @@ async def test_streaming_success_emits_before_single_model_commit(tmp_path: Path
     assert len(provider.stream_requests) == 1
     assert provider.stream_requests[0].stream is True
     assert len(commits.model_commits) == 1
-    assert commits.model_commits[0].assistant_message == response.to_msg()
+    assert commits.model_commits[0].assistant_message.model_dump(exclude={"timestamp"}) == (
+        response.to_msg().model_dump(exclude={"timestamp"})
+    )
     assert sink.events[0].kind == "model.step.started"
     model_events = [event.model_event for event in sink.events[1:]]
     assert [event.kind for event in model_events if event is not None] == [

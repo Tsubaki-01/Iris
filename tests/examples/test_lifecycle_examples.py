@@ -60,7 +60,14 @@ class RecordingRunner:
         self.status_calls.append(("get_result", run_id))
         return self.result
 
-    def list_events(self, run_id: str, after_sequence: int = 0) -> list[object]:
+    def list_events(
+        self,
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[object]:
+        del limit
         self.events_call = (run_id, after_sequence)
         return self.events
 
@@ -128,9 +135,7 @@ def test_read_status_prefers_durable_result() -> None:
 
 
 def test_read_events_returns_exclusive_next_cursor() -> None:
-    runner = RecordingRunner(
-        events=[SimpleNamespace(sequence=8), SimpleNamespace(sequence=9)]
-    )
+    runner = RecordingRunner(events=[SimpleNamespace(sequence=8), SimpleNamespace(sequence=9)])
     events, cursor = events_example.read_events(
         runner,  # type: ignore[arg-type]
         run_id="run-1",

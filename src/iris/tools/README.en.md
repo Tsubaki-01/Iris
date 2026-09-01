@@ -104,7 +104,9 @@ cancellation again before entering middleware `before_call`, tool `arun`, artifa
 middleware after hooks, and breaker accounting. A guard failure starts no tool effect. Cancellation
 after a claim propagates as control flow to runtime instead of becoming a normal tool error.
 Low-level executor callers may omit the guard; lifecycle execution requires it through
-`ToolBridge`. Parallel context copies preserve identity for both shared read state and cancellation.
+`ToolBridge`. Parallel context copies preserve identity for both typed `ReadFileState` and
+cancellation. `ToolExecutionContext` parses read state at its public raw-input boundary; file
+services consume the typed object directly without repeating type checks.
 Cooperative cancellation uses `IrisCancellationRequestedError` from `iris.exceptions`, and
 `CallableTool` propagates it instead of normalizing it as an ordinary tool error. A thread worker
 cannot be forcibly terminated: cancellation or timeout stops waiting, abandons its late return, and
@@ -145,6 +147,7 @@ flowchart LR
   more directory segments; grep reads UTF-8 files line by line and skips `.iris` before descent;
 - list/grep stop as soon as the global `max_results` limit is reached, and `max_results=0` performs
   no path resolution, walk, stat, or open;
+- with `max_results > 0`, a missing list/grep root raises `FILE_NOT_FOUND`;
 - recursive file discovery skips escaping symlinks and grep skips decoding failures;
 - overwriting/editing an existing file requires a prior unchanged read;
 - edit requires exactly one match;
@@ -161,8 +164,10 @@ the confirmation gate.
 YAML name `human.ask` registers model-visible `ask_question`. `AskQuestionTool` converts validated
 input to `QuestionPrompt` and refuses direct `arun()`; runtime owns the interaction.
 
-`ToolMiddleware` supports before, after, error, and legacy `after_execute` hooks. Middleware failures
-become `MIDDLEWARE_ERROR`. `CircuitBreaker` tracks consecutive failures by tool name and returns
+`ToolMiddleware` defines exact async `before_call`, `after_call`, and `on_error` hooks. Custom
+middleware subclasses it and overrides the required hooks; the executor does not probe partial
+objects, synchronous returns, or legacy hooks. Middleware failures become `MIDDLEWARE_ERROR`.
+`CircuitBreaker` tracks consecutive failures by tool name and returns
 `CIRCUIT_OPEN` during cooldown.
 
 `DeferredToolIndex` uses a local BM25-like ranker over name, tags, group, and description, with CJK

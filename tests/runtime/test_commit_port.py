@@ -25,6 +25,8 @@ from iris.lifecycle import (
     RunEvent,
     RunEventKind,
     RunPhase,
+    RunRecord,
+    RunToolCallRecord,
 )
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import RuntimeCursor
@@ -190,15 +192,20 @@ def test_store_commit_port_exact_control_read_does_not_load_events_or_mutate_loc
     original_events = store.list_events
     original_full_run = store.load_run
 
-    def load_control(run_id: str):
+    def load_control(run_id: str) -> RunControlSnapshot | None:
         calls["control"] += 1
         return original_control(run_id)
 
-    def list_events(run_id: str, after_sequence: int = 0):
+    def list_events(
+        run_id: str,
+        after_sequence: int = 0,
+        *,
+        limit: int | None = None,
+    ) -> list[RunEvent]:
         calls["events"] += 1
-        return original_events(run_id, after_sequence)
+        return original_events(run_id, after_sequence, limit=limit)
 
-    def load_run(run_id: str):
+    def load_run(run_id: str) -> RunRecord | None:
         calls["full_run"] += 1
         return original_full_run(run_id)
 
@@ -384,11 +391,11 @@ def test_store_commit_port_uses_point_reads_for_single_tool(
     original_point = store.load_tool_call
     original_list = store.list_tool_calls
 
-    def load_tool_call(run_id: str, tool_call_id: str):
+    def load_tool_call(run_id: str, tool_call_id: str) -> RunToolCallRecord | None:
         calls["point"] += 1
         return original_point(run_id, tool_call_id)
 
-    def list_tool_calls(run_id: str):
+    def list_tool_calls(run_id: str) -> list[RunToolCallRecord]:
         calls["list"] += 1
         return original_list(run_id)
 
@@ -414,7 +421,7 @@ def test_store_commit_port_lists_existing_calls_once_per_prepared_batch(
         }
     )
 
-    def list_tool_calls(run_id: str):
+    def list_tool_calls(run_id: str) -> list[RunToolCallRecord]:
         nonlocal calls
         calls += 1
         return original_list(run_id)

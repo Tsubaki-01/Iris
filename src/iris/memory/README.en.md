@@ -123,7 +123,8 @@ The large `iris.memory` export surface is grouped as follows:
   `resolve_memory_path()`;
 - orchestration: extractor/classifier protocols, policy, orchestrator, and rule/no-op defaults;
 - projection: `FileMemoryMirror` and `MemoryContextBuilder`;
-- tools: search/list/get tools, access-policy factories, and `register_memory_tools()`.
+- tools: search/list/get tools, `default_memory_access_policy_factory()`, and
+  `register_memory_tools()`.
 
 The exact set is `src/iris/memory/__init__.py::__all__`. Private SQL helpers, mirror markers, and
 tool-payload helpers are not extension contracts.
@@ -131,7 +132,9 @@ tool-payload helpers are not extension contracts.
 `register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
 `READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
 scope; `MemoryAccessPolicy` derives read/write scopes from trusted host context and can include the
-workspace-shared scope. `MemoryQuery`, `memory_search`, and `memory_list` all declare a `1..100`
+workspace-shared scope. `register_memory_tools()` requires an `access_policy_factory` directly; it
+does not accept or adapt a legacy single-scope factory. `MemoryQuery`, `memory_search`, and
+`memory_list` all declare a `1..100`
 limit. After raw tool input passes that boundary, it is projected to a trusted `MemoryQuery`
 without repeating the same range validation. Tools evaluate access policy on the event loop, then
 submit the entire multi-scope read as one service job rather than switching threads once per scope.
@@ -143,6 +146,9 @@ instance lock, reads and renders each target once while preserving manual text o
 uses a same-directory temporary file for atomic replacement. Layout initialization is cached only
 after success, and projection failures remain visible. SQLite uses short-lived connections and
 wraps storage/JSON failures as `IrisMemoryError`.
+Public store `list_items()`, `list_events()`, and `list_candidates()` calls reject limits outside
+`1..100` with `IrisMemoryError` instead of silently clamping them. Only `list_items(limit=None)`
+requests a complete mirror projection.
 
 ## Current limitations
 

@@ -89,6 +89,9 @@ past block completion until a finish reason and usage tail are complete, then em
 terminal carrying an `LLMResponse` built through the same final mapper. The raw iterator is closed
 in `finally`; no background producer or intermediate queue is created.
 
+The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
+`model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.
+
 ```python
 from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg
 

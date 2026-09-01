@@ -43,7 +43,7 @@ class ToolBridge:
         """
         self.tool_view = tool_view
         self.tool_executor = tool_executor
-        self._read_states: dict[str, Any] = {}
+        self._read_states: dict[str, ReadFileState] = {}
 
     def preflight_once(
         self,
@@ -84,7 +84,7 @@ class ToolBridge:
                 )
         return ToolBatchPlan(calls=tuple(calls))
 
-    def read_state(self, session_id: str) -> Any | None:
+    def read_state(self, session_id: str) -> ReadFileState | None:
         """返回 session 当前保存的文件读取状态。"""
         return self._read_states.get(session_id)
 

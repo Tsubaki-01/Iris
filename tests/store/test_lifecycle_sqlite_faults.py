@@ -296,6 +296,64 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
         assert connection.execute("SELECT COUNT(*) FROM session_messages").fetchone() == (0,)
 
 
+def test_model_commit_queries_session_lane_once(tmp_path: Path) -> None:
+    """同一 history commit 的 active fence 只读取一次 lane owner。"""
+
+    class TracingSQLiteStore(SQLiteStore):
+        """记录当前 store connection 执行的 SQL。"""
+
+        def __init__(self, path: Path) -> None:
+            self.statements: list[str] = []
+            super().__init__(path)
+
+        def _connect(self) -> sqlite3.Connection:
+            connection = super()._connect()
+            connection.set_trace_callback(self.statements.append)
+            return connection
+
+    store = TracingSQLiteStore(tmp_path / "single-lane-query.db")
+    created = store.create_run(_create_command())
+    reserved = store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="act-1",
+            now=_NOW,
+        )
+    )
+    assistant = Msg.assistant("done")
+    command = CommitModelStep(
+        run_id="run-1",
+        expected_run_revision=reserved.run.revision,
+        activation_id="act-1",
+        expected_session_revision=0,
+        message_delta=[assistant],
+        usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+        checkpoint=RunCheckpoint(
+            run_id="run-1",
+            sequence=2,
+            activation_id="act-1",
+            engine_cursor={"position": "after_model", "step_index": 1},
+            session_revision=1,
+            model_steps_reserved=1,
+            model_steps_committed=1,
+            environment_fingerprint="environment-v1",
+        ),
+        assistant_message=assistant,
+        now=_NOW,
+    )
+    store.statements.clear()
+
+    store.commit_model_step(command)
+
+    lane_queries = [
+        statement
+        for statement in store.statements
+        if "from session_run_lanes" in statement.casefold()
+    ]
+    assert len(lane_queries) == 1
+
+
 @pytest.mark.parametrize("operation", ["finish", "recovery"])
 def test_partial_session_message_insert_rolls_back_terminal_closure(
     tmp_path: Path,

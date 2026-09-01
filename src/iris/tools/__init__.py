@@ -1,5 +1,6 @@
 """Iris 工具内核公共导出。"""
 
+from ._read_state import ReadFileRecord, ReadFileState
 from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
@@ -37,8 +38,6 @@ from .permissions import (
     PermissionDecision,
     PermissionEffect,
     PermissionPolicy,
-    ReadFileRecord,
-    ReadFileState,
     WorkspacePolicy,
 )
 from .registry import ToolRegistry, ToolRegistryView

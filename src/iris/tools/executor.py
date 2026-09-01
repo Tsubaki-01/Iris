@@ -12,9 +12,8 @@ Example:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import re
-from collections.abc import Awaitable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
@@ -34,6 +33,8 @@ from ..hitl.models import (
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
+from ._paths import safe_path_segment
+from ._read_state import ReadFileState
 from .artifacts import ToolArtifactStore
 from .base import (
     BaseTool,
@@ -42,12 +43,12 @@ from .base import (
     ToolResult,
 )
 from .circuit import CircuitBreaker
+from .middleware import ToolMiddleware
 from .permissions import (
     DefaultPermissionPolicy,
     PermissionDecision,
     PermissionEffect,
     PermissionPolicy,
-    ReadFileState,
 )
 from .registry import ToolRegistry
 
@@ -112,7 +113,7 @@ class ToolExecutor:
         *,
         permission_policy: PermissionPolicy | None = None,
         artifact_preview_chars: int = 8000,
-        middleware: Sequence[object] | None = None,
+        middleware: Sequence[ToolMiddleware] | None = None,
         circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         """初始化执行器。
@@ -123,7 +124,7 @@ class ToolExecutor:
             registry (ToolRegistry): 配置好可用方法的当前状态总库。
             permission_policy (PermissionPolicy | None): 安全及交互式授权拦截规则处理器。
             artifact_preview_chars (int): 若被启用硬盘持久化，保留前置内容的字符数。
-            middleware (Sequence[object] | None): 工具调用生命周期钩子。
+            middleware (Sequence[ToolMiddleware] | None): 工具调用生命周期钩子。
             circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
         """
         self.registry = registry
@@ -598,7 +599,7 @@ class ToolExecutor:
         Returns:
             ToolArtifactStore: 操作落盘工作的具象存取处理库。
         """
-        session_id = _safe_path_segment(context.session_id or "default")
+        session_id = safe_path_segment(context.session_id or "default")
         root = context.workspace_root / ".iris" / "tool-results" / session_id
         return ToolArtifactStore(root=root, preview_chars=self.artifact_preview_chars)
 
@@ -610,11 +611,8 @@ class ToolExecutor:
     ) -> ToolResult | None:
         """运行 before_call middleware。"""
         for middleware in self.middleware:
-            hook = getattr(middleware, "before_call", None)
-            if hook is None:
-                continue
             try:
-                await _maybe_await(hook(tool, params, context))
+                await middleware.before_call(tool, params, context)
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),
@@ -629,16 +627,11 @@ class ToolExecutor:
         result: ToolResult,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """运行 after_call 和兼容 after_execute middleware。"""
+        """运行 after_call middleware。"""
         current = result
         for middleware in self.middleware:
             try:
-                hook = getattr(middleware, "after_call", None)
-                if hook is not None:
-                    current = await _maybe_await(hook(tool, current, context))
-                legacy_hook = getattr(middleware, "after_execute", None)
-                if legacy_hook is not None:
-                    current = await _maybe_await(legacy_hook(current, context))
+                current = await middleware.after_call(tool, current, context)
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),
@@ -655,11 +648,8 @@ class ToolExecutor:
     ) -> ToolResult | None:
         """运行 on_error middleware。"""
         for middleware in self.middleware:
-            hook = getattr(middleware, "on_error", None)
-            if hook is None:
-                continue
             try:
-                replacement = await _maybe_await(hook(tool, error, context))
+                replacement = await middleware.on_error(tool, error, context)
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),
@@ -704,28 +694,6 @@ def _tool_error_code_and_message(
     if match is None:
         return "EXECUTION_ERROR", message
     return match.group(1), match.group(2)
-
-
-def _safe_path_segment(value: str) -> str:
-    """将外部 ID 转为单个安全路径段。
-
-    确保所生成字符片段能够跨系统文件层安全存储，清除所有特殊符号。
-
-    Args:
-        value (str): 要清理保护的文件节点命名。
-
-    Returns:
-        str: 规整并替代好禁用位后的合法纯字符串。
-    """
-    segment = re.sub(r"[^A-Za-z0-9_-]", "_", value)
-    return segment.strip("_") or "default"
-
-
-async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
-    """兼容同步和异步 middleware 返回值。"""
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 def _tool_use_from_context(context: ToolExecutionContext) -> ToolUseBlock:

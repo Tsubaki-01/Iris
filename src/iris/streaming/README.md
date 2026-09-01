@@ -41,7 +41,8 @@ gateway = StreamingGateway(
 `LiveStreamBroker` 必须在同一个 event loop/thread 中使用。`replay_capacity_per_scope` 限制每个
 run/session ring，`subscription_capacity` 限制单 consumer future-live backlog。Partial 可以
 合并或丢弃；critical event 无法入队时，subscription 产生 `ReplayGap` 和
-`SubscriptionTerminal`，客户端应重连并执行 durable sync。
+`SubscriptionTerminal`，客户端应重连并执行 durable sync。slow-consumer 转换只从 active
+subscription 的 offer 路径进入，并只产生一组 gap/terminal。
 
 ## Gateway 与命令
 

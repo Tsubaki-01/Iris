@@ -15,7 +15,6 @@ Example:
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import math
 import uuid
@@ -96,23 +95,6 @@ if TYPE_CHECKING:
 # endregion
 
 logger = logging.getLogger(__name__)
-
-
-def _supports_list_events_limit(store: LifecycleStore) -> bool:
-    """判断 custom store 的 ``list_events`` 是否接受 keyword-only limit。"""
-    try:
-        parameters = inspect.signature(store.list_events).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or (
-            parameter.name == "limit"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        )
-        for parameter in parameters
-    )
 
 
 class Clock(Protocol):
@@ -245,20 +227,15 @@ class AgentRunner:
 
         ``observer_event_timeout_s`` 必须是有限正数；默认 30 秒。
         """
-        if not math.isfinite(observer_event_timeout_s) or observer_event_timeout_s <= 0:
+        if not 0 < observer_event_timeout_s < math.inf:
             raise ValueError("observer_event_timeout_s 必须是有限正数")
         self.runtime = runtime
         self.store = store
-        self._store_list_events_supports_limit = _supports_list_events_limit(store)
         self.observers = tuple(observers)
         self.observer_event_timeout_s = observer_event_timeout_s
         self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
-        # HITL 决定必须只落在 runner 的 aggregate transaction 里；带自有 store 的实现会
-        # 造成第二条持久化路径，因此在装配期直接拒绝。
-        if hasattr(self.interaction_service, "store"):
-            raise IrisRunStateError("runner interaction service 必须是无状态领域服务")
         self.environment_fingerprint = compute_environment_fingerprint(runtime)
         self._live_publisher = live_publisher
         if live_publisher is None:
@@ -430,9 +407,7 @@ class AgentRunner:
             cursor=cursor,
             clock=self._now,
             event_sink=active.events,
-            durable_event_callback=self._compose_durable_event_callback(
-                durable_event_callback
-            ),
+            durable_event_callback=self._compose_durable_event_callback(durable_event_callback),
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -612,9 +587,7 @@ class AgentRunner:
             cursor=cursor,
             clock=self._now,
             event_sink=active.events,
-            durable_event_callback=self._compose_durable_event_callback(
-                durable_event_callback
-            ),
+            durable_event_callback=self._compose_durable_event_callback(durable_event_callback),
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -1157,16 +1130,11 @@ class AgentRunner:
         limit: int | None = None,
     ) -> list[RunEvent]:
         """读取 sequence 严格大于游标的 durable events。"""
-        if limit is not None and (
-            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
-        ):
-            raise IrisRunStateError("limit 必须是正整数", limit=limit)
-        normalized = self._required_id(run_id)
-        if limit is None:
-            return self.store.list_events(normalized, after_sequence)
-        if self._store_list_events_supports_limit:
-            return self.store.list_events(normalized, after_sequence, limit=limit)
-        return self.store.list_events(normalized, after_sequence)[:limit]
+        return self.store.list_events(
+            self._required_id(run_id),
+            after_sequence,
+            limit=limit,
+        )
 
     # endregion
 

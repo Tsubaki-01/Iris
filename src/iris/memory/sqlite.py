@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..exceptions import IrisMemoryError
+from ._scope import scope_summary as _scope_summary
 from .models import (
     MemoryActor,
     MemoryArtifactRef,
@@ -343,7 +344,7 @@ class SQLiteMemoryStore:
         sql += " ORDER BY updated_at DESC, id DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            params.append(_safe_limit(limit))
+            params.append(_validated_list_limit(limit))
         try:
             with self._connection() as connection:
                 rows = connection.execute(sql, params).fetchall()
@@ -359,7 +360,7 @@ class SQLiteMemoryStore:
         limit: int = 100,
     ) -> list[MemoryEvent]:
         """列出指定 scope 下的审计事件。"""
-        safe_limit = _safe_limit(limit)
+        safe_limit = _validated_list_limit(limit)
         clause, params = _scope_clause(scope)
         sql = f"SELECT * FROM memory_events WHERE {clause}"
         if item_id is not None:
@@ -401,7 +402,7 @@ class SQLiteMemoryStore:
         limit: int = 50,
     ) -> list[MemoryCandidate]:
         """列出指定 scope 下的候选记忆。"""
-        safe_limit = _safe_limit(limit)
+        safe_limit = _validated_list_limit(limit)
         clause, params = _scope_clause(scope)
         sql = f"SELECT * FROM memory_candidates WHERE {clause}"
         if status is not None:
@@ -957,19 +958,6 @@ def _scope_values(scope: MemoryScope) -> list[str]:
     ]
 
 
-def _scope_summary(scope: MemoryScope) -> str:
-    """生成用于错误上下文的稳定 scope 摘要。"""
-    parts = [
-        f"workspace={scope.workspace_id}",
-        f"agent={scope.agent_id}",
-        f"collection={scope.collection}",
-        f"visibility={scope.visibility.value}",
-    ]
-    if scope.session_id:
-        parts.append(f"session={scope.session_id}")
-    return ", ".join(parts)
-
-
 def _row_to_item(row: sqlite3.Row) -> MemoryItem:
     """将 SQLite row 转换为长期记忆条目。"""
     return MemoryItem(
@@ -1081,9 +1069,11 @@ def _dump_json(value: Any) -> str:
         raise IrisMemoryError("Memory 数据必须可 JSON 序列化") from exc
 
 
-def _safe_limit(limit: int) -> int:
-    """限制列表读取的最大返回数量。"""
-    return min(max(limit, 1), 100)
+def _validated_list_limit(limit: int) -> int:
+    """校验公开列表读取的返回数量。"""
+    if not 1 <= limit <= 100:
+        raise IrisMemoryError("limit 必须在 1 到 100 之间", limit=limit)
+    return limit
 
 
 def _placeholders(values: Sequence[object]) -> str:

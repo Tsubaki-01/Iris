@@ -272,9 +272,6 @@ class ProviderClient(BaseModel):
         if hasattr(value, "model_dump"):
             dumped = value.model_dump()
             return dumped if isinstance(dumped, Mapping) else {}
-        if hasattr(value, "dict"):
-            dumped = value.dict()
-            return dumped if isinstance(dumped, Mapping) else {}
         return {}
 
     def _get(self, value: Any, key: str, default: Any = None) -> Any:

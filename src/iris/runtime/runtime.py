@@ -35,6 +35,7 @@ from ..message import (
 from ..tools import (
     CancellationSignal,
     PreparedToolCall,
+    ReadFileState,
     ToolBatchPlan,
     ToolRegistryView,
     ToolResult,
@@ -1225,18 +1226,9 @@ def _tool_timeout_seconds(
     return min(remaining, configured)
 
 
-def _read_state_snapshot(state: Any | None) -> dict[str, Any] | None:
-    """仅把 JSON-safe read state 放入 cursor。"""
-    if state is None:
-        return None
-    if isinstance(state, Mapping):
-        return dict(state)
-    model_dump = getattr(state, "model_dump", None)
-    if callable(model_dump):
-        dumped = model_dump(mode="json")
-        if isinstance(dumped, dict):
-            return dumped
-    raise HITLCheckpointInvalidError("工具 read state 不是 JSON-safe object")
+def _read_state_snapshot(state: ReadFileState | None) -> dict[str, Any] | None:
+    """把可信 read state 序列化到 cursor。"""
+    return None if state is None else state.model_dump(mode="json")
 
 
 def _tool_result_message(result: ToolResult) -> Msg:

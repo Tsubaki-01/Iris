@@ -152,8 +152,9 @@ middleware after hooks → breaker 记录。guard 失败时不会进入任何工
 作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
-并发 context copy 会共享原始 `read_state` 和 `cancellation` live object；signal 不会进入
-`model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
+并发 context copy 会共享类型化 `ReadFileState` 和 `cancellation` live object；
+`ToolExecutionContext` 在 public raw 输入边界解析 read state，后续 file service 直接消费该
+对象，不再重复做类型判断。signal 不会进入 `model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
 `IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
 
 `read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
@@ -236,7 +237,9 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 `WorkspacePolicy.resolve_path()` 会拒绝 workspace 外路径，包括父目录逃逸和解析后逃逸的符号链接。`WorkspaceFileService` 用 `ReadFileState` 记录文件的 `mtime_ns` 和 `size_bytes`，写入或编辑已有文件前会检查 `FILE_NOT_READ` 和 `STALE_FILE_STATE`。
 
-`list_files` 与 `grep_search` 的 `max_results=0` 会在路径解析、walk、stat 或 open 前直接返回空结果。流式遍历以低开销早停为契约，因此 `list_files` 不再提供旧实现的全局排序保证；需要稳定排序的调用方应对返回的有限结果自行排序。
+`list_files` 与 `grep_search` 的 `max_results=0` 会在路径解析、walk、stat 或 open 前直接返回空结果。
+当 `max_results > 0` 时，缺失搜索根统一返回 `FILE_NOT_FOUND`。流式遍历以低开销早停为契约，
+因此 `list_files` 不再提供旧实现的全局排序保证；需要稳定排序的调用方应对返回的有限结果自行排序。
 
 文件写入成功返回的 workspace 相对路径统一使用 `/` 分隔，避免不同操作系统返回不同格式。
 
@@ -271,14 +274,14 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 ### Middleware
 
-`ToolMiddleware` 提供生命周期钩子：
+`ToolMiddleware` 提供三个精确的 async 生命周期钩子：
 
-- `before_call(tool, params, context) -> None`
-- `after_call(tool, result, context) -> ToolResult`
-- `on_error(tool, error, context) -> ToolResult | None`
-- `after_execute(result, context) -> ToolResult`，用于兼容旧式执行后钩子
+- `await before_call(tool, params, context) -> None`
+- `await after_call(tool, result, context) -> ToolResult`
+- `await on_error(tool, error, context) -> ToolResult | None`
 
-`ToolExecutor` 也接受只实现部分同名方法的对象；middleware 抛错会变成 `MIDDLEWARE_ERROR`。
+自定义 middleware 继承 `ToolMiddleware` 并覆盖所需 async hook；executor 不探测 partial object、
+同步返回值或旧 hook。Middleware 抛错会变成 `MIDDLEWARE_ERROR`。
 
 ### CircuitBreaker
 

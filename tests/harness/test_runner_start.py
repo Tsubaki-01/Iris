@@ -10,6 +10,7 @@ import pytest
 from iris.exceptions import IrisConfigError, IrisProviderError, IrisRunConflictError
 from iris.harness import AgentRunner
 from iris.harness._fingerprint import compute_environment_fingerprint
+from iris.hitl import HumanInteractionService
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -64,6 +65,27 @@ class NonJsonPolicy(OpaquePolicy):
 
     def fingerprint_payload(self) -> dict[str, object]:
         return {"live": object()}
+
+
+def test_runner_accepts_typed_interaction_service_with_unrelated_store_attribute(
+    tmp_path: Path,
+) -> None:
+    """Typed service 不应因无关属性名被误判为第二条持久化路径。"""
+
+    class AttributedInteractionService(HumanInteractionService):
+        """携带普通 store 元数据的合法无状态 service。"""
+
+        store = "metadata-only"
+
+    service = AttributedInteractionService()
+
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path),
+        store=InMemoryLifecycleStore(),
+        interaction_service=service,
+    )
+
+    assert runner.interaction_service is service
 
 
 def test_environment_fingerprint_is_stable_for_equivalent_runtime(tmp_path: Path) -> None:

@@ -190,12 +190,8 @@ class LiveSubscription(AsyncIterator[LiveStreamItem]):
                 return
 
     def _mark_slow_consumer(self) -> None:
-        if not self._accepting:
-            return
         self._pending = deque(
-            delivery
-            for delivery in self._pending
-            if not isinstance(delivery.item, LiveEnvelope)
+            delivery for delivery in self._pending if not isinstance(delivery.item, LiveEnvelope)
         )
         self._data_count = 0
         replay_high_water = (
@@ -417,9 +413,7 @@ class LiveStreamBroker(LivePublisher):
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError as exc:
-            raise IrisRunStateError(
-                "LiveStreamBroker 操作必须发生在绑定 event loop 内"
-            ) from exc
+            raise IrisRunStateError("LiveStreamBroker 操作必须发生在绑定 event loop 内") from exc
         thread_id = threading.get_ident()
         if self._loop is None:
             self._loop = loop

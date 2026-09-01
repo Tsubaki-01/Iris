@@ -80,7 +80,10 @@ async def test_p5_manager_durable_burst_observation(
         max_tracked_durable_runs=1,
     )
     stream = manager.events()
-    manager._event_buffer.register_run("run-manager-performance", after_sequence=0)
+    assert manager._event_buffer.try_register_run(
+        "run-manager-performance",
+        after_sequence=0,
+    )
 
     started = perf_counter()
     for event in reversed(events):

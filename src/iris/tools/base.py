@@ -28,6 +28,7 @@ from ..exceptions import (
     IrisToolValidationError,
 )
 from ..message import TextBlock
+from ._read_state import ReadFileState
 from .schema import (
     callable_input_model,
     schema_from_callable,
@@ -213,7 +214,7 @@ class ToolExecutionContext(BaseModel):
         agent_id (str): 发起调用的智能体身份 ID。
         permission_mode (str): 操作受限时的静默降级或拦截等级许可。
         metadata (dict[str, Any]): 附加运行态透传的配置或临时钩子容器字典。
-        read_state (Any | None): 模型长效调用的工具游标恢复引用对象。
+        read_state (ReadFileState | None): 文件读后写入的类型化状态。
 
     Example:
         ctx = ToolExecutionContext(workspace_root=Path("."))
@@ -226,7 +227,7 @@ class ToolExecutionContext(BaseModel):
     agent_id: str = ""
     permission_mode: str = "default"
     metadata: dict[str, Any] = Field(default_factory=dict)
-    read_state: Any | None = None
+    read_state: ReadFileState | None = None
     cancellation: CancellationSignal | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

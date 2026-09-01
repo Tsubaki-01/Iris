@@ -6,10 +6,8 @@ import json
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import fields, is_dataclass
 from dataclasses import replace as dataclass_replace
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol, TypeVar
@@ -81,6 +79,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._serialization import jsonable as _jsonable
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._terminal_closure import build_terminal_tool_closure
 
@@ -622,8 +621,7 @@ class SQLiteStore:
         *,
         operation: str,
     ) -> _SessionMetadata:
-        """只读 metadata 校验 lane 与 session history revision。"""
-        self._require_lane(connection, run)
+        """只读 metadata 校验 session history revision。"""
         session = self._select_session_metadata(
             connection,
             run.session_id,
@@ -3229,23 +3227,6 @@ def _dump_json(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-
-
-def _jsonable(value: object) -> object:
-    """把 durable/replay 输入投影为严格 JSON 值。"""
-    if isinstance(value, BaseModel):
-        return value.model_dump(mode="json")
-    if is_dataclass(value) and not isinstance(value, type):
-        return {item.name: _jsonable(getattr(value, item.name)) for item in fields(value)}
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
 
 
 def _load_json(value: str) -> Any:

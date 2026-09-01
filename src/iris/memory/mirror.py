@@ -110,6 +110,7 @@ from threading import RLock
 from typing import Any
 
 from ..exceptions import IrisMemoryError
+from ._scope import scope_summary as _scope_summary
 from .models import (
     MemoryCategory,
     MemoryEvent,
@@ -506,19 +507,6 @@ class FileMemoryMirror:
                     temp_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-
-
-def _scope_summary(scope: MemoryScope) -> str:
-    """生成稳定可读的 scope 摘要。"""
-    parts = [
-        f"workspace={scope.workspace_id}",
-        f"agent={scope.agent_id}",
-        f"collection={scope.collection}",
-        f"visibility={scope.visibility.value}",
-    ]
-    if scope.session_id:
-        parts.append(f"session={scope.session_id}")
-    return ", ".join(parts)
 
 
 def _scope_key(scope: MemoryScope) -> str:

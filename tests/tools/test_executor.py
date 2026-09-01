@@ -16,6 +16,7 @@ from iris.tools import (
     ToolDefinition,
     ToolExecutionContext,
     ToolExecutor,
+    ToolMiddleware,
     ToolRegistry,
     ToolResult,
 )
@@ -65,19 +66,19 @@ class ExplodingPermissionPolicy:
         raise RuntimeError("policy failed")
 
 
-class ContextCaptureMiddleware:
+class ContextCaptureMiddleware(ToolMiddleware):
     def __init__(self) -> None:
         self.seen: list[tuple[str, str]] = []
 
     async def before_call(
         self,
-        tool: object,
-        params: dict[str, str],
+        tool: BaseTool,
+        params: dict[str, Any],
         context: ToolExecutionContext,
     ) -> None:
         del tool
         await asyncio.sleep(0)
-        self.seen.append((params["value"], context.call_id))
+        self.seen.append((str(params["value"]), context.call_id))
 
 
 class CountingPermissionPolicy:

@@ -10,8 +10,7 @@ from .base import BaseTool, ToolExecutionContext, ToolResult
 class ToolMiddleware:
     """工具执行生命周期 middleware 基类。
 
-    所有钩子默认不改变执行流程。调用方仍可传入只实现部分钩子的旧式对象，
-    executor 会按存在的钩子动态调用，以保持阶段 2 middleware 兼容。
+    所有 async 钩子默认不改变执行流程；自定义 middleware 直接继承并覆盖所需钩子。
     """
 
     async def before_call(
@@ -39,11 +38,3 @@ class ToolMiddleware:
     ) -> ToolResult | None:
         """工具执行错误时可返回替代结果。"""
         return None
-
-    async def after_execute(
-        self,
-        result: ToolResult,
-        context: ToolExecutionContext,
-    ) -> ToolResult:
-        """兼容阶段 2 的执行后处理钩子。"""
-        return result

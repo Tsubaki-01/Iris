@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -8,6 +9,7 @@ from iris.hitl import PermissionPrompt, QuestionPrompt, make_call_fingerprint
 from iris.message import ToolUseBlock
 from iris.tools import (
     AskQuestionTool,
+    BaseTool,
     CircuitBreaker,
     DefaultPermissionPolicy,
     PermissionDecision,
@@ -15,6 +17,7 @@ from iris.tools import (
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
+    ToolMiddleware,
     ToolRegistry,
     ToolResult,
 )
@@ -70,9 +73,14 @@ def test_prepare_many_returns_human_gate_without_execution_side_effects(
         calls.append(content)
         return "written"
 
-    class Middleware:
-        def before_call(self, *args: object) -> None:
-            del args
+    class Middleware(ToolMiddleware):
+        async def before_call(
+            self,
+            tool: BaseTool,
+            params: dict[str, Any],
+            context: ToolExecutionContext,
+        ) -> None:
+            del tool, params, context
             middleware_calls.append("before")
 
     registry = ToolRegistry()
@@ -161,9 +169,14 @@ async def test_execute_one_applies_deny_before_execution_lifecycle(tmp_path: Pat
         tool_calls.append("called")
         return "written"
 
-    class Middleware:
-        def before_call(self, *args: object) -> None:
-            del args
+    class Middleware(ToolMiddleware):
+        async def before_call(
+            self,
+            tool: BaseTool,
+            params: dict[str, Any],
+            context: ToolExecutionContext,
+        ) -> None:
+            del tool, params, context
             middleware_calls.append("before")
 
     registry = ToolRegistry()

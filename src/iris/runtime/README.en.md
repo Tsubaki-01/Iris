@@ -124,7 +124,9 @@ it into an activation outcome rather than an ordinary tool error.
 
 Concurrent file reads share one `ReadFileState` identity. Workers only return immutable
 observations, which the event loop merges. The checkpoint snapshot taken after the window settles
-contains the combined records, so a later serial write barrier can retain stale-read checks.
+contains the combined records, so a later serial write barrier can retain stale-read checks. A raw
+checkpoint dictionary is parsed once by `ToolBridge.restore_read_state()`; runtime then carries the
+typed state and snapshots it directly.
 Synchronous callables remain inline by default; only explicit `CallableExecutionMode.THREAD`
 placement moves a blocking body to a worker. Threads cannot be safely forced to stop. Cancellation
 or timeout stops waiting and discards the late return; when a durable claim exists, runtime settles

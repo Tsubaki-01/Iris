@@ -6,7 +6,6 @@ import asyncio
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -49,7 +48,7 @@ async def test_p1_callable_execution_observation(
     require_performance_timing: None,
     record_observation: Callable[..., None],
 ) -> None:
-    """记录默认 inline 与可用时显式 thread 的响应性形状。"""
+    """记录默认 inline 与显式 thread 的响应性形状。"""
 
     def blocking_callable() -> str:
         time.sleep(0.08)
@@ -68,14 +67,10 @@ async def test_p1_callable_execution_observation(
         counters={"heartbeat_ticks": inline_ticks, "thread_mode_supported": 0},
     )
 
-    execution_mode_type: Any = getattr(tools, "CallableExecutionMode", None)
-    if execution_mode_type is None:
-        return
-
     thread_samples, thread_ticks = await _measure_callable(
         tools.CallableTool(
             blocking_callable,
-            execution_mode=execution_mode_type.THREAD,
+            execution_mode=tools.CallableExecutionMode.THREAD,
         ),
         samples=5,
     )

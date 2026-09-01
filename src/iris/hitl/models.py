@@ -243,14 +243,7 @@ class HumanInteraction(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lifecycle(self) -> HumanInteraction:
-        request = getattr(self, "request", None)
-        tool_call_id = getattr(self, "tool_call_id", None)
-        expected_tool_call_id = getattr(
-            getattr(request, "tool_call", None),
-            "tool_call_id",
-            None,
-        )
-        if request is not None and tool_call_id != expected_tool_call_id:
+        if self.tool_call_id != self.request.tool_call.tool_call_id:
             raise ValueError("interaction tool_call_id 必须匹配 request subject")
         if self.response is not None and self.response.kind != self.request.prompt.kind:
             raise ValueError("interaction prompt kind 必须匹配 response kind")

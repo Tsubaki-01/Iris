@@ -29,12 +29,25 @@ from iris.memory import (
     MemoryWriteInput,
     SQLiteMemoryStore,
     build_memory_service_from_config,
+    default_memory_access_policy_factory,
 )
 from iris.tools import ToolExecutionContext
 
 
 def _scope(agent_id: str = "agent") -> MemoryScope:
     return MemoryScope(workspace_id="workspace", agent_id=agent_id)
+
+
+def test_default_access_policy_factory_builds_exact_scope(tmp_path: Path) -> None:
+    factory = default_memory_access_policy_factory(MemoryConfig())
+    context = ToolExecutionContext(workspace_root=tmp_path, agent_id="agent")
+
+    policy = factory(context)
+
+    expected_scope = MemoryScope(workspace_id=str(tmp_path.resolve()), agent_id="agent")
+    assert policy.actor_agent_id == "agent"
+    assert policy.write_scope == expected_scope
+    assert policy.read_scopes == [expected_scope]
 
 
 @pytest.mark.asyncio

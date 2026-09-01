@@ -11,11 +11,11 @@ Example:
 # region imports
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from ..exceptions import IrisToolExecutionError
 from ..message import TextBlock
+from ._paths import safe_path_segment
 from .base import ToolArtifact, ToolResult
 
 # endregion
@@ -84,7 +84,7 @@ class ToolArtifactStore:
         try:
             root = self.root.resolve(strict=False)
             root.mkdir(parents=True, exist_ok=True)
-            artifact_path = (root / f"{_safe_path_segment(result.tool_use_id)}.txt").resolve(
+            artifact_path = (root / f"{safe_path_segment(result.tool_use_id)}.txt").resolve(
                 strict=False
             )
             artifact_path.relative_to(root)
@@ -116,23 +116,3 @@ class ToolArtifactStore:
                 },
             }
         )
-
-
-def _safe_path_segment(value: str) -> str:
-    """将外部 ID 转为单个安全路径段。
-
-    抹除特异符号以规避外部系统调用注入针对系统路径操作解析器的越权注入行为。
-
-    Args:
-        value (str): 被校验整理替换的安全清洗上游字符段。
-
-    Returns:
-        str: 全部被置换为安全白名单内并剔除了多余头尾的文字串。
-             若过滤后为空则返回 "default"。
-
-    Example:
-        >>> _safe_path_segment("../../foo!")
-        "foo"
-    """
-    segment = re.sub(r"[^A-Za-z0-9_-]", "_", value)
-    return segment.strip("_") or "default"

@@ -61,7 +61,7 @@ class MemoryStore(Protocol):
         """列出指定 scope 下的长期记忆条目。
 
         `categories` 与 `kinds` 必须由 store 在读取层过滤，再应用 `limit`。
-        `limit=None` 表示读取完整投影，主要供 mirror 重建使用。
+        `limit` 必须在 1 到 100 之间；`None` 表示读取完整投影，主要供 mirror 重建使用。
         """
 
     def list_events(
@@ -71,7 +71,7 @@ class MemoryStore(Protocol):
         item_id: str | None = None,
         limit: int = 100,
     ) -> list[MemoryEvent]:
-        """列出指定 scope 下的审计事件。"""
+        """列出指定 scope 下的审计事件，`limit` 必须在 1 到 100 之间。"""
 
     def add_candidate(
         self,
@@ -88,7 +88,7 @@ class MemoryStore(Protocol):
         status: MemoryCandidateStatus | None = None,
         limit: int = 50,
     ) -> list[MemoryCandidate]:
-        """列出指定 scope 下的候选记忆。"""
+        """列出指定 scope 下的候选记忆，`limit` 必须在 1 到 100 之间。"""
 
     def update_candidate_status(
         self,

@@ -128,22 +128,20 @@ def _install_read_counters(
     stack.enter_context(patch.object(sqlite_module, "_row_to_run", decode))
     stack.enter_context(patch.object(store, "load_run", load_run))
     stack.enter_context(patch.object(store, "list_tool_calls", list_tool_calls))
-    if hasattr(store, "load_run_control"):
-        original_load_run_control = store.load_run_control
+    original_load_run_control = store.load_run_control
 
-        def load_run_control(run_id: str):
-            counters["load_run_control"] += 1
-            return original_load_run_control(run_id)
+    def load_run_control(run_id: str):
+        counters["load_run_control"] += 1
+        return original_load_run_control(run_id)
 
-        stack.enter_context(patch.object(store, "load_run_control", load_run_control))
-    if hasattr(store, "load_tool_call"):
-        original_load_tool_call = store.load_tool_call
+    stack.enter_context(patch.object(store, "load_run_control", load_run_control))
+    original_load_tool_call = store.load_tool_call
 
-        def load_tool_call(run_id: str, tool_call_id: str):
-            counters["load_tool_call"] += 1
-            return original_load_tool_call(run_id, tool_call_id)
+    def load_tool_call(run_id: str, tool_call_id: str):
+        counters["load_tool_call"] += 1
+        return original_load_tool_call(run_id, tool_call_id)
 
-        stack.enter_context(patch.object(store, "load_tool_call", load_tool_call))
+    stack.enter_context(patch.object(store, "load_tool_call", load_tool_call))
     return counters
 
 
@@ -247,13 +245,8 @@ def _measure_in_memory_target_list(
         for index in range(1001)
     ]
     with store._lock:
-        if hasattr(store, "_set_tool_call"):
-            for record in records:
-                store._set_tool_call(record)
-        else:
-            store._tool_calls.update(
-                ((record.run_id, record.tool_call_id), record) for record in records
-            )
+        for record in records:
+            store._set_tool_call(record)
         counted = _CountingToolCalls(store._tool_calls)
         store._tool_calls = counted
 

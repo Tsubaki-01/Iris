@@ -61,11 +61,9 @@ def test_tool_registers_function_in_explicit_registry() -> None:
 
 def test_callable_execution_mode_is_public() -> None:
     """工具作者可以从公共 tools 包显式选择 callable placement。"""
-    execution_mode = getattr(tools, "CallableExecutionMode", None)
-
-    assert execution_mode is not None
-    assert execution_mode.INLINE.value == "inline"
-    assert execution_mode.THREAD.value == "thread"
+    assert tools.CallableExecutionMode is CallableExecutionMode
+    assert tools.CallableExecutionMode.INLINE.value == "inline"
+    assert tools.CallableExecutionMode.THREAD.value == "thread"
 
 
 @pytest.mark.asyncio
