@@ -13,7 +13,6 @@ import builtins
 import json
 import sys
 import threading
-from collections import deque
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,21 +170,22 @@ def run_chat_loop(
         error_func=write_error,
     )
     host.start()
+    close_reason = "chat 结束"
     try:
         while True:
             try:
                 user_input = read_input("iris> ").strip()
             except KeyboardInterrupt:
-                host.interrupt(reason="用户中断")
+                close_reason = "用户中断"
                 return 130
             except EOFError:
-                host.interrupt(reason="输入已关闭")
+                close_reason = "输入已关闭"
                 return 0
 
             if host.exit_code is not None:
                 return host.exit_code
             if user_input in {"/exit", "/quit"}:
-                host.interrupt(reason="用户退出 chat")
+                close_reason = "用户退出 chat"
                 return 0
             if user_input == "/help":
                 write_output("可用命令：")
@@ -213,7 +213,7 @@ def run_chat_loop(
         write_error(_format_iris_error(exc))
         return 1
     finally:
-        host.close()
+        host.close(reason=close_reason)
 
 
 class _ChatSessionHost:
@@ -234,10 +234,8 @@ class _ChatSessionHost:
         _loop (asyncio.AbstractEventLoop | None): manager 所属 event loop。
         _stop (asyncio.Event | None): 请求关闭 event stream 的信号。
         _manager (SessionManager | None): 当前 CLI 使用的单 session facade。
-        _current_run_id (str | None): host 观察到的 current run。
-        _follow_up_run_ids (deque[str]): 已接纳、等待成为 current 的 future runs。
         _pending_interaction (HumanInteraction | None): 等待下一行输入的 typed HITL。
-        _resume_tasks (set[asyncio.Task[RunResult]]): manager-owned resume waiters。
+        _close_reason (str | None): 退出时交给 runner 的取消原因。
         _live_terminal_events (dict[str, asyncio.Event]): Live consumer 的 per-run terminal 水位。
         _live_stream_closed (bool): Live consumer 是否已结束。
         _stream_snapshots (dict[tuple[str, str, str], str]): 文本块的最近输出快照。
@@ -285,10 +283,8 @@ class _ChatSessionHost:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
         self._manager: SessionManager | None = None
-        self._current_run_id: str | None = None
-        self._follow_up_run_ids: deque[str] = deque()
         self._pending_interaction: HumanInteraction | None = None
-        self._resume_tasks: set[asyncio.Task[RunResult]] = set()
+        self._close_reason: str | None = None
         self._live_terminal_events: dict[str, asyncio.Event] = {}
         self._live_stream_closed = live_broker is None
         self._stream_snapshots: dict[tuple[str, str, str], str] = {}
@@ -319,16 +315,13 @@ class _ChatSessionHost:
         """同步提交一行普通输入或 follow-up 命令。"""
         self._call(self._submit(input, mode=mode))
 
-    def interrupt(self, *, reason: str) -> None:
-        """若 facade 仍有 current run，则同步提交 interrupt 请求。"""
-        self._call(self._interrupt(reason=reason))
-
-    def close(self) -> None:
-        """结束 manager event stream，并等待后台线程退出。"""
+    def close(self, *, reason: str | None = None) -> None:
+        """停止 admission 并等待当前 run 结算后结束后台线程。"""
         if not self._thread.is_alive():
             return
         loop = self._require_loop()
         stop = self._require_stop()
+        self._close_reason = reason
         loop.call_soon_threadsafe(stop.set)
         self._thread.join()
         if self._thread_error is not None:
@@ -369,12 +362,14 @@ class _ChatSessionHost:
         consumer = asyncio.create_task(self._consume_events())
         self._ready.set()
         await self._stop.wait()
-        await self._manager.close()
-        if self._live_broker is not None:
-            self._live_broker.close()
-        await consumer
-        if live_consumer is not None:
-            await live_consumer
+        try:
+            await self._manager.close(cancel_run=True, reason=self._close_reason)
+        finally:
+            if self._live_broker is not None:
+                self._live_broker.close()
+            await consumer
+            if live_consumer is not None:
+                await live_consumer
 
     async def _submit(
         self,
@@ -385,12 +380,11 @@ class _ChatSessionHost:
         """按当前 host 状态路由一行输入。"""
         manager = self._require_manager()
         if mode == "follow_up":
-            receipt = await manager.submit(
+            await manager.submit(
                 input,
                 mode="follow_up",
                 options=self._run_options(),
             )
-            self._follow_up_run_ids.append(receipt.run_id)
             return
 
         if self._pending_interaction is not None:
@@ -403,44 +397,34 @@ class _ChatSessionHost:
                 return
             interaction = self._pending_interaction
             self._pending_interaction = None
-            task = asyncio.create_task(
-                manager.resume(
-                    interaction_id=interaction.interaction_id,
-                    response=response,
-                )
+            await manager.admit_resume(
+                interaction_id=interaction.interaction_id,
+                response=response,
             )
-            self._resume_tasks.add(task)
-            task.add_done_callback(self._resume_done)
             return
 
         if not input.strip():
             return
-        idle = self._current_run_id is None
-        receipt = await manager.submit(
+        await manager.submit(
             input,
-            mode=None if idle else "steer",
-            options=self._run_options() if idle else None,
+            mode="auto",
+            options=self._run_options(),
         )
-        if idle:
-            run = self._runner.get_run(receipt.run_id)
-            self._current_run_id = None if run.stop_reason is not None else receipt.run_id
-
-    async def _interrupt(self, *, reason: str) -> None:
-        """把同步 Ctrl-C/退出转换为 manager interrupt。"""
-        if self._current_run_id is None:
-            return
-        await self._require_manager().interrupt(reason=reason)
 
     async def _consume_events(self) -> None:
-        """消费 manager mixed stream，并投影为终端输出与 host routing state。"""
+        """消费 mixed stream，显示结果及仍待响应的交互。"""
         async for event in self._require_manager().events():
             if isinstance(event, SubmissionEvent):
-                self._handle_submission_event(event)
                 continue
             if event.kind is RunEventKind.INTERACTION_SUSPENDED:
                 result = self._runner.get_result(event.run_id)
-                if result is None or result.pending_interaction is None:
-                    raise HITLCheckpointInvalidError("waiting 事件缺少 pending interaction")
+                # 输入控制读取当前事实；历史 suspended 提示可能已被取消或恢复取代。
+                if (
+                    result is None
+                    or result.pending_interaction is None
+                    or result.pending_interaction.interaction_id != event.correlation_id
+                ):
+                    continue
                 self._pending_interaction = result.pending_interaction
                 _write_interaction_prompt(
                     result.pending_interaction,
@@ -465,11 +449,11 @@ class _ChatSessionHost:
                     RunStopReason.OUTCOME_UNKNOWN,
                 }:
                     self._exit_code = 1
-                if self._current_run_id == event.run_id:
+                if (
+                    self._pending_interaction is not None
+                    and self._pending_interaction.run_id == event.run_id
+                ):
                     self._pending_interaction = None
-                    self._current_run_id = (
-                        self._follow_up_run_ids.popleft() if self._follow_up_run_ids else None
-                    )
 
     async def _consume_live_events(self, subscription: LiveSubscription) -> None:
         """消费 session live stream，并输出模型文本增量。"""
@@ -537,29 +521,6 @@ class _ChatSessionHost:
             return
         terminal_event = self._live_terminal_events.setdefault(run_id, asyncio.Event())
         await terminal_event.wait()
-
-    def _handle_submission_event(self, event: SubmissionEvent) -> None:
-        """从 host 的 future-run 投影中移除失败的 follow-up。"""
-        if event.mode != "follow_up" or event.state != "failed":
-            return
-        try:
-            self._follow_up_run_ids.remove(event.run_id)
-        except ValueError:
-            pass
-        if self._current_run_id == event.run_id:
-            self._current_run_id = (
-                self._follow_up_run_ids.popleft() if self._follow_up_run_ids else None
-            )
-
-    def _resume_done(self, task: asyncio.Task[RunResult]) -> None:
-        """收取 resume waiter 异常，避免游离 task 静默失败。"""
-        self._resume_tasks.discard(task)
-        if task.cancelled():
-            return
-        error = task.exception()
-        if isinstance(error, IrisError):
-            self._error_func(_format_iris_error(error))
-            self._exit_code = 1
 
     # endregion
 

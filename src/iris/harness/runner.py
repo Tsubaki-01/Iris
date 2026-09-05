@@ -1282,10 +1282,18 @@ class AgentRunner:
             return
         if current.phase is not RunPhase.ACTIVE:
             raise IrisRunStateError("non-suspended engine outcome 遇到非 active run")
-        # engine 只感知统一的 cancellation signal，deadline 原因需要在此还原。
+        # 失败先于 timer 获得调度时，仍以同一 Clock 的 absolute deadline 确认到期原因。
         outcome = result.outcome
-        if outcome is RuntimeActivationOutcome.CANCELLED and active.signal.deadline_requested:
-            outcome = RuntimeActivationOutcome.DEADLINE_EXCEEDED
+        if outcome is RuntimeActivationOutcome.FAILED:
+            deadline_at = current.options.limits.deadline_at
+            if deadline_at is not None and self._now() >= deadline_at:
+                active.signal.request_deadline()
+        if active.signal.deadline_requested and outcome in {
+            RuntimeActivationOutcome.CANCELLED,
+            RuntimeActivationOutcome.FAILED,
+        }:
+            self._finish_cancelled_task(active, port)
+            return
         stop_reason = {
             RuntimeActivationOutcome.COMPLETED: RunStopReason.COMPLETED,
             RuntimeActivationOutcome.FAILED: RunStopReason.FAILED,

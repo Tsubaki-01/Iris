@@ -65,6 +65,12 @@ exact runner/store through `get_session()`, `get_run()`, `get_result()`, `list_t
 session. It is intended for a host that must accept new ordinary input while the current run is
 executing:
 
+The host explicitly selects `observation_mode="mixed"` (default) or `"broker_only"`. Mixed mode
+provides lossless `events()` and can also publish to a broker. Broker-only mode requires
+`submission_publisher`, publishes submission facts without local trackers/transient buffers, and
+rejects `events()`. Gateway-only hosts should select broker-only so admission does not depend on an
+unused local consumer.
+
 ```python
 import asyncio
 
@@ -97,20 +103,25 @@ the provider or run settlement. While busy, callers must choose explicitly:
 - `mode="follow_up"` pre-generates a future run ID and may carry options. It creates one run at a
   time, only after the exact current run becomes terminal.
 
+Plain-text hosts such as the CLI can use `mode="auto"`. Under the manager lock, durable state selects
+a new run when idle or steer when busy. `options` applies only to a new run and is unused in the busy
+branch; the UI does not need its own routing-state copy.
+
 Each mode preserves its own FIFO order, while eligibility is independent: an earlier follow-up
 does not block a steer that can still enter the current run. A busy receipt means only `pending`;
-the final delivery or failure is reported through `events()`. This single-consumer stream mixes raw
+the selected observation mode reports final delivery or failure. The mixed single-consumer stream mixes raw
 durable `RunEvent` values with transient `SubmissionEvent` values and adds no session-global
 sequence. Idle submissions emit no `SubmissionEvent`.
 
-The optional `submission_publisher` is only a submission side channel. The manager first writes
+In mixed mode, the optional `submission_publisher` is a submission side channel. The manager first writes
 the original `SubmissionEvent` to the single-consumer buffer above, then best-effort publishes a
 `SessionSubmissionEvent` carrying the session identity. A publisher failure neither repeats the
 buffer write nor changes the receipt. Run events, HITL, and results retain their existing
 manager/runner contracts.
 
 By default, a manager queues at most 64 steers and 64 follow-ups, reserves 256 transient submission
-event slots, and tracks 64 durable runs that the consumer has not caught up with. Hosts may set
+event slots, and tracks 64 durable runs that the consumer has not caught up with. The latter two
+limits apply only in mixed mode. Hosts may set
 other finite positive limits through `max_pending_steer`, `max_pending_follow_up`,
 `max_buffered_submission_events`, and `max_tracked_durable_runs`. A busy admission reserves both its
 pending and terminal event slots. If any required capacity is unavailable, it raises
@@ -120,11 +131,17 @@ consumer catches up. A new idle submit is rejected before task creation in the s
 synchronous admission mutation owns both the durable-tracker capacity decision and baseline
 registration; there is no check-then-register path.
 
-HITL responses use only `manager.resume(interaction_id=..., response=...)`; they never enter the
-ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
+HITL responses use `manager.resume(interaction_id=..., response=...)` to wait for the complete result,
+or `admit_resume(...)` to return `ResumeReceipt(run_id, interaction_id)` after activation admission.
+Both share one admission owner; the manager/runner retains background execution ownership and the
+response never enters the ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
 cancellation request is not terminal, so follow-ups still wait for actual settlement. `close()`
 rejects later operations, fails every pending input with `session_closed`, and ends the event
 stream, but neither cancels nor waits for the current run.
+
+A host about to close its event loop uses `close(cancel_run=True, reason=...)`: close admission and
+fail pending input first, prevent another follow-up from starting, then cancel and await the current
+run through the runner. CLI `/exit`, EOF, Ctrl-C, and error exits all use this path.
 
 The queue, receipt state, submission events, claims, and durable event watermarks exist only in the
 current process. Durable event payloads do not accumulate in an unbounded process-local queue: a
@@ -158,6 +175,11 @@ exception is logged and the lane continues without changing the durable result. 
 callback is not a new public observer registry.
 
 ## Cancellation and recovery
+
+When settling failure, the runner checks the absolute deadline against its injected Clock,
+independently of timer scheduling. Provider exceptions, `response.failed`, and cancellation cleanup
+failures after the deadline settle as `DEADLINE_EXCEEDED`; errors before it remain `FAILED`.
+An uncommitted tool claim still takes precedence as `OUTCOME_UNKNOWN`.
 
 Cancellation requested is a durable fact, not a settlement claim. A non-cooperative synchronous
 tool may delay settlement. If a tool returns after the request, its result is committed before the
@@ -195,7 +217,7 @@ the provider commit and is not injected again.
 
 ## Public API
 
-`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `SubmissionEvent`,
+`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `ResumeReceipt`, `SubmissionEvent`,
 `SessionSubmissionEvent`, `SessionEvent`, `LiveFact`, and `LivePublisher`; run
 request/options/limits/runtime options; phase, stop reason, usage, error, snapshot, and result;
 plus run events and observers. Store commands remain in `iris.lifecycle`.
