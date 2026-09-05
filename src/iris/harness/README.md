@@ -61,6 +61,11 @@ Host 可把同一个 `LivePublisher`（通常是 `LiveStreamBroker`）通过 `li
 `SessionManager(runner, session_id, submission_publisher=...)` 绑定一个 exact runner 与一个
 session。它适合需要在当前 run 执行期间接收新普通输入的 host：
 
+Host 显式选择 `observation_mode="mixed"`（默认）或 `"broker_only"`。Mixed 模式提供
+lossless `events()`，也可同时发布到 broker。Broker-only 模式要求 `submission_publisher`，
+只发布 submission facts，不创建本地 tracker/transient buffer；调用 `events()` 会失败。
+仅使用 Gateway 的 host 应选择 broker-only，容量不会取决于一个未使用的本地 consumer。
+
 ```python
 import asyncio
 
@@ -91,18 +96,21 @@ Idle 时，`submit(input, mode=None, options=...)` 在 run create 已 durable co
 - `mode="follow_up"`：预生成 future run id，可携带 options；只在 exact current run terminal 后
   串行创建，一次启动一条。
 
+CLI 等普通文本 host 可用 `mode="auto"`：manager 持锁读取当前 durable 状态，idle 时新建 run，
+busy 时选择 steer。此时 `options` 只用于新 run，busy 分支不使用它；UI 无需维护路由状态副本。
+
 两种 mode 各自保持 FIFO，但按 eligibility 独立推进，因此较早的 follow-up 不阻塞仍可进入当前
-run 的 steer。Busy receipt 只表示 `pending`；最终 delivery/failure 只通过 `events()` 报告。
+run 的 steer。Busy receipt 只表示 `pending`；最终 delivery/failure 通过所选 observation 模式报告。
 该单消费者 stream 原样混合 durable `RunEvent` 与 transient `SubmissionEvent`，不创建 session-global
 sequence。Idle submit 不产生 `SubmissionEvent`。
 
-可选 `submission_publisher` 只提供 submission side channel。Manager 会先把原
+Mixed 模式下，可选 `submission_publisher` 提供 submission side channel。Manager 会先把原
 `SubmissionEvent` 成功写入上述单消费者 buffer，再 best-effort 发布带 session identity 的
 `SessionSubmissionEvent`；发布失败不重复 buffer 写入，也不改变 receipt。Run events、HITL 和
 result 仍以原 manager/runner 契约为准。
 
 Manager 默认最多分别排队 64 条 steer 与 64 条 follow-up，最多保留 256 个 transient submission
-event 槽位，并跟踪 64 个尚未被 consumer 追平的 durable run。可通过
+event 槽位，并跟踪 64 个尚未被 consumer 追平的 durable run；后两种限制仅用于 mixed 模式。可通过
 `max_pending_steer`、`max_pending_follow_up`、`max_buffered_submission_events` 和
 `max_tracked_durable_runs` 关键字参数设置其它有限正整数。Busy admission 会同时预留 pending 与
 terminal event 槽位；任一容量不足时，在 receipt、队列和 event 发布前抛出 `IrisRunStateError`，不
@@ -110,10 +118,16 @@ terminal event 槽位；任一容量不足时，在 receipt、队列和 event �
 idle submit 则在创建 task 前拒绝。Durable tracker 的容量判断与 baseline 登记由同一个同步
 admission mutation 完成，不使用 check-then-register 双阶段路径。
 
-HITL response 只走 `manager.resume(interaction_id=..., response=...)`，不进入普通输入队列。
+HITL response 通过 `manager.resume(interaction_id=..., response=...)` 等待完整结果，或通过
+`admit_resume(...)` 在 activation 已接纳后返回 `ResumeReceipt(run_id, interaction_id)`。
+两者共享同一 admission owner；后台执行仍由 manager/runner 持有，不进入普通输入队列。
 `interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
 仍等待真实 settlement。`close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
 event stream，但不取消或等待当前 run。
+
+即将关闭 event loop 的 host 使用 `close(cancel_run=True, reason=...)`：先关闭 admission 并
+失败掉 pending input，阻止启动下一条 follow-up，再通过 runner 取消并等待当前 run 结算。
+CLI 的 `/exit`、EOF、Ctrl-C 和错误退出均使用这条路径。
 
 Queue、receipt 状态、submission events、claim 和 durable event 水位都只存在于当前进程。Durable
 event payload 不进入无界进程内队列；callback 只推进每个 run 的 observed watermark，consumer 按
@@ -142,6 +156,11 @@ Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mut
 记录 warning 并继续，不改变 durable result；同步 callback 不是新的 public observer registry。
 
 ## Cancellation 与 recovery
+
+结算失败时，runner 使用注入的 Clock 核对 absolute deadline，不依赖 timer 是否已经获得调度。
+到期后的 provider 异常、`response.failed` 和取消清理失败结算为 `DEADLINE_EXCEEDED`；
+到期前的 provider 错误保持 `FAILED`。未提交的工具 claim 仍优先结算为
+`OUTCOME_UNKNOWN`。
 
 `cancellation_requested` 是 durable fact，不等于已取消。同步且不协作的工具可能延迟
 settlement；runner 不会提前返回 cancelled。工具 result 若在请求后正常返回，会先 durable
@@ -175,7 +194,7 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 
 ## 公开接口
 
-`iris.harness` 导出 `AgentRunner`、`SessionManager`、`SubmitReceipt`、`SubmissionEvent`、
+`iris.harness` 导出 `AgentRunner`、`SessionManager`、`SubmitReceipt`、`ResumeReceipt`、`SubmissionEvent`、
 `SessionSubmissionEvent`、`SessionEvent`、`LiveFact`、`LivePublisher`，以及 run
 request/options/limits/runtime options、phase/stop reason/usage/error/snapshot/result 和 run
 events/observer。Store commands 仍属于 `iris.lifecycle`。

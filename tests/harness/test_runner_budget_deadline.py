@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from iris.exceptions import IrisProviderError
 from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunOptions,
@@ -18,7 +20,16 @@ from iris.lifecycle import (
     RunStopReason,
     ToolCallPhase,
 )
-from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.message import (
+    LLMRequest,
+    LLMResponse,
+    ModelResponseFailed,
+    ModelResponseStarted,
+    ModelStreamEvent,
+    ModelStreamScope,
+    ProviderStreamError,
+    ToolUseBlock,
+)
 from iris.runtime import (
     RuntimeActivationInput,
     RuntimeActivationOutcome,
@@ -39,6 +50,7 @@ from iris.tools import (
 
 from .fakes import (
     FrozenClock,
+    RecordingPublisher,
     StaticProvider,
     build_runtime,
     text_response,
@@ -155,6 +167,124 @@ async def test_deadline_during_provider_wait_returns_deadline_terminal(
 
     assert result.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
     assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_deadline", [False, True])
+async def test_provider_cleanup_error_preserves_deadline_cause(
+    tmp_path: Path,
+    after_deadline: bool,
+) -> None:
+    """deadline 发起取消后 provider 清理抛错仍归因超时，到期前失败则保持原错误。"""
+
+    class CleanupErrorProvider:
+        """提供合法 complete 接口，模拟网络资源清理失败。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            """按测试时序在请求阶段或取消清理阶段抛出 provider 错误。"""
+            del request
+            if after_deadline:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError as exc:
+                    raise IrisProviderError("provider cleanup failed") from exc
+            raise IrisProviderError("provider request failed")
+
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=CleanupErrorProvider()),
+        store=store,
+    )
+    result = await runner.start(
+        AgentRunRequest(input="provider 清理", run_id="provider-cleanup"),
+        options=AgentRunOptions(
+            limits=RunLimits(deadline_at=datetime.now(UTC) + timedelta(milliseconds=200))
+        ),
+    )
+
+    assert result.run.stop_reason is (
+        RunStopReason.DEADLINE_EXCEEDED if after_deadline else RunStopReason.FAILED
+    )
+    if after_deadline:
+        assert result.error is None
+    else:
+        assert result.error is not None
+        assert result.error.code == "PROVIDER_ERROR"
+    assert store.load_session_lane("default") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
+    tmp_path: Path,
+    expired: bool,
+    streaming: bool,
+) -> None:
+    """Clock 单调前进后先收到 provider 失败时，不依赖 timer 是否已经置位。"""
+    clock = FrozenClock()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class EventFailureProvider:
+        """通过事件同步合法 complete 异常与 typed stream terminal。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            """在控制端推进时间后返回普通 provider 失败。"""
+            del request
+            entered.set()
+            await release.wait()
+            raise IrisProviderError("provider request failed")
+
+        async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+            """按完整 started/failed 协议返回流式失败。"""
+            del request
+            scope = ModelStreamScope(
+                model_stream_id="deadline-stream", provider="fake", model="fake-model", attempt=1
+            )
+            yield ModelResponseStarted(
+                scope=scope, sequence=1, occurred_at=clock.now(), response_id="deadline-response"
+            )
+            entered.set()
+            await release.wait()
+            yield ModelResponseFailed(
+                scope=scope,
+                sequence=2,
+                occurred_at=clock.now(),
+                error=ProviderStreamError(
+                    code="PROVIDER_STREAM_ERROR", message="provider stream failed", retryable=False
+                ),
+                semantic_output_emitted=False,
+            )
+
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=EventFailureProvider()),
+        store=InMemoryLifecycleStore(),
+        clock=clock,
+        live_publisher=RecordingPublisher() if streaming else None,
+    )
+    running = asyncio.create_task(
+        runner.start(
+            AgentRunRequest(input="provider 失败", run_id="unsignalled-deadline"),
+            options=AgentRunOptions(
+                limits=RunLimits(deadline_at=clock.now() + timedelta(seconds=60))
+            ),
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    clock.advance(seconds=61 if expired else 1)
+    assert not runner._active["unsignalled-deadline"].signal.deadline_requested
+    release.set()
+    result = await asyncio.wait_for(running, timeout=1)
+
+    assert result.run.stop_reason is (
+        RunStopReason.DEADLINE_EXCEEDED if expired else RunStopReason.FAILED
+    )
+    if expired:
+        assert result.error is None
+    else:
+        assert result.error is not None
+        assert result.error.code == ("PROVIDER_STREAM_ERROR" if streaming else "PROVIDER_ERROR")
 
 
 @pytest.mark.asyncio

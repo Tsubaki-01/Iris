@@ -75,8 +75,8 @@ class SubmitReceipt(BaseModel):
     """一次普通输入 admission 的不可变即时回执。
 
     只表达"输入是否已被接纳"，不表达 run 结果。idle submit 在 run create 已 durable commit
-    后返回 ``delivered``；busy submit 一律返回 ``pending``，最终 delivery/failure 只通过
-    ``SessionManager.events()`` 报告。
+    后返回 ``delivered``；busy submit 一律返回 ``pending``，最终 delivery/failure 通过 host
+    选择的 mixed stream 或 submission publisher 报告。
 
     Attributes:
         submission_id (str): 该次提交的 process-local 标识。
@@ -146,6 +146,15 @@ class SubmissionEvent(BaseModel):
         if (self.state == "failed") != (self.reason is not None):
             raise ValueError("仅 failed submission event 必须包含 reason")
         return self
+
+
+class ResumeReceipt(BaseModel):
+    """HITL 恢复已接纳的即时回执；最终结果由 runner 或事件流提供。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    interaction_id: str
 
 
 # 单消费者 stream 原样混合 durable run event 与 transient submission event，不合并 sequence。
@@ -653,11 +662,29 @@ class SessionManager:
         max_buffered_submission_events: int = _DEFAULT_MAX_BUFFERED_SUBMISSION_EVENTS,
         max_tracked_durable_runs: int = _DEFAULT_MAX_TRACKED_DURABLE_RUNS,
         submission_publisher: LivePublisher | None = None,
+        observation_mode: Literal["mixed", "broker_only"] = "mixed",
     ) -> None:
-        """绑定 runner 与 session id，初始化全部 process-local 状态。"""
+        """绑定 runner 与 session，并按 host observation 模式初始化本地状态。
+
+        Args:
+            runner (AgentRunner): Exact complete-run owner。
+            session_id (str): 绑定 session。
+            max_pending_steer (int): Steer FIFO 容量。
+            max_pending_follow_up (int): Follow-up FIFO 容量。
+            max_buffered_submission_events (int): Mixed 模式下 transient event 容量。
+            max_tracked_durable_runs (int): Mixed 模式下 durable tracker 容量。
+            submission_publisher (LivePublisher | None): Submission fact publisher。
+            observation_mode (Literal["mixed", "broker_only"]): 本地 lossless stream 或仅发布。
+
+        Raises:
+            IrisRunStateError: Session 为空，或 broker-only 缺少 publisher。
+            ValueError: 容量不是正数。
+        """
         normalized_session_id = session_id.strip()
         if not normalized_session_id:
             raise IrisRunStateError("session_id 不能为空")
+        if observation_mode == "broker_only" and submission_publisher is None:
+            raise IrisRunStateError("broker_only observation 需要 submission_publisher")
         if (
             min(
                 max_pending_steer,
@@ -684,11 +711,15 @@ class SessionManager:
         self._steering = _SessionSteeringPort(self)
         self._follow_up_admissions: dict[str, _FollowUpAdmission] = {}
         self._tracker_reconcile_task: asyncio.Task[None] | None = None
-        self._event_buffer = _SessionEventBuffer(
-            runner.list_events,
-            max_buffered_submission_events=max_buffered_submission_events,
-            max_tracked_durable_runs=max_tracked_durable_runs,
-            on_tracker_released=self._schedule_tracker_reconcile,
+        self._event_buffer = (
+            _SessionEventBuffer(
+                runner.list_events,
+                max_buffered_submission_events=max_buffered_submission_events,
+                max_tracked_durable_runs=max_tracked_durable_runs,
+                on_tracker_released=self._schedule_tracker_reconcile,
+            )
+            if observation_mode == "mixed"
+            else None
         )
 
     # endregion
@@ -701,20 +732,21 @@ class SessionManager:
         self,
         input: str,
         *,
-        mode: SubmissionMode | None = None,
+        mode: SubmissionMode | Literal["auto"] | None = None,
         options: AgentRunOptions | None = None,
     ) -> SubmitReceipt:
         """提交 idle input，或向 busy run admission 一条 steer/follow-up。
 
         Args:
             input (str): 用户输入，不能为空白。
-            mode (SubmissionMode | None): idle 时必须为 None；busy 时必须显式给出
-                ``steer`` 或 ``follow_up``。
-            options (AgentRunOptions | None): 新 run 的限额与 runtime 选项；``steer`` 不接受。
+            mode (SubmissionMode | Literal["auto"] | None): ``auto`` 在锁内按当前状态
+                选择 idle submit 或 steer；其他模式保留显式 idle/busy 契约。
+            options (AgentRunOptions | None): 新 run 选项；显式 steer 不接受，auto 的
+                busy 分支忽略这些仅供新 run 使用的选项。
 
         Returns:
             SubmitReceipt: idle submit 返回 ``delivered``；busy submit 返回 ``pending``，最终
-                结果只通过 ``events()`` 报告。
+                结果通过所选 observation 模式报告。
 
         Raises:
             IrisRunStateError: 当输入为空、mode 与 idle/busy 状态不符、steer 携带 options、
@@ -727,6 +759,10 @@ class SessionManager:
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
+            if mode == "auto":
+                mode = None if self._current_run_id is None else "steer"
+                if mode == "steer":
+                    options = None
 
             # --- 2. idle：直接创建并等待 run admission ---
             if self._current_run_id is None:
@@ -734,7 +770,9 @@ class SessionManager:
                     raise IrisRunStateError("idle submit 的 mode 必须为 None")
                 submission_id = self._new_submission_id()
                 run_id = self._new_run_id()
-                if not self._event_buffer.try_register_run(run_id, after_sequence=0):
+                if self._event_buffer is not None and not self._event_buffer.try_register_run(
+                    run_id, after_sequence=0
+                ):
                     raise IrisRunStateError("durable run tracker 容量已满")
                 self._current_run_id = run_id
                 task, started = self._create_start_task_locked(
@@ -750,7 +788,8 @@ class SessionManager:
                     if self._current_task is task and self._current_run_id == run_id:
                         self._current_task = None
                         self._current_run_id = None
-                    self._event_buffer.discard_run(run_id)
+                    if self._event_buffer is not None:
+                        self._event_buffer.discard_run(run_id)
                     raise
                 return SubmitReceipt(
                     submission_id=submission_id,
@@ -778,7 +817,10 @@ class SessionManager:
                 raise IrisRunStateError("cancelling run 不接受新的 steer input")
             if not self._pending.can_accept(mode):
                 raise IrisRunStateError(f"{mode} input 队列容量已满")
-            if not self._event_buffer.can_reserve_submission_lifecycle():
+            if (
+                self._event_buffer is not None
+                and not self._event_buffer.can_reserve_submission_lifecycle()
+            ):
                 raise IrisRunStateError("submission event buffer 容量已满")
 
             # --- 4. 入队并返回 pending receipt ---
@@ -819,6 +861,38 @@ class SessionManager:
             IrisRunStateError: 当 facade 已关闭、没有 current run、current run 不在 waiting
                 phase，或 interaction_id 不是当前 waiting interaction 时。
         """
+        _, task = await self._admit_resume(interaction_id=interaction_id, response=response)
+        # 调用方取消等待时，durable activation 仍由 manager 持有。
+        return await asyncio.shield(task)
+
+    async def admit_resume(
+        self,
+        *,
+        interaction_id: str,
+        response: HumanInteractionResponse,
+    ) -> ResumeReceipt:
+        """接纳当前 HITL 响应，不等待恢复后的完整执行。
+
+        Args:
+            interaction_id (str): 当前 waiting interaction 的标识。
+            response (HumanInteractionResponse): 已解析的人工响应。
+
+        Returns:
+            ResumeReceipt: Activation 已启动或本次恢复已立即结算的回执。
+
+        Raises:
+            IrisRunStateError: Manager 已关闭、当前 run/interaction 不可恢复。
+        """
+        receipt, _ = await self._admit_resume(interaction_id=interaction_id, response=response)
+        return receipt
+
+    async def _admit_resume(
+        self,
+        *,
+        interaction_id: str,
+        response: HumanInteractionResponse,
+    ) -> tuple[ResumeReceipt, asyncio.Task[RunResult]]:
+        """在线性化 admission 下创建唯一 managed resume task。"""
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
@@ -842,8 +916,7 @@ class SessionManager:
             self._current_task = task
             self._attach_settlement_callback(task, run_id, submission=None)
             await self._wait_for_admission(task, started)
-        # 在锁外等待完整 result；shield 保证调用方被取消时不会连带取消 durable activation。
-        return await asyncio.shield(task)
+        return ResumeReceipt(run_id=run_id, interaction_id=interaction_id.strip()), task
 
     async def interrupt(self, *, reason: str | None = None) -> RunSnapshot:
         """请求取消 facade 当前 exact run，并保留 follow-up 到真实 terminal。
@@ -886,19 +959,25 @@ class SessionManager:
                 ``SubmissionEvent`` 的异步迭代器，在 ``close()`` 之后正常结束。
 
         Raises:
-            IrisRunStateError: 当已有 consumer 取用过该 stream 时；事件只入队一次，多个
-                consumer 会互相吞掉事件。
+            IrisRunStateError: Broker-only 模式，或已有 consumer 取用过该 stream。
         """
+        if self._event_buffer is None:
+            raise IrisRunStateError("broker_only observation 不提供 SessionManager.events()")
         if self._event_consumer_started:
             raise IrisRunStateError("SessionManager events 只允许一个 consumer")
         self._event_consumer_started = True
-        return self._iterate_events()
+        return self._iterate_events(self._event_buffer)
 
-    async def close(self) -> None:
-        """关闭 facade admission/event stream，不取消或等待 durable run。
+    async def close(self, *, cancel_run: bool = False, reason: str | None = None) -> None:
+        """关闭 admission；host 退出时可选择取消并等待当前 run 结算。
 
-        幂等：重复调用直接返回。当前 durable run 继续由 runner 推进，manager 只放弃对它的
-        观察与后续输入接纳。
+        默认仅 detach，当前 durable run 继续由 runner 推进，manager 只放弃对它的
+        观察与后续输入接纳。``cancel_run=True`` 先停止 follow-up 调度，再请求取消并等待，
+        供即将关闭 event loop 的 host 使用。
+
+        Args:
+            cancel_run (bool): 是否由 runner 取消并等待当前 run。
+            reason (str | None): 可选的 durable cancellation 原因。
 
         Notes:
             已进入 create 的 follow-up 按 run 是否已 durable 区分处理：已存在则视为投递成功，
@@ -908,6 +987,8 @@ class SessionManager:
             if self._closed:
                 return
             self._closed = True
+            run_id = self._current_run_id
+            current_task = self._current_task
             # claim 与 acknowledge/fail 之间不允许 await，因此持锁时不应存在悬挂 claim。
             assert not self._claimed_steer, "claim 到 callback 之间不得出现 await"
             for admission in tuple(self._follow_up_admissions.values()):
@@ -922,13 +1003,26 @@ class SessionManager:
                     )
                     admission.task.cancel()
                     self._cancel_follow_up_helpers(admission)
-                    self._event_buffer.discard_run(admission.item.run_id)
+                    if self._event_buffer is not None:
+                        self._event_buffer.discard_run(admission.item.run_id)
+                    if run_id == admission.item.run_id:
+                        run_id = None
                 else:
                     self._complete_follow_up_success_locked(admission)
             self._fail_items(self._pending.drain_all_pending(), reason="session_closed")
             self._current_run_id = None
             self._current_task = None
-            self._event_buffer.close()
+        try:
+            if cancel_run and run_id is not None:
+                before = self._runner.get_run(run_id)
+                await self._runner.cancel(run_id, reason=reason)
+                if current_task is not None:
+                    await asyncio.shield(current_task)
+                for event in self._runner.list_events(run_id, before.last_event_sequence):
+                    self._relay_run_event(event)
+        finally:
+            if self._event_buffer is not None:
+                self._event_buffer.close()
 
     # endregion
 
@@ -936,10 +1030,10 @@ class SessionManager:
     #            Managed Task Plumbing
     # ==========================================
     # region
-    async def _iterate_events(self) -> AsyncIterator[SessionEvent]:
+    async def _iterate_events(self, buffer: _SessionEventBuffer) -> AsyncIterator[SessionEvent]:
         """消费有界 mixed event buffer 直到其 closed 状态耗尽。"""
         while True:
-            event = await self._event_buffer.next_event()
+            event = await buffer.next_event()
             if event is None:
                 return
             yield event
@@ -1061,7 +1155,8 @@ class SessionManager:
                 except IrisRunNotFoundError:
                     # run 从未成型：facade 回到 idle，并把 follow-up 判为 create 失败。
                     self._current_run_id = None
-                    self._event_buffer.discard_run(run_id)
+                    if self._event_buffer is not None:
+                        self._event_buffer.discard_run(run_id)
                     if submission is not None:
                         admission = self._follow_up_admissions.get(submission.submission_id)
                         if admission is not None:
@@ -1079,7 +1174,8 @@ class SessionManager:
                             admission.outcome.set_result(None)
                         self._complete_follow_up_success_locked(admission)
                 if snapshot.phase is RunPhase.TERMINAL:
-                    self._event_buffer.mark_run_settled(run_id)
+                    if self._event_buffer is not None:
+                        self._event_buffer.mark_run_settled(run_id)
                     await self._handle_terminal_locked(run_id)
                 # waiting 保留 current owner；active task error 也不自动 recover/drain。
         except Exception:
@@ -1105,7 +1201,8 @@ class SessionManager:
                     return
                 self._current_task = None
                 self._current_run_id = None
-                self._event_buffer.discard_run(run_id)
+                if self._event_buffer is not None:
+                    self._event_buffer.discard_run(run_id)
                 return
             if snapshot.phase is RunPhase.TERMINAL:
                 await self._handle_terminal_locked(run_id)
@@ -1120,7 +1217,8 @@ class SessionManager:
         """结算 terminal run：清空其 steer 并启动下一条 follow-up。"""
         if self._current_run_id != run_id:
             return
-        self._event_buffer.mark_run_settled(run_id)
+        if self._event_buffer is not None:
+            self._event_buffer.mark_run_settled(run_id)
         self._fail_items(self._pending.drain_steers_for_run(run_id), reason="target_terminal")
         self._current_run_id = None
         self._current_task = None
@@ -1135,7 +1233,9 @@ class SessionManager:
         item = self._pending.peek_follow_up()
         if item is None:
             return
-        if not self._event_buffer.try_register_run(item.run_id, after_sequence=0):
+        if self._event_buffer is not None and not self._event_buffer.try_register_run(
+            item.run_id, after_sequence=0
+        ):
             return
         self._pending.pop_follow_up()
         self._current_run_id = item.run_id
@@ -1216,7 +1316,8 @@ class SessionManager:
         if self._current_task is admission.task and self._current_run_id == admission.item.run_id:
             self._current_task = None
             self._current_run_id = None
-        self._event_buffer.discard_run(admission.item.run_id)
+        if self._event_buffer is not None:
+            self._event_buffer.discard_run(admission.item.run_id)
         self._emit_submission_event(admission.item, "failed", reason="start_failed")
         self._fail_items(self._pending.drain_follow_ups(), reason="start_failed")
 
@@ -1273,7 +1374,8 @@ class SessionManager:
 
     def _relay_run_event(self, event: RunEvent) -> None:
         """把 durable ``RunEvent`` 合并为可从 store 补读的 per-run 水位。"""
-        self._event_buffer.observe_run_event(event)
+        if self._event_buffer is not None:
+            self._event_buffer.observe_run_event(event)
 
     def _emit_submission_event(
         self,
@@ -1290,14 +1392,15 @@ class SessionManager:
             state=state,
             reason=reason,
         )
-        if state == "pending":
-            self._event_buffer.add_pending(event)
-        else:
-            self._event_buffer.add_terminal(event)
+        if self._event_buffer is not None:
+            if state == "pending":
+                self._event_buffer.add_pending(event)
+            else:
+                self._event_buffer.add_terminal(event)
         self._publish_submission_event(event)
 
     def _publish_submission_event(self, event: SubmissionEvent) -> None:
-        """Best-effort 发布已成功写入原 buffer 的 submission side-channel fact。"""
+        """向 host 选择的 publisher 发布 submission fact。"""
         publisher = self._submission_publisher
         if publisher is None:
             return
@@ -1349,4 +1452,4 @@ class SessionManager:
     # endregion
 
 
-__all__ = ["SessionEvent", "SessionManager", "SubmissionEvent", "SubmitReceipt"]
+__all__ = ["ResumeReceipt", "SessionEvent", "SessionManager", "SubmissionEvent", "SubmitReceipt"]

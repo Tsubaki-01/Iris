@@ -16,7 +16,13 @@ from ..lifecycle import (
 )
 from .observer import RunEventObserver
 from .runner import AgentRunner
-from .session_manager import SessionEvent, SessionManager, SubmissionEvent, SubmitReceipt
+from .session_manager import (
+    ResumeReceipt,
+    SessionEvent,
+    SessionManager,
+    SubmissionEvent,
+    SubmitReceipt,
+)
 from .streaming import LiveFact, LivePublisher, SessionSubmissionEvent
 
 __all__ = [
@@ -25,6 +31,7 @@ __all__ = [
     "AgentRunner",
     "LiveFact",
     "LivePublisher",
+    "ResumeReceipt",
     "RunEvent",
     "RunEventKind",
     "RunEventObserver",
