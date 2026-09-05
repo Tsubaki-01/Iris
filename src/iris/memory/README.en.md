@@ -83,8 +83,11 @@ existence.
 - `process_candidates()` explicitly accepts, rejects, or promotes candidates; the default no-op
   extractor creates none and no background extraction exists.
 
-Candidate promotion is a single SQLite transaction and is idempotent after success. Item,
-candidate, and event IDs are globally unique across scopes.
+Candidate promotion acquires a `BEGIN IMMEDIATE` write transaction before reading candidate
+status. Concurrent or repeated promotions return the same item and write only one pair of add and
+accept events. `update_item()` also reads and applies its patch in one write transaction, so changes
+to different fields from separate connections merge sequentially. Item, candidate, and event IDs
+are globally unique across scopes.
 
 `MemoryContextBuilder` preserves result order and fits fragments into `max_chars`, truncating only
 the first fragment when necessary and counting omissions. Prompt fragments keep semantic metadata
@@ -129,6 +132,10 @@ The large `iris.memory` export surface is grouped as follows:
 The exact set is `src/iris/memory/__init__.py::__all__`. Private SQL helpers, mirror markers, and
 tool-payload helpers are not extension contracts.
 
+`MemoryConfig.search` contains only `use_fts`, which selects whether to enable the full-text index.
+Each `MemoryQuery.limit` or tool input's `limit` determines the result count; there is no
+configuration-level default search count.
+
 `register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
 `READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
 scope; `MemoryAccessPolicy` derives read/write scopes from trusted host context and can include the
@@ -146,6 +153,11 @@ instance lock, reads and renders each target once while preserving manual text o
 uses a same-directory temporary file for atomic replacement. Layout initialization is cached only
 after success, and projection failures remain visible. SQLite uses short-lived connections and
 wraps storage/JSON failures as `IrisMemoryError`.
+Every store initialized with FTS enabled rebuilds all active items from the authoritative table in
+the same transaction. This includes additions, edits, and deletions made while indexing was disabled,
+at the cost of one full rebuild at startup. Explicit `rebuild_index()` also rebuilds from the
+authoritative table. FTS contains only active items, so `MemoryQuery(include_deleted=True)` queries
+the authoritative table with text matching to include deleted matches.
 Public store `list_items()`, `list_events()`, and `list_candidates()` calls reject limits outside
 `1..100` with `IrisMemoryError` instead of silently clamping them. Only `list_items(limit=None)`
 requests a complete mirror projection.
@@ -164,6 +176,7 @@ requests a complete mirror projection.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | SDK lifecycle, audit, scope isolation, SQLite search, and context building | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| Concurrent promotion, field updates, FTS completeness, and result-count config | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | Async reads, multi-scope tool scheduling, and query plans | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Batched mirror projection, rebuild, and atomic replacement | `mirror.py` | `tests/memory/test_mirror.py` |
 | Runtime injection | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |

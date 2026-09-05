@@ -210,6 +210,7 @@ class SQLiteMemoryStore:
                     except sqlite3.Error:
                         self._fts_enabled = False
                     else:
+                        self._rebuild_fts(connection)
                         self._fts_enabled = True
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 初始化失败", path=str(self.path)) from exc
@@ -220,18 +221,7 @@ class SQLiteMemoryStore:
             return
         try:
             with self._connection() as connection:
-                connection.execute("DELETE FROM memory_items_fts")
-                rows = connection.execute(
-                    """
-                    SELECT id, text FROM memory_items
-                    WHERE status = ?
-                    """,
-                    (MemoryItemStatus.ACTIVE.value,),
-                ).fetchall()
-                connection.executemany(
-                    "INSERT INTO memory_items_fts (item_id, text) VALUES (?, ?)",
-                    [(row["id"], row["text"]) for row in rows],
-                )
+                self._rebuild_fts(connection)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 索引重建失败", path=str(self.path)) from exc
 
@@ -265,17 +255,19 @@ class SQLiteMemoryStore:
         *,
         event: MemoryEvent,
     ) -> MemoryItem:
-        """更新长期记忆条目并记录审计事件。"""
-        current = self.get_item(item_id, scope)
-        if current is None:
-            raise IrisMemoryError("记忆条目不存在", item_id=item_id)
+        """在同一写事务中读取、更新长期记忆条目并记录审计事件。"""
         updates = patch.model_dump(exclude_unset=True)
-        if not updates:
-            return current
-        updates["updated_at"] = _now_iso()
-        updated = current.model_copy(update=updates)
         try:
             with self._connection() as connection:
+                # 读取前取得写事务，避免不同连接用旧快照覆盖彼此的字段修改。
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._fetch_item(connection, item_id, scope, include_deleted=False)
+                if current is None:
+                    raise IrisMemoryError("记忆条目不存在", item_id=item_id)
+                if not updates:
+                    return current
+                updates["updated_at"] = _now_iso()
+                updated = current.model_copy(update=updates)
                 self._upsert_item(connection, updated)
                 self._refresh_fts_row(connection, updated)
                 self._insert_event(connection, event)
@@ -314,7 +306,7 @@ class SQLiteMemoryStore:
 
     def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """按查询条件召回长期记忆。"""
-        if query.text and self._fts_enabled and not query.item_ids:
+        if query.text and self._fts_enabled and not query.item_ids and not query.include_deleted:
             fts_results = self._search_fts(query)
             if fts_results:
                 return fts_results
@@ -453,9 +445,11 @@ class SQLiteMemoryStore:
         actor: MemoryActor,
         reason: str,
     ) -> MemoryItem:
-        """在单个事务中将 pending candidate 晋升为 L2 item。"""
+        """在串行写事务中将 pending candidate 晋升为 L2 item。"""
         try:
             with self._connection() as connection:
+                # 同一候选的并发晋升必须在读取状态前排队，后继调用复用已晋升条目。
+                connection.execute("BEGIN IMMEDIATE")
                 candidate = self._fetch_candidate(connection, candidate_id, scope)
                 if candidate is None:
                     raise IrisMemoryError("候选记忆不存在", candidate_id=candidate_id)
@@ -839,6 +833,17 @@ class SQLiteMemoryStore:
         if row is None:
             return None
         return _row_to_candidate(row)
+
+    def _rebuild_fts(self, connection: sqlite3.Connection) -> None:
+        """在调用方事务中从权威表完整建立活跃条目的派生索引。"""
+        connection.execute("DELETE FROM memory_items_fts")
+        connection.execute(
+            """
+            INSERT INTO memory_items_fts (item_id, text)
+            SELECT id, text FROM memory_items WHERE status = ?
+            """,
+            (MemoryItemStatus.ACTIVE.value,),
+        )
 
     def _refresh_fts_row(self, connection: sqlite3.Connection, item: MemoryItem) -> None:
         """刷新单条 FTS 索引。"""

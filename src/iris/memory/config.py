@@ -90,7 +90,6 @@ class MemorySearchConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    limit: int = Field(default=10, gt=0, le=100)
     use_fts: bool = True
 
 
