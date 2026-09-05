@@ -469,17 +469,17 @@ class ToolExecutor:
                     "tool_name": result.tool_name or tool_use.name,
                 }
             )
-            artifact_store = self._artifact_store(context)
-            persisted = artifact_store.persist_if_large(
-                normalized,
-                max_chars=tool.definition.max_result_chars,
-            )
-            final_result = await self._run_after_call(tool, persisted, context)
+            final_result = await self._run_after_call(tool, normalized, context)
             final_result = final_result.model_copy(
                 update={
                     "tool_use_id": final_result.tool_use_id or tool_use.id,
                     "tool_name": final_result.tool_name or tool_use.name,
                 }
+            )
+            # Hook 可以改写正文，长度限制必须作用于最终交付给模型的结果。
+            final_result = self._artifact_store(context).persist_if_large(
+                final_result,
+                max_chars=tool.definition.max_result_chars,
             )
             self._record_breaker_result(tool.name, final_result)
             return final_result

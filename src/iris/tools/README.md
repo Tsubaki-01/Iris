@@ -147,8 +147,8 @@ executor = ToolExecutor(
 `arguments`。Runtime 在同一 tool batch 内复用该 plan；`execute_prepared()` 只刷新 permission，
 不会再次 lookup、降级为 dict 或重复 schema 校验。刷新后按 `preflight_result` / `DENY`、human
 protocol guard、精确 approve 的优先级授权；通过后依次检查 circuit breaker、cancellation、
-effect guard、cancellation，随后才进入 middleware `before_call` → `tool.arun()` → artifact →
-middleware after hooks → breaker 记录。guard 失败时不会进入任何工具 effect；claim 后取消会
+effect guard、cancellation，随后才进入 middleware `before_call` → `tool.arun()` →
+middleware after hooks → artifact → breaker 记录。guard 失败时不会进入任何工具 effect；claim 后取消会
 作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
@@ -271,6 +271,9 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 ### Artifact
 
 `ToolArtifactStore.persist_if_large(result, max_chars=...)` 只处理非错误结果。若 `result.model_content` 超过阈值，会写入本地文本 artifact，并把返回内容替换为预览、完整路径和 `.iris/` gitignore 提示。
+
+Executor 在全部 `after_call` 完成后执行一次 artifact 处理，因此 hook 扩展后的最终正文也受
+`max_result_chars` 约束；hook 收到的是工具完整结果。
 
 ### Middleware
 
