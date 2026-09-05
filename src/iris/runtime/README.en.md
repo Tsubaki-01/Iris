@@ -51,6 +51,14 @@ tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects requi
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
 engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
 
+When the model returns a tool batch, runtime commits the assistant, all prepared facts, and the
+initial tool cursor before advancing in original order. It commits ordinary call results before
+atomically suspending the waiting checkpoint and interaction at the human gate identified by the
+current `next_tool_index`. Resume does not repeat the committed prefix. Human responses bind to
+that durable subject. If dynamic permission changes to ALLOW while waiting, an approval can
+execute; if it changes to DENY, approval produces a permission error. User rejection remains
+`USER_REJECTED`, and permission is still refreshed before execution.
+
 ## Optional live streaming
 
 `stream_sink=None` preserves the complete-only path exactly: runtime continues to call

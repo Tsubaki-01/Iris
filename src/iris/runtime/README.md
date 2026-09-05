@@ -56,6 +56,12 @@ cursor 位置只有：
 必须 durable claim，result 后必须 durable commit；claim 后无法证明结果时返回
 `TOOL_OUTCOME_UNKNOWN`，不得重放 effect。
 
+模型返回工具批次后，runtime 先提交 assistant、整批 prepared facts 与初始 tool cursor，
+再按原始顺序推进。普通调用的结果提交后，才在当前 `next_tool_index` 对应的人工 gate
+原子提交 waiting checkpoint 与 interaction；恢复不会重复已经提交的前缀调用。
+人工响应绑定该 durable subject。等待期间动态权限变为 ALLOW 时，批准可继续执行；变为
+DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_REJECTED`，执行前仍刷新权限。
+
 ## 可选 live streaming
 
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用

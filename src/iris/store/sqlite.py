@@ -82,6 +82,7 @@ from ..tools.base import ToolErrorInfo, ToolResult
 from ._serialization import jsonable as _jsonable
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._terminal_closure import build_terminal_tool_closure
+from ._tool_results import is_preflight_result
 
 _CommandT = TypeVar("_CommandT")
 _ReadT = TypeVar("_ReadT")
@@ -1054,7 +1055,7 @@ class SQLiteStore:
             )
         if (
             tool_call.phase is ToolCallPhase.PREPARED
-            and not _is_preflight_result(command.result)
+            and not is_preflight_result(command.result)
             and not self._is_interaction_result(
                 connection,
                 tool_call,
@@ -3167,18 +3168,6 @@ def _validate_pending_interaction(run: RunRecord, interaction: HumanInteraction)
         raise IrisRunStateError("suspend command 必须包含 pending interaction")
     if interaction.response is not None:
         raise IrisRunStateError("pending interaction 不能包含 response")
-
-
-def _is_preflight_result(result: ToolResult) -> bool:
-    """判断工具失败是否可证明发生在 effect claim 之前。"""
-    if not result.is_error or result.error is None:
-        return False
-    return result.error.code in {
-        "NOT_FOUND",
-        "PERMISSION_ERROR",
-        "TOOL_NOT_ALLOWED",
-        "VALIDATION_ERROR",
-    }
 
 
 def _closed_interaction(
