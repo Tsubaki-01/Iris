@@ -90,7 +90,9 @@ flowchart LR
 - `process_candidates()` 才会按 policy 接受、拒绝或晋升候选；默认
   `NoOpMemoryExtractor` 不产生候选，也不存在后台自动提取。
 
-候选晋升在 SQLite 中以单事务完成，重复晋升保持幂等；条目、候选和事件 ID 在所有 scope
+候选晋升在 SQLite 中先取得 `BEGIN IMMEDIATE` 写事务，再读取候选状态；并发或重复晋升
+返回同一条目，只写入一组新增和接受事件。`update_item()` 同样在一个写事务中读取和应用
+patch，不同连接对同一条目不同字段的修改会依次合并。条目、候选和事件 ID 在所有 scope
 中全局唯一。
 
 ### Context 注入
@@ -143,6 +145,9 @@ result = await runner.start(
 完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
 接口：SQLite 私有 SQL helper、mirror marker 格式和工具 payload helper。
 
+`MemoryConfig.search` 只包含 `use_fts`，用于选择是否启用全文索引。返回数量由每次
+`MemoryQuery.limit` 或工具输入的 `limit` 决定，没有配置级搜索数量默认值。
+
 ## 只读 memory 工具
 
 `register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
@@ -169,6 +174,10 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
 以及可选 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
+每次启用 FTS 的 store 初始化时，都会在同一事务中从权威表重建全部 active 条目的索引，
+使关闭索引期间的新增、改写和删除在重新启用后生效；代价是启动时的一次全量重建。
+显式 `rebuild_index()` 也可从权威表重建。FTS 只保存 active 条目，因此
+`MemoryQuery(include_deleted=True)` 直接查询权威表并使用文本匹配，避免漏掉已删除的命中。
 公开 store 的 `list_items()`、`list_events()` 与 `list_candidates()` 对非 `1..100` 的 limit
 直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
 
@@ -187,6 +196,7 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | SDK 生命周期、审计、scope 隔离、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | async 读取、工具多 scope 调度、查询计划 | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
 | mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
 | runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
