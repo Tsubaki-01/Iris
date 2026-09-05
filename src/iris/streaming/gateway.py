@@ -229,11 +229,11 @@ class StreamingGateway:
                 )
                 return SubmitAccepted(request_id=command.request_id, receipt=receipt)
             if isinstance(command, ResumeCommand):
-                result = await self._manager.resume(
+                resume_receipt = await self._manager.admit_resume(
                     interaction_id=command.interaction_id,
                     response=command.response,
                 )
-                return ResumeAccepted(request_id=command.request_id, result=result)
+                return ResumeAccepted(request_id=command.request_id, receipt=resume_receipt)
             if isinstance(command, CancelCommand):
                 run = await self._manager.interrupt(reason=command.reason)
                 return CancelAccepted(request_id=command.request_id, run=run)

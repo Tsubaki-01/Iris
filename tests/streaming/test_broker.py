@@ -276,6 +276,90 @@ async def test_broker_close_delivers_one_terminal_and_aclose_is_idempotent() -> 
     assert terminal.reason == "broker_closed"
 
 
+@pytest.mark.asyncio
+async def test_replay_scope_lru_bounds_history_and_reports_evicted_cursor() -> None:
+    """连续完成 run 后回收旧 scope，旧游标重连明确收到 gap。"""
+    broker = LiveStreamBroker(
+        replay_capacity_per_scope=2,
+        subscription_capacity=8,
+        max_replay_scopes=4,
+    )
+    broker.publish(_run_event(1, run_id="run-old"))
+    cursor = LiveCursor(
+        stream_epoch=broker.current_epoch(),
+        scope="run",
+        scope_id="run-old",
+        after_live_sequence=1,
+    )
+    for index in range(20):
+        broker.publish(_run_event(1, run_id=f"run-{index}"))
+        broker.publish(_run_event(2, run_id=f"run-{index}", kind=RunEventKind.RUN_TERMINAL))
+        assert len(broker._rings) <= 4
+        assert len(broker._sequences) <= 4
+
+    subscription = broker.subscribe(
+        LiveSubscriptionRequest(scope="run", scope_id="run-old", cursor=cursor)
+    )
+    gap = await _next(subscription)
+    assert isinstance(gap, ReplayGap) and gap.reason == "unknown_cursor"
+    await subscription.aclose()
+
+    broker.publish(_run_event(2, run_id="run-old"))
+    recreated = broker._rings[("run", "run-old")][-1].envelope
+    assert recreated.live_sequence > cursor.after_live_sequence
+    subscription = broker.subscribe(
+        LiveSubscriptionRequest(scope="run", scope_id="run-old", cursor=cursor)
+    )
+    gap = await _next(subscription)
+    assert isinstance(gap, ReplayGap) and gap.reason == "cursor_expired"
+    await subscription.aclose()
+    broker.close()
+    assert broker._rings == {}
+    assert broker._sequences == {}
+
+
+@pytest.mark.asyncio
+async def test_replay_eviction_preserves_unconsumed_active_scope_sequences() -> None:
+    """回放被淘汰时保留活跃 scope 的 published high-water。"""
+    broker = LiveStreamBroker(
+        replay_capacity_per_scope=2,
+        subscription_capacity=8,
+        max_replay_scopes=1,
+    )
+    subscription = broker.subscribe(LiveSubscriptionRequest(scope="run", scope_id="run-1"))
+    for sequence in range(1, 4):
+        broker.publish(_run_event(sequence))
+        broker.publish(_run_event(1, run_id=f"other-{sequence}"))
+    assert ("run", "run-1") not in broker._rings
+    assert [item.live_sequence for item in [await _next(subscription) for _ in range(3)]] == [
+        1,
+        2,
+        3,
+    ]
+    await subscription.aclose()
+    assert ("run", "run-1") not in broker._sequences
+    broker.close()
+
+
+@pytest.mark.asyncio
+async def test_subscribing_refreshes_replay_scope_lru_position() -> None:
+    """最近访问的旧 run 在下一次淘汰时继续保留回放。"""
+    broker = LiveStreamBroker(
+        replay_capacity_per_scope=2,
+        subscription_capacity=8,
+        max_replay_scopes=3,
+    )
+    broker.publish(_run_event(1, run_id="run-first"))
+    broker.publish(_run_event(1, run_id="run-second"))
+    subscription = broker.subscribe(LiveSubscriptionRequest(scope="run", scope_id="run-first"))
+    await subscription.aclose()
+    broker.publish(_run_event(1, run_id="run-third"))
+
+    assert ("run", "run-first") in broker._rings
+    assert ("run", "run-second") not in broker._rings
+    broker.close()
+
+
 def test_projection_allowlists_tool_and_provider_payloads(tmp_path: Path) -> None:
     secret_path = (tmp_path / "secret.txt").resolve()
     tool_result = ToolResult(

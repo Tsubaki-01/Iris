@@ -45,10 +45,6 @@ type _ConnectionPhase = Literal["initial", "awaiting_subscription", "subscribed"
 _COMMAND_ADAPTER = TypeAdapter(_IncomingCommand)
 
 
-class _ReceiptBackpressureError(Exception):
-    """Capacity-1 receipt queue 无法接收下一条结果。"""
-
-
 @dataclass(slots=True)
 class _ConnectionState:
     """单次 serve 调用的 task-shared 状态。"""
@@ -57,6 +53,7 @@ class _ConnectionState:
     subscription: GatewaySubscription | None = None
     subscription_ready: asyncio.Event = field(default_factory=asyncio.Event)
     receiver_done: asyncio.Event = field(default_factory=asyncio.Event)
+    receipt_capacity: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
 
 
 def _parse_frame(frame: str | bytes) -> _IncomingCommand:
@@ -135,24 +132,15 @@ class WebSocketAdapter:
                 frame = await receive()
                 if frame is None:
                     return
+                # 在命令改变 manager 状态前预留确认容量，直到唯一 writer 完成发送。
+                await state.receipt_capacity.acquire()
                 try:
                     command = _parse_frame(frame)
                 except (UnicodeDecodeError, ValidationError):
-                    self._offer_receipt(receipts, _invalid_command())
-                    await asyncio.sleep(0)
-                    continue
-                receipt = await self._route_command(command, state)
-                self._offer_receipt(receipts, receipt)
-                await asyncio.sleep(0)
-        except _ReceiptBackpressureError as exc:
-            logger.warning(
-                "websocket receipt queue 已满",
-                extra={
-                    "session_id": self._gateway.session_id,
-                    "adapter": type(self).__qualname__,
-                    "exception_type": type(exc).__qualname__,
-                },
-            )
+                    receipt = _invalid_command()
+                else:
+                    receipt = await self._route_command(command, state)
+                receipts.put_nowait(receipt)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -245,17 +233,6 @@ class WebSocketAdapter:
             scope_id=subscription.scope_id,
         )
 
-    @staticmethod
-    def _offer_receipt(
-        receipts: asyncio.Queue[CommandReceipt],
-        receipt: CommandReceipt,
-    ) -> None:
-        """无等待写入 capacity-1 queue；满时结束连接而非增加 writer。"""
-        try:
-            receipts.put_nowait(receipt)
-        except asyncio.QueueFull as exc:
-            raise _ReceiptBackpressureError from exc
-
     async def _send_loop(
         self,
         send: Callable[[str], Awaitable[None]],
@@ -288,6 +265,7 @@ class WebSocketAdapter:
                     receipt = receipt_task.result()
                     await send(receipt.model_dump_json())
                     receipts.task_done()
+                    state.receipt_capacity.release()
                     receipt_task = asyncio.create_task(receipts.get())
                     continue
                 if ready_task is not None and ready_task in completed:

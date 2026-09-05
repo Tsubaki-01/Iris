@@ -15,12 +15,11 @@ from pydantic import BaseModel
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
-from iris.harness import AgentRunner, SessionManager, SubmissionEvent
+from iris.harness import AgentRunner, SessionManager
 from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import (
     AgentRunRequest,
     LifecycleStore,
-    RunEvent,
     RunPhase,
     RunStopReason,
 )
@@ -42,10 +41,13 @@ from iris.streaming import (
     ResumeCommand,
     SSEAdapter,
     StreamingGateway,
+    SubmitAccepted,
+    SubmitCommand,
     SubscribeCommand,
     SubscriptionTerminal,
     SyncAccepted,
     SyncCommand,
+    WebSocketAdapter,
 )
 from iris.tools import (
     BaseTool,
@@ -346,6 +348,8 @@ def _build_system(
         runner,
         "session-system",
         submission_publisher=broker,
+        observation_mode="broker_only",
+        max_tracked_durable_runs=1,
     )
     gateway = StreamingGateway(
         runner=runner,
@@ -370,18 +374,6 @@ async def _take_until(
         if predicate(item):
             return items
     raise AssertionError("subscription 未在有限事件内到达预期终点")
-
-
-async def _take_manager_event(
-    stream: AsyncIterator[RunEvent | SubmissionEvent],
-    predicate: Callable[[RunEvent | SubmissionEvent], bool],
-) -> RunEvent | SubmissionEvent:
-    """从 manager 唯一 mixed stream 读取到指定事实。"""
-    for _ in range(256):
-        item = await asyncio.wait_for(anext(stream), timeout=1)
-        if predicate(item):
-            return item
-    raise AssertionError("manager stream 未在有限事件内到达预期事实")
 
 
 def _is_live_kind(kind: str) -> Callable[[GatewayStreamItem], bool]:
@@ -661,14 +653,16 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
         )
     )
     assert isinstance(command_result, ResumeAccepted)
-    assert command_result.result.run.stop_reason is RunStopReason.COMPLETED
+    assert command_result.receipt.run_id == receipt.run_id
+    completed_items = await _take_until(subscription, _is_live_kind("run.terminal"))
+    completed = runner.get_result(receipt.run_id)
+    assert completed is not None and completed.run.stop_reason is RunStopReason.COMPLETED
     assert tool.calls == ["x"]
     assert policy.checks == [
         ("write_secret", {"value": "x"}),
         ("write_secret", {"value": "x"}),
         ("write_secret", {"value": "x"}),
     ]
-    completed_items = await _take_until(subscription, _is_live_kind("run.terminal"))
     envelopes = _live_envelopes(partial_items + waiting_items + completed_items)
     ordered_kinds = [item.kind for item in envelopes]
     assert ordered_kinds.index("tool.preparing") < ordered_kinds.index("interaction.suspended")
@@ -792,9 +786,13 @@ async def test_transport_disconnect_keeps_run_active_and_cancel_command_stops_ne
     monkeypatch.setattr(litellm, "acompletion", backend)
     provider = _RecordingStreamingProvider()
     runner, manager, broker, gateway, _ = _build_system(tmp_path, provider)
-    manager_events = manager.events()
+    session_events = gateway.subscribe(
+        SubscribeCommand(request_id="observe-runs", scope="session", scope_id="session-system")
+    )
 
-    first = await manager.submit("保持运行")
+    first_accepted = await gateway.handle(SubmitCommand(request_id="first", input="保持运行"))
+    assert isinstance(first_accepted, SubmitAccepted)
+    first = first_accepted.receipt
     await asyncio.wait_for(disconnect_raw.waiting[0].wait(), timeout=1)
     subscription = gateway.subscribe(
         SubscribeCommand(
@@ -817,19 +815,14 @@ async def test_transport_disconnect_keeps_run_active_and_cancel_command_stops_ne
     assert subscription._closed
 
     disconnect_raw.gates[1].set()
-    await _take_manager_event(
-        manager_events,
-        lambda item: (
-            isinstance(item, RunEvent)
-            and item.run_id == first.run_id
-            and item.kind.value == "run.terminal"
-        ),
-    )
+    await _take_until(session_events, _is_live_kind("run.terminal"))
     first_result = runner.get_result(first.run_id)
     assert first_result is not None
     assert first_result.run.stop_reason is RunStopReason.COMPLETED
 
-    second = await manager.submit("显式取消")
+    second_accepted = await gateway.handle(SubmitCommand(request_id="second", input="显式取消"))
+    assert isinstance(second_accepted, SubmitAccepted)
+    second = second_accepted.receipt
     await asyncio.wait_for(cancel_raw.waiting[0].wait(), timeout=1)
     cancel_receipt = await gateway.handle(
         CancelCommand(request_id="cancel-run", reason="用户显式取消")
@@ -837,22 +830,105 @@ async def test_transport_disconnect_keeps_run_active_and_cancel_command_stops_ne
     assert isinstance(cancel_receipt, CancelAccepted)
     assert cancel_receipt.run.run_id == second.run_id
     await asyncio.wait_for(cancel_raw.cancelled_event.wait(), timeout=1)
-    await _take_manager_event(
-        manager_events,
-        lambda item: (
-            isinstance(item, RunEvent)
-            and item.run_id == second.run_id
-            and item.kind.value == "run.terminal"
-        ),
-    )
+    await _take_until(session_events, _is_live_kind("run.terminal"))
     second_result = runner.get_result(second.run_id)
     assert second_result is not None
     assert second_result.run.stop_reason is RunStopReason.CANCELLED
     assert second_result.run.cancellation_reason == "用户显式取消"
 
-    await manager_events.aclose()
+    await session_events.aclose()
     await manager.close()
     broker.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_websocket_resume_keeps_sync_steer_cancel_and_disconnect_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+) -> None:
+    """Resume 后 provider 暂停期间仍处理后续控制命令与断线。"""
+    tool_stream = _ControlledRawStream(_tool_chunks([("write-1", "write_secret", '{"value":"x"}')]))
+    resumed_stream = _ControlledRawStream(_text_chunks("恢复完成"), gated_indexes=(0,))
+    backend = _FakeChatBackend(
+        [tool_stream, resumed_stream, _ControlledRawStream(_text_chunks("补充完成"))]
+    )
+    monkeypatch.setattr(litellm, "acompletion", backend)
+    registry = ToolRegistry()
+    registry.register(_SensitiveWriteTool(tmp_path))
+    runner, manager, broker, gateway, _ = _build_system(
+        tmp_path, _RecordingStreamingProvider(), registry=registry
+    )
+    observation = gateway.subscribe(
+        SubscribeCommand(request_id="observe", scope="session", scope_id="session-system")
+    )
+    submitted = await manager.submit("写入值")
+    await _take_until(observation, _is_live_kind("interaction.suspended"))
+    waiting = runner.get_result(submitted.run_id)
+    assert waiting is not None and waiting.pending_interaction is not None
+    commands = [
+        SubscribeCommand(request_id="subscribe", scope="session", scope_id="session-system"),
+        ResumeCommand(
+            request_id="resume",
+            interaction_id=waiting.pending_interaction.interaction_id,
+            response=PermissionInteractionResponse(decision="approve"),
+        ),
+        SyncCommand(
+            request_id="sync",
+            cursors=(DurableRunCursor(run_id=submitted.run_id, after_sequence=0),),
+        ),
+        SubmitCommand(request_id="steer", input="补充要求", mode="steer"),
+    ]
+    if cancel:
+        commands.append(CancelCommand(request_id="cancel", reason="用户取消恢复中的运行"))
+    sent: list[dict[str, Any]] = []
+    receipts_sent = asyncio.Event()
+    command_count = len(commands)
+
+    async def receive() -> str | None:
+        if commands:
+            command = commands.pop(0)
+            if isinstance(command, SyncCommand):
+                await resumed_stream.waiting[0].wait()
+            return command.model_dump_json()
+        await receipts_sent.wait()
+        return None
+
+    async def send(value: str) -> None:
+        payload = json.loads(value)
+        if "request_id" in payload:
+            sent.append(payload)
+            if len(sent) == command_count:
+                receipts_sent.set()
+
+    try:
+        await asyncio.wait_for(WebSocketAdapter(gateway=gateway).serve(receive, send), timeout=2)
+        assert [item["event"] for item in sent] == [
+            "command.subscribe.accepted",
+            "command.resume.accepted",
+            "command.sync.accepted",
+            "command.submit.accepted",
+            *(["command.cancel.accepted"] if cancel else []),
+        ]
+        assert sent[1]["receipt"]["run_id"] == submitted.run_id
+        if not cancel:
+            active = runner.get_run(submitted.run_id)
+            assert active.phase is RunPhase.ACTIVE
+            assert active.cancellation_requested_at is None
+            assert not resumed_stream.cancelled
+            resumed_stream.gates[0].set()
+        await _take_until(observation, _is_live_kind("run.terminal"))
+        result = runner.get_result(submitted.run_id)
+        assert result is not None
+        assert result.run.stop_reason is (
+            RunStopReason.CANCELLED if cancel else RunStopReason.COMPLETED
+        )
+    finally:
+        resumed_stream.gates[0].set()
+        await observation.aclose()
+        await manager.close()
+        broker.close()
 
 
 @pytest.mark.asyncio
