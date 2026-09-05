@@ -80,7 +80,8 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
   returns a provider route; `to_llm_request_options()` returns only request-level fields. The active
-  provider path rejects `stream: true` and non-chat `api_style` at call time.
+  provider path rejects non-chat `api_style` at call time. Streaming is selected by host injection
+  of the runner's `live_publisher`; model configuration has no `stream` field.
 - `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`, and
   `human.ask`. The latter exposes model tool name `ask_question`.
 - `tools.python.functions` imports a callable `module:function` and registers it. `registrars`

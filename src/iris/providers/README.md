@@ -58,6 +58,10 @@ flowchart LR
 内置 Iris provider id 为 `openai`、`anthropic` 和 `deepseek`。自定义 provider 只有在已初始化
 `Config.providers` 且包含 `base_url` 时才进入注册表；只配置 API key 不会注册 provider。
 
+全局 `Config` 只提供 `api_key`、`provider_api_keys` 和 `providers`。Endpoint 使用
+`providers[name].base_url` 或 Agent `model.base_url`；timeout 使用 `model.timeout` 或
+显式 client 参数，日志通过 Python `logging` 配置。全局不再声明无效的 `base_url/timeout/debug`。
+
 API key 优先级：
 
 1. `create_provider_client(..., api_key=...)`；

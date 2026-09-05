@@ -117,9 +117,10 @@ model: openai/gpt-4o-mini
 - `provider`: provider 名称，例如 `openai`。
 - `name`: 模型名称，例如 `gpt-4o-mini`。
 - `base_url`: 可选自定义 endpoint。
-- `temperature`、`top_p`、`max_tokens`、`tool_choice`、`response_format`、`stream`、
+- `temperature`、`top_p`、`max_tokens`、`tool_choice`、`response_format`、
   `timeout`、`provider_options`、`metadata`: 可选请求级参数，会由 runtime 透传给
   `LLMRequest`。
+- Streaming 由 host 给 runner 注入 `live_publisher` 开启，模型配置不声明 `stream`。
 - `api_style`: 可选 API 风格字段，会合并进 `LLMRequest.provider_options`；当前
   runtime/provider active path 仅支持 LiteLLM Chat Completion，`api_style: responses`
   会在调用阶段被拒绝。

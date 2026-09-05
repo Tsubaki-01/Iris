@@ -51,6 +51,9 @@ no runtime sink. The publisher is a best-effort observation plane. An ordinary e
 a payload-free warning and cannot roll back a durable mutation, cancel a run, or change its
 `RunResult`.
 
+Publisher injection is the sole runtime transport choice: complete without a publisher, streaming
+with one. `ModelConfig` has no `stream` field; direct provider calls still use `LLMRequest.stream`.
+
 `AgentRunner.from_config()` and `from_config_path()` pass the publisher only to the runner;
 `RuntimeFactory` owns neither the broker nor fan-out. A host can refill durable facts from the
 exact runner/store through `get_session()`, `get_run()`, `get_result()`, `list_tool_calls()`, and

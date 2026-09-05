@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisRunPersistenceError
+from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -294,6 +295,28 @@ def _runtime(
         tool_view=resolved_registry.view(),
         workspace_root=tmp_path,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_stream", [False, True])
+async def test_absent_sink_forces_complete_request_transport(
+    tmp_path: Path, request_stream: bool
+) -> None:
+    """host 未传 sink 时，run request options 不能开启 provider streaming。"""
+    provider = FakeProvider([_text_response("完成")])
+    activation = start_activation(
+        options=RuntimeExecutionOptions(request_options={"stream": request_stream})
+    )
+
+    result = await _runtime(provider, tmp_path).execute(
+        activation,
+        commits=FakeRuntimeCommitPort(activation),
+        cancellation=MutableCancellationSignal(),
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    [request] = provider.requests
+    assert request.stream is False
 
 
 @pytest.mark.asyncio

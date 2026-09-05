@@ -54,7 +54,8 @@ engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
 ## Optional live streaming
 
 `stream_sink=None` preserves the complete-only path exactly: runtime continues to call
-`RuntimeProvider.complete()` with `stream=False`. With a synchronous `RuntimeEventSink`, runtime
+`RuntimeProvider.complete()` with `stream=False`, overriding `request_options`. With a synchronous
+`RuntimeEventSink`, runtime
 uses the independent structural `StreamingRuntimeProvider` capability to detect `stream()`.
 Missing capability fails with `PROVIDER_STREAM_ERROR/provider`; runtime neither falls back to
 `complete()` nor fabricates tokens.
