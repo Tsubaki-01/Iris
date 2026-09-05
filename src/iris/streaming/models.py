@@ -27,7 +27,7 @@ from pydantic import (
     model_validator,
 )
 
-from ..harness.session_manager import SubmissionMode, SubmitReceipt
+from ..harness.session_manager import ResumeReceipt, SubmissionMode, SubmitReceipt
 from ..hitl import HumanInteractionResponse
 from ..lifecycle import (
     AgentRunOptions,
@@ -259,11 +259,11 @@ class SubmitAccepted(_FrozenWireModel):
 
 
 class ResumeAccepted(_FrozenWireModel):
-    """Resume command result receipt。"""
+    """Resume command admission receipt；运行结果由 durable observation 获取。"""
 
     event: Literal["command.resume.accepted"] = "command.resume.accepted"
     request_id: _NonEmptyString
-    result: RunResult
+    receipt: ResumeReceipt
 
 
 class CancelAccepted(_FrozenWireModel):

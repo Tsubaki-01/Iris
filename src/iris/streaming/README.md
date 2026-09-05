@@ -1,3 +1,5 @@
+[English](README.en.md)
+
 # `iris.streaming`
 
 `iris.streaming` 提供 host-embedded 的 live observation plane：进程内 broker 负责有界 replay、
@@ -7,6 +9,8 @@
 本包不创建 server、route、认证、授权、TLS、CORS、tenant registry 或 artifact download URL。
 Host 必须在每次连接和命令进入 Iris 前完成这些工作。Cursor 只表示 observation 位置，不授予
 任何权限。
+
+随 Iris 一同安装，要求 Python 3.12 或更高版本，不需要额外的 transport 依赖。
 
 ## Host 组合
 
@@ -19,6 +23,7 @@ from iris.streaming import LiveStreamBroker, StreamingGateway
 broker = LiveStreamBroker(
     replay_capacity_per_scope=256,
     subscription_capacity=64,
+    max_replay_scopes=256,
 )
 runner = AgentRunner.from_config_path(
     "agent.yaml",
@@ -28,6 +33,7 @@ manager = SessionManager(
     runner,
     "default",
     submission_publisher=broker,
+    observation_mode="broker_only",
 )
 gateway = StreamingGateway(
     runner=runner,
@@ -38,8 +44,19 @@ gateway = StreamingGateway(
 )
 ```
 
+仅通过 gateway/broker 观察时使用 `observation_mode="broker_only"`：manager 要求提供
+`submission_publisher`，不创建 mixed event buffer，也不允许调用 `events()`。完成的 run 不会
+因无人消费 mixed stream 而占用下一轮 admission 容量。需要本地 mixed stream 的 host 可使用默认
+`observation_mode="mixed"`，并持续消费 `manager.events()`。
+
 `LiveStreamBroker` 必须在同一个 event loop/thread 中使用。`replay_capacity_per_scope` 限制每个
-run/session ring，`subscription_capacity` 限制单 consumer future-live backlog。Partial 可以
+run/session ring；`max_replay_scopes`（默认 256）限制全局 ring 数，publish 或 subscribe 会更新
+scope 的 LRU 顺序。淘汰 ring 不关闭活跃订阅，其 published sequence 会保留到订阅关闭且无 ring；
+其余旧 scope 的 ring 和 counter 一起回收。因此 counter 数不超过 replay scope 数加活跃 scope 数。
+重建已回收的 scope 时序号会跳过旧值，旧 cursor 明确得到 `unknown_cursor` 或 `cursor_expired`
+gap；不要假设新 scope 从 1 开始。`close()` 清理 replay/counter 并给活跃订阅发送终态。
+
+`subscription_capacity` 限制单 consumer future-live backlog。Partial 可以
 合并或丢弃；critical event 无法入队时，subscription 产生 `ReplayGap` 和
 `SubscriptionTerminal`，客户端应重连并执行 durable sync。slow-consumer 转换只从 active
 subscription 的 offer 路径进入，并只产生一组 gap/terminal。
@@ -80,12 +97,15 @@ receipt = await gateway.handle(
 `handle()` 支持：
 
 - `SubmitCommand` → `SessionManager.submit()`；
-- `ResumeCommand` → `SessionManager.resume()`；
+- `ResumeCommand` → `SessionManager.admit_resume()`，返回 `ResumeAccepted.receipt`
+  中的 `run_id` 和 `interaction_id`，不会等待恢复后的模型或工具执行结束；
 - `CancelCommand` → `SessionManager.interrupt()`；
 - `SyncCommand` → read-only durable sync。
 
 `request_id` 只用于关联 receipt，不提供幂等或去重。预期 `IrisError` 会变成稳定的
 `CommandRejected`；unexpected error 只返回通用拒绝并记录不含 raw frame/payload 的 warning。
+Resume 的最终结果通过 live terminal/interaction 事件后执行 durable sync 获取。直接调用 SDK 的
+`SessionManager.resume()` 仍等待完整 `RunResult`。
 
 ## Disclosure policy
 
@@ -128,8 +148,10 @@ boundary validation，失败应由 host 映射为无敏感细节的请求错误�
 JSON typed command；解析失败返回 `INVALID_COMMAND`。首个有效命令只能是 `subscribe` 或
 `sync`，sync-first 后仍需 subscribe 才能执行 mutation command。
 
-连接内只有 sender task 调用 `send()`。Receive task 只顺序处理命令并把 receipt 写入
-capacity-1 queue；queue 饱和时连接按 backpressure error path 清理，不创建第二个 writer。
+连接内只有 sender task 调用 `send()`。Receive task 在路由命令前预留一个 receipt 容量，随后
+把确认写入 capacity-1 queue；容量直到 sender 完成发送才释放。慢 sender 会暂停后续命令的
+admission，因此流水发送多个命令不会先改变 manager 状态再因 queue 已满丢弃确认。
+Resume 只等待 admission，后续 sync、steer、cancel 或 disconnect 可在运行完成前继续处理。
 第二个 subscribe 会被拒绝。`receive() -> None`、receive/send exception 或 task cancellation 都会
 drain/cancel child tasks 并关闭 subscription。
 
@@ -143,10 +165,21 @@ Broker epoch、live cursor、subscriptions 和 partial 都是 process-local 状�
 已知的 per-run `DurableRunCursor` 请求 sync。Durable authority 始终是 runner/store，live replay
 不能替代 durable event/result/tool snapshot。
 
-## 验证
+## 开发与验证
 
-```bash
-uv run pytest tests/streaming
+`models.py` 定义公开 wire 模型，`projection.py` 把 runner/runtime facts 投影为 live payload；
+`broker.py` 管理顺序、回放与订阅，`gateway.py` 组合命令和 durable sync，`sse.py` /
+`websocket.py` 负责传输 framing。包级公开入口由 `__init__.py` 导出。
+
+修改回放/容量时补 `tests/streaming/test_broker.py`，修改命令契约时同步
+`test_gateway.py` 和 `test_models.py`，修改连接生命周期时补 `test_transports.py` 与
+`test_system.py`。系统测试使用真实 runner/manager/provider adapter 与脚本化模型流，无外部调用；
+broker-only 场景以 `max_tracked_durable_runs=1` 验证连续运行接纳。
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD/tmp/uv-cache"
+uv sync --dev
+uv run pytest tests/streaming -p no:cacheprovider --basetemp="$PWD/tmp/pytest-streaming"
 uv run ruff check src/iris/streaming tests/streaming
 uv run mypy src/iris/streaming
 ```

@@ -224,44 +224,67 @@ async def test_websocket_sync_first_then_subscribe_and_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_websocket_uses_one_writer_and_closes_on_receipt_backpressure() -> None:
+async def test_websocket_reserves_receipt_capacity_before_pipelined_mutations() -> None:
     subscription = FakeSubscription()
     gateway = FakeGateway(subscription)
     release = asyncio.Event()
     send_started = asyncio.Event()
+    second_received = asyncio.Event()
+    all_sent = asyncio.Event()
+    sent: list[str] = []
     concurrent = 0
     max_concurrent = 0
 
     async def slow_send(value: str) -> None:
         nonlocal concurrent, max_concurrent
-        del value
         concurrent += 1
         max_concurrent = max(max_concurrent, concurrent)
         send_started.set()
         await release.wait()
+        await asyncio.sleep(0)
+        sent.append(json.loads(value)["request_id"])
+        if len(sent) == 4:
+            all_sent.set()
         concurrent -= 1
+
+    frames = deque(
+        [
+            SubscribeCommand(
+                request_id="subscribe-1", scope="session", scope_id="session-1"
+            ).model_dump_json(),
+            *[
+                SubmitCommand(request_id=f"submit-{index}", input="继续").model_dump_json()
+                for index in range(3)
+            ],
+        ]
+    )
+
+    async def receive() -> str | None:
+        if frames:
+            frame = frames.popleft()
+            if len(frames) == 2:
+                second_received.set()
+            return frame
+        await all_sent.wait()
+        return None
 
     task = asyncio.create_task(
         WebSocketAdapter(gateway=cast(StreamingGateway, gateway)).serve(
-            _receiver(
-                SubscribeCommand(
-                    request_id="subscribe-1",
-                    scope="session",
-                    scope_id="session-1",
-                ).model_dump_json(),
-                SyncCommand(request_id="sync-1").model_dump_json(),
-                SyncCommand(request_id="sync-2").model_dump_json(),
-                SyncCommand(request_id="sync-3").model_dump_json(),
-                None,
-            ),
+            receive,
             slow_send,
         )
     )
     await asyncio.wait_for(send_started.wait(), timeout=1)
-    await asyncio.sleep(0)
-    release.set()
-    await asyncio.wait_for(task, timeout=1)
+    await asyncio.wait_for(second_received.wait(), timeout=1)
+    try:
+        await asyncio.sleep(0)
+        assert gateway.commands == []
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
 
+    assert sent == ["subscribe-1", "submit-0", "submit-1", "submit-2"]
+    assert [command.request_id for command in gateway.commands] == sent[1:]
     assert max_concurrent == 1
     assert subscription.closed
 

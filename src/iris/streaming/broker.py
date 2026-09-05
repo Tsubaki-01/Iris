@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -269,23 +269,28 @@ class LiveStreamBroker(LivePublisher):
         *,
         replay_capacity_per_scope: int,
         subscription_capacity: int,
+        max_replay_scopes: int = 256,
     ) -> None:
         """创建显式有界的进程内 broker。
 
         Args:
             replay_capacity_per_scope (int): 每个 run/session ring 的 envelope 上限。
             subscription_capacity (int): 每个 consumer 的 pending envelope 上限。
+            max_replay_scopes (int): 全局保留 replay ring 的 scope 上限，默认 256。
 
         Raises:
             ValueError: 任一 capacity 不是有限正整数。
         """
         _require_positive_capacity(replay_capacity_per_scope, "replay_capacity_per_scope")
         _require_positive_capacity(subscription_capacity, "subscription_capacity")
+        _require_positive_capacity(max_replay_scopes, "max_replay_scopes")
         self._replay_capacity = replay_capacity_per_scope
         self._subscription_capacity = subscription_capacity
+        self._max_replay_scopes = max_replay_scopes
         self._epoch = uuid.uuid4().hex
         self._sequences: dict[_ScopeKey, int] = {}
-        self._rings: dict[_ScopeKey, deque[_StoredEnvelope]] = {}
+        self._rings: OrderedDict[_ScopeKey, deque[_StoredEnvelope]] = OrderedDict()
+        self._sequence_floor = 0
         self._subscriptions: set[LiveSubscription] = set()
         self._closed = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -312,6 +317,8 @@ class LiveStreamBroker(LivePublisher):
         if self._closed:
             raise IrisRunStateError("LiveStreamBroker 已关闭")
         key = (request.scope, request.scope_id)
+        if key in self._rings:
+            self._rings.move_to_end(key)
         high_water = self._sequences.get(key, 0)
         cursor = request.cursor
         initial_sequence = (
@@ -348,12 +355,14 @@ class LiveStreamBroker(LivePublisher):
         self._closed = True
         subscriptions = tuple(self._subscriptions)
         self._subscriptions.clear()
+        self._rings.clear()
+        self._sequences.clear()
         for subscription in subscriptions:
             subscription._broker_closed()
 
     def _publish_projected(self, projected: _ProjectedLiveFact) -> None:
         key = (projected.scope, projected.scope_id)
-        sequence = self._sequences.get(key, 0) + 1
+        sequence = self._sequences.get(key, self._sequence_floor) + 1
         self._sequences[key] = sequence
         envelope = LiveEnvelope.model_construct(
             stream_epoch=self._epoch,
@@ -377,6 +386,10 @@ class LiveStreamBroker(LivePublisher):
             deque(maxlen=self._replay_capacity),
         )
         ring.append(stored)
+        self._rings.move_to_end(key)
+        if len(self._rings) > self._max_replay_scopes:
+            evicted_key, _ = self._rings.popitem(last=False)
+            self._release_sequence(evicted_key)
         for subscription in tuple(self._subscriptions):
             if (
                 subscription._scope == projected.scope
@@ -394,7 +407,7 @@ class LiveStreamBroker(LivePublisher):
         if cursor.stream_epoch != self._epoch:
             subscription._enqueue_gap("epoch_changed", cursor)
             return
-        if key not in self._sequences or cursor.after_live_sequence > high_water:
+        if key not in self._rings or cursor.after_live_sequence > high_water:
             subscription._enqueue_gap("unknown_cursor", cursor)
             return
         ring = self._rings[key]
@@ -408,6 +421,18 @@ class LiveStreamBroker(LivePublisher):
 
     def _detach(self, subscription: LiveSubscription) -> None:
         self._subscriptions.discard(subscription)
+        key = (subscription._scope, subscription._scope_id)
+        if key not in self._rings:
+            self._release_sequence(key)
+
+    def _release_sequence(self, key: _ScopeKey) -> None:
+        """只回收无活跃订阅的序号，并为重建 scope 留出可检测的缺口。"""
+        if any((item._scope, item._scope_id) == key for item in self._subscriptions):
+            return
+        sequence = self._sequences.pop(key, None)
+        if sequence is not None:
+            # 无需保留每个旧 scope 的 tombstone，也不会在同一 epoch 重用其序号。
+            self._sequence_floor = max(self._sequence_floor, sequence + 1)
 
     def _ensure_loop(self) -> None:
         try:

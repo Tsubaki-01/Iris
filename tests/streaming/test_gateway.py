@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import IrisRunConflictError, IrisRunNotFoundError, IrisRunStateError
-from iris.harness import AgentRunner, SessionManager, SubmitReceipt
+from iris.harness import AgentRunner, ResumeReceipt, SessionManager, SubmitReceipt
 from iris.lifecycle import AgentRunRequest, RunPhase
 from iris.message import (
     ModelBlockDelta,
@@ -232,9 +232,9 @@ async def test_handle_routes_commands_and_does_not_deduplicate_request_id(
             state="delivered",
         )
 
-    async def resume(*, interaction_id: str, response: object):
+    async def admit_resume(*, interaction_id: str, response: object) -> ResumeReceipt:
         calls.append(("resume", (interaction_id, response)))
-        return result
+        return ResumeReceipt(run_id="run-own", interaction_id=interaction_id)
 
     async def interrupt(*, reason: str | None = None):
         calls.append(("cancel", reason))
@@ -244,7 +244,7 @@ async def test_handle_routes_commands_and_does_not_deduplicate_request_id(
         raise AssertionError("gateway 不得消费 manager.events()")
 
     monkeypatch.setattr(manager, "submit", submit)
-    monkeypatch.setattr(manager, "resume", resume)
+    monkeypatch.setattr(manager, "admit_resume", admit_resume)
     monkeypatch.setattr(manager, "interrupt", interrupt)
     monkeypatch.setattr(manager, "events", forbidden_events)
     submit_command = SubmitCommand(request_id="same-id", input="hello")
@@ -270,6 +270,7 @@ async def test_handle_routes_commands_and_does_not_deduplicate_request_id(
     assert isinstance(second, SubmitAccepted)
     assert [name for name, _ in calls].count("submit") == 2
     assert isinstance(resumed, ResumeAccepted)
+    assert resumed.receipt == ResumeReceipt(run_id="run-own", interaction_id="interaction-1")
     assert isinstance(cancelled, CancelAccepted)
     assert isinstance(synced, SyncAccepted)
     await manager.close()
