@@ -11,7 +11,7 @@ Provider API key 使用 `IRIS_PROVIDER_API_KEYS__{PROVIDER}` 这类 nested env�
 示例:
     import iris
 
-    iris.init_config(api_key="sk-xxx", debug=True)
+    iris.init_config(api_key="sk-xxx")
     # iris.init_config(env_file=".env")  # 可选加载 dotenv
     cfg = iris.get_config()
 """
@@ -61,7 +61,7 @@ class Config(BaseSettings):
     避免运行时被意外修改。
 
     Example:
-        cfg = Config(api_key="sk-xxx", timeout=15)
+        cfg = Config(api_key="sk-xxx")
     """
 
     model_config = SettingsConfigDict(
@@ -86,14 +86,6 @@ class Config(BaseSettings):
         default_factory=dict,
         description="按 provider 名称声明的非 secret 运行配置",
     )
-
-    # --- 可选字段 ---
-    base_url: str = Field(
-        default="https://api.example.com",
-        description="API base URL",
-    )
-    timeout: int = Field(default=30, ge=1, description="Request timeout (s)")
-    debug: bool = Field(default=False, description="Debug mode")
 
     # --- 字段检验 ---
     def model_post_init(self, __context: Any) -> None:
@@ -140,7 +132,7 @@ def init_config(*, env_file: str | None = None, **kwargs: Any) -> Config:
     Example::
 
         import iris
-        iris.init_config(api_key="sk-xxx", debug=True)
+        iris.init_config(api_key="sk-xxx")
     """
     global _config
     if _config is not None:

@@ -36,7 +36,6 @@ class ModelConfig(BaseModel):
         max_tokens (int | None): 最大输出 token 数。
         tool_choice (str | dict[str, Any] | None): 工具选择策略。
         response_format (dict[str, Any] | None): 结构化输出配置。
-        stream (bool): 是否请求流式响应。
         timeout (float | None): 单次请求超时时间，单位秒。
         provider_options (dict[str, Any]): 少量 provider 专属选项。
         metadata (dict[str, Any]): 请求级元数据。
@@ -51,7 +50,6 @@ class ModelConfig(BaseModel):
     max_tokens: int | None = None
     tool_choice: str | dict[str, Any] | None = None
     response_format: dict[str, Any] | None = None
-    stream: bool = False
     timeout: float | None = None
     provider_options: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)

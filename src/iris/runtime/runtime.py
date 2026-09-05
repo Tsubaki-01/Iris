@@ -968,7 +968,9 @@ class AgentRuntime:
     ) -> LLMResponse | RuntimeActivationResult:
         """执行 complete 或 direct-pull stream，并只返回完整响应。"""
         if stream_sink is None:
-            return await self.environment.provider.complete(request)
+            return await self.environment.provider.complete(
+                request.model_copy(update={"stream": False})
+            )
 
         provider = streaming_provider_for(self.environment.provider)
         if provider is None:

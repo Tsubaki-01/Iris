@@ -48,6 +48,9 @@ Host 可把同一个 `LivePublisher`（通常是 `LiveStreamBroker`）通过 `li
 观察面：普通异常只记录不含 payload 的 warning，不会回滚 durable mutation、取消 run 或改变
 `RunResult`。
 
+是否注入 publisher 是 runtime transport 的唯一选择：未注入时 complete，注入时 streaming。
+`ModelConfig` 不包含 `stream`；低层直接调用 provider 时仍由 `LLMRequest.stream` 指定接口。
+
 `AgentRunner.from_config()` 与 `from_config_path()` 只把 publisher 交给 runner，
 `RuntimeFactory` 不拥有 broker 或 fan-out。Host 可通过 `get_session()`、`get_run()`、
 `get_result()`、`list_tool_calls()` 和 `list_events()` 从 exact runner/store 补读 durable facts，

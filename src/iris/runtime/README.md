@@ -59,7 +59,8 @@ cursor 位置只有：
 ## 可选 live streaming
 
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
-`RuntimeProvider.complete()`，请求的 `stream` 为 `False`。传入同步 `RuntimeEventSink` 时，
+`RuntimeProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。
+传入同步 `RuntimeEventSink` 时，
 runtime 通过独立的 `StreamingRuntimeProvider` structural capability 检测 `stream()`；capability
 缺失会以 `PROVIDER_STREAM_ERROR/provider` 失败，不回退到 `complete()`，也不伪造 token。
 

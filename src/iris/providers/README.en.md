@@ -51,6 +51,11 @@ Built-in Iris provider IDs are `openai`, `anthropic`, and `deepseek`. A custom p
 registry only when initialized `Config.providers` contains its `base_url`; an API key alone does not
 register it.
 
+Global `Config` contains only `api_key`, `provider_api_keys`, and `providers`. Set the endpoint via
+`providers[name].base_url` or Agent `model.base_url`; set timeout via `model.timeout` or an explicit
+client argument, and configure logs through Python `logging`. Global `base_url/timeout/debug`
+fields are no longer declared.
+
 API-key precedence is explicit argument, `Config.provider_api_keys[provider]`, then generic
 `Config.api_key`. The factory never reads environment variables or dotenv files directly; call
 `iris.init_config()` first.
