@@ -79,6 +79,7 @@ from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._serialization import jsonable as _jsonable
 from ._terminal_closure import build_terminal_tool_closure
+from ._tool_results import is_preflight_result
 
 
 class _ActiveCommand(Protocol):
@@ -473,7 +474,7 @@ class InMemoryLifecycleStore:
                 )
             if (
                 tool_call.phase is ToolCallPhase.PREPARED
-                and not self._is_preflight_result(command.result)
+                and not is_preflight_result(command.result)
                 and not self._is_interaction_result(tool_call, command.result)
             ):
                 raise IrisRunStateError("可能包含副作用的工具结果必须先 claim")
@@ -1475,17 +1476,6 @@ class InMemoryLifecycleStore:
             RunStopReason.CANCELLED: ActivationOutcome.CANCELLED,
             RunStopReason.OUTCOME_UNKNOWN: ActivationOutcome.OUTCOME_UNKNOWN,
         }.get(stop_reason, ActivationOutcome.FAILED)
-
-    @staticmethod
-    def _is_preflight_result(result: ToolResult) -> bool:
-        if not result.is_error or result.error is None:
-            return False
-        return result.error.code in {
-            "NOT_FOUND",
-            "PERMISSION_ERROR",
-            "TOOL_NOT_ALLOWED",
-            "VALIDATION_ERROR",
-        }
 
     def _is_interaction_result(
         self,

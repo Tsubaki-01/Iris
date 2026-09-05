@@ -1191,7 +1191,7 @@ async def test_execute_denied_reservation_skips_provider(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_execute_suspends_before_model_step_commit(tmp_path: Path) -> None:
+async def test_execute_commits_model_step_before_suspending_current_gate(tmp_path: Path) -> None:
     def write(value: str) -> str:
         return value
 
@@ -1225,9 +1225,10 @@ async def test_execute_suspends_before_model_step_commit(tmp_path: Path) -> None
     assert result.outcome is RuntimeActivationOutcome.SUSPENDED
     assert result.suspension is not None
     assert result.cursor.position == "tool_batch"
-    assert commits.model_commits == []
+    assert len(commits.model_commits) == 1
     assert len(commits.suspensions) == 1
-    assert "suspend" in commits.events
+    assert commits.events.index("commit_model_step") < commits.events.index("suspend")
+    assert commits.suspensions[0].message_delta == ()
     assert "claim_tool_call" not in commits.events
     assert steering.events == []
 
@@ -1462,9 +1463,10 @@ async def test_execute_question_after_ordinary_prefix_commits_answer(
         commits=commits,
         cancellation=MutableCancellationSignal(),
     )
-    assert effects == []
-    assert commits.claims == {}
-    assert commits.tool_commits == []
+    assert effects == ["echo"]
+    assert len(commits.claims) == 1
+    assert len(commits.tool_commits) == 1
+    assert waiting.cursor.next_tool_index == 1
     resumed = resume_activation(
         waiting.cursor,
         interaction_projection=_interaction_result(waiting, answer="继续"),
@@ -1543,7 +1545,7 @@ async def test_execute_rejects_mismatched_interaction_projection_before_effect(
             cancellation=MutableCancellationSignal(),
         )
 
-    assert effects == []
+    assert effects == ["echo"]
 
 
 @pytest.mark.asyncio

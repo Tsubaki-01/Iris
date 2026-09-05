@@ -113,6 +113,10 @@ commits first, the store rejects a new claim without appending a claim event. If
 first, that call can only commit a proven result or be closed atomically with every other unresolved
 claim as outcome unknown during terminal settlement or recovery; it is never replayed.
 
+Preflight failures and `CIRCUIT_OPEN` short-circuit results can commit directly from `PREPARED`
+without a claim event. Both stores use the same classification in `_tool_results.py`; actual tool
+execution still requires a claim first.
+
 Every terminal mutation closes tool history that is still `PREPARED` or `CLAIMED` in the same
 aggregate transaction. A `CLAIMED` fact becomes `OUTCOME_UNKNOWN` and emits the existing
 `TOOL_CALL_OUTCOME_UNKNOWN` event. A `PREPARED` fact remains unchanged and emits no outcome event.

@@ -98,6 +98,9 @@ step、ordinal、call ID、fingerprint 和 version。durable cancellation 先提
 claim 且不追加 claim event；claim 先提交时，该调用只能提交明确 result，或在 terminal/
 recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcome unknown，绝不重放。
 
+effect 前的预检失败与 `CIRCUIT_OPEN` 熔断结果允许直接从 `PREPARED` 提交，不产生 claim
+event；两个 store 使用 `_tool_results.py` 的同一分类规则。真实工具执行仍必须先 claim。
+
 任何 terminal mutation 都在同一 aggregate transaction 内闭合仍为 `PREPARED` 或 `CLAIMED` 的
 tool history。`CLAIMED` fact 转为 `OUTCOME_UNKNOWN`，并追加既有的
 `TOOL_CALL_OUTCOME_UNKNOWN` event；`PREPARED` fact 保持不变且不追加 outcome event。两者都会向

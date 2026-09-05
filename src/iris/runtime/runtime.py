@@ -132,7 +132,6 @@ class AgentRuntime:
             cursor.read_state,
         )
         interaction_projection = activation.interaction_projection
-        projection_validated = False
         plan: ToolBatchPlan | None = None
 
         while True:
@@ -172,7 +171,6 @@ class AgentRuntime:
                     return model_outcome
                 cursor = model_outcome.cursor
                 plan = model_outcome.plan
-                projection_validated = False
                 continue
 
             # --- 4. 预检工具批次 ---
@@ -196,17 +194,25 @@ class AgentRuntime:
                     tools_enabled=activation.options.include_tools,
                     cancellation=cancellation,
                 )
-            if not projection_validated:
+            if interaction_projection is not None:
+                prepared_subject = plan.calls[cursor.next_tool_index]
                 _validate_interaction_projection(
                     interaction_projection,
-                    cursor,
-                    plan.calls,
+                    build_runtime_tool_call(
+                        activation=activation,
+                        cursor=cursor,
+                        prepared=prepared_subject,
+                        workspace_root=self.environment.workspace_root,
+                    ),
+                    prepared_subject.human_request,
                 )
-                projection_validated = True
 
             # --- 5. 执行安全并发窗口 ---
             # RETURN_TO_MODEL 仅并发连续安全调用，结果仍按模型原始顺序提交。
-            if activation.options.tool_error_policy is ToolErrorPolicy.RETURN_TO_MODEL:
+            if (
+                interaction_projection is None
+                and activation.options.tool_error_policy is ToolErrorPolicy.RETURN_TO_MODEL
+            ):
                 window = _parallel_tool_window(
                     start=cursor.next_tool_index,
                     calls=plan.calls,
@@ -232,21 +238,21 @@ class AgentRuntime:
             prepared = plan.calls[cursor.next_tool_index]
             approved_projection: RuntimeApprovedToolCall | None = None
             projected_result: ToolResult | None = None
-            if prepared.human_request is not None:
-                if isinstance(interaction_projection, ToolResult):
-                    projected_result = interaction_projection
-                    interaction_projection = None
-                elif isinstance(interaction_projection, RuntimeApprovedToolCall):
-                    approved_projection = interaction_projection
-                    interaction_projection = None
-                else:
-                    return self._suspend_existing_batch(
-                        activation=activation,
-                        cursor=cursor,
-                        plan=plan.calls,
-                        prepared=prepared,
-                        commits=commits,
-                    )
+            # projection 已绑定当前 durable subject；刷新后的 ALLOW/DENY 不再产生 gate。
+            if isinstance(interaction_projection, ToolResult):
+                projected_result = interaction_projection
+                interaction_projection = None
+            elif isinstance(interaction_projection, RuntimeApprovedToolCall):
+                approved_projection = interaction_projection
+                interaction_projection = None
+            elif prepared.human_request is not None:
+                return self._suspend_existing_batch(
+                    activation=activation,
+                    cursor=cursor,
+                    plan=plan.calls,
+                    prepared=prepared,
+                    commits=commits,
+                )
 
             # --- 7. 取得当前工具结果 ---
             # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
@@ -915,33 +921,6 @@ class AgentRuntime:
             )
             for index, prepared in enumerate(plan.calls, start=1)
         )
-        gate = plan.first_human_gate
-        if gate is not None and gate.human_request is not None:
-            suspended = commits.suspend(
-                RuntimeSuspension(
-                    cursor_before=cursor,
-                    message_delta=message_delta,
-                    assistant_message=assistant,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    total_tokens=response.total_tokens,
-                    prepared_tool_calls=prepared_facts,
-                    cursor=cursor_after,
-                    interaction_request=gate.human_request,
-                )
-            )
-            _validate_suspension_projection(
-                activation=activation,
-                cursor=cursor_after,
-                interaction_request=gate.human_request,
-                suspended=suspended,
-            )
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.SUSPENDED,
-                cursor=suspended.cursor,
-                assistant_message=assistant,
-                suspension=suspended.interaction,
-            )
         committed = commits.commit_model_step(
             RuntimeModelStepCommit(
                 cursor_before=cursor,
@@ -1155,40 +1134,27 @@ def _settle_steering_input(
 
 
 def _validate_interaction_projection(
-    projection: ToolResult | RuntimeApprovedToolCall | None,
-    cursor: RuntimeCursor,
-    plan: Sequence[PreparedToolCall],
+    projection: ToolResult | RuntimeApprovedToolCall,
+    subject: RuntimeToolCall,
+    request: HumanInteractionRequest | None,
 ) -> None:
-    """在任何批次 effect 前把 response projection 绑定到第一处未提交 gate。"""
-    if projection is None:
-        return
-    gate = next(
-        (
-            prepared
-            for prepared in plan[cursor.next_tool_index :]
-            if prepared.human_request is not None
-        ),
-        None,
-    )
-    if gate is None or gate.human_request is None:
-        raise IrisRunConflictError("interaction projection 没有对应的 pending gate")
-    snapshot = gate.human_request.tool_call
+    """把 response projection 绑定到 durable cursor 当前调用，允许动态裁决不再需要 gate。"""
     if isinstance(projection, RuntimeApprovedToolCall):
-        if not isinstance(gate.human_request.prompt, PermissionPrompt):
+        if request is not None and not isinstance(request.prompt, PermissionPrompt):
             raise IrisRunConflictError("interaction projection 类型与 question gate 不匹配")
         if (
-            projection.tool_call_id != snapshot.tool_call_id
-            or projection.tool_name != snapshot.tool_name
-            or projection.fingerprint != snapshot.fingerprint
+            projection.tool_call_id != subject.tool_call_id
+            or projection.tool_name != subject.tool_name
+            or projection.fingerprint != subject.fingerprint
         ):
             raise IrisRunConflictError("interaction projection 与 pending gate 不匹配")
         return
     if (
-        projection.tool_use_id != snapshot.tool_call_id
-        or projection.tool_name != snapshot.tool_name
+        projection.tool_use_id != subject.tool_call_id
+        or projection.tool_name != subject.tool_name
     ):
         raise IrisRunConflictError("interaction projection 与 pending gate 不匹配")
-    if isinstance(gate.human_request.prompt, QuestionPrompt):
+    if request is not None and isinstance(request.prompt, QuestionPrompt):
         if projection.is_error:
             raise IrisRunConflictError("question interaction projection 必须是回答结果")
         return
