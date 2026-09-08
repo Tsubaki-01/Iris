@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,6 +15,8 @@ from iris.message import (
     ModelResponseCompleted,
     ModelResponseFailed,
     Msg,
+    TextBlock,
+    ToolUseBlock,
 )
 from iris.providers import ProviderClient
 
@@ -186,6 +189,15 @@ async def test_provider_client_stream_aggregates_split_tool_call_only_at_complet
 ) -> None:
     import iris.providers.client as provider_client
 
+    parsed_arguments: list[str] = []
+    original_loads = json.loads
+
+    def count_argument_parses(value: str, **kwargs: Any) -> Any:
+        if value == '{"query":"Iris"}':
+            parsed_arguments.append(value)
+        return original_loads(value, **kwargs)
+
+    monkeypatch.setattr(json, "loads", count_argument_parses)
     raw_stream = _RawStream(
         _chunk(
             delta={
@@ -237,6 +249,70 @@ async def test_provider_client_stream_aggregates_split_tool_call_only_at_complet
     assert tool_call.id == "call-1"
     assert tool_call.name == "lookup"
     assert tool_call.input == {"query": "Iris"}
+    assert parsed_arguments == ['{"query":"Iris"}']
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_preserves_response_fields_and_tool_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """交错块按现有响应契约生成文本、首见顺序的工具及独立 reasoning。"""
+    import iris.providers.client as provider_client
+
+    raw_stream = _RawStream(
+        _chunk(
+            delta={
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "second-index",
+                        "function": {"name": "lookup", "arguments": '{"query":"Iris"}'},
+                    }
+                ]
+            }
+        ),
+        _chunk(delta={"reasoning_content": "先思考", "content": "结果"}),
+        _chunk(
+            delta={
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "first-index",
+                        "function": {"name": "list", "arguments": "{}"},
+                    }
+                ]
+            }
+        ),
+        _chunk(finish_reason="tool_calls"),
+        _chunk(
+            choices=False, usage={"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9}
+        ),
+    )
+
+    async def fake_acompletion(**kwargs: Any) -> _RawStream:
+        return raw_stream
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    events = await _collect(
+        ProviderClient(provider="deepseek", api_key="test-key"),
+        LLMRequest(model="gpt-4o", stream=True),
+    )
+
+    terminal = events[-1]
+    assert isinstance(terminal, ModelResponseCompleted)
+    response = terminal.response
+    assert response.provider == "deepseek"
+    assert response.id == "chatcmpl-stream-1"
+    assert response.model == "gpt-4o"
+    assert response.content == [
+        TextBlock(text="结果"),
+        ToolUseBlock(id="second-index", name="lookup", input={"query": "Iris"}),
+        ToolUseBlock(id="first-index", name="list", input={}),
+    ]
+    assert response.reasoning == "先思考"
+    assert response.finish_reason == "tool_calls"
+    assert (response.input_tokens, response.output_tokens, response.total_tokens) == (4, 5, 9)
+    assert response.metadata == {"raw_object": "chat.completion"}
 
 
 @pytest.mark.asyncio

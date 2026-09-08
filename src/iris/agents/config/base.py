@@ -29,7 +29,6 @@ class ModelConfig(BaseModel):
     Attributes:
         provider (str): Provider 名称，例如 `openai`。
         name (str): Provider 下的模型名，例如 `gpt-4o-mini`。
-        api_style (str | None): 可选 API 风格。
         base_url (str | None): 可选 provider base URL。
         temperature (float | None): 采样温度。
         top_p (float | None): nucleus sampling 参数。
@@ -43,7 +42,6 @@ class ModelConfig(BaseModel):
 
     provider: str
     name: str
-    api_style: str | None = None
     base_url: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -77,21 +75,14 @@ class ModelConfig(BaseModel):
         转换为 `LLMRequest` 支持的请求级选项。
         由于 `LLMRequest` 显式要求 `model` 字段，因此不包含 `provider` 和 `name`。
         """
-        options = self.model_dump(
+        return self.model_dump(
             exclude={
                 "provider",
                 "name",
-                "api_style",
                 "base_url",
             },
             exclude_none=True,
         )
-        provider_options = dict(self.provider_options)
-        if self.api_style is not None:
-            provider_options["api_style"] = self.api_style
-        if provider_options:
-            options["provider_options"] = provider_options
-        return options
 
 
 class PythonToolsConfig(BaseModel):

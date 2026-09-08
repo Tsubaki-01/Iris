@@ -1,3 +1,5 @@
+"""Iris 当前实现的领域异常与 runtime 错误来源映射。"""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar
@@ -43,14 +45,6 @@ class IrisConfigError(IrisError, ValueError):
 
 class IrisValidationError(IrisError):
     """输入或配置校验失败时抛出。"""
-
-
-class IrisParserError(IrisError):
-    """解析结构化内容失败时抛出。"""
-
-
-class IrisExecutionError(IrisError):
-    """任务执行过程中发生异常时抛出。"""
 
 
 # ----- Runtime 控制流领域 -----
@@ -228,32 +222,6 @@ class IrisToolValidationError(IrisToolError):
     """工具参数或状态无效时抛出。"""
 
 
-# ----- MCP 领域 -----
-
-
-class IrisMCPError(IrisError):
-    """MCP 集成错误的基类。"""
-
-
-class IrisMCPConnectionError(IrisMCPError):
-    """连接 MCP 服务器失败时抛出。"""
-
-
-class IrisMCPProtocolError(IrisMCPError):
-    """发生 MCP 协议违规或收到意外响应时抛出。"""
-
-
-# ----- 代理 (Agent) 领域 -----
-
-
-class IrisAgentError(IrisError):
-    """Agent 相关错误的基类。"""
-
-
-class IrisAgentExecutionError(IrisAgentError):
-    """核心 Agent 执行或主循环失败时抛出。"""
-
-
 # ----- 记忆 (Memory) 领域 -----
 
 
@@ -273,7 +241,3 @@ class IrisTemplateError(IrisError):
 
 class IrisTemplateNotFoundError(IrisTemplateError):
     """找不到所需模板时抛出。"""
-
-
-class IrisTemplateRenderError(IrisTemplateError):
-    """渲染模板期间发生错误时抛出。"""

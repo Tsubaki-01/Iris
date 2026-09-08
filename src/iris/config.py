@@ -19,7 +19,7 @@ Provider API key 使用 `IRIS_PROVIDER_API_KEYS__{PROVIDER}` 这类 nested env�
 from __future__ import annotations
 
 # region imports
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,13 +39,11 @@ class ProviderConfig(BaseModel):
     Attributes:
         litellm_provider (str): 传给 LiteLLM 的 provider 名称。
         base_url (str | None): OpenAI-compatible 中转站的 endpoint。
-        api_style (Literal["chat"]): 当前仅支持 Chat Completion。
         headers (dict[str, str]): 透传给 provider 的额外 headers。
     """
 
     litellm_provider: str = Field(default="openai", description="LiteLLM provider")
     base_url: str | None = Field(default=None, description="Provider base URL")
-    api_style: Literal["chat"] = Field(default="chat", description="API 风格")
     headers: dict[str, str] = Field(
         default_factory=dict,
         description="Provider 默认 HTTP headers",

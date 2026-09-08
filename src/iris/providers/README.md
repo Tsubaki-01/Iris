@@ -61,6 +61,8 @@ flowchart LR
 全局 `Config` 只提供 `api_key`、`provider_api_keys` 和 `providers`。Endpoint 使用
 `providers[name].base_url` 或 Agent `model.base_url`；timeout 使用 `model.timeout` 或
 显式 client 参数，日志通过 Python `logging` 配置。全局不再声明无效的 `base_url/timeout/debug`。
+`ProviderConfig` 只声明 `litellm_provider`、`base_url` 和 `headers`；它和 Agent `ModelConfig`
+都不提供 `api_style`，调用契约固定为 Chat Completion。
 
 API key 优先级：
 
@@ -119,7 +121,9 @@ Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2
 - 收到 finish reason 后继续消费 usage tail；允许 LiteLLM 保留无语义增量的占位 choice，
   但仍拒绝后续文本、thinking、工具调用或重复 finish reason；
 - EOF 时生成唯一 completed terminal；
-- completed terminal 复用 complete mapper 构造完整 `LLMResponse`；
+- 完整工具参数在 block completion 边界只解析一次 JSON，结果保存在累计状态中；
+- completed terminal 从累计文本、reasoning、工具参数和 usage 直接构造完整 `LLMResponse`，
+  保持文本在前、工具按首次出现顺序排列；
 - `finally` 关闭支持 `aclose()` 的 raw iterator。
 
 ```python
@@ -153,6 +157,9 @@ schema，由 LiteLLM chat bridge 处理。这是 active path 的明确限制。
 不会泄露 raw exception、header 或 key；本地 `asyncio.CancelledError` 原样传播。
 
 ## 维护与验证
+
+Iris 直接依赖 LiteLLM，不直接调用 `httpx` 或 OpenAI SDK。二者由 LiteLLM 的依赖关系引入，
+不在 Iris 的直接依赖中重复声明；这不意味着安装环境中不再包含它们。
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
