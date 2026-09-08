@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -481,9 +482,162 @@ def test_commit_model_step_updates_history_checkpoint_and_tool_intents_atomicall
 
     session.messages.clear()
     assert len(lifecycle_store.load_session("session-1").messages) == 1
-    assert committed.session is not None
-    committed.session.messages[0].metadata["caller-mutated"] = True
+    assert committed.session_revision == session.revision
+    loaded = lifecycle_store.load_session("session-1")
+    loaded.messages[0].metadata["caller-mutated"] = True
     assert lifecycle_store.load_session("session-1").messages[0].metadata == {}
+
+
+def test_tool_batch_read_filters_before_returning_isolated_records(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """按当前模型步限定工具记录，保留排序与返回值隔离。"""
+    _prepare_tool_batch(lifecycle_store)
+    assert lifecycle_store.list_tool_calls("run-1", step_index=1) == []
+    current = lifecycle_store.list_tool_calls("run-1", step_index=0)
+    assert [call.ordinal for call in current] == [1, 2, 3]
+    current[0].arguments["value"] = "changed"
+    assert lifecycle_store.load_tool_call("run-1", "call-1").arguments == {"value": 1}
+
+
+def test_run_control_preserves_exact_session_identity(lifecycle_store: LifecycleStore) -> None:
+    """窄控制快照携带所属 session，供 gateway 区分不同会话的 run。"""
+    _create(lifecycle_store)
+    _create(lifecycle_store, run_id="run-2", session_id="session-2", activation_id="activation-2")
+    first = lifecycle_store.load_run_control("run-1")
+    second = lifecycle_store.load_run_control("run-2")
+    assert first.session_id == "session-1"
+    assert second.session_id == "session-2"
+    assert first.run_id == "run-1"
+    assert second.run_id == "run-2"
+
+
+def test_sqlite_mutation_receipt_does_not_read_session_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """提交 delta 只返回 revision；完整 history 由显式读取取得。"""
+    store = SQLiteStore(tmp_path / "lifecycle.db")
+
+    def reject_history(*args: object, **kwargs: object) -> None:
+        pytest.fail("mutation receipt must not load full session history")
+
+    monkeypatch.setattr(store, "_select_session", reject_history)
+    committed = _prepare_tool(store)
+    assert committed.session_revision == 1
+
+
+def test_sqlite_reads_do_not_deepcopy_newly_decoded_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite row 解析已经创建独立对象，读取无需再次复制。"""
+    store = SQLiteStore(tmp_path / "lifecycle.db")
+    _prepare_tool(store)
+
+    def reject_copy(value: object) -> None:
+        pytest.fail("SQLite read must return its newly decoded facts directly")
+
+    monkeypatch.setattr("iris.store.sqlite.deepcopy", reject_copy)
+    assert store.load_run("run-1") is not None
+    assert len(store.load_session("session-1").messages) == 1
+    assert store.load_checkpoint("run-1") is not None
+    assert store.load_tool_call("run-1", "call-tool") is not None
+    assert len(store.list_tool_calls("run-1")) == 1
+    assert store.list_events("run-1")
+
+
+def test_replay_retains_only_fact_identifiers(lifecycle_store: LifecycleStore) -> None:
+    """精确重试缓存只保留重载事实所需的标识，不保存旧 aggregate。"""
+    _prepare_tool(lifecycle_store)
+    for replay in lifecycle_store._replays.values():
+        assert all(
+            isinstance(getattr(replay, item.name), str | bool | type(None))
+            for item in fields(replay)
+        )
+
+
+def test_replay_key_is_encoded_once_per_mutation(
+    lifecycle_store: LifecycleStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同次提交复用 canonical key；命中重试仍精确匹配完整命令。"""
+    created = _create(lifecycle_store)
+    module = import_module(type(lifecycle_store).__module__)
+    original = module.replay_key
+    encodings = 0
+
+    def encode(operation: str, command: object) -> str:
+        nonlocal encodings
+        encodings += 1
+        return original(operation, command)
+
+    monkeypatch.setattr(module, "replay_key", encode)
+    command = ReserveModelStep(
+        run_id="run-1",
+        expected_run_revision=created.run.revision,
+        activation_id="activation-1",
+        now=_T1,
+    )
+    lifecycle_store.reserve_model_step(command)
+    assert encodings == 1
+    assert lifecycle_store.reserve_model_step(command).events == ()
+    assert encodings == 2
+
+
+@pytest.mark.parametrize(
+    "usage_json",
+    [
+        '{"model_steps_reserved": -1}',
+        '{"model_steps_reserved": 0, "model_steps_committed": 1}',
+        '{"tool_calls_committed": -1}',
+    ],
+)
+def test_sqlite_usage_json_is_validated_at_row_load(tmp_path: Path, usage_json: str) -> None:
+    """单一 usage JSON 仍由既有 RunUsage owner 校验计数不变量。"""
+    store = SQLiteStore(tmp_path / "lifecycle.db")
+    _create(store)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("UPDATE agent_runs SET usage_json = ?", (usage_json,))
+    with pytest.raises(IrisRunPersistenceError):
+        store.load_run("run-1")
+
+
+def test_model_commit_replay_returns_current_facts_without_repeating_events(
+    lifecycle_store: LifecycleStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """稍后重试旧提交会取得终态与最新 revision，且不重复消息和事件。"""
+    commands: list[CommitModelStep] = []
+    original = lifecycle_store.commit_model_step
+
+    def capture(command: CommitModelStep) -> RunCommit:
+        commands.append(command)
+        return original(command)
+
+    monkeypatch.setattr(lifecycle_store, "commit_model_step", capture)
+    committed = _prepare_tool(lifecycle_store)
+    terminal = lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=committed.run.revision,
+            activation_id="activation-1",
+            stop_reason=RunStopReason.CANCELLED,
+            now=_T3,
+        )
+    )
+    events = lifecycle_store.list_events("run-1")
+    session = lifecycle_store.load_session("session-1")
+    replay = original(commands[0])
+    assert replay.run == terminal.run
+    assert replay.result == terminal.result
+    assert replay.checkpoint == terminal.checkpoint
+    assert replay.session_revision == session.revision == 2
+    assert replay.events == ()
+    assert lifecycle_store.list_events("run-1") == events
+    assert lifecycle_store.load_session("session-1") == session
+    with pytest.raises(IrisRunConflictError):
+        original(replace(commands[0], now=_T2))
 
 
 def test_claim_and_commit_tool_result_cover_effect_fence(
@@ -920,7 +1074,7 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
         False,
         True,
     ]
-    assert terminal.session == session
+    assert terminal.session_revision == session.revision
     assert terminal.checkpoint is not None
     assert terminal.checkpoint.sequence == 2
     assert terminal.checkpoint.session_revision == session.revision
@@ -1041,7 +1195,7 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     tool_results = [result for message in session.messages for result in message.tool_results]
     assert session.revision == 2
     assert [result.tool_use_id for result in tool_results] == ["call-1", "call-2", "call-3"]
-    assert recovered.session == session
+    assert recovered.session_revision == session.revision
     assert recovered.checkpoint is not None
     assert recovered.checkpoint.sequence == claimed.checkpoint.sequence
     assert recovered.checkpoint.session_revision == session.revision

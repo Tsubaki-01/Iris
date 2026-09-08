@@ -48,7 +48,7 @@ type ReplayGapReason = Literal[
     "slow_consumer",
 ]
 type SubscriptionTerminalReason = Literal["slow_consumer", "broker_closed"]
-type GatewayCommandKind = Literal["subscribe", "submit", "resume", "cancel", "sync"]
+type GatewayCommandKind = Literal["subscribe", "submit", "resume", "cancel", "sync", "snapshot"]
 
 _NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _StableCode = Annotated[
@@ -202,7 +202,7 @@ class CancelCommand(_FrozenWireModel):
 
 
 class SyncCommand(_FrozenWireModel):
-    """按 caller 已知 run cursors 请求 durable sync。"""
+    """按 caller 已知 run cursors 请求有限事件页。"""
 
     kind: Literal["sync"] = "sync"
     request_id: _NonEmptyString
@@ -217,18 +217,24 @@ class SyncCommand(_FrozenWireModel):
         return _require_unique_durable_cursors(value)
 
 
+class SnapshotCommand(_FrozenWireModel):
+    """显式读取 caller 已知 run 的完整状态。"""
+
+    kind: Literal["snapshot"] = "snapshot"
+    request_id: _NonEmptyString
+    run_ids: tuple[_NonEmptyString, ...] = ()
+
+
 GatewayCommand = Annotated[
-    SubmitCommand | ResumeCommand | CancelCommand | SyncCommand,
+    SubmitCommand | ResumeCommand | CancelCommand | SyncCommand | SnapshotCommand,
     Field(discriminator="kind"),
 ]
 
 
 class DurableRunPage(_FrozenWireModel):
-    """一个 caller 已知 run 的有限 durable page。"""
+    """一个 caller 已知 run 的有限事件页，不附带状态快照。"""
 
-    run: RunSnapshot
-    result: RunResult | None = None
-    tool_calls: tuple[RunToolCallRecord, ...] = ()
+    run_id: _NonEmptyString
     events: tuple[RunEvent, ...] = ()
     next_cursor: DurableRunCursor | None = None
 
@@ -241,13 +247,28 @@ class DurableSync(_FrozenWireModel):
 
 
 class DurableSyncItem(_FrozenWireModel):
-    """Subscription initial path 的 out-of-band durable snapshot。"""
+    """Subscription initial path 的 out-of-band durable 事件页。"""
 
-    kind: Literal["sync.snapshot"] = "sync.snapshot"
+    kind: Literal["sync.page"] = "sync.page"
     sync: DurableSync
 
 
 type GatewayStreamItem = LiveStreamItem | DurableSyncItem
+
+
+class DurableRunSnapshot(_FrozenWireModel):
+    """一个 run 按需读取的状态、结果与完整工具记录。"""
+
+    run: RunSnapshot
+    result: RunResult | None = None
+    tool_calls: tuple[RunToolCallRecord, ...] = ()
+
+
+class DurableSnapshot(_FrozenWireModel):
+    """Bound session 中 caller 指定 run 的有序状态快照。"""
+
+    session_id: _NonEmptyString
+    runs: tuple[DurableRunSnapshot, ...] = ()
 
 
 class SubmitAccepted(_FrozenWireModel):
@@ -282,6 +303,14 @@ class SyncAccepted(_FrozenWireModel):
     sync: DurableSync
 
 
+class SnapshotAccepted(_FrozenWireModel):
+    """Snapshot command 的按需状态快照回执。"""
+
+    event: Literal["command.snapshot.accepted"] = "command.snapshot.accepted"
+    request_id: _NonEmptyString
+    snapshot: DurableSnapshot
+
+
 class SubscribeAccepted(_FrozenWireModel):
     """Subscribe command receipt。"""
 
@@ -307,6 +336,7 @@ CommandReceipt = Annotated[
     | ResumeAccepted
     | CancelAccepted
     | SyncAccepted
+    | SnapshotAccepted
     | SubscribeAccepted
     | CommandRejected,
     Field(discriminator="event"),
@@ -320,6 +350,8 @@ __all__ = [
     "CommandRejected",
     "DurableRunCursor",
     "DurableRunPage",
+    "DurableRunSnapshot",
+    "DurableSnapshot",
     "DurableSync",
     "DurableSyncItem",
     "GatewayCommand",
@@ -334,6 +366,8 @@ __all__ = [
     "ReplayGapReason",
     "ResumeAccepted",
     "ResumeCommand",
+    "SnapshotAccepted",
+    "SnapshotCommand",
     "SubmitAccepted",
     "SubmitCommand",
     "SubscribeAccepted",

@@ -157,6 +157,45 @@ async def test_managed_start_signals_after_registration_and_relays_live_events(
 
 
 @pytest.mark.asyncio
+async def test_runner_cancellation_does_not_rescan_collected_event_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = BlockingProvider()
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    relayed: list[RunEvent] = []
+    running = asyncio.create_task(
+        runner._start_managed(
+            AgentRunRequest(input="等待", run_id="run-collector"),
+            durable_event_callback=relayed.append,
+        )
+    )
+    prior_sequence_reads = 0
+    original_getattribute = RunEvent.__getattribute__
+
+    try:
+        await asyncio.wait_for(provider.started.wait(), timeout=1)
+        prior_ids = {id(event) for event in relayed}
+
+        def getattribute(event: RunEvent, name: str) -> object:
+            nonlocal prior_sequence_reads
+            if name == "sequence" and id(event) in prior_ids:
+                prior_sequence_reads += 1
+            return original_getattribute(event, name)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(RunEvent, "__getattribute__", getattribute)
+            runner.request_cancel("run-collector")
+    finally:
+        provider.release.set()
+    await running
+
+    assert prior_sequence_reads == 0
+    assert relayed == store.list_events("run-collector")
+
+
+@pytest.mark.asyncio
 async def test_managed_start_relays_model_commit_before_steering_ack(
     tmp_path: Path,
 ) -> None:

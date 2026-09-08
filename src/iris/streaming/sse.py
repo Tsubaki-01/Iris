@@ -43,7 +43,7 @@ def _encode_item(item: GatewayStreamItem) -> bytes:
         lines.append(
             "id: "
             + encode_live_cursor(
-                LiveCursor(
+                LiveCursor.model_construct(
                     stream_epoch=item.stream_epoch,
                     scope=item.scope,
                     scope_id=item.scope_id,

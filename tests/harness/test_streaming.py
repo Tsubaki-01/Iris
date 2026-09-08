@@ -106,13 +106,23 @@ async def _next_submission(
 
 
 @pytest.mark.asyncio
-async def test_runner_publishes_runtime_and_each_durable_event_once(tmp_path: Path) -> None:
+@pytest.mark.parametrize("callback_fails", [False, True])
+async def test_runner_publishes_runtime_and_each_durable_event_once(
+    tmp_path: Path,
+    callback_fails: bool,
+) -> None:
     """Runtime facts 保序，committed event 只经去重入口发布一次。"""
     publisher = RecordingPublisher()
     runtime = EmittingAgentRuntime(build_runtime(tmp_path))
     store = InMemoryLifecycleStore()
     observer = RecordingObserver()
     callback_events: list[RunEvent] = []
+
+    def on_durable_event(event: RunEvent) -> None:
+        callback_events.append(event)
+        if callback_fails:
+            raise RuntimeError("injected callback failure")
+
     runner = AgentRunner(
         runtime=runtime,
         store=store,
@@ -122,7 +132,7 @@ async def test_runner_publishes_runtime_and_each_durable_event_once(tmp_path: Pa
 
     result = await runner._start_managed(
         AgentRunRequest(input="完成", run_id="run-publish", session_id="session-live"),
-        durable_event_callback=callback_events.append,
+        durable_event_callback=on_durable_event,
     )
 
     runtime_facts = [fact for fact in publisher.facts if isinstance(fact, RuntimeStreamEvent)]

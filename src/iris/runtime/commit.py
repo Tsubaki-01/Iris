@@ -7,17 +7,10 @@
 # region imports
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
-
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    ValidationInfo,
-    field_validator,
-)
 
 from ..exceptions import IrisRunConflictError, IrisRunStateError
 from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerprint
@@ -29,86 +22,61 @@ from .models import RuntimeActivationInput, RuntimeCursor
 # endregion
 
 
-class _FrozenCommitModel(BaseModel):
-    """Required commit facts 的不可变模型基类。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
-
-
-class ModelStepReservation(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelStepReservation:
     """Provider effect 前的 durable model-step reservation。"""
 
     granted: bool
-    step_index: int = Field(ge=0)
+    step_index: int
     cursor: RuntimeCursor
-    remaining_deadline_seconds: float | None = Field(default=None, ge=0)
+    remaining_deadline_seconds: float | None = None
 
 
-class RuntimeToolCall(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeToolCall:
     """Runtime 提交给 port 的精确 prepared tool fact。"""
 
     run_id: str
     activation_id: str
-    step_index: int = Field(ge=0)
-    ordinal: int = Field(ge=1)
+    step_index: int
+    ordinal: int
     tool_call_id: str
     tool_name: str
     arguments: dict[str, object]
-    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fingerprint: str
     interaction_id: str | None = None
-    tool_version: int = Field(default=1, ge=1)
-
-    @field_validator(
-        "run_id",
-        "activation_id",
-        "tool_call_id",
-        "tool_name",
-        "interaction_id",
-    )
-    @classmethod
-    def _validate_text(cls, value: str | None, info: ValidationInfo) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError(f"{info.field_name} 不能为空")
-        return normalized
+    tool_version: int = 1
 
 
-class ToolCallClaim(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallClaim:
     """工具 effect 前由 commit port 返回的 durable claim。"""
 
     run_id: str
     activation_id: str
     tool_call_id: str
     tool_name: str
-    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    tool_version: int = Field(ge=1)
-
-    @field_validator("run_id", "activation_id", "tool_call_id", "tool_name")
-    @classmethod
-    def _validate_text(cls, value: str, info: ValidationInfo) -> str:
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError(f"{info.field_name} 不能为空")
-        return normalized
+    fingerprint: str
+    tool_version: int
 
 
-class RuntimeModelStepCommit(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeModelStepCommit:
     """一次 provider response 的完整原子提交事实。"""
 
     cursor_before: RuntimeCursor
     message_delta: tuple[Msg, ...] = ()
     assistant_message: Msg
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    total_tokens: int = Field(default=0, ge=0)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
     prepared_tool_calls: tuple[RuntimeToolCall, ...] = ()
     cursor_after: RuntimeCursor
     resumability: CheckpointResumability = CheckpointResumability.SAFE
 
 
-class RuntimeToolResultCommit(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeToolResultCommit:
     """一次 claimed 或 preflight-only 工具结果的原子提交事实。"""
 
     tool_call: RuntimeToolCall
@@ -118,32 +86,25 @@ class RuntimeToolResultCommit(_FrozenCommitModel):
     cursor_after: RuntimeCursor
 
 
-class RuntimeSuspension(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeSuspension:
     """模型步、prepared batch 与 interaction 的原子等待输入。"""
 
     cursor_before: RuntimeCursor
     message_delta: tuple[Msg, ...] = ()
     assistant_message: Msg
-    input_tokens: int = Field(default=0, ge=0)
-    output_tokens: int = Field(default=0, ge=0)
-    total_tokens: int = Field(default=0, ge=0)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
     prepared_tool_calls: tuple[RuntimeToolCall, ...]
     cursor: RuntimeCursor
     interaction_request: HumanInteractionRequest
     expires_at: datetime | None = None
     resumability: CheckpointResumability = CheckpointResumability.SAFE
 
-    @field_validator("expires_at")
-    @classmethod
-    def _validate_expiry(cls, value: datetime | None) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("expires_at 必须包含时区")
-        return value.astimezone(UTC)
 
-
-class RuntimeSuspensionResult(_FrozenCommitModel):
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeSuspensionResult:
     """等待事务成功后返回给 engine 的 durable projection。"""
 
     cursor: RuntimeCursor

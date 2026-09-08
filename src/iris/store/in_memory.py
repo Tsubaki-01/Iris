@@ -10,13 +10,11 @@ Example:
 
 from __future__ import annotations
 
-import json
 from bisect import bisect_right
 from copy import deepcopy
-from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from ..exceptions import (
     IrisRunConflictError,
@@ -77,7 +75,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
-from ._serialization import jsonable as _jsonable
+from ._replay import ReplayRecord, replay_key
 from ._terminal_closure import build_terminal_tool_closure
 from ._tool_results import is_preflight_result
 
@@ -105,15 +103,13 @@ class InMemoryLifecycleStore:
         self._interactions: dict[str, HumanInteraction] = {}
         self._events: dict[str, list[RunEvent]] = {}
         self._results: dict[str, RunResult] = {}
-        self._replays: dict[str, RunCommit] = {}
+        self._replays: dict[str, ReplayRecord] = {}
 
     def create_run(self, command: CreateRun) -> RunCommit:
         """原子创建 run、lane、activation、checkpoint 与起始事件。"""
         command = deepcopy(command)
         with self._lock:
-            run_id = command.request.run_id
-            if run_id is None:
-                raise IrisRunStateError("CreateRun request 缺少最终 run_id")
+            run_id = cast(str, command.request.run_id)
             if run_id in self._runs:
                 raise IrisRunConflictError("run_id 已存在", run_id=run_id)
             owner = self._lanes.get(command.request.session_id)
@@ -206,7 +202,7 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=run,
-                session=None,
+                session_revision=None,
                 checkpoint=command.initial_checkpoint,
                 events=events,
             )
@@ -222,7 +218,8 @@ class InMemoryLifecycleStore:
         """从 resolved waiting run 建立新的 active fence。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("resume_waiting_run", command)
+            key = replay_key("resume_waiting_run", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -300,18 +297,19 @@ class InMemoryLifecycleStore:
             self._interactions[closed.interaction_id] = deepcopy(closed)
             self._events[run.run_id].append(deepcopy(event))
             self._results.pop(run.run_id, None)
-            return self._store_replay("resume_waiting_run", command, commit)
+            return self._store_replay(key, commit)
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
         """在 provider effect 前增加 durable model-step reservation。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("reserve_model_step", command)
+            key = replay_key("reserve_model_step", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_active(command)
             if run.usage.model_steps_reserved >= run.options.limits.max_model_steps:
-                return self._finish_budget_exhausted(run, command.now, command)
+                return self._finish_budget_exhausted(run, command.now, key)
             usage = reserve_model_step(run.usage)
             checkpoint = self._require_checkpoint(run.run_id).model_copy(
                 update={"model_steps_reserved": usage.model_steps_reserved}
@@ -340,13 +338,14 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             self._checkpoints[run.run_id] = deepcopy(checkpoint)
             self._events[run.run_id].append(deepcopy(event))
-            return self._store_replay("reserve_model_step", command, commit)
+            return self._store_replay(key, commit)
 
     def commit_model_step(self, command: CommitModelStep) -> RunCommit:
         """原子提交模型响应及其历史、tool intents 与 checkpoint。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("commit_model_step", command)
+            key = replay_key("commit_model_step", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_active(command)
@@ -386,7 +385,7 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                session=next_session if command.message_delta else None,
+                session_revision=next_session.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 events=(event,),
             )
@@ -396,13 +395,14 @@ class InMemoryLifecycleStore:
             for tool_call in prepared:
                 self._set_tool_call(tool_call)
             self._events[run.run_id].append(deepcopy(event))
-            return self._store_replay("commit_model_step", command, commit)
+            return self._store_replay(key, commit)
 
     def claim_tool_call(self, command: ClaimToolCall) -> RunCommit:
         """将 prepared tool call durable 转为 claimed。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("claim_tool_call", command)
+            key = replay_key("claim_tool_call", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_active(command)
@@ -448,13 +448,14 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             self._set_tool_call(claimed)
             self._events[run.run_id].append(deepcopy(event))
-            return self._store_replay("claim_tool_call", command, commit)
+            return self._store_replay(key, commit)
 
     def commit_tool_result(self, command: CommitToolResult) -> RunCommit:
         """将 claimed 或无副作用失败的 prepared 调用转为 committed。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("commit_tool_result", command)
+            key = replay_key("commit_tool_result", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_active(command)
@@ -517,7 +518,7 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                session=next_session if command.message_delta else None,
+                session_revision=next_session.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 events=(event,),
             )
@@ -526,13 +527,14 @@ class InMemoryLifecycleStore:
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._set_tool_call(committed_call)
             self._events[run.run_id].append(deepcopy(event))
-            return self._store_replay("commit_tool_result", command, commit)
+            return self._store_replay(key, commit)
 
     def suspend_run(self, command: SuspendRun) -> RunCommit:
         """原子提交当前 facts 并将 active run 转为 waiting。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("suspend_run", command)
+            key = replay_key("suspend_run", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_active(command)
@@ -608,7 +610,7 @@ class InMemoryLifecycleStore:
             result = project_result(updated, interaction)
             commit = RunCommit(
                 run=updated,
-                session=next_session if command.message_delta else None,
+                session_revision=next_session.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 interaction=interaction,
                 events=(event,),
@@ -624,13 +626,14 @@ class InMemoryLifecycleStore:
             self._set_tool_call(bound_interaction_tool)
             self._events[run.run_id].append(deepcopy(event))
             self._results[run.run_id] = deepcopy(result)
-            return self._store_replay("suspend_run", command, commit)
+            return self._store_replay(key, commit)
 
     def resolve_interaction(self, command: ResolveInteraction) -> RunCommit:
         """以 version、kind 与 fingerprint CAS 写入人工响应。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("resolve_interaction", command)
+            key = replay_key("resolve_interaction", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -691,13 +694,14 @@ class InMemoryLifecycleStore:
             self._interactions[interaction.interaction_id] = deepcopy(resolved)
             self._events[run.run_id].append(deepcopy(event))
             self._results[run.run_id] = deepcopy(result)
-            return self._store_replay("resolve_interaction", command, commit)
+            return self._store_replay(key, commit)
 
     def request_cancellation(self, command: RequestCancellation) -> RunCommit:
         """记录首次 cancellation request，并按显式要求结算 waiting run。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("request_cancellation", command)
+            key = replay_key("request_cancellation", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -807,7 +811,7 @@ class InMemoryLifecycleStore:
                     self._results[run.run_id] = deepcopy(result)
             commit = RunCommit(
                 run=updated,
-                session=updated_session,
+                session_revision=updated_session.revision if updated_session is not None else None,
                 checkpoint=updated_checkpoint,
                 interaction=interaction,
                 events=tuple(events),
@@ -825,13 +829,14 @@ class InMemoryLifecycleStore:
             for record in claimed_closures:
                 self._set_tool_call(record)
             self._events[run.run_id].extend(deepcopy(events))
-            return self._store_replay("request_cancellation", command, commit)
+            return self._store_replay(key, commit)
 
     def finish_run(self, command: FinishRun) -> RunCommit:
         """将 active/waiting run 原子结算并释放 session lane。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("finish_run", command)
+            key = replay_key("finish_run", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -929,7 +934,7 @@ class InMemoryLifecycleStore:
             result = project_result(updated)
             commit = RunCommit(
                 run=updated,
-                session=updated_session if closure_messages else None,
+                session_revision=updated_session.revision if closure_messages else None,
                 checkpoint=updated_checkpoint,
                 interaction=interaction,
                 events=(*unknown_events, terminal_event),
@@ -948,13 +953,14 @@ class InMemoryLifecycleStore:
                 self._set_tool_call(record)
             self._events[run.run_id].extend(deepcopy(commit.events))
             self._results[run.run_id] = deepcopy(result)
-            return self._store_replay("finish_run", command, commit)
+            return self._store_replay(key, commit)
 
     def recover_active_run(self, command: RecoverActiveRun) -> RunCommit:
         """按 durable checkpoint/tool facts 放弃并恢复或终止旧 activation。"""
         command = deepcopy(command)
         with self._lock:
-            replay = self._load_replay("recover_active_run", command)
+            key = replay_key("recover_active_run", command)
+            replay = self._load_replay(key)
             if replay is not None:
                 return replay
             run = self._require_run(command.run_id)
@@ -1063,7 +1069,9 @@ class InMemoryLifecycleStore:
                 result = project_result(updated)
                 commit = RunCommit(
                     run=updated,
-                    session=updated_session,
+                    session_revision=(
+                        updated_session.revision if updated_session is not None else None
+                    ),
                     checkpoint=terminal_checkpoint,
                     events=events,
                     result=result,
@@ -1105,7 +1113,9 @@ class InMemoryLifecycleStore:
                 result = project_result(updated)
                 commit = RunCommit(
                     run=updated,
-                    session=updated_session,
+                    session_revision=(
+                        updated_session.revision if updated_session is not None else None
+                    ),
                     checkpoint=terminal_checkpoint,
                     events=events,
                     result=result,
@@ -1113,11 +1123,10 @@ class InMemoryLifecycleStore:
                 self._lanes.pop(run.session_id, None)
                 self._results[run.run_id] = deepcopy(result)
             else:
-                if command.new_activation_id is None:
-                    raise IrisRunRecoveryError("resume recovery 缺少 new activation identity")
-                if command.new_activation_id in self._activations:
+                new_activation_id = cast(str, command.new_activation_id)
+                if new_activation_id in self._activations:
                     raise IrisRunConflictError(
-                        "activation_id 已存在", activation_id=command.new_activation_id
+                        "activation_id 已存在", activation_id=new_activation_id
                     )
                 ordinal = 1 + max(
                     (
@@ -1128,7 +1137,7 @@ class InMemoryLifecycleStore:
                     default=0,
                 )
                 activation_next = ActivationRecord(
-                    activation_id=command.new_activation_id,
+                    activation_id=new_activation_id,
                     run_id=run.run_id,
                     ordinal=ordinal,
                     kind=ActivationKind.RECOVER,
@@ -1169,7 +1178,7 @@ class InMemoryLifecycleStore:
                 self._checkpoints[run.run_id] = deepcopy(terminal_checkpoint)
             self._activations[activation.activation_id] = deepcopy(abandoned)
             self._events[run.run_id].extend(deepcopy(list(events)))
-            return self._store_replay("recover_active_run", command, commit)
+            return self._store_replay(key, commit)
 
     def load_run(self, run_id: str) -> RunRecord | None:
         """按 ID 返回 copy-isolated run record。"""
@@ -1184,6 +1193,7 @@ class InMemoryLifecycleStore:
                 return None
             return RunControlSnapshot(
                 run_id=run.run_id,
+                session_id=run.session_id,
                 phase=run.phase,
                 revision=run.revision,
                 current_activation_id=run.current_activation_id,
@@ -1222,8 +1232,10 @@ class InMemoryLifecycleStore:
         with self._lock:
             return deepcopy(self._tool_calls.get((run_id, tool_call_id)))
 
-    def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]:
-        """按 step index 与 ordinal 返回 run 的全部工具调用。"""
+    def list_tool_calls(
+        self, run_id: str, *, step_index: int | None = None
+    ) -> list[RunToolCallRecord]:
+        """按 step/ordinal 返回工具事实，可限定为一个模型步。"""
         with self._lock:
             if run_id not in self._runs:
                 raise IrisRunNotFoundError("run 不存在", run_id=run_id)
@@ -1231,6 +1243,8 @@ class InMemoryLifecycleStore:
                 self._tool_calls[(run_id, tool_call_id)]
                 for tool_call_id in self._tool_call_ids_by_run.get(run_id, ())
             ]
+            if step_index is not None:
+                calls = [call for call in calls if call.step_index == step_index]
             return deepcopy(sorted(calls, key=lambda item: (item.step_index, item.ordinal)))
 
     def load_result(self, run_id: str) -> RunResult | None:
@@ -1545,7 +1559,7 @@ class InMemoryLifecycleStore:
         self,
         run: RunRecord,
         now: datetime,
-        command: ReserveModelStep,
+        key: str,
     ) -> RunCommit:
         activation = self._require_activation(run.current_activation_id)
         settled = settle_activation(
@@ -1584,45 +1598,36 @@ class InMemoryLifecycleStore:
         self._lanes.pop(run.session_id, None)
         self._events[run.run_id].append(deepcopy(event))
         self._results[run.run_id] = deepcopy(result)
-        return self._store_replay("reserve_model_step", command, commit)
+        return self._store_replay(key, commit)
 
-    @staticmethod
-    def _replay_key(operation: str, command: object) -> str:
-        payload = _jsonable(command)
-        return f"{operation}:{json.dumps(payload, allow_nan=False, sort_keys=True)}"
-
-    def _load_replay(self, operation: str, command: object) -> RunCommit | None:
-        replay = self._replays.get(self._replay_key(operation, command))
+    def _load_replay(self, key: str) -> RunCommit | None:
+        """重载当前权威事实，精确重试不重复投递事件。"""
+        replay = self._replays.get(key)
         if replay is None:
             return None
-        run = self._runs[replay.run.run_id]
-        session = self._sessions.get(run.session_id) if replay.session is not None else None
-        checkpoint = self._checkpoints.get(run.run_id)
+        run = self._runs[replay.run_id]
+        session_revision = (
+            self._sessions[run.session_id].revision if replay.includes_session_revision else None
+        )
         interaction = (
-            self._interactions.get(replay.interaction.interaction_id)
-            if replay.interaction is not None
+            self._interactions.get(replay.interaction_id)
+            if replay.interaction_id is not None
             else None
         )
-        current = dataclass_replace(
-            replay,
-            run=deepcopy(run),
-            session=deepcopy(session),
-            checkpoint=deepcopy(checkpoint),
-            interaction=deepcopy(interaction),
-            events=(),
-            result=deepcopy(self._results.get(run.run_id)),
+        return deepcopy(
+            RunCommit(
+                run=run,
+                session_revision=session_revision,
+                checkpoint=self._checkpoints.get(run.run_id),
+                interaction=interaction,
+                result=self._results.get(run.run_id),
+            )
         )
-        return deepcopy(current)
 
-    def _store_replay(
-        self,
-        operation: str,
-        command: object,
-        commit: RunCommit,
-    ) -> RunCommit:
-        isolated = deepcopy(commit)
-        self._replays[self._replay_key(operation, command)] = isolated
-        return deepcopy(isolated)
+    def _store_replay(self, key: str, commit: RunCommit) -> RunCommit:
+        """保存最小重试描述，并隔离本次返回的内存权威事实。"""
+        self._replays[key] = ReplayRecord.from_commit(commit)
+        return deepcopy(commit)
 
 
 __all__ = ["InMemoryLifecycleStore"]

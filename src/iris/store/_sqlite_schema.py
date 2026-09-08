@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -53,9 +53,6 @@ _COMMON_STATEMENTS = (
         pending_interaction_id TEXT,
         cancellation_requested_at TEXT,
         cancellation_reason TEXT,
-        model_steps_reserved INTEGER NOT NULL DEFAULT 0,
-        model_steps_committed INTEGER NOT NULL DEFAULT 0,
-        tool_calls_committed INTEGER NOT NULL DEFAULT 0,
         usage_json TEXT NOT NULL DEFAULT '{}',
         assistant_message_json TEXT,
         error_json TEXT,
@@ -65,8 +62,7 @@ _COMMON_STATEMENTS = (
         started_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         finished_at TEXT,
-        CHECK ((phase = 'terminal') = (stop_reason IS NOT NULL)),
-        CHECK (model_steps_committed <= model_steps_reserved)
+        CHECK ((phase = 'terminal') = (stop_reason IS NOT NULL))
     )
     """,
     """

@@ -33,6 +33,8 @@ from .models import (
     CommandRejected,
     DurableRunCursor,
     DurableRunPage,
+    DurableRunSnapshot,
+    DurableSnapshot,
     DurableSync,
     DurableSyncItem,
     GatewayCommand,
@@ -41,6 +43,8 @@ from .models import (
     LiveSubscriptionRequest,
     ResumeAccepted,
     ResumeCommand,
+    SnapshotAccepted,
+    SnapshotCommand,
     SubmitAccepted,
     SubmitCommand,
     SubscribeCommand,
@@ -54,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 class GatewaySubscription(AsyncIterator[GatewayStreamItem]):
-    """先交付可选 durable snapshot，再消费 broker live subscription。"""
+    """先交付可选 durable 事件页，再消费 broker live subscription。"""
 
     def __init__(
         self,
@@ -114,9 +118,7 @@ class GatewaySubscription(AsyncIterator[GatewayStreamItem]):
         """应用 gateway disclosure policy，不重新解析 trusted payload。"""
         channel = envelope.payload.get("channel")
         block_kind = envelope.payload.get("block_kind")
-        if not self._allow_thinking and (
-            channel == "thinking" or block_kind == "thinking"
-        ):
+        if not self._allow_thinking and (channel == "thinking" or block_kind == "thinking"):
             return None
         if not self._allow_tool_arguments and channel in {
             "tool_name",
@@ -198,12 +200,10 @@ class StreamingGateway:
         """
         self._require_scope_binding(request.scope, request.scope_id)
         initial_sync = (
-            self.durable_sync(request.durable_cursors)
-            if request.durable_cursors
-            else None
+            self.durable_sync(request.durable_cursors) if request.durable_cursors else None
         )
         subscription = self._broker.subscribe(
-            LiveSubscriptionRequest(
+            LiveSubscriptionRequest.model_construct(
                 scope=request.scope,
                 scope_id=request.scope_id,
                 cursor=request.cursor,
@@ -242,6 +242,11 @@ class StreamingGateway:
                     request_id=command.request_id,
                     sync=self.durable_sync(command.cursors),
                 )
+            if isinstance(command, SnapshotCommand):
+                return SnapshotAccepted(
+                    request_id=command.request_id,
+                    snapshot=self.durable_snapshot(command.run_ids),
+                )
             assert_never(command)
         except IrisError as exc:
             return CommandRejected(
@@ -268,43 +273,65 @@ class StreamingGateway:
             )
 
     def durable_sync(self, cursors: Sequence[DurableRunCursor]) -> DurableSync:
-        """按 caller-known run 顺序读取有限 durable pages。"""
-        self._runner.get_session(self._session_id)
-        authorized = []
+        """按 caller-known run 顺序读取有限事件页，不加载完整状态。"""
         for cursor in cursors:
-            run = self._runner.get_run(cursor.run_id)
-            if run.session_id != self._session_id:
-                raise IrisRunConflictError("run 不属于 gateway bound session")
-            authorized.append((cursor, run))
+            self._require_scope_binding("run", cursor.run_id)
 
         pages: list[DurableRunPage] = []
-        for cursor, run in authorized:
-            result = self._runner.get_result(run.run_id)
-            tool_calls = self._runner.list_tool_calls(run.run_id)
+        for cursor in cursors:
             events = self._runner.list_events(
-                run.run_id,
+                cursor.run_id,
                 cursor.after_sequence,
                 limit=self._durable_page_size + 1,
             )
             page_events = tuple(events[: self._durable_page_size])
             next_cursor = (
-                DurableRunCursor(
-                    run_id=run.run_id,
+                DurableRunCursor.model_construct(
+                    run_id=cursor.run_id,
                     after_sequence=page_events[-1].sequence,
                 )
                 if len(events) > self._durable_page_size
                 else None
             )
             pages.append(
-                DurableRunPage(
-                    run=run,
-                    result=self._filter_result(result),
-                    tool_calls=tuple(self._filter_tool_calls(tool_calls)),
+                DurableRunPage.model_construct(
+                    run_id=cursor.run_id,
                     events=page_events,
                     next_cursor=next_cursor,
                 )
             )
-        return DurableSync(session_id=self._session_id, runs=tuple(pages))
+        return DurableSync.model_construct(session_id=self._session_id, runs=tuple(pages))
+
+    def durable_snapshot(self, run_ids: Sequence[str]) -> DurableSnapshot:
+        """按需读取指定 run 的当前状态、结果与工具记录。
+
+        Args:
+            run_ids (Sequence[str]): Caller 已知的 run，按输入顺序返回。
+
+        Returns:
+            DurableSnapshot: 应用 gateway disclosure policy 后的状态快照。
+
+        Raises:
+            IrisRunConflictError: 任一 run 不属于 bound session。
+            IrisRunNotFoundError: 任一 run 不存在。
+        """
+        runs = [self._runner.get_run(run_id) for run_id in run_ids]
+        for run in runs:
+            if run.session_id != self._session_id:
+                raise IrisRunConflictError("run 不属于 gateway bound session")
+        return DurableSnapshot.model_construct(
+            session_id=self._session_id,
+            runs=tuple(
+                DurableRunSnapshot.model_construct(
+                    run=run,
+                    result=self._filter_result(self._runner.get_result(run.run_id)),
+                    tool_calls=tuple(
+                        self._filter_tool_calls(self._runner.list_tool_calls(run.run_id))
+                    ),
+                )
+                for run in runs
+            ),
+        )
 
     def _require_scope_binding(self, scope: str, scope_id: str) -> None:
         """验证 subscription scope 只属于 bound session。"""
@@ -312,7 +339,7 @@ class StreamingGateway:
             if scope_id != self._session_id:
                 raise IrisRunConflictError("session scope 不属于 gateway bound session")
             return
-        run = self._runner.get_run(scope_id)
+        run = self._runner.get_run_control(scope_id)
         if run.session_id != self._session_id:
             raise IrisRunConflictError("run scope 不属于 gateway bound session")
 
@@ -372,9 +399,7 @@ class StreamingGateway:
                 tool_call_updates["arguments"] = {}
             tool_call = interaction.request.tool_call.model_copy(update=tool_call_updates)
             request = interaction.request.model_copy(update={"tool_call": tool_call})
-            updates["pending_interaction"] = interaction.model_copy(
-                update={"request": request}
-            )
+            updates["pending_interaction"] = interaction.model_copy(update={"request": request})
         if result.error is not None:
             updates["error"] = result.error.model_copy(update={"details": {}})
         return result.model_copy(update=updates) if updates else result

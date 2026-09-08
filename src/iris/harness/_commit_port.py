@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from ..exceptions import (
@@ -23,7 +22,6 @@ from ..lifecycle import (
     RunCheckpoint,
     RunCommit,
     RunControlSnapshot,
-    RunEvent,
     RunEventKind,
     RunPhase,
     RunRecord,
@@ -45,8 +43,7 @@ from ..runtime import (
     RuntimeToolResultCommit,
     ToolCallClaim,
 )
-
-logger = logging.getLogger(__name__)
+from ._events import _RunEventCollector
 
 
 class StoreRuntimeCommitPort(RuntimeCommitPort):
@@ -60,8 +57,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         activation_id: str,
         cursor: RuntimeCursor,
         clock: Callable[[], datetime],
-        event_sink: list[RunEvent],
-        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        event_collector: _RunEventCollector,
         interaction_service: HumanInteractionService | None = None,
     ) -> None:
         if run.phase is not RunPhase.ACTIVE or run.current_activation_id != activation_id:
@@ -78,10 +74,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._session_revision = store.load_session(run.session_id).revision
         self._activation_id = activation_id
         self._clock = clock
-        self._event_sink = event_sink
-        self._durable_event_callback = durable_event_callback
+        self._event_collector = event_collector
         self._interaction_service = interaction_service or HumanInteractionService()
-        self._event_keys = {(event.run_id, event.sequence) for event in event_sink}
         self._reusable_model_reservation = (
             checkpoint.model_steps_reserved == checkpoint.model_steps_committed + 1
         )
@@ -320,9 +314,9 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._run = commit.run
         if commit.checkpoint is not None:
             self._checkpoint = commit.checkpoint
-        if commit.session is not None:
-            self._session_revision = commit.session.revision
-        self._record_events(commit.events)
+        if commit.session_revision is not None:
+            self._session_revision = commit.session_revision
+        self._event_collector.record(commit.events)
 
     def _accept_checkpoint(
         self,
@@ -395,11 +389,12 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 "updated_at": snapshot.updated_at,
             }
         )
-        self._record_events(events)
+        self._event_collector.record(events)
 
     def _control_snapshot(self) -> RunControlSnapshot:
         return RunControlSnapshot(
             run_id=self._run.run_id,
+            session_id=self._run.session_id,
             phase=self._run.phase,
             revision=self._run.revision,
             current_activation_id=self._run.current_activation_id,
@@ -408,25 +403,6 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             last_event_sequence=self._run.last_event_sequence,
             updated_at=self._run.updated_at,
         )
-
-    def _record_events(self, events: Sequence[RunEvent]) -> None:
-        """记录并同步 relay 新的 durable events。"""
-        self._event_keys.update((event.run_id, event.sequence) for event in self._event_sink)
-        for event in events:
-            key = (event.run_id, event.sequence)
-            if key in self._event_keys:
-                continue
-            self._event_keys.add(key)
-            self._event_sink.append(event)
-            if self._durable_event_callback is None:
-                continue
-            try:
-                self._durable_event_callback(event)
-            except Exception:
-                logger.exception(
-                    "durable event callback 处理失败",
-                    extra={"run_id": event.run_id, "sequence": event.sequence},
-                )
 
     def _require_cursor(self, cursor: RuntimeCursor) -> None:
         if self._cursor != cursor:
@@ -498,7 +474,10 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         if not calls:
             return []
         existing = {
-            record.tool_call_id: record for record in self._store.list_tool_calls(self._run.run_id)
+            record.tool_call_id: record
+            for record in self._store.list_tool_calls(
+                self._run.run_id, step_index=calls[0].step_index
+            )
         }
         records: list[RunToolCallRecord] = []
         for call in calls:

@@ -21,7 +21,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v2
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v3
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported and must be replaced before creating a new store; the
@@ -40,8 +40,11 @@ use targeted reads for the requested run, session, lane owner, interaction, chec
 or events.
 Reads that need multiple queries use one deferred transaction for a consistent snapshot and remain
 write-free.
+SQLite row decoding already creates independent objects, so public reads return those results
+without another blanket deepcopy. The in-memory implementation still deep-copies store-owned facts.
 Exact tool-call reads reuse the existing `(run_id, tool_call_id)` primary key. Run-control reads
-select only the eight `RunControlSnapshot` columns and do not decode request, options, usage,
+select only the session identity and control columns in `RunControlSnapshot` and do not decode
+request, options, usage,
 message, or error JSON. The in-memory implementation lists one run through a per-run call-ID index;
 the existing tuple-key dictionary remains authoritative.
 
@@ -55,13 +58,24 @@ history precondition checks only the session revision. Both stores share lifecyc
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
 load/recovery boundaries such as SQLite row decoding, while one private store serializer projects
-replay keys and durable commands to JSON values. Schema v2 keeps only revision,
+replay keys and durable commands to JSON values. Schema v3 keeps only revision,
 message count, and update time in `sessions`; messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
 metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and
 validate exact ordinals `1..message_count`.
+Mutation `RunCommit` receipts carry only a changed `session_revision`; generating a receipt does not
+reread full history.
 
-Schema v2 contains:
+Exact-retry cache values contain only a run ID, a flag for returning the session revision, and an
+interaction ID. Hits reload current authoritative facts with empty events. Each mutation encodes
+its complete canonical command key once. The cache retains its existing process-local lifetime,
+without TTL/LRU eviction; complete command keys still grow with the number of mutations.
+
+`agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
+removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
+when rows are first loaded. The current database is schema v3; older schemas are not migrated or read.
+
+Schema v3 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
@@ -80,7 +94,7 @@ conflict/state errors.
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v2-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v3-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -91,7 +105,10 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v2.
+schema identity is lifecycle v3.
+`list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
+filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
+exact tool-call read.
 
 `list_events(run_id, after_sequence=0, limit=None)` always preserves sequence order; when provided,
 `limit` must be a positive integer. The in-memory store locates the cursor before copying a bounded
@@ -117,6 +134,9 @@ Preflight failures and `CIRCUIT_OPEN` short-circuit results can commit directly 
 without a claim event. Both stores use the same classification in `_tool_results.py`; actual tool
 execution still requires a claim first.
 
+Terminal tool messages and Runtime commits share `ToolResult.to_msg()`, directly projecting
+already normalized metadata.
+
 Every terminal mutation closes tool history that is still `PREPARED` or `CLAIMED` in the same
 aggregate transaction. A `CLAIMED` fact becomes `OUTCOME_UNKNOWN` and emits the existing
 `TOOL_CALL_OUTCOME_UNKNOWN` event. A `PREPARED` fact remains unchanged and emits no outcome event.
@@ -130,7 +150,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v2, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v3, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 

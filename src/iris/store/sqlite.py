@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v2 的同步 SQLite store。"""
+"""精确 lifecycle schema v3 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,10 @@ import json
 import sqlite3
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import replace as dataclass_replace
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
@@ -79,6 +78,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._replay import ReplayRecord, replay_key
 from ._serialization import jsonable as _jsonable
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._terminal_closure import build_terminal_tool_closure
@@ -128,7 +128,7 @@ class SQLiteStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = RLock()
-        self._replays: dict[str, RunCommit] = {}
+        self._replays: dict[str, ReplayRecord] = {}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             is_empty = not self.path.exists() or self.path.stat().st_size == 0
@@ -233,11 +233,11 @@ class SQLiteStore:
         )
 
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None:
-        """只读取 activation/cancellation 判断所需的八个 run 字段。"""
+        """只读取 session 归属与 activation/cancellation 判断所需的字段。"""
 
         def read(connection: sqlite3.Connection) -> RunControlSnapshot | None:
             row = connection.execute(
-                """SELECT run_id, phase, run_revision, current_activation_id,
+                """SELECT run_id, session_id, phase, run_revision, current_activation_id,
                     cancellation_requested_at, cancellation_reason,
                     last_event_sequence, updated_at
                 FROM agent_runs WHERE run_id = ?""",
@@ -310,10 +310,20 @@ class SQLiteStore:
             ),
         )
 
-    def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]:
+    def list_tool_calls(
+        self, run_id: str, *, step_index: int | None = None
+    ) -> list[RunToolCallRecord]:
+        """按 step/ordinal 读取工具事实，可在同一连接中限定一个模型步。"""
+
         def read(connection: sqlite3.Connection) -> list[RunToolCallRecord]:
             if self._select_run(connection, run_id, operation="list_tool_calls") is None:
                 raise IrisRunNotFoundError("run 不存在", run_id=run_id)
+            query = "SELECT * FROM run_tool_calls WHERE run_id = ?"
+            parameters: tuple[object, ...] = (run_id,)
+            if step_index is not None:
+                query += " AND step_index = ?"
+                parameters += (step_index,)
+            query += " ORDER BY step_index, ordinal"
             return [
                 _decode_row(
                     _row_to_tool_call,
@@ -321,12 +331,7 @@ class SQLiteStore:
                     path=self.path,
                     operation="list_tool_calls",
                 )
-                for row in connection.execute(
-                    """SELECT * FROM run_tool_calls
-                    WHERE run_id = ?
-                    ORDER BY step_index, ordinal""",
-                    (run_id,),
-                )
+                for row in connection.execute(query, parameters)
             ]
 
         return self._read("list_tool_calls", read)
@@ -415,17 +420,18 @@ class SQLiteStore:
     ) -> RunCommit:
         with self._lock:
             try:
+                key = replay_key(operation, command) if replayable else None
                 with self._connect() as connection:
                     _execute(connection, "BEGIN IMMEDIATE")
-                    if replayable:
-                        replay = self._load_replay(connection, operation, command)
+                    if key is not None:
+                        replay = self._load_replay(connection, operation, key)
                         if replay is not None:
                             connection.commit()
                             return replay
                     commit = handler(connection, deepcopy(command))
                     connection.commit()
-                    if replayable:
-                        self._replays[_replay_key(operation, command)] = deepcopy(commit)
+                    if key is not None:
+                        self._replays[key] = ReplayRecord.from_commit(commit)
                     return deepcopy(commit)
             except (IrisRunConflictError, IrisRunPersistenceError):
                 raise
@@ -446,20 +452,20 @@ class SQLiteStore:
         self,
         connection: sqlite3.Connection,
         operation: str,
-        command: object,
+        key: str,
     ) -> RunCommit | None:
         """把 process-local replay 刷新为当前 durable facts。"""
-        replay = self._replays.get(_replay_key(operation, command))
+        replay = self._replays.get(key)
         if replay is None:
             return None
-        run = self._require_run(connection, replay.run.run_id, operation=operation)
-        session = (
-            self._select_session(
+        run = self._require_run(connection, replay.run_id, operation=operation)
+        session_revision = (
+            self._select_session_metadata(
                 connection,
                 run.session_id,
                 operation=operation,
-            )
-            if replay.session is not None
+            ).revision
+            if replay.includes_session_revision
             else None
         )
         checkpoint = self._select_checkpoint(
@@ -470,16 +476,15 @@ class SQLiteStore:
         interaction = (
             self._select_interaction(
                 connection,
-                replay.interaction.interaction_id,
+                replay.interaction_id,
                 operation=operation,
             )
-            if replay.interaction is not None
+            if replay.interaction_id is not None
             else None
         )
-        return dataclass_replace(
-            replay,
+        return RunCommit(
             run=run,
-            session=session,
+            session_revision=session_revision,
             checkpoint=checkpoint,
             interaction=interaction,
             events=(),
@@ -920,14 +925,13 @@ class SQLiteStore:
             activation_id=command.activation_id,
             step_index=command.usage.model_steps_committed - 1,
         )
-        committed_session: SessionSnapshot | None = None
+        committed_session_revision: int | None = None
         if command.message_delta:
-            committed_session = self._update_session(
+            committed_session_revision = self._update_session(
                 connection,
                 session,
                 command.message_delta,
                 command.now,
-                operation=operation,
             )
         else:
             self._touch_session(
@@ -948,7 +952,7 @@ class SQLiteStore:
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=committed_session,
+            session_revision=committed_session_revision,
             checkpoint=command.checkpoint,
             events=(event,),
         )
@@ -1101,14 +1105,13 @@ class SQLiteStore:
             step_index=tool_call.step_index,
             correlation_id=tool_call.tool_call_id,
         )
-        committed_session: SessionSnapshot | None = None
+        committed_session_revision: int | None = None
         if command.message_delta:
-            committed_session = self._update_session(
+            committed_session_revision = self._update_session(
                 connection,
                 session,
                 command.message_delta,
                 command.now,
-                operation=operation,
             )
         else:
             self._touch_session(
@@ -1123,7 +1126,7 @@ class SQLiteStore:
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=committed_session,
+            session_revision=committed_session_revision,
             checkpoint=command.checkpoint,
             events=(event,),
         )
@@ -1229,14 +1232,13 @@ class SQLiteStore:
             correlation_id=interaction.interaction_id,
         )
         result = project_result(updated, interaction)
-        committed_session: SessionSnapshot | None = None
+        committed_session_revision: int | None = None
         if command.message_delta:
-            committed_session = self._update_session(
+            committed_session_revision = self._update_session(
                 connection,
                 session,
                 command.message_delta,
                 command.now,
-                operation=operation,
             )
         else:
             self._touch_session(
@@ -1261,7 +1263,7 @@ class SQLiteStore:
         self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=committed_session,
+            session_revision=committed_session_revision,
             checkpoint=command.checkpoint,
             interaction=interaction,
             events=(event,),
@@ -1463,7 +1465,7 @@ class SQLiteStore:
         ]
         interaction: HumanInteraction | None = None
         session_metadata: _SessionMetadata | None = None
-        updated_session: SessionSnapshot | None = None
+        updated_session_revision: int | None = None
         closure_messages: list[Msg] = []
         updated_checkpoint = checkpoint
         unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
@@ -1558,12 +1560,11 @@ class SQLiteStore:
                 result = None
 
         if closure_messages and session_metadata is not None:
-            updated_session = self._update_session(
+            updated_session_revision = self._update_session(
                 connection,
                 session_metadata,
                 closure_messages,
                 command.now,
-                operation=operation,
             )
             self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
         else:
@@ -1588,7 +1589,7 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=updated_session,
+            session_revision=updated_session_revision,
             checkpoint=updated_checkpoint,
             interaction=interaction,
             events=tuple(events),
@@ -1664,7 +1665,7 @@ class SQLiteStore:
                 message_count=0,
                 updated_at=None,
             )
-        updated_session: SessionSnapshot | None = None
+        updated_session_revision: int | None = None
         updated_checkpoint = (
             checkpoint.model_copy(
                 deep=True,
@@ -1715,12 +1716,11 @@ class SQLiteStore:
         result = project_result(updated)
 
         if closure_messages:
-            updated_session = self._update_session(
+            updated_session_revision = self._update_session(
                 connection,
                 session_metadata,
                 closure_messages,
                 command.now,
-                operation=operation,
             )
             self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
         else:
@@ -1742,7 +1742,7 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=updated_session,
+            session_revision=updated_session_revision,
             checkpoint=updated_checkpoint,
             interaction=interaction,
             events=(*unknown_events, terminal_event),
@@ -1812,7 +1812,7 @@ class SQLiteStore:
         )
         closure_messages = [message for _, _, message in terminal_closures]
         session_metadata: _SessionMetadata | None = None
-        updated_session: SessionSnapshot | None = None
+        updated_session_revision: int | None = None
         terminal_checkpoint = checkpoint
         if closure_messages:
             session_metadata = self._select_session_metadata(
@@ -1920,19 +1920,18 @@ class SQLiteStore:
             output_checkpoint = terminal_checkpoint
             delete_lane = True
         else:
-            if command.new_activation_id is None:
-                raise IrisRunRecoveryError("resume recovery 缺少 new activation identity")
+            new_activation_id = cast(str, command.new_activation_id)
             if (
                 self._select_activation(
                     connection,
-                    command.new_activation_id,
+                    new_activation_id,
                     operation=operation,
                 )
                 is not None
             ):
                 raise IrisRunConflictError(
                     "activation_id 已存在",
-                    activation_id=command.new_activation_id,
+                    activation_id=new_activation_id,
                 )
             row = connection.execute(
                 """SELECT COALESCE(MAX(ordinal), 0) AS max_ordinal
@@ -1940,7 +1939,7 @@ class SQLiteStore:
                 (run.run_id,),
             ).fetchone()
             activation_next = ActivationRecord(
-                activation_id=command.new_activation_id,
+                activation_id=new_activation_id,
                 run_id=run.run_id,
                 ordinal=int(row["max_ordinal"]) + 1,
                 kind=ActivationKind.RECOVER,
@@ -1975,12 +1974,11 @@ class SQLiteStore:
             output_checkpoint = rebound
 
         if closure_messages and session_metadata is not None:
-            updated_session = self._update_session(
+            updated_session_revision = self._update_session(
                 connection,
                 session_metadata,
                 closure_messages,
                 command.now,
-                operation=operation,
             )
             self._update_checkpoint(connection, checkpoint, terminal_checkpoint, command.now)
         else:
@@ -2003,7 +2001,7 @@ class SQLiteStore:
             self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session=updated_session,
+            session_revision=updated_session_revision,
             checkpoint=output_checkpoint,
             events=events,
             result=result,
@@ -2082,9 +2080,7 @@ class SQLiteStore:
         command: CreateRun,
     ) -> RunCommit:
         """增量创建 run、lane、activation、checkpoint 与起始事件。"""
-        run_id = command.request.run_id
-        if run_id is None:
-            raise IrisRunStateError("CreateRun request 缺少最终 run_id")
+        run_id = cast(str, command.request.run_id)
         if self._select_run(connection, run_id, operation="create_run") is not None:
             raise IrisRunConflictError("run_id 已存在", run_id=run_id)
         lane = connection.execute(
@@ -2276,9 +2272,7 @@ class SQLiteStore:
         current: _SessionMetadata,
         message_delta: list[Msg],
         updated_at: datetime,
-        *,
-        operation: str,
-    ) -> SessionSnapshot:
+    ) -> int:
         """CAS 推进 session metadata，并只插入本次 message delta。"""
         next_revision = current.revision + 1
         next_message_count = current.message_count + len(message_delta)
@@ -2312,11 +2306,7 @@ class SQLiteStore:
                 for ordinal, message in enumerate(message_delta, start=first_ordinal)
             ],
         )
-        return self._select_session(
-            connection,
-            current.session_id,
-            operation=operation,
-        )
+        return next_revision
 
     def _insert_run(
         self,
@@ -2610,7 +2600,7 @@ class SQLiteStore:
                     connection.execute("BEGIN")
                     result = reader(connection)
                     connection.commit()
-                    return deepcopy(result)
+                    return result
             except IrisRunPersistenceError:
                 raise
             except sqlite3.Error as exc:
@@ -2880,6 +2870,7 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
 def _row_to_run_control(row: sqlite3.Row) -> RunControlSnapshot:
     return RunControlSnapshot(
         run_id=row["run_id"],
+        session_id=row["session_id"],
         phase=row["phase"],
         revision=row["run_revision"],
         current_activation_id=row["current_activation_id"],
@@ -2986,17 +2977,16 @@ _INSERT_RUN = """INSERT INTO agent_runs(
     run_id, session_id, agent_id, phase, stop_reason, request_json, options_json,
     environment_fingerprint, session_revision, run_revision, current_activation_id,
     pending_interaction_id, cancellation_requested_at, cancellation_reason,
-    model_steps_reserved, model_steps_committed, tool_calls_committed, usage_json,
+    usage_json,
     assistant_message_json, error_json, checkpoint_sequence, last_event_sequence,
     created_at, started_at, updated_at, finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _UPDATE_RUN = """UPDATE agent_runs SET
     session_id = ?, agent_id = ?, phase = ?, stop_reason = ?, request_json = ?,
     options_json = ?, environment_fingerprint = ?, session_revision = ?,
     run_revision = ?, current_activation_id = ?, pending_interaction_id = ?,
     cancellation_requested_at = ?, cancellation_reason = ?,
-    model_steps_reserved = ?, model_steps_committed = ?, tool_calls_committed = ?,
     usage_json = ?, assistant_message_json = ?, error_json = ?, checkpoint_sequence = ?,
     last_event_sequence = ?, created_at = ?, started_at = ?, updated_at = ?, finished_at = ?
 WHERE run_id = ? AND run_revision = ?"""
@@ -3036,9 +3026,6 @@ def _run_values(run: RunRecord, session_revision: int) -> tuple[object, ...]:
         run.pending_interaction_id,
         _iso(run.cancellation_requested_at),
         run.cancellation_reason,
-        usage.model_steps_reserved,
-        usage.model_steps_committed,
-        usage.tool_calls_committed,
         _dump_json(usage),
         _dump_json(run.assistant_message) if run.assistant_message is not None else None,
         _dump_json(run.error) if run.error is not None else None,
@@ -3196,11 +3183,6 @@ def _activation_outcome(stop_reason: RunStopReason) -> ActivationOutcome:
         RunStopReason.CANCELLED: ActivationOutcome.CANCELLED,
         RunStopReason.OUTCOME_UNKNOWN: ActivationOutcome.OUTCOME_UNKNOWN,
     }.get(stop_reason, ActivationOutcome.FAILED)
-
-
-def _replay_key(operation: str, command: object) -> str:
-    payload = _jsonable(command)
-    return f"{operation}:{json.dumps(payload, allow_nan=False, sort_keys=True)}"
 
 
 def _stored_activation_outcome(activation: ActivationRecord) -> str | None:

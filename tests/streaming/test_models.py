@@ -10,9 +10,13 @@ from pydantic import TypeAdapter, ValidationError
 from iris.streaming.models import (
     CommandReceipt,
     CommandRejected,
+    DurableRunPage,
+    GatewayCommand,
     LiveCursor,
     LiveEnvelope,
     LiveSubscriptionRequest,
+    SnapshotAccepted,
+    SnapshotCommand,
     SubscribeAccepted,
 )
 
@@ -101,3 +105,23 @@ def test_command_receipt_discriminator_and_safe_rejection() -> None:
                 "traceback": "secret",
             }
         )
+
+
+def test_snapshot_command_and_receipt_use_separate_wire_contract() -> None:
+    command = TypeAdapter(GatewayCommand).validate_python(
+        {"kind": "snapshot", "request_id": "snapshot-1", "run_ids": ["run-1"]}
+    )
+    receipt = TypeAdapter(CommandReceipt).validate_python(
+        {
+            "event": "command.snapshot.accepted",
+            "request_id": "snapshot-1",
+            "snapshot": {"session_id": "session-1", "runs": []},
+        }
+    )
+
+    assert isinstance(command, SnapshotCommand)
+    assert command.run_ids == ("run-1",)
+    assert isinstance(receipt, SnapshotAccepted)
+    assert receipt.snapshot.session_id == "session-1"
+    with pytest.raises(ValidationError):
+        DurableRunPage.model_validate({"run_id": "run-1", "result": None})

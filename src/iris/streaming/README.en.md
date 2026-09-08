@@ -75,6 +75,7 @@ and does not mutate the store or perform recovery directly.
 ```python
 from iris.streaming import (
     DurableRunCursor,
+    SnapshotCommand,
     SubmitCommand,
     SubscribeCommand,
 )
@@ -92,13 +93,24 @@ subscription = gateway.subscribe(
 receipt = await gateway.handle(
     SubmitCommand(request_id="submit-1", input="继续分析", mode="steer")
 )
+snapshot_receipt = await gateway.handle(
+    SnapshotCommand(request_id="snapshot-1", run_ids=("run-known",))
+)
 ```
 
 `subscribe()` creates no network task. When the request includes caller-known durable cursors,
-`GatewaySubscription` first emits a `DurableSyncItem`, then delegates to the broker's live stream.
-`durable_sync()` reads only the explicitly supplied runs and returns bounded event pages in input
-order. It neither discovers other runs in the session nor automatically recovers them. `next_cursor`
-represents only that run's durable event high-water mark.
+`GatewaySubscription` first emits a `DurableSyncItem(kind="sync.page")`, then delegates to the broker's
+live stream. `durable_sync(cursors)` returns ordered `DurableRunPage` entries in `DurableSync.runs`.
+Each page contains only `run_id`, bounded `events`, and `next_cursor`. It checks session ownership
+through narrow run control reads without loading full runs, results, tool calls, or session history.
+`next_cursor` identifies another available page. `None` means all events visible to this query have
+been read; it does not mean the run has ended.
+
+`durable_snapshot(run_ids)` explicitly returns `DurableSnapshot`, whose ordered `runs` contain
+`DurableRunSnapshot(run, result, tool_calls)`. An active run may have `result=None`. Event pages and
+state snapshots independently read current durable facts, with no atomic snapshot across the two
+calls. Both operations accept only caller-known runs belonging to the bound session; neither
+discovers other runs nor automatically recovers them.
 
 `handle()` supports:
 
@@ -106,13 +118,14 @@ represents only that run's durable event high-water mark.
 - `ResumeCommand` → `SessionManager.admit_resume()`, returning `run_id` and `interaction_id` in
   `ResumeAccepted.receipt` without waiting for the resumed model or tool execution to finish.
 - `CancelCommand` → `SessionManager.interrupt()`.
-- `SyncCommand` → read-only durable sync.
+- `SyncCommand` → bounded event pages in `SyncAccepted.sync`.
+- `SnapshotCommand` → on-demand full state in `SnapshotAccepted.snapshot`.
 
 `request_id` correlates receipts; it provides no idempotency or deduplication. Expected `IrisError`
 instances become stable `CommandRejected` receipts. Unexpected errors produce a generic rejection
-and a warning that excludes raw frames and payloads. Obtain the final resume result through durable
-sync after a live terminal/interaction event. Direct SDK calls to `SessionManager.resume()` still
-wait for a complete `RunResult`.
+and a warning that excludes raw frames and payloads. Request a snapshot explicitly after a live
+terminal/interaction event to obtain the final resume result. Direct SDK calls to
+`SessionManager.resume()` still wait for a complete `RunResult`.
 
 ## Disclosure policy
 
@@ -121,7 +134,7 @@ thinking blocks/deltas and tool-argument partials, and remove tool names from li
 Arguments in durable tool calls and waiting interactions are projected as empty dictionaries. Enable
 these options only when the host has authorized the tenant/session and needs those fields.
 
-Durable sync always removes assistant/tool-result metadata, run/tool error details, local artifact
+Durable snapshots always remove assistant/tool-result metadata, run/tool error details, local artifact
 paths, tool result data/stats/metadata, and pending interaction workspace paths. Argument opt-in does
 not restore them. The current durable wire shape cannot represent an artifact without its path,
 so the gateway returns `artifact=None`; the host owns any authorized download interface.
@@ -155,13 +168,14 @@ boundary validation; the host should map failures to request errors without sens
 
 `WebSocketAdapter.serve(receive, send)` accepts callbacks supplied by the framework. Raw frames must
 be UTF-8 JSON typed commands; parsing failures return `INVALID_COMMAND`. The first valid command
-must be `subscribe` or `sync`. A sync-first connection must still subscribe before mutation commands.
+can be `subscribe`, `sync`, or `snapshot`. Further read-only pages and snapshots are allowed before
+subscribing, but mutation commands require a subscription.
 
 Only the sender task calls `send()`. Before routing a command, the receiver reserves one receipt slot,
 then places its receipt into a capacity-1 queue. The slot is released only after the sender finishes
 sending. A slow sender pauses subsequent command admission, so pipelined commands cannot mutate
 the manager and then lose their receipt because the queue is full. Resume waits only for admission;
-later sync, steer, cancel, or disconnect can be processed before the run completes.
+later sync, snapshot, steer, cancel, or disconnect can be processed before the run completes.
 A second subscribe is rejected. `receive() -> None`, receive/send exceptions, or task cancellation
 drain/cancel child tasks and close the subscription.
 
@@ -172,14 +186,16 @@ or recover. Only an explicit `CancelCommand` makes the gateway request durable c
 
 Broker epochs, live cursors, subscriptions, and partials are process-local and not persisted. After
 a process restart, an old cursor produces `ReplayGap(reason="epoch_changed")`. Clients must discard
-incomplete partials and request sync using their known per-run `DurableRunCursor` values. The runner
+incomplete partials and request sync using their known per-run `DurableRunCursor` values. Request a
+snapshot separately when full state is needed. The runner
 and store remain the durable authority; live replay cannot replace durable event/result/tool snapshots.
 
 ## Development and verification
 
 `models.py` defines public wire models; `projection.py` projects runner/runtime facts into live
 payloads. `broker.py` manages ordering, replay, and subscriptions. `gateway.py` combines commands and
-durable sync. `sse.py` / `websocket.py` own transport framing. `__init__.py` exports package-level APIs.
+event pages and state snapshots. `sse.py` / `websocket.py` own transport framing.
+`__init__.py` exports package-level APIs.
 
 For replay/capacity changes, extend `tests/streaming/test_broker.py`. Update `test_gateway.py` and
 `test_models.py` for command contracts, and `test_transports.py` plus `test_system.py` for connection

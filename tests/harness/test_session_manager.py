@@ -125,6 +125,36 @@ async def test_steer_delivery_follows_durable_commit_and_preserves_fifo(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_steer_claim_uses_control_without_loading_run_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """锁内选择 steer 只需要当前控制事实，不读取完整 checkpoint/result。"""
+    provider = BlockingProvider(text_response("完成"))
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    manager = SessionManager(runner, "session-control")
+    current = await manager.submit("开始")
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    queued = await manager.submit("新方向", mode="steer")
+    control = runner.get_run_control(current.run_id)
+
+    def reject_full_snapshot(run_id: str) -> None:
+        raise AssertionError("steer claim loaded a full RunSnapshot")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(runner, "get_run", reject_full_snapshot)
+            claimed = await manager._steering.claim(current.run_id, control.current_activation_id)
+        assert claimed is not None
+        assert claimed.submission_id == queued.submission_id
+        assert claimed.message.text == "新方向"
+    finally:
+        manager._steering.fail(queued.submission_id, "test_finished")
+        provider.release.set()
+        await manager.close(cancel_run=True)
+
+
+@pytest.mark.asyncio
 async def test_follow_up_waits_for_terminal_and_starts_one_run_at_a_time(tmp_path: Path) -> None:
     """Follow-up admission 不抢占 current run，并按 FIFO 串行 create。"""
     provider = BlockingProvider(text_response("完成"))

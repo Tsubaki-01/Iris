@@ -34,11 +34,19 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 - `recover(run_id, expected_activation_id=...)`：对 active run 要求精确 fence。safe checkpoint
   创建 recover activation，outcome-ready 只补 terminal，unresolved claim 结算为
   `outcome_unknown`；
-- `get_session()`、`get_run()`、`get_result()`、`list_tool_calls()` 和
+- `get_session()`、`get_run()`、`get_run_control()`、`get_result()`、`list_tool_calls()` 和
   `list_events(after_sequence=0, limit=None)`：无副作用 durable reads；`limit` 如提供必须是
   正整数。
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
+
+`get_run_control()` 只读取 run identity、phase、activation fence、revision 与取消控制字段。
+SessionManager 在锁内用它判断 steer 是否仍可进入当前 activation，不装载完整 run snapshot。
+事件补读直接消费 store 返回的有序、唯一、有限页；store 是排序和分页的唯一 owner，manager
+只推进 watermark 并保留空页冲突与 submission barrier。
+
+内部 `RunCommit.session_revision` 只返回本次会话 revision；commit port 直接更新本地 revision，
+mutation 不为回执加载完整 history。需要消息时仍显式调用 `get_session()`。
 
 ## Live publisher 组合
 
@@ -155,6 +163,10 @@ Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mut
 并行；每个 event 默认最多等待 30 秒，可用 `observer_event_timeout_s` 覆盖。Timeout 或普通异常只
 记录 warning 并继续，不改变 durable result；同步 callback 不是新的 public observer registry。
 
+每次 activation 中，runner 与 commit port 共享私有 `_RunEventCollector`，由它唯一持有累计
+事件与 `(run_id, sequence)` 去重键。新增批次只检查本批事件；取消事件即使被两条路径观察，
+同步 callback 也只对首次收集执行一次。Callback 失败不阻断后续 live publisher。
+
 ## Cancellation 与 recovery
 
 结算失败时，runner 使用注入的 Clock 核对 absolute deadline，不依赖 timer 是否已经获得调度。
@@ -187,6 +199,23 @@ active recovery 会验证 checkpoint v1、session revision、usage counters、en
 把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
 继续写入。同步阻塞 callable 不保证并发加速，并且仍可能延迟 settlement。
+
+恢复指纹绑定 agent 名称、有效模型路由与请求参数、已加载的结构化 context、模板来源版本、
+当前工具定义、权限 policy、workspace 和 checkpoint 版本。启动时已启用目录发现的全部 Skill
+内容版本也会参与，包括尚未加载的 Skill。会话存储路径、context 配置文件位置和重复声明写法
+不参与；相同模板移动位置不改变版本。工具实现如需显式版本，应写入
+`ToolDefinition.metadata`；框架不推断 Python 源码版本，也不扫描整个 workspace。
+
+Factory 创建内置 `ProviderClient` 时，把合并全局配置后的 provider、LiteLLM provider、endpoint
+和 headers 保存在 `RuntimeEnvironment.provider_fingerprint`；指纹不包含 API key。Host 注入
+自定义 provider 时，应在创建 runner 前显式设置该字典中的路由或版本标识；默认空字典表示
+框架不推断该 provider 的内部行为。模型请求名称与请求参数仍参与恢复比较。
+
+模板来源在 runner 构造期间冻结；同一 runtime 的后续渲染使用这个快照，新 runtime 才读取新
+版本。来源范围包括静态嵌套依赖、可选依赖和文件名列表；动态文件名表达式不受支持，可改为
+条件分支中的静态引用。配置的空 memory 模板也会冻结，因为 run options 可稍后启用它；空前置
+段仍跳过。指纹不渲染 context，`StrictUndefined` 和字符上限保留到实际渲染。详见
+[`iris.context`](../context/README.md)。
 
 `before_model / step 0` 的初始 recovery 会从 durable `AgentRunRequest.input` 重建尚未提交的
 当前轮次输入。后续 checkpoint 的输入已经随 provider commit 进入 session history，因此不会再次

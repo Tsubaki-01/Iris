@@ -50,10 +50,4 @@ def build_terminal_tool_closure(
         is_error=True,
         error=error,
     )
-    return updated, Msg.tool_result(
-        tool_use_id=result.tool_use_id,
-        content=result.model_content,
-        is_error=True,
-        name=result.tool_name,
-        metadata=result.to_block_metadata(),
-    )
+    return updated, result.to_msg()

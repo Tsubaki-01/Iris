@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v2 schema 与 session history 的硬边界测试。"""
+"""Lifecycle SQLite v3 schema 与 session history 的硬边界测试。"""
 
 from __future__ import annotations
 
@@ -43,9 +43,6 @@ _COLUMNS = {
         "pending_interaction_id",
         "cancellation_requested_at",
         "cancellation_reason",
-        "model_steps_reserved",
-        "model_steps_committed",
-        "tool_calls_committed",
         "usage_json",
         "assistant_message_json",
         "error_json",
@@ -133,7 +130,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v2_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v3_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -169,7 +166,7 @@ def test_empty_database_creates_exact_v2_schema_and_reopens(tmp_path: Path) -> N
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 2)]
+    assert identity == [("agent_lifecycle", 3)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")

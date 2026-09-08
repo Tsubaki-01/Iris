@@ -14,7 +14,14 @@ from iris.hitl import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from iris.lifecycle import AgentRunRequest, RunEvent, RunEventKind, RunPhase, RunStopReason
+from iris.lifecycle import (
+    AgentRunRequest,
+    RunEvent,
+    RunEventKind,
+    RunPhase,
+    RunStopReason,
+    RunToolCallRecord,
+)
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import AskQuestionTool, ToolCapability, ToolRegistry
@@ -87,6 +94,7 @@ async def test_managed_resume_signals_after_begin_and_relays_live_events(
 @pytest.mark.asyncio
 async def test_resume_exposes_same_batch_question_gates_in_original_order(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
@@ -109,6 +117,18 @@ async def test_resume_exposes_same_batch_question_gates_in_original_order(
     first = await runner.start(AgentRunRequest(input="提问", run_id="run-questions"))
     assert first.pending_interaction is not None
     assert first.pending_interaction.tool_call_id == "first"
+
+    def reject_history(run_id: str, *, step_index: int | None = None) -> list[RunToolCallRecord]:
+        pytest.fail("resume subject must use an exact tool-call read")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "list_tool_calls", reject_history)
+        cursor = runner._validate_resume_checkpoint(
+            store.load_run("run-questions"),
+            first.pending_interaction,
+            store.load_checkpoint("run-questions"),
+        )
+    assert cursor.tool_calls[cursor.next_tool_index].id == "first"
 
     second = await AgentRunner(
         runtime=build_runtime(tmp_path, registry=registry, provider=StaticProvider()),

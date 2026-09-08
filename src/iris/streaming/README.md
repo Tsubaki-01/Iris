@@ -70,6 +70,7 @@ Gateway 从不调用 `SessionManager.events()`，也不直接使用 store mutati
 ```python
 from iris.streaming import (
     DurableRunCursor,
+    SnapshotCommand,
     SubmitCommand,
     SubscribeCommand,
 )
@@ -87,12 +88,22 @@ subscription = gateway.subscribe(
 receipt = await gateway.handle(
     SubmitCommand(request_id="submit-1", input="继续分析", mode="steer")
 )
+snapshot_receipt = await gateway.handle(
+    SnapshotCommand(request_id="snapshot-1", run_ids=("run-known",))
+)
 ```
 
 `subscribe()` 不创建 network task。若请求携带 caller-known durable cursors，
-`GatewaySubscription` 先产生一个 `DurableSyncItem`，再委托 broker live stream。
-`durable_sync()` 只读取显式给出的 run，并按输入顺序返回有限 event page；它不会发现 session 下
-的其他 run，也不会自动 recover。`next_cursor` 只表示该 run 的 durable event high-water。
+`GatewaySubscription` 先产生一个 `DurableSyncItem(kind="sync.page")`，再委托 broker live stream。
+`durable_sync(cursors)` 按输入顺序返回 `DurableSync.runs` 中的 `DurableRunPage`；每页只有
+`run_id`、有限 `events` 和 `next_cursor`。它通过窄 run control 检查 session 归属，不读取完整
+run、result、tool calls 或 session history。`next_cursor` 表示还有下一页，为 `None` 时已读完
+本次查询可见的事件；它不表示 run 已结束。
+
+`durable_snapshot(run_ids)` 显式返回 `DurableSnapshot`，其 `runs` 按输入顺序包含
+`DurableRunSnapshot(run, result, tool_calls)`。Active run 的 `result` 可以为 `None`。
+事件分页与状态快照各自读取当前 durable 事实，不承诺两次调用之间的原子快照。两种读取均只接受
+caller 已知且属于 bound session 的 run，不发现其他 run，也不自动 recover。
 
 `handle()` 支持：
 
@@ -100,11 +111,12 @@ receipt = await gateway.handle(
 - `ResumeCommand` → `SessionManager.admit_resume()`，返回 `ResumeAccepted.receipt`
   中的 `run_id` 和 `interaction_id`，不会等待恢复后的模型或工具执行结束；
 - `CancelCommand` → `SessionManager.interrupt()`；
-- `SyncCommand` → read-only durable sync。
+- `SyncCommand` → 只读有限事件页，返回 `SyncAccepted.sync`；
+- `SnapshotCommand` → 按需完整状态，返回 `SnapshotAccepted.snapshot`。
 
 `request_id` 只用于关联 receipt，不提供幂等或去重。预期 `IrisError` 会变成稳定的
 `CommandRejected`；unexpected error 只返回通用拒绝并记录不含 raw frame/payload 的 warning。
-Resume 的最终结果通过 live terminal/interaction 事件后执行 durable sync 获取。直接调用 SDK 的
+Resume 的最终结果通过 live terminal/interaction 事件后显式请求 snapshot 获取。直接调用 SDK 的
 `SessionManager.resume()` 仍等待完整 `RunResult`。
 
 ## Disclosure policy
@@ -114,7 +126,7 @@ block/delta 或 tool-arguments partial，并从 live tool facts 删除 tool name
 waiting interaction 中的 arguments 投影为空字典。只有 host 已完成 tenant/session 授权且确实需要
 这些字段时，才应显式启用对应选项。
 
-Durable sync 始终删除 assistant/tool-result metadata、run/tool error details、artifact 本地路径、
+Durable snapshot 始终删除 assistant/tool-result metadata、run/tool error details、artifact 本地路径、
 tool result data/stats/metadata 与 pending interaction 的 workspace path；这些字段不受参数 opt-in
 放行。当前 durable wire shape 无法在不携带 path 的情况下表达 artifact，因此 gateway 返回
 `artifact=None`，由 host 另行实现授权下载接口。
@@ -145,13 +157,13 @@ boundary validation，失败应由 host 映射为无敏感细节的请求错误�
 ## WebSocket adapter
 
 `WebSocketAdapter.serve(receive, send)` 接收 framework 提供的 callback。Raw frame 必须是 UTF-8
-JSON typed command；解析失败返回 `INVALID_COMMAND`。首个有效命令只能是 `subscribe` 或
-`sync`，sync-first 后仍需 subscribe 才能执行 mutation command。
+JSON typed command；解析失败返回 `INVALID_COMMAND`。首个有效命令可以是 `subscribe`、`sync`
+或 `snapshot`；订阅前可以继续只读分页或取快照，执行 mutation command 前必须 subscribe。
 
 连接内只有 sender task 调用 `send()`。Receive task 在路由命令前预留一个 receipt 容量，随后
 把确认写入 capacity-1 queue；容量直到 sender 完成发送才释放。慢 sender 会暂停后续命令的
 admission，因此流水发送多个命令不会先改变 manager 状态再因 queue 已满丢弃确认。
-Resume 只等待 admission，后续 sync、steer、cancel 或 disconnect 可在运行完成前继续处理。
+Resume 只等待 admission，后续 sync、snapshot、steer、cancel 或 disconnect 可在运行完成前继续处理。
 第二个 subscribe 会被拒绝。`receive() -> None`、receive/send exception 或 task cancellation 都会
 drain/cancel child tasks 并关闭 subscription。
 
@@ -162,13 +174,14 @@ recover。只有客户端显式发送 `CancelCommand`，gateway 才会请求 dur
 
 Broker epoch、live cursor、subscriptions 和 partial 都是 process-local 状态，不持久化。进程重启后
 旧 cursor 会产生 `ReplayGap(reason="epoch_changed")`；客户端必须丢弃不完整 partial，并用自己
-已知的 per-run `DurableRunCursor` 请求 sync。Durable authority 始终是 runner/store，live replay
+已知的 per-run `DurableRunCursor` 请求 sync；需要恢复完整状态时，另行请求 snapshot。
+Durable authority 始终是 runner/store，live replay
 不能替代 durable event/result/tool snapshot。
 
 ## 开发与验证
 
 `models.py` 定义公开 wire 模型，`projection.py` 把 runner/runtime facts 投影为 live payload；
-`broker.py` 管理顺序、回放与订阅，`gateway.py` 组合命令和 durable sync，`sse.py` /
+`broker.py` 管理顺序、回放与订阅，`gateway.py` 组合命令、事件分页和状态快照，`sse.py` /
 `websocket.py` 负责传输 framing。包级公开入口由 `__init__.py` 导出。
 
 修改回放/容量时补 `tests/streaming/test_broker.py`，修改命令契约时同步

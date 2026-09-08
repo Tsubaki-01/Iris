@@ -44,6 +44,9 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
+`RunCommit.session_revision` 只在 mutation 改变 history 时返回提交后的 revision，不携带完整
+`SessionSnapshot`；需要 history 时显式调用 `load_session()`。精确重试返回当前事实与空 events，
+而不是第一次提交的旧快照。
 每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
@@ -53,10 +56,16 @@ message delta 只推进一次，与 delta 中的消息条数无关；持久化�
 不进入 lifecycle 公共模型或 command。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
 `load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
-`load_run_control(run_id)` 只返回 `RunControlSnapshot` 的八个 fence/cancellation 字段。两者都不
+`list_tool_calls(run_id, step_index=...)` 将有序工具读取限定为一个模型步，省略时返回整 run；
+`load_run_control(run_id)` 只返回 `RunControlSnapshot` 的 session 归属与 fence/cancellation 字段。
+gateway 可以据此确认 run 属于所请求的 session，无需加载完整 run。上述读取都不
 替代 mutation CAS，也不改变同步 store boundary。
 
 ## 公开接口
+
+`CreateRun` 的 request/checkpoint identity 及 `RecoverActiveRun` 的 disposition/activation 组合
+由公开 command 构造时校验；store 不重复检查这些已确定的 optional 关系，只检查当前 durable
+事实及 mutation 所需的 CAS、identity 与 fence。
 
 `iris.lifecycle` 可直接导入所有契约模型、enums、commands、`LifecycleStore` 和
 `snapshot_run()`/`project_result()`，包括最小只读投影 `RunControlSnapshot`。完整运行入口只在

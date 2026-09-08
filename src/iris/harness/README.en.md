@@ -35,12 +35,22 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 - `recover()` requires the exact active activation fence. Safe checkpoints create a recover
   activation, outcome-ready checkpoints only finalize, and unresolved claims become
   `outcome_unknown`.
-- `get_session()`, `get_run()`, `get_result()`, `list_tool_calls()`, and
+- `get_session()`, `get_run()`, `get_run_control()`, `get_result()`, `list_tool_calls()`, and
   `list_events(after_sequence=0, limit=None)` are side-effect-free durable reads. When provided,
   `limit` must be a positive integer.
 
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
+
+`get_run_control()` reads only run identity, phase, activation fence, revision, and cancellation
+control fields. SessionManager uses it under its lock to decide whether a steer can still enter
+the current activation without loading a full run snapshot. Event replay consumes the store's
+ordered, unique, bounded pages directly. The store owns sorting and pagination; the manager
+advances watermarks and retains empty-page conflicts and submission barriers.
+
+The internal `RunCommit.session_revision` returns only the resulting session revision. The
+commit port updates its local revision directly, and mutations do not load complete history for
+their receipts. Call `get_session()` explicitly when messages are needed.
 
 ## Live publisher composition
 
@@ -174,6 +184,11 @@ observer lane is sequence-ordered, different observers run in parallel, and each
 exception is logged and the lane continues without changing the durable result. The synchronous
 callback is not a new public observer registry.
 
+Within each activation, the runner and commit port share a private `_RunEventCollector`, which
+alone owns accumulated events and `(run_id, sequence)` deduplication keys. A new batch checks
+only its own events. Even when both paths observe a cancellation event, the synchronous callback
+runs only on its first collection. Callback failures do not block the subsequent live publisher.
+
 ## Cancellation and recovery
 
 When settling failure, the runner checks the absolute deadline against its injected Clock,
@@ -210,6 +225,29 @@ abandons the old activation, closes every claim as outcome unknown, and creates 
 Normal parent/control/infrastructure exit waits for runtime children to drain before revoking the
 commit port, preventing late child writes. Synchronous blocking callables have no concurrency
 speedup guarantee and may still delay settlement.
+
+The recovery fingerprint binds the agent name, effective model route and request options, loaded
+structured context, template source versions, current tool definitions, permission policy,
+workspace, and checkpoint version. It also includes content versions for every Skill discovered
+in the enabled startup directory, including Skills not yet loaded. Session storage paths,
+context configuration locations, and duplicate declaration forms are excluded. Moving identical
+templates does not change their versions. Use `ToolDefinition.metadata` for an explicit tool
+implementation version; the framework neither infers Python source versions nor scans the workspace.
+
+When the factory creates a built-in `ProviderClient`, it saves the effective provider, LiteLLM
+provider, endpoint, and headers after global configuration merging in
+`RuntimeEnvironment.provider_fingerprint`. API keys are excluded. A host injecting its own
+provider should set explicit route or version identifiers in this dictionary before constructing
+the runner. Its empty default means the framework does not infer provider internals; request
+model names and options still participate in recovery comparisons.
+
+Template sources are frozen when the runner is constructed. The same runtime renders from that
+snapshot; a new runtime reads new versions. The snapshot includes nested static dependencies,
+optional dependencies, and filename lists. Dynamic filename expressions are unsupported; use
+static references in conditional branches instead. A configured empty memory template is frozen
+because run options may activate it later, while an empty before-input section is skipped. The
+fingerprint does not render context; `StrictUndefined` and character limits remain rendering-time
+checks. See [`iris.context`](../context/README.en.md).
 
 Initial recovery at `before_model / step 0` reconstructs the uncommitted current-turn input from the
 durable `AgentRunRequest.input`. At later checkpoints, that input is already in session history from

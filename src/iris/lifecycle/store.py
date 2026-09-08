@@ -205,10 +205,10 @@ class RecoverActiveRun:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RunCommit:
-    """一次 mutation 原子提交后返回的完整事实集合。"""
+    """一次 mutation 的事实回执；session 仅返回发生变化时的 revision。"""
 
     run: RunRecord
-    session: SessionSnapshot | None = None
+    session_revision: int | None = None
     checkpoint: RunCheckpoint | None = None
     interaction: HumanInteraction | None = None
     events: tuple[RunEvent, ...] = ()
@@ -258,7 +258,11 @@ class LifecycleStore(Protocol):
         tool_call_id: str,
     ) -> RunToolCallRecord | None: ...
 
-    def list_tool_calls(self, run_id: str) -> list[RunToolCallRecord]: ...
+    def list_tool_calls(
+        self, run_id: str, *, step_index: int | None = None
+    ) -> list[RunToolCallRecord]:
+        """按 step/ordinal 返回工具事实，可限定为一个模型步。"""
+        ...
 
     def load_result(self, run_id: str) -> RunResult | None: ...
 
