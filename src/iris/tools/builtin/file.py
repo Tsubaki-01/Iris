@@ -16,10 +16,11 @@ import re
 import tempfile
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from fnmatch import fnmatchcase
 from itertools import islice
 from pathlib import Path
-from typing import Any, ClassVar, Generic, TypeVar, cast
+from typing import Any, ClassVar, Generic, TextIO, TypeVar, cast
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -363,14 +364,9 @@ class WorkspaceFileService:
             OSError: 打开、读取或观测文件失败。
             UnicodeDecodeError: 文件不是有效 UTF-8 文本。
         """
-        path = self.resolve_path(params.file_path, context)
-        if not path.exists():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
-        if not path.is_file():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
-        with path.open("r", encoding="utf-8") as handle:
+        with self._open_text(params.file_path, context) as (path, handle):
             selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
             stat = os.fstat(handle.fileno())
         if params.with_line_numbers:
@@ -387,6 +383,50 @@ class WorkspaceFileService:
                 size_bytes=stat.st_size,
             ),
         )
+
+    def read_text_observed(
+        self,
+        file_path: str,
+        context: ToolExecutionContext,
+    ) -> tuple[str, ReadFileRecord]:
+        """从同一次打开读取完整文本并获取观测，供需要内容版本的调用方使用。
+
+        Args:
+            file_path: workspace 内的文件路径。
+            context: 提供 workspace 事实的执行上下文，不在此更新 read_state。
+
+        Returns:
+            tuple[str, ReadFileRecord]: 完整 UTF-8 文本及同一打开文件的观测。
+
+        Raises:
+            IrisToolValidationError: 路径越出 workspace。
+            IrisToolExecutionError: 路径不存在或不是普通文件。
+            OSError: 打开、读取或观测失败。
+            UnicodeDecodeError: 文件不是有效 UTF-8 文本。
+        """
+        with self._open_text(file_path, context) as (path, handle):
+            text = handle.read()
+            stat = os.fstat(handle.fileno())
+        return text, ReadFileRecord(
+            path=path,
+            mtime_ns=stat.st_mtime_ns,
+            size_bytes=stat.st_size,
+        )
+
+    @contextmanager
+    def _open_text(
+        self,
+        file_path: str,
+        context: ToolExecutionContext,
+    ) -> Iterator[tuple[Path, TextIO]]:
+        """统一 workspace 文本读取的路径与文件类型边界。"""
+        path = self.resolve_path(file_path, context)
+        if not path.exists():
+            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
+        if not path.is_file():
+            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
+        with path.open("r", encoding="utf-8") as handle:
+            yield path, handle
 
     def read_file(self, params: ReadFileInput, context: ToolExecutionContext) -> str:
         """读取文件片段并更新读取状态。

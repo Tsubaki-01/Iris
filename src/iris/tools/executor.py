@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
@@ -599,7 +600,7 @@ class ToolExecutor:
         Returns:
             ToolArtifactStore: 操作落盘工作的具象存取处理库。
         """
-        session_id = safe_path_segment(context.session_id or "default")
+        session_id = safe_path_segment(context.session_id)
         root = context.workspace_root / ".iris" / "tool-results" / session_id
         return ToolArtifactStore(root=root, preview_chars=self.artifact_preview_chars)
 
@@ -704,11 +705,8 @@ def _tool_use_from_context(context: ToolExecutionContext) -> ToolUseBlock:
 def _copy_context_for_parallel_call(
     context: ToolExecutionContext,
 ) -> ToolExecutionContext:
-    """复制并发调用上下文，同时共享文件读取状态。"""
-    child_context = context.model_copy(deep=True)
-    child_context.read_state = context.read_state
-    child_context.cancellation = context.cancellation
-    return child_context
+    """只复制各调用独有的 metadata，共享读取状态和取消信号。"""
+    return context.model_copy(update={"metadata": deepcopy(context.metadata)})
 
 
 def _human_interaction_request(

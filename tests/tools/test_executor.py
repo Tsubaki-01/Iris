@@ -13,6 +13,8 @@ from iris.tools import (
     BaseTool,
     PermissionDecision,
     PermissionEffect,
+    ReadFileRecord,
+    ReadFileState,
     ToolDefinition,
     ToolExecutionContext,
     ToolExecutor,
@@ -258,6 +260,70 @@ async def test_executor_uses_isolated_context_for_concurrent_read_batch(
     )
 
     assert set(middleware.seen) == {("a", "call_1"), ("b", "call_2")}
+
+
+@pytest.mark.asyncio
+async def test_parallel_context_copies_only_isolated_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """并发调用隔离嵌套 metadata，共享状态不会先复制再丢弃。"""
+    copies: list[str] = []
+
+    class Signal(_SharedCancellationSignal):
+        """记录共享取消信号的无谓复制。"""
+
+        def __deepcopy__(self, memo: dict[int, Any]) -> Signal:
+            copies.append("cancellation")
+            return self
+
+    original_copy = ReadFileRecord.__deepcopy__
+
+    def copy_record(record: ReadFileRecord, memo: dict[int, Any] | None = None) -> ReadFileRecord:
+        copies.append("read_record")
+        return original_copy(record, memo)
+
+    monkeypatch.setattr(ReadFileRecord, "__deepcopy__", copy_record)
+    source = tmp_path / "source.txt"
+    state = ReadFileState(
+        files={str(source): ReadFileRecord(path=source, mtime_ns=1, size_bytes=2)}
+    )
+    signal = Signal()
+    seen: list[ToolExecutionContext] = []
+
+    class CaptureContext(ToolMiddleware):
+        """在并发路径中修改各调用独有的 metadata。"""
+
+        async def before_call(
+            self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
+        ) -> None:
+            context.metadata["nested"]["calls"].append(context.call_id)
+            seen.append(context)
+            await asyncio.sleep(0)
+
+    def echo(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(echo)
+    context = ToolExecutionContext(
+        workspace_root=tmp_path,
+        metadata={"nested": {"calls": []}},
+        read_state=state,
+        cancellation=signal,
+    )
+    results = await ToolExecutor(registry, middleware=[CaptureContext()]).execute_many(
+        [ToolUseBlock(id=str(i), name="echo", input={"value": str(i)}) for i in range(3)],
+        context,
+    )
+
+    assert all(not result.is_error for result in results)
+    assert len(seen) == 3
+    assert context.metadata == {"nested": {"calls": []}}
+    for child in seen:
+        assert child.read_state is state
+        assert child.cancellation is signal
+        assert child.metadata == {"nested": {"calls": [child.call_id]}}
+    assert copies == []
 
 
 @pytest.mark.asyncio

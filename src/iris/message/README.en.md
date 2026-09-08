@@ -46,7 +46,7 @@ package boundary.
 `iris.message.__all__` exposes the message/conversation/request/response contracts plus the
 provider-neutral streaming contracts. The latter include `ModelStreamScope`, `ModelBlockRef`,
 `ModelUsageSnapshot`, block and response event models, the discriminated `ModelStreamEvent` union,
-`ModelStreamFinalization`, and the safe `ProviderStreamError` DTO.
+and the safe `ProviderStreamError` DTO. The event union includes all three response terminal states.
 
 ### Messages and blocks
 
@@ -64,6 +64,8 @@ result = Msg.tool_result(call.id, "done", name=call.name)
 Tool-result messages retain `Role.USER` internally; the provider mapper converts them to the
 provider's tool-message wire shape. `ToolResultBlock.metadata` keeps supported fields and moves
 unknown extensions under `extra`.
+The tool kernel projects trusted `ToolResult` values through `to_msg()`, reusing normalized
+metadata; raw message inputs are still parsed by this package.
 
 ### `Conversation`
 

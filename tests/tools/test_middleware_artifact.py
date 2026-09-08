@@ -61,3 +61,44 @@ async def test_after_call_expansion_is_persisted_once(tmp_path: Path) -> None:
     assert result.artifact is not None
     assert result.artifact.path.read_text(encoding="utf-8") == "expanded result"
     assert result.artifact.preview == "ex"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_id", "second_id"),
+    [("call/1", "call_1"), ("Call", "call"), ("中文", "__"), ("", "default")],
+)
+@pytest.mark.parametrize("id_field", ["call", "session"])
+async def test_different_ids_keep_both_artifacts(
+    tmp_path: Path, first_id: str, second_id: str, id_field: str
+) -> None:
+    """不同调用或会话 ID 的大结果同时可读，路径仍位于 artifact 根目录。"""
+
+    def echo(value: str) -> str:
+        return value
+
+    registry = ToolRegistry()
+    tool = registry.register_function(echo)
+    tool.definition.max_result_chars = 3
+    executor = ToolExecutor(registry)
+    artifacts = []
+    for identifier, content in [(first_id, "first result"), (second_id, "second result")]:
+        result = await executor.execute_one(
+            ToolUseBlock(
+                id=identifier if id_field == "call" else "same-call",
+                name="echo",
+                input={"value": content},
+            ),
+            ToolExecutionContext(
+                workspace_root=tmp_path,
+                session_id=identifier if id_field == "session" else "same-session",
+            ),
+        )
+        assert not result.is_error
+        assert result.artifact is not None
+        result.artifact.path.relative_to(tmp_path / ".iris" / "tool-results")
+        artifacts.append(result.artifact)
+
+    assert artifacts[0].path != artifacts[1].path
+    assert artifacts[0].path.read_text(encoding="utf-8") == "first result"
+    assert artifacts[1].path.read_text(encoding="utf-8") == "second result"
