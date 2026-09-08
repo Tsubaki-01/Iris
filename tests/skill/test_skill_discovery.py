@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,26 @@ def test_discovers_three_valid_skills_without_diagnostics(tmp_path: Path) -> Non
     assert all(skill.root_index == 0 for skill in result.skills)
     assert all(skill.skill_file.is_absolute() for skill in result.skills)
     assert all(not hasattr(skill, "body") for skill in result.skills)
+
+
+def test_discovery_enumerates_each_skill_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "skills"
+    skill_file = _write_skill(root, "example")
+    original_iterdir = Path.iterdir
+    enumerations: list[Path] = []
+
+    def iterdir(path: Path) -> Iterator[Path]:
+        enumerations.append(path)
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    result = _discover(tmp_path, root)
+
+    assert result.skills[0].name == "example"
+    assert enumerations.count(skill_file.parent) == 1
 
 
 def test_missing_skill_file_does_not_block_valid_siblings(tmp_path: Path) -> None:
@@ -240,6 +261,7 @@ def test_parser_error_receives_absolute_file_path_at_load_boundary(tmp_path: Pat
     with pytest.raises(IrisSkillFormatError) as exc_info:
         _load_skill(
             skill_file.parent,
+            skill_file=skill_file,
             workspace_root=workspace,
             scope=SkillScope.PROJECT,
             root=root,

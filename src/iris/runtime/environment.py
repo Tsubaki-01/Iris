@@ -17,12 +17,13 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
 from ..memory import MemoryContextBuilder, MemoryService
 from ..message import LLMRequest, LLMResponse, ModelStreamEvent
+from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
@@ -108,6 +109,8 @@ class RuntimeEnvironment:
         workspace_root (Path): 工具执行使用的 workspace 根路径。
         memory_service (MemoryService | None): 显式可选 memory 服务。
         memory_context_builder (MemoryContextBuilder): memory context 裁剪器。
+        skill_registry (SkillRegistry | None): 启动发现的 Skill 内容版本快照。
+        provider_fingerprint (dict[str, Any]): 有效 provider 配置或 host 显式版本，不含 API key。
     """
 
     agent_config: AgentConfig
@@ -119,6 +122,8 @@ class RuntimeEnvironment:
     workspace_root: Path = field(default_factory=Path.cwd)
     memory_service: MemoryService | None = None
     memory_context_builder: MemoryContextBuilder = field(default_factory=MemoryContextBuilder)
+    skill_registry: SkillRegistry | None = None
+    provider_fingerprint: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """归一化工具执行的 workspace 根路径。"""

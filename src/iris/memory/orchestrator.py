@@ -10,6 +10,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
@@ -130,14 +131,6 @@ class MemoryPolicy:
             return PolicyDecision(False, "candidate is not suggested for L2")
         return self._score_decision(candidate)
 
-    def should_merge(
-        self,
-        candidate: MemoryCandidate,
-        existing: MemoryItem,
-    ) -> PolicyDecision:
-        """不自动合并候选。"""
-        return PolicyDecision(False, "merge is not implemented in this policy")
-
     def _score_decision(self, candidate: MemoryCandidate) -> PolicyDecision:
         """按置信度和重要性阈值判断候选。"""
         if candidate.confidence is not None and candidate.confidence < self.min_confidence:
@@ -193,31 +186,27 @@ class MemoryOrchestrator:
         limit: int = 50,
     ) -> list[MemoryItem]:
         """显式处理 pending candidates，并在策略允许时晋升为 L2 item。"""
-        promoted_items: list[MemoryItem] = []
         candidates = self.service.list_candidates(
             scope,
             status=MemoryCandidateStatus.PENDING,
             limit=limit,
         )
-        for candidate in candidates:
-            decision = self.policy.should_promote(candidate)
-            if not decision.allowed:
-                self.service.reject_candidate(
-                    candidate.id,
-                    scope,
-                    actor=MemoryActor.SDK,
-                    reason=decision.reason,
-                )
-                continue
-            item = self.service.promote_candidate(
-                candidate.id,
-                scope,
-                kind=_candidate_kind(candidate),
-                actor=MemoryActor.SDK,
-                reason=decision.reason,
-            )
-            promoted_items.append(item)
-        return promoted_items
+
+        def promotions() -> Iterator[tuple[str, MemoryItemKind, str]]:
+            # 策略与晋升交错执行，后续策略失败时也由批次服务刷新已提交条目。
+            for candidate in candidates:
+                decision = self.policy.should_promote(candidate)
+                if not decision.allowed:
+                    self.service.reject_candidate(
+                        candidate.id,
+                        scope,
+                        actor=MemoryActor.SDK,
+                        reason=decision.reason,
+                    )
+                    continue
+                yield candidate.id, _candidate_kind(candidate), decision.reason
+
+        return self.service.promote_candidates(scope, promotions())
 
     def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """复用 MemoryService 构建记忆上下文。"""

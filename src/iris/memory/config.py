@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,12 +30,6 @@ class MemoryBackend(StrEnum):
 
     NONE = "none"
     SQLITE = "sqlite"
-
-
-class MemoryMirrorMode(StrEnum):
-    """文件 mirror 模式。"""
-
-    MINIMAL = "minimal"
 
 
 class MemoryScopeConfig(BaseModel):
@@ -99,24 +92,6 @@ class MemoryMirrorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
-    mode: MemoryMirrorMode = MemoryMirrorMode.MINIMAL
-
-
-class MemoryWritePolicyConfig(BaseModel):
-    """记忆写入策略配置。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    mode: Literal["sdk_only"] = "sdk_only"
-    delete_mode: Literal["tombstone"] = "tombstone"
-
-
-class MemoryOrchestratorConfig(BaseModel):
-    """记忆编排器配置占位。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = False
 
 
 class MemoryConfig(BaseModel):
@@ -130,8 +105,6 @@ class MemoryConfig(BaseModel):
     scope: MemoryScopeConfig = Field(default_factory=MemoryScopeConfig)
     search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
     mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
-    write_policy: MemoryWritePolicyConfig = Field(default_factory=MemoryWritePolicyConfig)
-    orchestrator: MemoryOrchestratorConfig = Field(default_factory=MemoryOrchestratorConfig)
 
 
 def build_memory_service_from_config(

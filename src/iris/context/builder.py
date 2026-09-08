@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic_core import PydanticSerializationError
 
@@ -57,6 +57,43 @@ class ContextBuilder:
                 else None
             ),
         )
+
+    def fingerprint_payload(self, input_data: ContextBuildInput) -> dict[str, Any]:
+        """返回实际启用的结构化输入与模板版本，不执行渲染。
+
+        Args:
+            input_data (ContextBuildInput): 运行环境已经加载的 context 输入。
+
+        Returns:
+            dict[str, Any]: 忽略来源路径和未启用内容的恢复指纹输入。
+
+        Raises:
+            IrisContextError: 有效模板来源无法读取或解析。
+        """
+        payload: dict[str, Any] = {}
+        for section_name, section in (
+            ("system", input_data.system),
+            ("memory", input_data.memory),
+            ("before_current_input", input_data.before_current_input),
+        ):
+            if section is None:
+                continue
+            slots = _enabled_slots(section)
+            # memory 可在 step 0 由 run options 注入 slots，因此其配置也属于恢复环境。
+            if not slots and (
+                section_name != "memory" or (section.template is None and section.max_chars is None)
+            ):
+                continue
+            payload[section_name] = {
+                "slots": [slot.model_dump(mode="json") for slot in slots],
+                "max_chars": section.max_chars,
+                "template_version": (
+                    self.template_renderer.content_version(section.template)
+                    if section.template is not None
+                    else None
+                ),
+            }
+        return payload
 
     def _render_optional_section(
         self,

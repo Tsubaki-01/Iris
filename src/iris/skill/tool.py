@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from hashlib import sha256
+from io import StringIO
+from itertools import islice
 from pathlib import Path
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..exceptions import (
+    IrisSkillError,
     IrisSkillNotFoundError,
     IrisSkillPathError,
     IrisToolExecutionError,
@@ -17,7 +22,7 @@ from ..exceptions import (
 from ..message import TextBlock
 from ..tools import (
     BaseTool,
-    ReadFileInput,
+    ReadFileRecord,
     ToolCapability,
     ToolDefinition,
     ToolErrorInfo,
@@ -42,7 +47,7 @@ class LoadSkillInput(BaseModel):
 
 
 class LoadSkillTool(BaseTool):
-    """按名称读取当前 live SKILL.md，不执行其中内容。"""
+    """按名称读取与启动版本一致的 SKILL.md，不执行其中内容。"""
 
     def __init__(
         self,
@@ -120,9 +125,18 @@ class LoadSkillTool(BaseTool):
             )
 
         try:
-            text = self.file_service.read_file(
-                ReadFileInput(file_path=metadata.relative_skill_file),
-                context,
+            worker_context = context.model_copy(update={"read_state": None})
+            text, record = await asyncio.to_thread(
+                self._read_current_skill,
+                metadata,
+                worker_context,
+            )
+        except IrisSkillError as exc:
+            return self._error_result(
+                code="SKILL_VERSION_CHANGED",
+                message=exc.message,
+                retryable=False,
+                details={"name": input_data.name},
             )
         except IrisToolValidationError as exc:
             if exc.message.startswith("PATH_OUTSIDE_WORKSPACE"):
@@ -146,11 +160,23 @@ class LoadSkillTool(BaseTool):
         except OSError:
             return self._read_error(input_data.name, "SKILL.md 读取失败")
 
+        self.file_service.ensure_read_state(context).merge(record)
         return ToolResult(
             tool_use_id="",
             tool_name="load_skill",
             content=[TextBlock(text=text)] if text else [],
         )
+
+    def _read_current_skill(
+        self,
+        metadata: SkillMetadata,
+        context: ToolExecutionContext,
+    ) -> tuple[str, ReadFileRecord]:
+        """在 worker 内读取完整版本，成功后再保留原有的 1000 行输出范围。"""
+        text, record = self.file_service.read_text_observed(metadata.relative_skill_file, context)
+        if sha256(text.encode("utf-8")).hexdigest() != metadata.content_version:
+            raise IrisSkillError("Skill 内容已变化，请开始新 run", name=metadata.name)
+        return "\n".join(line.rstrip("\n") for line in islice(StringIO(text), 1000)), record
 
     def _resolve_live_file(
         self,

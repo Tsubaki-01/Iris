@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from hashlib import sha256
 from pathlib import Path
 
 from ..exceptions import (
@@ -148,7 +149,10 @@ def _scan_root(
             continue
 
         try:
-            has_skill_file = any(child.name == SKILL_FILE_NAME for child in candidate.iterdir())
+            skill_file = next(
+                (child for child in candidate.iterdir() if child.name == SKILL_FILE_NAME),
+                None,
+            )
         except OSError as exc:
             diagnostics.append(
                 SkillDiagnostic(
@@ -159,7 +163,7 @@ def _scan_root(
                 )
             )
             continue
-        if not has_skill_file:
+        if skill_file is None:
             diagnostics.append(
                 SkillDiagnostic(
                     code="MISSING_SKILL_FILE",
@@ -172,6 +176,7 @@ def _scan_root(
         try:
             metadata = _load_skill(
                 candidate,
+                skill_file=skill_file,
                 workspace_root=resolved_workspace,
                 scope=scope,
                 root=resolved_root,
@@ -211,6 +216,7 @@ def _scan_root(
 def _load_skill(
     skill_dir: Path,
     *,
+    skill_file: Path,
     workspace_root: Path,
     scope: SkillScope,
     root: Path,
@@ -221,23 +227,6 @@ def _load_skill(
     resolved_workspace = workspace_root
     resolved_root = root
     resolved_skill_dir = skill_dir.resolve(strict=False)
-
-    try:
-        skill_file = next(
-            (child for child in skill_dir.iterdir() if child.name == SKILL_FILE_NAME),
-            None,
-        )
-    except OSError as exc:
-        raise IrisSkillFormatError(
-            "无法枚举 Skill 目录",
-            path=str(resolved_skill_dir),
-            reason=str(exc),
-        ) from exc
-    if skill_file is None:
-        raise IrisSkillFormatError(
-            f"Skill 目录缺少 {SKILL_FILE_NAME}",
-            path=str(resolved_skill_dir),
-        )
 
     resolved_skill_file = skill_file.resolve(strict=False)
     _require_containment(
@@ -308,6 +297,7 @@ def _load_skill(
         skill_file=resolved_skill_file,
         root_dir=resolved_skill_dir,
         relative_skill_file=resolved_skill_file.relative_to(resolved_workspace).as_posix(),
+        content_version=sha256(text.encode("utf-8")).hexdigest(),
         root_index=root_index,
         description_truncated=description_truncated,
         declared_name=declared_name,

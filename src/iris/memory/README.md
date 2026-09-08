@@ -95,6 +95,11 @@ flowchart LR
 patch，不同连接对同一条目不同字段的修改会依次合并。条目、候选和事件 ID 在所有 scope
 中全局唯一。
 
+`process_candidates()` 每批只为当前 scope 重建一次镜像。`MemoryService.promote_candidates()`
+接收 scope 与按顺序提供 `(candidate_id, kind, reason)` 的 iterable，仍逐项调用 store 的原子
+晋升；后续候选或策略失败时，已成功提交的条目会在异常传播前统一刷新。空批次不重建镜像，
+单条 `promote_candidate()` 仍在返回前刷新。
+
 ### Context 注入
 
 `MemoryContextBuilder` 保持检索顺序，在 `max_chars` 预算内生成
@@ -147,14 +152,17 @@ result = await runner.start(
 
 `MemoryConfig.search` 只包含 `use_fts`，用于选择是否启用全文索引。返回数量由每次
 `MemoryQuery.limit` 或工具输入的 `limit` 决定，没有配置级搜索数量默认值。
+配置仅支持 `backend`、`root`、`path`、`scope`、`search` 与 `mirror.enabled`；编排器必须显式
+构造，写入通过 SDK，删除使用 tombstone，不提供无行为的模式选择。
 
 ## 只读 memory 工具
 
 `register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
 `READ` 能力。当前没有模型可见的 remember/forget 工具；写入仍须通过 SDK 或上层策略显式完成。
 
-工具输入不能覆盖 scope。`MemoryAccessPolicy` 由宿主上下文计算写 scope 与可读 scope；宿主可
-显式加入约定的 workspace-shared scope，多 scope 结果按 item ID 去重。
+工具输入不能覆盖 scope。`MemoryAccessPolicy(read_scopes=[...])` 只声明当前允许读取的 scope；
+空集合不读取任何 scope。宿主可显式加入约定的 workspace-shared scope，多 scope 结果按 item
+ID 去重。`effective_read_scopes()` 按顺序去重；工厂在每次工具执行前从当前宿主上下文重新计算策略。
 `register_memory_tools()` 必须直接接收 `access_policy_factory`；不再接受单 scope factory，
 也不会推断或包装旧契约。
 `MemoryQuery`、`memory_search` 与 `memory_list` 的 `limit` 都声明为 `1..100`；工具输入在 raw
@@ -185,10 +193,6 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 
 - 不提供向量数据库、embedding、语义 reranker 或远程后端。
 - 不自动从 session 消息提取记忆，不启动后台任务。
-- `MemoryOrchestratorConfig.enabled` 目前只是配置形状，
-  `build_memory_service_from_config()` 不会据此构造 orchestrator。
-- `MemoryWritePolicyConfig` 只表达当前 `sdk_only` / `tombstone` 契约，不是通用策略引擎。
-- `WorkingMemoryFrame` 是预留数据模型，当前 runtime active path 不消费它。
 - `collection` 参与 SQLite 硬隔离，但当前不是独立的业务管理对象。
 
 ## 维护与验证
@@ -199,6 +203,7 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 | 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | async 读取、工具多 scope 调度、查询计划 | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
 | mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
+| 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
 
 ```bash
