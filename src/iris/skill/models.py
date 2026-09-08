@@ -46,6 +46,7 @@ class SkillMetadata(BaseModel):
     skill_file: Path
     root_dir: Path
     relative_skill_file: str
+    content_version: str
     root_index: int = Field(ge=0)
     description_truncated: bool = False
     declared_name: str | None = None

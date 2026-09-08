@@ -85,7 +85,7 @@ the output structures LLM input and is not guaranteed to parse as strict XML.
 
 `ContextSection(template=None, max_chars=None, slots=[])` requires an absolute template path when
 constructed directly and a positive non-boolean `max_chars`. System must have at least one enabled
-slot. Empty optional sections do not touch a configured template path.
+slot. During `build()`, empty optional sections do not touch a configured template path.
 
 `ContextBuildInput.with_memory_slots()` returns a copy with runtime slots appended; it does not
 mutate the loaded object and creates an empty memory section when needed.
@@ -98,6 +98,26 @@ When `template` is set, `ContextTemplateRenderer` receives exactly one variable,
 JSON-mode list of slot dictionaries. Jinja2 uses XML autoescape and `StrictUndefined`; rendered text
 is preserved as prompt text. Missing templates, encoding/dependency/render errors, and non-serializable
 slot values raise `IrisContextError`.
+
+On its first `render_file()` or `content_version()` call for an entry template, a
+`ContextTemplateRenderer` reads that source and its static `include` / `import` / `extends`
+dependencies. Later calls reuse the source snapshot, Jinja Environment, and compiled templates.
+File edits and newly added optional files affect only a new renderer. No directory scan is needed.
+Nested dependencies, static fallback filename lists, and `ignore missing` preserve the content and
+file availability observed in that first snapshot.
+
+Dependency filenames must be static strings or lists of static strings. Dynamic data and
+conditional branches remain supported: replace `{% include selected %}` with fixed filenames in
+the respective branches. A dynamic filename expression raises `IrisContextError` with that
+actionable guidance because its source version cannot be determined at startup.
+
+`ContextBuilder.fingerprint_payload()` returns enabled, sorted slots, character limits, and
+template content versions without rendering the context. The harness calls it when constructing
+a runner. It includes `system`, a before-input section with enabled slots, and configured memory
+templates or character limits. Run options can later inject slots into an empty memory section,
+so its configured template is frozen at this point too. Default empty memory sections, disabled
+slots, and empty before-input sections are skipped. Standalone `build()` still returns `None` for
+empty optional sections. `StrictUndefined` and `max_chars` apply only during actual rendering.
 
 `max_chars` is checked after complete rendering, including tags, attributes, fixed template text,
 whitespace, and newlines. Equal length passes; excess raises with section, limit, and actual length.
@@ -113,8 +133,9 @@ Unknown fields are rejected and no legacy migration runs.
 `ContextBuildInput`, `ContextBuildOutput`, `ContextBuilder`, `ContextXmlRenderer`,
 `ContextTemplateRenderer`, and `load_context_build_input`.
 
-The builder accepts optional renderer instances and exposes `build(input_data)`. The XML renderer
-exposes `render_section()` and `render_slot()`; the template renderer exposes `render_file()`.
+The builder accepts optional renderer instances and exposes `build(input_data)` and
+`fingerprint_payload(input_data)`. The XML renderer exposes `render_section()` and `render_slot()`;
+the template renderer exposes `render_file()` and `content_version(template_path)`.
 
 File/YAML/template/build errors use `IrisContextError`. Direct Pydantic construction errors surface
 as `pydantic.ValidationError` with the underlying context validation information.
@@ -128,6 +149,7 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 | --- | --- | --- |
 | Slot/section contracts, ordering, roles, limits, and XML rendering | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML, template paths, and Jinja2 rendering | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
+| Template snapshots and recovery inputs | `builder.py`, `renderer.py` | `tests/context/test_template_snapshot.py`, `tests/harness/test_environment_fingerprint.py` |
 
 ```bash
 uv run pytest tests/context

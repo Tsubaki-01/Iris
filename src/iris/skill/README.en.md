@@ -21,8 +21,10 @@ flowchart LR
     Loader --> Markdown["live SKILL.md Markdown"]
 ```
 
-The factory takes one discovery snapshot per runtime construction. Bodies are not retained in the
-registry or context. Only a non-empty catalog adds the `available_skills` slot and a `load_skill`
+The factory takes one discovery snapshot per runtime construction and enumerates each candidate
+directory once. Bodies are not retained in the registry or context. `SkillMetadata.content_version`
+stores a digest of the complete UTF-8 text already read during discovery.
+Only a non-empty catalog adds the `available_skills` slot and a `load_skill`
 tool backed by the same registry. The runtime does not refresh that snapshot.
 
 ## Layout and configuration
@@ -93,13 +95,18 @@ contains only `name` and `description`. After selecting an entry, the model call
 {"name": "my-skill"}
 ```
 
-`load_skill` returns up to 1000 lines of the current live `SKILL.md` Markdown. Discovery owns the
+`load_skill` returns up to 1000 lines of `SKILL.md` Markdown matching its startup content version. Discovery owns the
 configured root and scan-directory boundaries. At load time, the tool revalidates that the file is
 still inside its original Skill directory, while the shared file service enforces the workspace
 boundary. The model does not need `file.read` for Skill bodies. The tool reads text only: it never
 executes body content, invokes commands automatically, or turns a Skill into a mounted tool set.
+A single worker reads the complete text and observation from one open file, verifies the version,
+then selects the output lines. The event loop merges the successful `ReadFileRecord`; the worker
+does not mutate shared read state.
 
-Stable tool error codes are `SKILL_NOT_FOUND`, `SKILL_PATH_ERROR`, and `SKILL_READ_ERROR`.
+Stable tool error codes are `SKILL_NOT_FOUND`, `SKILL_PATH_ERROR`, `SKILL_READ_ERROR`, and
+`SKILL_VERSION_CHANGED`. Changed content produces the last error, requires a new run, and is not
+returned to the model.
 
 ### Custom system templates
 
@@ -132,17 +139,18 @@ is invisible to the model even though `load_skill` remains registered.
 | Description | At most 1024 catalog characters; longer text is truncated with a warning |
 | Context | `system.max_chars` is a hard post-render limit; overflow raises `IrisContextError` without omitting entries |
 | Provider | The provider's total context window still applies |
-| File read | `WorkspaceFileService` returns at most 1000 lines |
+| File read | Read the complete text and verify its version; `load_skill` returns at most 1000 lines |
 | Tool result | `load_skill` defaults to `max_result_chars=50000`; the executor stores a larger non-error result as an artifact and returns a preview |
 
 There is no user-level shared directory. A temporary workaround is to set `permissions.workspace`
 to a common parent of several projects and point `skills.root` to a shared path below it. This also
 broadens the workspace boundary for every file tool and must be treated as a security tradeoff.
 
-Adding `AgentConfig.skills` changes the config schema: an old checkpoint can fail closed once on a
-new environment fingerprint even with `enabled: false`. When enabled, catalog or description
-changes also alter the fingerprint. Restart long-running `iris chat` processes after changing
-configuration or Skill metadata. No provider-cache hit behavior is guaranteed.
+Run recovery binds the startup content versions of every Skill actually discovered in enabled
+directories. A changed body requires a new run even if that Skill has not been loaded yet. Disabled
+Skills do not read directories or bodies, and unrelated workspace files are not scanned.
+Rebuild the runtime or restart long-running `iris chat` processes after changing Skills.
+No provider-cache hit behavior is guaranteed.
 
 If multiple scopes are added, bare names may evolve into `scope:name`; callers and `require` should
 not assume a bare name stays unique across scopes forever. A third search/deferred level should be
@@ -176,7 +184,7 @@ dataclass used only by discovery results.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Metadata/frontmatter | `models.py`, `frontmatter.py` | `tests/skill/test_skill_models.py`, `tests/skill/test_skill_frontmatter.py` |
+| Metadata/frontmatter | `models.py`, `frontmatter.py` | `tests/skill/test_skill_discovery.py`, `tests/skill/test_skill_frontmatter.py` |
 | Paths, scanning, priority | `discovery.py`, `registry.py` | `tests/skill/test_skill_discovery.py`, `tests/skill/test_skill_registry.py` |
 | Catalog and on-demand load | `catalog.py`, `tool.py` | `tests/skill/test_skill_catalog.py`, `tests/skill/test_skill_tool.py` |
 | Config/factory integration | `../agents/config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |

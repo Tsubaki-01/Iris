@@ -123,15 +123,6 @@ class MemoryActor(StrEnum):
     SYSTEM = "system"
 
 
-class WorkingMemoryFrame(BaseModel):
-    """运行态 L0 工作记忆帧。预留数据模型，用于agent runtime"""
-
-    scope: MemoryScope
-    task: str = ""
-    messages: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class MemoryScope(BaseModel):
     """记忆隔离边界。
 

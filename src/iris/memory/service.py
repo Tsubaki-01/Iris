@@ -13,7 +13,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import TypeVar
 
@@ -419,16 +419,44 @@ class MemoryService:
         Returns:
             MemoryItem: 晋升后可召回的 L2 item。
         """
-        item = self.store.promote_candidate(
-            candidate_id,
+        return self.promote_candidates(
             scope,
-            kind=kind,
+            [(candidate_id, kind, reason)],
             actor=actor,
-            reason=reason,
-        )
-        if self.mirror is not None:
-            self.mirror.rebuild_from_store(self.store, scope)
-        return item
+        )[0]
+
+    def promote_candidates(
+        self,
+        scope: MemoryScope,
+        promotions: Iterable[tuple[str, MemoryItemKind, str]],
+        *,
+        actor: MemoryActor = MemoryActor.SDK,
+    ) -> list[MemoryItem]:
+        """逐项原子晋升，并统一刷新本批已提交条目的镜像。
+
+        Args:
+            scope: 本批候选所属的隔离范围。
+            promotions: 按处理顺序提供候选 ID、长期记忆类型和晋升原因。
+            actor: 发起晋升操作的参与实体。
+
+        Returns:
+            list[MemoryItem]: 按输入顺序返回已晋升的条目。
+
+        Raises:
+            IrisMemoryError: store 或镜像操作失败；此前成功项仍已提交。
+        """
+        items: list[MemoryItem] = []
+        try:
+            for candidate_id, kind, reason in promotions:
+                items.append(
+                    self.store.promote_candidate(
+                        candidate_id, scope, kind=kind, actor=actor, reason=reason
+                    )
+                )
+        finally:
+            if items and self.mirror is not None:
+                self.mirror.rebuild_from_store(self.store, scope)
+        return items
 
     def accept_candidate(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from iris.skill.registry import SkillRegistry
 from iris.skill.tool import LoadSkillInput, LoadSkillTool
 from iris.tools import (
     PermissionEffect,
+    ReadFileRecord,
     ReadFileState,
     ToolExecutionContext,
     ToolExecutor,
@@ -81,6 +83,63 @@ async def test_valid_skill_returns_markdown_and_records_real_read_path(
     assert result.model_content == expected
     assert isinstance(context.read_state, ReadFileState)
     assert context.read_state.get(skill_file.resolve()) is not None
+
+
+@pytest.mark.asyncio
+async def test_skill_read_runs_in_worker_and_merges_read_state_on_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, skill_file = _registry(tmp_path)
+    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
+    loop_thread = threading.get_ident()
+    read_threads: list[int] = []
+    merge_threads: list[int] = []
+    original_open = Path.open
+    original_merge = ReadFileState.merge
+
+    def open_file(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path == skill_file.resolve():
+            read_threads.append(threading.get_ident())
+        return original_open(path, *args, **kwargs)
+
+    def merge(state: ReadFileState, record: ReadFileRecord) -> None:
+        merge_threads.append(threading.get_ident())
+        original_merge(state, record)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(ReadFileState, "merge", merge)
+
+    result = await LoadSkillTool(registry).arun(LoadSkillInput(name="example-skill"), context)
+
+    assert not result.is_error
+    assert read_threads and all(thread != loop_thread for thread in read_threads)
+    assert merge_threads == [loop_thread]
+    assert context.read_state.get(skill_file.resolve()) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    ["changed instructions", "line\n" * 1100 + "changed tail"],
+    ids=["body", "beyond-output-limit"],
+)
+async def test_modified_skill_requires_new_run(tmp_path: Path, body: str) -> None:
+    registry, skill_file = _registry(tmp_path, body="line\n" * 1100 + "original tail")
+    original = skill_file.read_text(encoding="utf-8")
+    frontmatter = original.rsplit("---\n", 1)[0]
+    skill_file.write_text(f"{frontmatter}---\n{body}", encoding="utf-8")
+
+    result = await LoadSkillTool(registry).arun(
+        LoadSkillInput(name="example-skill"),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+
+    assert result.is_error
+    assert result.error is not None
+    assert result.error.code == "SKILL_VERSION_CHANGED"
+    assert not result.error.retryable
+    assert result.content == []
 
 
 @pytest.mark.asyncio

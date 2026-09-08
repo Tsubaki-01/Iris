@@ -181,8 +181,6 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     def policy(context: ToolExecutionContext) -> MemoryAccessPolicy:
         policy_threads.append(threading.get_ident())
         return MemoryAccessPolicy(
-            actor_agent_id=context.agent_id,
-            write_scope=first_scope,
             read_scopes=[first_scope, second_scope],
         )
 

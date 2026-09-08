@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..agents import AgentConfig, build_tool_registry, load_agent_config
 from ..context import (
@@ -132,12 +132,24 @@ class RuntimeFactory:
             tool_registry,
             permission_policy=permission_policy,
         )
-        resolved_provider = provider or create_provider_client(
-            config.to_model_route(),
-            api_key=api_key,
-            base_url=config.model.base_url,
-            timeout=config.model.timeout,
-        )
+        provider_fingerprint: dict[str, Any] = {}
+        resolved_provider: RuntimeProvider
+        if provider is None:
+            client = create_provider_client(
+                config.to_model_route(),
+                api_key=api_key,
+                base_url=config.model.base_url,
+                timeout=config.model.timeout,
+            )
+            resolved_provider = client
+            provider_fingerprint = {
+                "provider": client.provider,
+                "litellm_provider": client.litellm_provider or client.provider,
+                "base_url": client.base_url,
+                "headers": dict(client.headers),
+            }
+        else:
+            resolved_provider = provider
 
         tool_bridge = ToolBridge(
             tool_view=tool_view,
@@ -150,6 +162,8 @@ class RuntimeFactory:
             tool_bridge=tool_bridge,
             workspace_root=workspace_root,
             memory_service=memory_service,
+            skill_registry=skill_registry,
+            provider_fingerprint=provider_fingerprint,
         )
         return AgentRuntime(environment)
 

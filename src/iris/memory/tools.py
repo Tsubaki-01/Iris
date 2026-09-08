@@ -52,27 +52,14 @@ MemoryAccessPolicyFactory = Callable[[ToolExecutionContext], "MemoryAccessPolicy
 class MemoryAccessPolicy:
     """一次工具执行可使用的记忆访问策略。
 
-    `actor_agent_id` 表示谁在执行；`write_scope` 表示默认写入位置；
-    `read_scopes` 表示只读工具允许读取的位置。当前注册的 memory tools 仍然只读，
-    但提前把 write/read scope 拆开，便于 runtime 为 subagent 挂载受控策略。
+    `read_scopes` 由宿主根据当前执行上下文明确提供；空集合表示不读取任何 scope。
     """
 
-    actor_agent_id: str
-    write_scope: MemoryScope
-    read_scopes: Sequence[MemoryScope] = ()
-    allow_write_shared: bool = False
-    allow_promote_to_parent: bool = False
+    read_scopes: Sequence[MemoryScope]
 
-    def effective_write_scope(self, context: ToolExecutionContext) -> MemoryScope:
-        """返回本次执行允许写入的默认 scope。"""
-        del context
-        return self.write_scope
-
-    def effective_read_scopes(self, context: ToolExecutionContext) -> list[MemoryScope]:
+    def effective_read_scopes(self) -> list[MemoryScope]:
         """返回本次执行允许读取的 scope 列表。"""
-        del context
-        scopes = list(self.read_scopes) or [self.write_scope]
-        return _dedupe_scopes(scopes)
+        return _dedupe_scopes(self.read_scopes)
 
 
 class MemorySearchToolInput(BaseModel):
@@ -172,7 +159,7 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
 
     def _read_scopes(self, context: ToolExecutionContext) -> list[MemoryScope]:
         """读取当前工具调用允许访问的 read scopes。"""
-        return self.access_policy_factory(context).effective_read_scopes(context)
+        return self.access_policy_factory(context).effective_read_scopes()
 
 
 class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
@@ -288,11 +275,7 @@ def default_memory_access_policy_factory(
             agent_id=context.agent_id or "default",
             session_id=context.session_id or None,
         )
-        return MemoryAccessPolicy(
-            actor_agent_id=context.agent_id or scope.agent_id,
-            write_scope=scope,
-            read_scopes=[scope],
-        )
+        return MemoryAccessPolicy(read_scopes=[scope])
 
     return _factory
 
@@ -378,7 +361,7 @@ def _dedupe_items(items: list[MemoryItem]) -> list[MemoryItem]:
     return deduped
 
 
-def _dedupe_scopes(scopes: list[MemoryScope]) -> list[MemoryScope]:
+def _dedupe_scopes(scopes: Sequence[MemoryScope]) -> list[MemoryScope]:
     """按完整 scope key 去重，避免重复查询同一块记忆。"""
     seen: set[tuple[str, str, str, str, str]] = set()
     deduped: list[MemoryScope] = []

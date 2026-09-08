@@ -89,6 +89,13 @@ accept events. `update_item()` also reads and applies its patch in one write tra
 to different fields from separate connections merge sequentially. Item, candidate, and event IDs
 are globally unique across scopes.
 
+`process_candidates()` rebuilds the current scope's mirror once per batch.
+`MemoryService.promote_candidates()` accepts a scope and an iterable of
+`(candidate_id, kind, reason)` tuples in processing order. Each store promotion remains atomic;
+if a later candidate or policy fails, previously committed items are projected before the error
+propagates. Empty batches do not rebuild, and single-item `promote_candidate()` still refreshes
+the mirror before returning.
+
 `MemoryContextBuilder` preserves result order and fits fragments into `max_chars`, truncating only
 the first fragment when necessary and counting omissions. Prompt fragments keep semantic metadata
 but omit storage source and retrieval score by default.
@@ -135,11 +142,17 @@ tool-payload helpers are not extension contracts.
 `MemoryConfig.search` contains only `use_fts`, which selects whether to enable the full-text index.
 Each `MemoryQuery.limit` or tool input's `limit` determines the result count; there is no
 configuration-level default search count.
+Configuration supports only `backend`, `root`, `path`, `scope`, `search`, and `mirror.enabled`.
+Construct orchestrators explicitly, write through the SDK, and use tombstone deletion; there are
+no mode settings without corresponding behavior.
 
 `register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
 `READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
-scope; `MemoryAccessPolicy` derives read/write scopes from trusted host context and can include the
-workspace-shared scope. `register_memory_tools()` requires an `access_policy_factory` directly; it
+scope. `MemoryAccessPolicy(read_scopes=[...])` declares allowed read scopes; an empty collection
+reads none. Hosts can include the workspace-shared scope, and multi-scope results are deduplicated
+by item ID. `effective_read_scopes()` deduplicates scopes in order. The factory recomputes the
+policy from current host context before every tool execution.
+`register_memory_tools()` requires an `access_policy_factory` directly; it
 does not accept or adapt a legacy single-scope factory. `MemoryQuery`, `memory_search`, and
 `memory_list` all declare a `1..100`
 limit. After raw tool input passes that boundary, it is projected to a trusted `MemoryQuery`
@@ -166,9 +179,6 @@ requests a complete mirror projection.
 
 - no vector database, embeddings, semantic reranker, or remote backend;
 - no automatic extraction from session messages or background tasks;
-- `MemoryOrchestratorConfig.enabled` is only a config shape and does not construct an orchestrator;
-- write-policy config only describes the current `sdk_only`/`tombstone` contract;
-- `WorkingMemoryFrame` is reserved and is not consumed by the active runtime;
 - collection is a hard SQLite filter, not a managed business object.
 
 ## Maintenance
@@ -179,6 +189,7 @@ requests a complete mirror projection.
 | Concurrent promotion, field updates, FTS completeness, and result-count config | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | Async reads, multi-scope tool scheduling, and query plans | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Batched mirror projection, rebuild, and atomic replacement | `mirror.py` | `tests/memory/test_mirror.py` |
+| Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | Runtime injection | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
 
 ```bash
