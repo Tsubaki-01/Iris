@@ -58,8 +58,7 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 - `ModelResponseStarted`、`ModelBlockStarted`、`ModelBlockDelta`、
   `ModelBlockCompleted`、`ModelUsageUpdated` 与三个 response terminal：
   provider-neutral streaming event models。
-- `ModelStreamEvent`：以上事件的 discriminated union；`ModelStreamFinalization`：
-  completed/failed/cancelled 终态投影。
+- `ModelStreamEvent`：以上事件的 discriminated union，直接包含三种 response 终态。
 - `ProviderStreamError`：不含 raw exception、header 或凭据的安全错误 DTO。
 
 ### `Msg`
@@ -79,6 +78,7 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 ```
 
 `ToolResultBlock.metadata` 会保留标准字段，并把未知扩展收纳到 `extra`，避免与后续标准字段冲突。
+工具内核的可信 `ToolResult` 使用 `to_msg()` 直接投影，复用已归一化的元数据；原始消息输入仍由本包解析。
 
 ### `Conversation`
 

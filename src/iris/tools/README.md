@@ -29,7 +29,7 @@ graph TD
 1. 用 `CallableTool`、`ToolRegistry.register_function()` 或自定义 `BaseTool` 生成 `ToolDefinition`。
 2. `ToolRegistry` 管理工具名称、别名、分组、deferred 可见性，并导出 provider schema。
 3. `ToolExecutor` 接收 `iris.message.ToolUseBlock`，查找工具、校验输入、检查权限、执行工具、运行 middleware，并返回 `ToolResult`。
-4. 超过 `ToolDefinition.max_result_chars` 的非错误文本结果会由 `ToolArtifactStore` 写入 `.iris/tool-results/{session_id}/{call_id}.txt`，返回预览和 artifact 元数据。
+4. 超过 `ToolDefinition.max_result_chars` 的非错误文本结果会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`，返回预览和 artifact 元数据。
 
 ## 快速入门
 
@@ -68,7 +68,7 @@ assert result.model_content == "你好，Iris"
   opt-in 的 `THREAD`；它不进入 provider schema。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
-- `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本。
+- `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview`。
 
@@ -88,6 +88,11 @@ assert result.model_content == "你好，Iris"
 `CallableTool` 将普通 callable 适配为 `BaseTool`。它会从函数签名、类型注解、docstring 或显式 `input_model` 生成 schema，并把返回值归一化为 `ToolResult`：字符串直接作为文本，`None` 为空内容，其他值优先 JSON 序列化。同步函数默认使用 `CallableExecutionMode.INLINE`，保持既有调用线程与顺序；只有显式声明 `THREAD` 才用 worker thread 执行。async function 不能声明 `THREAD`，会在注册阶段得到 `IrisToolValidationError`。同步函数在线程中返回 awaitable 时，awaitable 仍回到 event loop 等待。
 
 `preset_kwargs` 会在执行前注入函数调用，但不会暴露在 schema 中；调用方若传入同名参数会得到校验错误。
+
+每个 `CallableTool` 只使用一个输入模型：未传 `input_model` 时，从函数注解和 docstring
+参数说明生成 Pydantic 模型；schema 导出与首次输入校验都使用这个模型。固定 tuple 的
+各位置类型、`Annotated` 约束、可空字段和默认值都由 Pydantic 处理。调用函数时直接传递
+已验证字段，保留 tuple 和嵌套 `BaseModel` 等 Python 类型。
 
 ## 注册与执行
 
@@ -113,6 +118,8 @@ tool_obj = registry.register_function(
 - `search_deferred(query, include_groups=None, limit=10)`: 搜索 deferred 工具定义。
 
 `ToolRegistryView.active_tools` 会隐藏 `deferred=True` 的工具，除非名称在 `allow` 中；`deny` 优先级高于 `allow`。`include_groups` 可按 `definition.group` 过滤。
+
+名称冲突检查直接使用注册表已有的名称和别名索引，不重新遍历已注册工具的定义。
 
 `active_schemas()` 支持的 provider 包装：
 
@@ -152,12 +159,17 @@ middleware after hooks → artifact → breaker 记录。guard 失败时不会�
 作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
-并发 context copy 会共享类型化 `ReadFileState` 和 `cancellation` live object；
+并发 context copy 只深拷贝需要隔离的 `metadata`，直接共享类型化 `ReadFileState` 和
+`cancellation` live object，不复制共享对象及其记录；
 `ToolExecutionContext` 在 public raw 输入边界解析 read state，后续 file service 直接消费该
 对象，不再重复做类型判断。signal 不会进入 `model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
 `IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
 
 `read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
+
+`WorkspaceFileService.read_text_observed()` 为 Skill 内容版本检查提供同一次打开的完整文本与
+文件观测，复用文件读取的 workspace 和普通文件边界。它不更新共享读取状态；调用方在 await
+成功后合并。常规 `read_file_observed()` 仍只读取请求的分页范围。
 
 `ToolExecutor` 只提供分类、permission refresh 和单调用执行原语；lifecycle active path 由 runtime 在它之上
 使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
@@ -272,6 +284,10 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 `ToolArtifactStore.persist_if_large(result, max_chars=...)` 只处理非错误结果。若 `result.model_content` 超过阈值，会写入本地文本 artifact，并把返回内容替换为预览、完整路径和 `.iris/` gitignore 提示。
 
+会话与调用 ID 的文件名片段统一为 `id_` 加完整 UTF-8 字节的小写十六进制编码；空 ID
+编码为 `id_`。不同 ID 在大小写不敏感的文件系统上也保持不同路径，目录归属检查仍在落盘
+处执行。此命名规则直接替换旧规则，已有 artifact 引用继续使用其中保存的路径。
+
 Executor 在全部 `after_call` 完成后执行一次 artifact 处理，因此 hook 扩展后的最终正文也受
 `max_result_chars` 约束；hook 收到的是工具完整结果。
 
@@ -339,8 +355,8 @@ registry.register(ToolSearchTool(registry))
 ### schema helpers
 
 - `DocstringSchemaExtractor.extract(func)`: 解析 Google Style docstring 的 summary、Args、Returns、Example/Examples。
-- `schema_from_callable(func, preset_kwargs=...)`: 从函数签名、类型注解和 docstring Args 生成 object JSON Schema；函数参数必须有可解析类型注解，支持普通参数和 keyword-only 参数，跳过 `*args`/`**kwargs`。
-- `schema_from_pydantic_model(model)`: 从 Pydantic 模型生成最小 object schema，并保留 `$defs`。
+- `schema_from_callable(func, preset_kwargs=...)`: 通过动态 Pydantic 输入模型导出 JSON Schema；函数参数必须有可解析类型注解，支持普通参数和 keyword-only 参数，跳过 `*args`/`**kwargs`，保留 docstring Args 参数说明。
+- `schema_from_pydantic_model(model)`: 导出 Pydantic 模型的完整 JSON Schema，包括 `$defs` 与 `additionalProperties` 等根约束。
 - `to_openai_chat_tool_schema(definition)`、`to_openai_responses_tool_schema(definition)`、`to_anthropic_tool_schema(definition)`: 将 `ToolDefinition` 包装为 provider 需要的 schema 形状。
 
 常见类型映射包括 `str`、`int`、`float`、`bool`、`list`、`set`、`tuple`、`dict`、`Literal`、`Union`/`|`、`Any` 和嵌套 `BaseModel`。不支持的参数类型会触发工具校验错误。
@@ -371,7 +387,7 @@ to_openai_responses_tool_schema, tool
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| 基础模型、callable/schema 适配与注册 | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
+| 基础模型、callable/schema 适配与注册 | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_schema.py`, `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
 | 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |

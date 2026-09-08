@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from ..exceptions import IrisToolExecutionError
 from ..message import Msg, ToolUseBlock
 from ..tools import (
     CancellationSignal,
@@ -169,62 +168,6 @@ class ToolBridge:
             cancellation=cancellation,
         )
 
-    async def execute_once(
-        self,
-        *,
-        assistant_message: Msg,
-        session_id: str,
-        agent_id: str,
-        workspace_root: Path,
-        permission_mode: str,
-        metadata: Mapping[str, Any] | None,
-        tools_enabled: bool = True,
-    ) -> list[ToolResult]:
-        """执行助手消息中的工具调用并按原始顺序返回结果。
-
-        Args:
-            assistant_message (Msg): Provider 返回的 assistant 消息。
-            session_id (str): 当前会话 ID。
-            agent_id (str): 发起工具调用的 agent 标识。
-            workspace_root (Path): 工具执行工作区根目录。
-            permission_mode (str): 工具权限模式。
-            metadata (Mapping[str, Any] | None): 运行态追踪元数据。
-            tools_enabled (bool): 本轮是否允许执行工具调用。
-
-        Returns:
-            list[ToolResult]: 与 assistant tool call 顺序一致的工具结果。
-        """
-        tool_calls = assistant_message.tool_calls
-        if not tool_calls:
-            return []
-
-        active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
-        active_calls: list[ToolUseBlock] = []
-        result_slots: list[ToolResult | None] = []
-        for call in tool_calls:
-            if call.name not in active_names:
-                result_slots.append(_not_allowed_result(call))
-                continue
-            active_calls.append(call)
-            result_slots.append(None)
-
-        if active_calls:
-            context = ToolExecutionContext(
-                workspace_root=workspace_root,
-                session_id=session_id,
-                agent_id=agent_id,
-                permission_mode=permission_mode,
-                metadata=dict(metadata or {}),
-                read_state=self._read_states.get(session_id),
-            )
-            active_results = await self.tool_executor.execute_many(active_calls, context)
-            if context.read_state is not None:
-                self._read_states[session_id] = context.read_state
-            _merge_active_results(result_slots, active_results)
-
-        results = [cast(ToolResult, result) for result in result_slots]
-        return results
-
 
 def _active_tool_names(tool_view: ToolRegistryView) -> set[str]:
     """从活动工具视图推导本轮允许调用的工具名（含别名）。"""
@@ -246,26 +189,6 @@ def _not_allowed_result(call: ToolUseBlock) -> ToolResult:
             message=f"工具未暴露给当前模型: {call.name}",
         ),
     )
-
-
-def _merge_active_results(
-    result_slots: list[ToolResult | None],
-    active_results: Sequence[ToolResult],
-) -> None:
-    """按原始 tool call 顺序填回执行结果。"""
-    expected_count = sum(result is None for result in result_slots)
-    actual_count = len(active_results)
-    if actual_count != expected_count:
-        raise IrisToolExecutionError(
-            "工具执行结果数量不匹配",
-            expected_count=expected_count,
-            actual_count=actual_count,
-        )
-
-    iterator = iter(active_results)
-    for index, result in enumerate(result_slots):
-        if result is None:
-            result_slots[index] = next(iterator)
 
 
 __all__ = ["ToolBridge"]

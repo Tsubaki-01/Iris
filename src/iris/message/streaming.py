@@ -40,7 +40,6 @@ from .llm import LLMResponse
 _NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 ModelBlockKind = Literal["text", "thinking", "tool_call"]
 ModelDeltaChannel = Literal["text", "thinking", "tool_name", "tool_arguments"]
-ModelStreamFinalStatus = Literal["completed", "failed", "cancelled"]
 
 # endregion
 
@@ -197,31 +196,6 @@ ModelStreamEvent = Annotated[
 ]
 
 
-class ModelStreamFinalization(BaseModel):
-    """描述 provider stream 的唯一终态投影。"""
-
-    status: ModelStreamFinalStatus
-    response: LLMResponse | None = None
-    error: ProviderStreamError | None = None
-    last_provider_sequence: int = Field(ge=1)
-    semantic_output_emitted: bool
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    @model_validator(mode="after")
-    def _validate_terminal_payload(self) -> Self:
-        """校验终态与 response/error payload 的对应关系。"""
-        if self.status == "completed":
-            if self.response is None or self.error is not None:
-                raise ValueError("completed finalization 必须只携带 response")
-            return self
-        if self.response is not None:
-            raise ValueError("failed/cancelled finalization 不得携带 response")
-        if self.status == "failed" and self.error is None:
-            raise ValueError("failed finalization 必须携带 error")
-        return self
-
-
 __all__ = [
     "ModelBlockCompleted",
     "ModelBlockDelta",
@@ -234,8 +208,6 @@ __all__ = [
     "ModelResponseFailed",
     "ModelResponseStarted",
     "ModelStreamEvent",
-    "ModelStreamFinalization",
-    "ModelStreamFinalStatus",
     "ModelStreamScope",
     "ModelUsageSnapshot",
     "ModelUsageUpdated",

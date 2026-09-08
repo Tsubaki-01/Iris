@@ -27,11 +27,10 @@ from ..exceptions import (
     IrisToolExecutionError,
     IrisToolValidationError,
 )
-from ..message import TextBlock
+from ..message import Msg, Role, TextBlock, ToolResultBlock
 from ._read_state import ReadFileState
 from .schema import (
     callable_input_model,
-    schema_from_callable,
     schema_from_pydantic_model,
 )
 
@@ -394,6 +393,21 @@ class ToolResult(BaseModel):
             metadata["tool_name"] = self.tool_name
         return metadata
 
+    def to_msg(self) -> Msg:
+        """把已验证的结果投影为模型历史消息，元数据只归一化一次。
+
+        Returns:
+            Msg: 包含一个工具结果块的 user 消息。
+        """
+        block = ToolResultBlock.model_construct(
+            tool_use_id=self.tool_use_id,
+            content=self.model_content,
+            is_error=self.is_error,
+            name=self.tool_name,
+            metadata=self.to_block_metadata(),
+        )
+        return Msg(role=Role.USER, content=[block])
+
 
 class BaseTool(ABC):
     """所有工具实现的统一接口。
@@ -682,18 +696,14 @@ class CallableTool(BaseTool):
             else getattr(func, "iris_tool_deprecation_message", None)
         )
         preset_names = set(self.preset_kwargs)
-        input_schema = (
-            schema_from_pydantic_model(input_model)
-            if input_model is not None
-            else schema_from_callable(func, preset_kwargs=preset_names)
+        self._generated_model = (
+            input_model if input_model is not None else callable_input_model(func, preset_names)
         )
+        input_schema = schema_from_pydantic_model(self._generated_model)
         for name_ in preset_names:
             input_schema.get("properties", {}).pop(name_, None)
             if name_ in input_schema.get("required", []):
                 input_schema["required"].remove(name_)
-        self._generated_model = (
-            input_model if input_model is not None else callable_input_model(func, preset_names)
-        )
         metadata: dict[str, Any] = {
             "examples": list(tool_examples or []),
             "tags": list(tool_tags or []),
@@ -834,7 +844,8 @@ class CallableTool(BaseTool):
         Example:
             res = await tool.arun(args, ctx)
         """
-        kwargs = params.model_dump() if isinstance(params, BaseModel) else dict(params)
+        # Pydantic 的字段迭代保留已验证的嵌套模型，不将函数参数重新序列化。
+        kwargs = dict(params)
         kwargs.update(self.preset_kwargs)
         start = time.perf_counter()
         try:

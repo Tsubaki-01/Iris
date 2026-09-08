@@ -8,10 +8,7 @@ Example:
 
 from __future__ import annotations
 
-import re
-
 
 def safe_path_segment(value: str) -> str:
-    """把外部 ID 投影为单个安全路径片段。"""
-    segment = re.sub(r"[^A-Za-z0-9_-]", "_", value)
-    return segment.strip("_") or "default"
+    """编码完整 UTF-8 ID，使大小写不敏感的文件系统也不会合并不同 ID。"""
+    return f"id_{value.encode('utf-8').hex()}"

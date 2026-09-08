@@ -52,7 +52,8 @@ aliases, deferred flag, output limits, and metadata. `ToolExecutionContext` carr
 session, agent, permission, metadata, shared read-state information, and a shared live
 `cancellation` signal that serialization excludes. `ToolResult` is the single result boundary;
 `model_content` produces model-facing text and `to_block_metadata()` keeps the supported metadata
-subset.
+subset. `to_msg()` projects this trusted result directly into a history message, without
+normalizing metadata again. Runtime commits and terminal tool closure share this projection.
 
 `BaseTool` defines `validate_input()`, read/destructive/concurrency classification, and async
 `arun()`. `CallableTool` derives a schema from signatures, annotations, docstrings, or an explicit
@@ -63,11 +64,25 @@ functions cannot use `THREAD` and fail registration with `IrisToolValidationErro
 thread function returns an awaitable, Iris still awaits it on the event loop. Preset kwargs are
 hidden from schema and callers cannot override them.
 
+Each `CallableTool` uses one input model. Without an explicit `input_model`, Iris builds a
+Pydantic model from the function annotations and docstring parameter descriptions. That model
+owns both exported JSON Schema and first input validation, including fixed tuple positions,
+`Annotated` constraints, nullable fields, and defaults. The callable receives validated fields
+directly, preserving Python types such as tuples and nested `BaseModel` instances.
+
+`schema_from_callable(func, preset_kwargs=...)` exports through the same dynamic model builder.
+It requires resolvable annotations, supports ordinary and keyword-only parameters, and skips
+`*args`/`**kwargs`. `schema_from_pydantic_model(model)` returns the complete model JSON Schema,
+including `$defs` and root constraints such as `additionalProperties`.
+
 `ToolRegistry` registers tools/functions, resolves names and aliases, creates filtered views, exports
 active schemas, and searches deferred definitions. Deny filters override allow filters. Deferred
 tools are hidden unless explicitly allowed. Schema helpers support Iris-native, OpenAI Chat,
 OpenAI Responses, and Anthropic wrapper shapes; runtime's active provider path currently mounts the
 OpenAI Chat shape.
+
+Name-conflict checks use the registry's existing name and alias indexes directly instead of
+revisiting every registered tool definition.
 
 `@tool` attaches metadata without wrapping the function. Passing `registry` immediately calls that
 registry's `register_function()`; omitting it leaves registration to config assembly or a later
@@ -104,8 +119,9 @@ cancellation again before entering middleware `before_call`, tool `arun`, middle
 artifact handling, and breaker accounting. A guard failure starts no tool effect. Cancellation
 after a claim propagates as control flow to runtime instead of becoming a normal tool error.
 Low-level executor callers may omit the guard; lifecycle execution requires it through
-`ToolBridge`. Parallel context copies preserve identity for both typed `ReadFileState` and
-cancellation. `ToolExecutionContext` parses read state at its public raw-input boundary; file
+`ToolBridge`. Parallel context copies deep-copy only the isolated `metadata`; typed
+`ReadFileState` and cancellation are shared directly without copying their objects or records.
+`ToolExecutionContext` parses read state at its public raw-input boundary; file
 services consume the typed object directly without repeating type checks.
 
 The executor performs artifact handling once after every `after_call` hook. Hooks receive the full
@@ -118,6 +134,11 @@ lets lifecycle settlement fail closed when a durable claim already exists.
 The blocking I/O in `read_file`, `list_files`, and `grep_search` runs in worker threads; `write_file`
 and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A read returns an
 immutable `ReadFileRecord` observation that the event loop merges only after a successful await.
+
+`WorkspaceFileService.read_text_observed()` supplies complete text and a file observation from one
+open file for Skill content-version checks, sharing the workspace and regular-file boundaries.
+It does not update shared read state; callers merge after a successful await. Ordinary
+`read_file_observed()` still reads only the requested page.
 
 `ToolExecutor` provides classification, permission refresh, and per-call execution primitives only. The
 lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
@@ -157,8 +178,13 @@ flowchart LR
 - resolved parent/symlink escapes are rejected;
 - successful paths use workspace-relative `/` separators.
 
-Large non-error output is stored at `.iris/tool-results/{session_id}/{call_id}.txt` with sanitized
-identifiers, and the result becomes a preview plus artifact metadata. Default permissions do not
+Large non-error output is stored at
+`.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`, and the result becomes a preview
+plus artifact metadata. Each ID segment is `id_` followed by its complete UTF-8 bytes encoded as
+lowercase hexadecimal; an empty ID becomes `id_`. Distinct IDs retain distinct paths even on
+case-insensitive filesystems. Containment is still checked when writing. This naming rule
+replaces the previous rule directly; existing artifact references retain their saved paths.
+Default permissions do not
 directly allow writes; configure `DefaultPermissionPolicy(write_mode="allow")` or let runtime host
 the confirmation gate.
 
@@ -192,7 +218,7 @@ MCP implementations merely because `ToolCapability.MCP` exists.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Models, callable/schema adaptation, and registration | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
+| Models, callable/schema adaptation, and registration | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_schema.py`, `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
 | Lifecycle and HITL preflight | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | File tools, artifacts, and workspace safety | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | Circuit breaker | `circuit.py` | `tests/tools/test_circuit_breaker.py` |

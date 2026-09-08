@@ -2,15 +2,13 @@
 
 from datetime import UTC, datetime
 
-import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 from iris.message import (
     LLMResponse,
     ModelBlockRef,
     ModelResponseCompleted,
     ModelStreamEvent,
-    ModelStreamFinalization,
     ModelStreamScope,
     TextBlock,
 )
@@ -54,25 +52,3 @@ def test_model_stream_event_union_round_trips_completed_response() -> None:
     )
 
     assert restored == event
-
-
-def test_model_stream_finalization_requires_response_only_for_success() -> None:
-    response = LLMResponse(provider="openai", content=[TextBlock(text="完成")])
-
-    completed = ModelStreamFinalization(
-        status="completed",
-        response=response,
-        last_provider_sequence=4,
-        semantic_output_emitted=True,
-    )
-
-    assert completed.response == response
-    assert completed.error is None
-
-    with pytest.raises(ValidationError):
-        ModelStreamFinalization(
-            status="failed",
-            response=response,
-            last_provider_sequence=4,
-            semantic_output_emitted=True,
-        )

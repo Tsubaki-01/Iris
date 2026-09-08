@@ -54,6 +54,39 @@ async def test_callable_default_stays_inline() -> None:
     assert registered.is_concurrency_safe({}) is True
 
 
+def test_registration_uses_existing_name_and_alias_indexes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注册新工具不重读已有工具定义，名称和别名冲突仍被拒绝。"""
+
+    def first() -> str:
+        return "first"
+
+    def second() -> str:
+        return "second"
+
+    registry = ToolRegistry()
+    original = CallableTool(first)
+    original.definition.aliases = ("first_alias",)
+    registry.register(original)
+    reads: list[str] = []
+    original_getattribute = CallableTool.__getattribute__
+
+    def getattribute(tool: CallableTool, name: str) -> object:
+        if tool is original and name == "definition":
+            reads.append(name)
+        return original_getattribute(tool, name)
+
+    monkeypatch.setattr(CallableTool, "__getattribute__", getattribute)
+    registered = registry.register_function(second)
+    assert registry.get("second") is registered
+    assert registry.get("first_alias") is original
+    for name in ("first", "first_alias"):
+        with pytest.raises(IrisToolValidationError, match="重复"):
+            registry.register_function(second, name=name)
+    assert reads == []
+
+
 @pytest.mark.asyncio
 async def test_callable_explicit_thread_runs_on_worker() -> None:
     """显式 thread placement 把同步函数移出事件循环线程。"""

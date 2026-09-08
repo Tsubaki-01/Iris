@@ -630,7 +630,7 @@ class AgentRuntime:
             )
             if claimed_input is not None:
                 steering_claim = (steering, claimed_input)
-        message_delta = (_tool_result_message(result),)
+        message_delta = (result.to_msg(),)
         if steering_claim is not None:
             _, claimed_input = steering_claim
             message_delta = (*message_delta, claimed_input.message)
@@ -1149,10 +1149,7 @@ def _validate_interaction_projection(
         ):
             raise IrisRunConflictError("interaction projection 与 pending gate 不匹配")
         return
-    if (
-        projection.tool_use_id != subject.tool_call_id
-        or projection.tool_name != subject.tool_name
-    ):
+    if projection.tool_use_id != subject.tool_call_id or projection.tool_name != subject.tool_name:
         raise IrisRunConflictError("interaction projection 与 pending gate 不匹配")
     if request is not None and isinstance(request.prompt, QuestionPrompt):
         if projection.is_error:
@@ -1197,17 +1194,6 @@ def _tool_timeout_seconds(
 def _read_state_snapshot(state: ReadFileState | None) -> dict[str, Any] | None:
     """把可信 read state 序列化到 cursor。"""
     return None if state is None else state.model_dump(mode="json")
-
-
-def _tool_result_message(result: ToolResult) -> Msg:
-    """把结构化工具结果转换为 provider history 消息。"""
-    return Msg.tool_result(
-        tool_use_id=result.tool_use_id,
-        content=result.model_content,
-        is_error=result.is_error,
-        name=result.tool_name,
-        metadata=result.to_block_metadata(),
-    )
 
 
 def _normalize_run_error(error: Exception) -> RunErrorInfo:

@@ -276,10 +276,7 @@ class ToolRegistry:
         Raises:
             IrisToolValidationError: 当目标查重在本体或别名任何一面未通过时引爆。
         """
-        existing_names = set(self._tools) | set(self._aliases)
-        for tool in self._tools.values():
-            existing_names.update(tool.definition.aliases)
-        if name in existing_names:
+        if name in self._tools or name in self._aliases:
             raise IrisToolValidationError("工具名称或别名重复", name=name)
 
     # endregion
