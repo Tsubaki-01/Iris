@@ -55,6 +55,8 @@ Global `Config` contains only `api_key`, `provider_api_keys`, and `providers`. S
 `providers[name].base_url` or Agent `model.base_url`; set timeout via `model.timeout` or an explicit
 client argument, and configure logs through Python `logging`. Global `base_url/timeout/debug`
 fields are no longer declared.
+`ProviderConfig` declares only `litellm_provider`, `base_url`, and `headers`. Neither it nor Agent
+`ModelConfig` exposes `api_style`; the call contract is fixed to Chat Completion.
 
 API-key precedence is explicit argument, `Config.provider_api_keys[provider]`, then generic
 `Config.api_key`. The factory never reads environment variables or dotenv files directly; call
@@ -92,7 +94,9 @@ prefixed model, and returns `LLMResponse`. `stream()` requires `request.stream=T
 usage tail, directly pulls the raw async iterator, and yields only `ModelStreamEvent`. After a finish
 reason, it accepts a usage-tail placeholder choice only when that choice carries no semantic delta;
 later text, thinking, tool-call, or repeated finish-reason data remains a protocol error. At EOF it
-emits one completed terminal carrying an `LLMResponse` built through the same final mapper. The raw
+emits one completed terminal carrying an `LLMResponse` built directly from accumulated text,
+reasoning, parsed tool arguments, and usage. Tool arguments are parsed once at block completion;
+response content keeps text first and tools in their first-seen order. The raw
 iterator is closed in `finally`; no background producer or intermediate queue is created.
 
 The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
@@ -127,6 +131,10 @@ Runtime currently mounts OpenAI Chat function schemas for all providers on this 
 terminal without raw exception, header, or key details. Local `asyncio.CancelledError` propagates.
 
 ## Maintenance
+
+Iris depends directly on LiteLLM and does not call `httpx` or the OpenAI SDK directly. LiteLLM
+brings both packages into the dependency graph; removing duplicate direct declarations does not
+remove them from the installed environment.
 
 | Change | Main location | Tests |
 | --- | --- | --- |

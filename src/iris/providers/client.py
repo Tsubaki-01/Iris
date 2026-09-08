@@ -86,7 +86,7 @@ class ProviderClient(BaseModel):
         """
         if request.stream:
             raise IrisProviderError(
-                "complete() 不支持 stream=True，请使用后续 stream() 接口",
+                "complete() 不支持 stream=True，请使用 stream() 接口",
                 provider=self.provider,
             )
         self._validate_api_style(request)
@@ -131,7 +131,6 @@ class ProviderClient(BaseModel):
                 scope=scope,
                 error=self._map_litellm_error(exc),
                 as_mapping=self._as_mapping,
-                response_mapper=self._from_litellm_response,
             )
             return
 
@@ -139,13 +138,12 @@ class ProviderClient(BaseModel):
             cast(AsyncIterator[Any], raw_stream),
             scope=scope,
             as_mapping=self._as_mapping,
-            response_mapper=self._from_litellm_response,
             error_mapper=self._map_litellm_error,
         ):
             yield event
 
     def _validate_api_style(self, request: LLMRequest) -> None:
-        """拒绝本阶段不支持的非 Chat API 风格。"""
+        """在原始 provider 选项边界拒绝不支持的非 Chat 请求。"""
         api_style = request.provider_options.get("api_style", "chat")
         if api_style != "chat":
             raise IrisProviderError(

@@ -121,11 +121,9 @@ model: openai/gpt-4o-mini
   `timeout`、`provider_options`、`metadata`: 可选请求级参数，会由 runtime 透传给
   `LLMRequest`。
 - Streaming 由 host 给 runner 注入 `live_publisher` 开启，模型配置不声明 `stream`。
-- `api_style`: 可选 API 风格字段，会合并进 `LLMRequest.provider_options`；当前
-  runtime/provider active path 仅支持 LiteLLM Chat Completion，`api_style: responses`
-  会在调用阶段被拒绝。
+- 调用契约固定为 LiteLLM Chat Completion，不提供 `api_style` 配置字段。
 
-调用 `to_model_route()` 可转换为 core/providers 层使用的 `ModelRoute`。
+调用 `to_model_route()` 可转换为 providers 层使用的 `ModelRoute`。
 调用 `to_llm_request_options()` 可得到 `LLMRequest` 支持的请求级参数；`provider`、
 `name` 和 `base_url` 不会进入该结果。
 

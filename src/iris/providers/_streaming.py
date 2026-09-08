@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from ..exceptions import (
     IrisAPIConnectionError,
@@ -26,6 +26,7 @@ from ..exceptions import (
     IrisRateLimitExceededError,
 )
 from ..message import (
+    ContentBlock,
     LLMResponse,
     ModelBlockCompleted,
     ModelBlockDelta,
@@ -40,6 +41,8 @@ from ..message import (
     ModelUsageSnapshot,
     ModelUsageUpdated,
     ProviderStreamError,
+    TextBlock,
+    ToolUseBlock,
 )
 
 # endregion
@@ -52,7 +55,6 @@ from ..message import (
 _logger = logging.getLogger(__name__)
 
 _AsMapping = Callable[[Any], Mapping[str, Any]]
-_ResponseMapper = Callable[[Any], LLMResponse]
 _ErrorMapper = Callable[[Exception], IrisProviderError]
 
 # endregion
@@ -66,6 +68,7 @@ class _BlockState:
     snapshot: str = ""
     tool_name: str = ""
     tool_arguments: str = ""
+    parsed_arguments: dict[str, Any] = field(default_factory=dict)
     completed: bool = False
 
 
@@ -82,18 +85,15 @@ class ModelStreamAccumulator:
         *,
         scope: ModelStreamScope,
         as_mapping: _AsMapping,
-        response_mapper: _ResponseMapper,
     ) -> None:
         """初始化一次 provider stream 的内存状态。
 
         Args:
             scope: 本次 provider attempt 的稳定标识。
             as_mapping: 将 LiteLLM 对象转换为只读 mapping 的边界函数。
-            response_mapper: 复用 complete 路径的最终响应 mapper。
         """
         self._scope = scope
         self._as_mapping = as_mapping
-        self._response_mapper = response_mapper
         self._next_sequence = 1
         self._next_block_index = 0
         self._response_id = ""
@@ -448,6 +448,7 @@ class ModelStreamAccumulator:
             raise IrisProviderStreamProtocolError("tool arguments不是合法JSON object") from exc
         if not isinstance(arguments, dict):
             raise IrisProviderStreamProtocolError("tool arguments必须是JSON object")
+        state.parsed_arguments = arguments
 
     def _new_block(
         self,
@@ -470,51 +471,33 @@ class ModelStreamAccumulator:
         )
 
     def _build_response(self) -> LLMResponse:
-        """构造complete mapper可消费的最终Chat响应mapping。"""
-        text = "".join(
-            state.snapshot
-            for state in self._ordered_blocks()
-            if state.block.kind == "text"
-        )
-        reasoning = "".join(
-            state.snapshot
-            for state in self._ordered_blocks()
-            if state.block.kind == "thinking"
-        )
-        tool_calls = [
-            {
-                "id": state.block.tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": state.tool_name,
-                    "arguments": state.tool_arguments,
-                },
-            }
-            for state in self._ordered_blocks()
+        """从已完成的块构造响应，复用完成边界解析的工具参数。"""
+        blocks = self._ordered_blocks()
+        text = "".join(state.snapshot for state in blocks if state.block.kind == "text")
+        reasoning = "".join(state.snapshot for state in blocks if state.block.kind == "thinking")
+        content: list[ContentBlock] = [TextBlock(text=text)] if text else []
+        content.extend(
+            ToolUseBlock(
+                id=cast(str, state.block.tool_call_id),
+                name=state.tool_name,
+                input=state.parsed_arguments,
+            )
+            for state in blocks
             if state.block.kind == "tool_call"
-        ]
+        )
         raw_object = self._raw_object.removesuffix(".chunk")
-        response_mapping: dict[str, Any] = {
-            "id": self._response_id_or_fallback(),
-            "model": self._model or self._scope.model,
-            "object": raw_object or "chat.completion",
-            "choices": [
-                {
-                    "message": {
-                        "content": text,
-                        "reasoning_content": reasoning,
-                        "tool_calls": tool_calls,
-                    },
-                    "finish_reason": self._finish_reason,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": self._usage.input_tokens,
-                "completion_tokens": self._usage.output_tokens,
-                "total_tokens": self._usage.total_tokens,
-            },
-        }
-        return self._response_mapper(response_mapping)
+        return LLMResponse(
+            provider=self._scope.provider,
+            id=self._response_id_or_fallback(),
+            model=self._model or self._scope.model,
+            content=content,
+            finish_reason=self._finish_reason,
+            input_tokens=self._usage.input_tokens,
+            output_tokens=self._usage.output_tokens,
+            total_tokens=self._usage.total_tokens,
+            reasoning=reasoning,
+            metadata={"raw_object": raw_object or "chat.completion"},
+        )
 
     def _ordered_blocks(self) -> list[_BlockState]:
         """返回按source order排列的blocks。"""
@@ -561,7 +544,6 @@ async def _iter_litellm_events(
     *,
     scope: ModelStreamScope,
     as_mapping: _AsMapping,
-    response_mapper: _ResponseMapper,
     error_mapper: _ErrorMapper,
 ) -> AsyncIterator[ModelStreamEvent]:
     """直接拉取LiteLLM raw stream并只产出typed events。
@@ -570,7 +552,6 @@ async def _iter_litellm_events(
         raw_stream: LiteLLM返回的raw async iterator。
         scope: 当前provider attempt identity。
         as_mapping: LiteLLM object转换函数。
-        response_mapper: complete路径最终响应mapper。
         error_mapper: LiteLLM异常到Iris provider异常的mapper。
 
     Yields:
@@ -579,7 +560,6 @@ async def _iter_litellm_events(
     accumulator = ModelStreamAccumulator(
         scope=scope,
         as_mapping=as_mapping,
-        response_mapper=response_mapper,
     )
     try:
         try:
@@ -606,13 +586,11 @@ def failed_before_start(
     scope: ModelStreamScope,
     error: IrisProviderError,
     as_mapping: _AsMapping,
-    response_mapper: _ResponseMapper,
 ) -> ModelResponseFailed:
     """构造网络调用在首个chunk前失败时的唯一terminal。"""
     accumulator = ModelStreamAccumulator(
         scope=scope,
         as_mapping=as_mapping,
-        response_mapper=response_mapper,
     )
     return accumulator.fail(error)
 

@@ -201,3 +201,24 @@ async def test_provider_client_rejects_streaming_in_complete() -> None:
 
     with pytest.raises(IrisProviderError, match="stream"):
         await client.complete(LLMRequest(model="gpt-4o", stream=True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_provider_rejects_non_chat_request_before_network_io(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    """原始 provider 选项不能把当前 Chat 调用静默改成不支持的 API。"""
+    import iris.providers.client as provider_client
+
+    async def unexpected_call(**kwargs: Any) -> None:
+        pytest.fail("unsupported API style must not reach LiteLLM")
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", unexpected_call)
+    client = ProviderClient(provider="openai", api_key="test-key")
+    request = LLMRequest(model="gpt-4o", stream=stream, provider_options={"api_style": "responses"})
+    with pytest.raises(IrisProviderError, match="不支持的 provider API 风格"):
+        if stream:
+            await anext(client.stream(request))
+        else:
+            await client.complete(request)

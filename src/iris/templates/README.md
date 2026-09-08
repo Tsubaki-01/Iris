@@ -3,7 +3,7 @@
 # `iris.templates`
 
 `iris.templates` 提供官方 agent 配置模板的 scaffold 能力。它把 Iris 包内置的模板文件复制到
-用户指定目录，供 CLI 或调用方复用。
+用户指定目录，供 Python SDK 调用方复用。CLI 当前只提供 `iris chat`，不提供 scaffold 命令。
 
 当前官方模板只有 `file-agent`。
 
@@ -63,8 +63,9 @@ sdist/wheel，并至少包含：
 
 ## 维护与验证
 
-`pyproject.toml` 通过 `iris = ["templates/builtin/*/*"]` 打包模板文件。新增或修改模板时，
-应验证 scaffold 结果能被 `load_agent_config()` 加载且工具注册成功。
+项目使用 `pyproject.toml` 中的 `uv_build` 后端构建，模板位于 `iris` 包目录内，随包发布。
+新增或修改模板时，应检查构建产物包含这些文件，并验证 scaffold 结果能被
+`load_agent_config()` 加载且工具注册成功。
 
 当前 `tests/` 中没有 templates 专用测试文件；新增或修改模板时应同步补充 scaffold 行为测试。
 

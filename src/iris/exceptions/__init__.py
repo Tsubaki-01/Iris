@@ -1,11 +1,10 @@
+"""公开 Iris 当前使用的领域异常。"""
+
 from .exceptions import (
     # HITL
     HITLCheckpointInvalidError,
     HITLConflictError,
     HITLResponseMismatchError,
-    # Agent
-    IrisAgentError,
-    IrisAgentExecutionError,
     IrisAPIConnectionError,
     IrisAuthenticationError,
     # Runtime control
@@ -14,17 +13,11 @@ from .exceptions import (
     IrisConfigError,
     IrisContextError,
     IrisError,
-    IrisExecutionError,
     IrisHITLError,
     # Lifecycle / Run
     IrisLifecycleSchemaError,
-    IrisMCPConnectionError,
-    # MCP
-    IrisMCPError,
-    IrisMCPProtocolError,
     # Memory
     IrisMemoryError,
-    IrisParserError,
     # Provider
     IrisProviderError,
     IrisProviderStreamError,
@@ -46,7 +39,6 @@ from .exceptions import (
     # Template
     IrisTemplateError,
     IrisTemplateNotFoundError,
-    IrisTemplateRenderError,
     # Tool
     IrisToolError,
     IrisToolExecutionError,
@@ -64,8 +56,6 @@ __all__ = [
     "IrisSkillFormatError",
     "IrisSkillPathError",
     "IrisSkillNotFoundError",
-    "IrisExecutionError",
-    "IrisParserError",
     "IrisValidationError",
     "IrisHITLError",
     "HITLResponseMismatchError",
@@ -82,11 +72,6 @@ __all__ = [
     "IrisToolNotFoundError",
     "IrisToolExecutionError",
     "IrisToolValidationError",
-    "IrisMCPError",
-    "IrisMCPConnectionError",
-    "IrisMCPProtocolError",
-    "IrisAgentError",
-    "IrisAgentExecutionError",
     "IrisMemoryError",
     "IrisLifecycleSchemaError",
     "IrisRunConflictError",
@@ -98,5 +83,4 @@ __all__ = [
     "IrisRunStateError",
     "IrisTemplateError",
     "IrisTemplateNotFoundError",
-    "IrisTemplateRenderError",
 ]

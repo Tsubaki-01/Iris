@@ -147,7 +147,6 @@ def _merge_builtin_provider_config(
     return ProviderConfig(
         litellm_provider=litellm_provider,
         base_url=override.base_url,
-        api_style=override.api_style,
         headers=override.headers,
     )
 

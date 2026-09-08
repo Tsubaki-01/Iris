@@ -3,7 +3,8 @@
 # `iris.templates`
 
 `iris.templates` copies packaged agent templates into a caller-selected directory. The only public
-API is `scaffold_template()` and the only current built-in template is `file-agent`.
+API is `scaffold_template()` and the only current built-in template is `file-agent`. The CLI
+currently provides only `iris chat`; scaffolding is a Python SDK operation.
 
 ## Quick start
 
@@ -26,8 +27,10 @@ contains configuration and documentation only; it does not implement an agent lo
 
 ## Packaging and maintenance
 
-Templates live under `src/iris/templates/builtin/` and are included by
-`pyproject.toml` package-data pattern `templates/builtin/*/*`.
+The project uses the `uv_build` backend declared in `pyproject.toml`. Templates live inside the
+`iris` package under `src/iris/templates/builtin/` and are distributed with it. When changing a
+template, inspect the built artifact and verify that the scaffolded config loads and its tools
+register successfully.
 
 There are currently no dedicated template tests under `tests/`. Add scaffold behavior coverage
 when adding or changing a template.
