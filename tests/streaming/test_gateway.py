@@ -9,7 +9,7 @@ import pytest
 
 from iris.exceptions import IrisRunConflictError, IrisRunNotFoundError, IrisRunStateError
 from iris.harness import AgentRunner, ResumeReceipt, SessionManager, SubmitReceipt
-from iris.lifecycle import AgentRunRequest, RunPhase
+from iris.lifecycle import AgentRunRequest, RunEvent, RunPhase
 from iris.message import (
     ModelBlockDelta,
     ModelBlockRef,
@@ -29,6 +29,8 @@ from iris.streaming.models import (
     LiveEnvelope,
     ResumeAccepted,
     ResumeCommand,
+    SnapshotAccepted,
+    SnapshotCommand,
     SubmitAccepted,
     SubmitCommand,
     SubscribeCommand,
@@ -200,7 +202,8 @@ async def test_subscribe_yields_durable_sync_before_live(tmp_path: Path) -> None
     second = await anext(subscription)
 
     assert isinstance(first, DurableSyncItem)
-    assert first.sync.runs[0].run.run_id == "run-terminal"
+    assert first.kind == "sync.page"
+    assert first.sync.runs[0].run_id == "run-terminal"
     assert isinstance(second, LiveEnvelope)
     await subscription.aclose()
     await manager.close()
@@ -265,6 +268,7 @@ async def test_handle_routes_commands_and_does_not_deduplicate_request_id(
             cursors=(DurableRunCursor(run_id="run-own", after_sequence=0),),
         )
     )
+    snapshot = await gateway.handle(SnapshotCommand(request_id="snapshot-id", run_ids=("run-own",)))
 
     assert isinstance(first, SubmitAccepted)
     assert isinstance(second, SubmitAccepted)
@@ -273,6 +277,8 @@ async def test_handle_routes_commands_and_does_not_deduplicate_request_id(
     assert resumed.receipt == ResumeReceipt(run_id="run-own", interaction_id="interaction-1")
     assert isinstance(cancelled, CancelAccepted)
     assert isinstance(synced, SyncAccepted)
+    assert isinstance(snapshot, SnapshotAccepted)
+    assert snapshot.snapshot.runs[0].run.run_id == "run-own"
     await manager.close()
 
 
@@ -306,7 +312,64 @@ async def test_handle_maps_iris_error_without_context_leak(
 
 
 @pytest.mark.asyncio
-async def test_durable_sync_pages_in_input_order_and_redacts_tool_arguments(
+async def test_durable_sync_pages_only_events_without_loading_full_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, manager = await _runner_with_sync_facts(tmp_path)
+    gateway = StreamingGateway(
+        runner=runner,
+        manager=manager,
+        broker=_broker(),
+        session_id="session-own",
+        durable_page_size=2,
+    )
+
+    expected = runner.list_events("run-waiting")
+    list_events = runner.list_events
+    page_limits: list[int | None] = []
+
+    def read_page(
+        run_id: str, after_sequence: int = 0, *, limit: int | None = None
+    ) -> list[RunEvent]:
+        page_limits.append(limit)
+        return list_events(run_id, after_sequence, limit=limit)
+
+    def forbid_full_state(*args: object, **kwargs: object) -> None:
+        raise AssertionError("事件分页不得加载完整 run、result、tools 或 session history")
+
+    for method in ("get_session", "get_run", "get_result", "list_tool_calls"):
+        monkeypatch.setattr(runner, method, forbid_full_state)
+    monkeypatch.setattr(runner, "list_events", read_page)
+    sync = gateway.durable_sync(
+        (
+            DurableRunCursor(run_id="run-waiting", after_sequence=0),
+            DurableRunCursor(run_id="run-terminal", after_sequence=0),
+        )
+    )
+
+    assert [page.run_id for page in sync.runs] == ["run-waiting", "run-terminal"]
+    waiting = sync.runs[0]
+    assert set(waiting.model_dump()) == {"run_id", "events", "next_cursor"}
+    assert len(waiting.events) == 2
+    assert waiting.next_cursor == DurableRunCursor(
+        run_id="run-waiting",
+        after_sequence=waiting.events[-1].sequence,
+    )
+    seen = list(waiting.events)
+    cursor = waiting.next_cursor
+    while cursor is not None:
+        page = gateway.durable_sync((cursor,)).runs[0]
+        assert len(page.events) <= 2
+        seen.extend(page.events)
+        cursor = page.next_cursor
+    assert seen == expected
+    assert page_limits and all(limit == 3 for limit in page_limits)
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_durable_snapshot_returns_state_and_redacts_tool_arguments(
     tmp_path: Path,
 ) -> None:
     runner, manager = await _runner_with_sync_facts(tmp_path)
@@ -318,20 +381,12 @@ async def test_durable_sync_pages_in_input_order_and_redacts_tool_arguments(
         durable_page_size=2,
     )
 
-    sync = gateway.durable_sync(
-        (
-            DurableRunCursor(run_id="run-waiting", after_sequence=0),
-            DurableRunCursor(run_id="run-terminal", after_sequence=0),
-        )
-    )
+    snapshot = gateway.durable_snapshot(("run-waiting", "run-terminal"))
 
-    assert [page.run.run_id for page in sync.runs] == ["run-waiting", "run-terminal"]
-    waiting = sync.runs[0]
-    assert len(waiting.events) == 2
-    assert waiting.next_cursor == DurableRunCursor(
-        run_id="run-waiting",
-        after_sequence=waiting.events[-1].sequence,
-    )
+    assert [item.run.run_id for item in snapshot.runs] == ["run-waiting", "run-terminal"]
+    waiting = snapshot.runs[0]
+    assert set(waiting.model_dump()) == {"run", "result", "tool_calls"}
+    assert waiting.run.phase is RunPhase.WAITING
     assert waiting.result is not None and waiting.result.pending_interaction is not None
     assert waiting.result.pending_interaction.request.tool_call.arguments == {}
     assert waiting.result.pending_interaction.request.tool_call.workspace_root == "<redacted>"
@@ -346,7 +401,7 @@ async def test_durable_sync_pages_in_input_order_and_redacts_tool_arguments(
         session_id="session-own",
         durable_page_size=2,
         allow_tool_arguments=True,
-    ).durable_sync((DurableRunCursor(run_id="run-waiting", after_sequence=0),))
+    ).durable_snapshot(("run-waiting",))
     assert allowed.runs[0].tool_calls[0].arguments == {"value": "secret"}
     assert allowed.runs[0].result.pending_interaction.request.tool_call.arguments == {
         "value": "secret"
@@ -380,6 +435,10 @@ async def test_durable_sync_rejects_missing_or_cross_session_without_partial_pag
         )
     with pytest.raises(IrisRunNotFoundError):
         gateway.durable_sync((DurableRunCursor(run_id="missing", after_sequence=0),))
+    with pytest.raises(IrisRunConflictError):
+        gateway.durable_snapshot(("run-terminal", "run-cross"))
+    with pytest.raises(IrisRunNotFoundError):
+        gateway.durable_snapshot(("missing",))
     await manager.close()
 
 

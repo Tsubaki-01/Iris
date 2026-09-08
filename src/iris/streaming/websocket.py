@@ -14,7 +14,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 
 from pydantic import Field, TypeAdapter, ValidationError
 
@@ -26,6 +26,7 @@ from .models import (
     CommandRejected,
     GatewayStreamItem,
     ResumeCommand,
+    SnapshotCommand,
     SubmitCommand,
     SubscribeAccepted,
     SubscribeCommand,
@@ -37,7 +38,12 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 type _IncomingCommand = Annotated[
-    SubscribeCommand | SubmitCommand | ResumeCommand | CancelCommand | SyncCommand,
+    SubscribeCommand
+    | SubmitCommand
+    | ResumeCommand
+    | CancelCommand
+    | SyncCommand
+    | SnapshotCommand,
     Field(discriminator="kind"),
 ]
 type _ConnectionPhase = Literal["initial", "awaiting_subscription", "subscribed"]
@@ -52,7 +58,6 @@ class _ConnectionState:
     phase: _ConnectionPhase = "initial"
     subscription: GatewaySubscription | None = None
     subscription_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    receiver_done: asyncio.Event = field(default_factory=asyncio.Event)
     receipt_capacity: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
 
 
@@ -94,7 +99,7 @@ class WebSocketAdapter:
         sender = asyncio.create_task(self._send_loop(send, receipts, state))
         tasks = (receiver, sender)
         try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
                     task.result()
@@ -109,9 +114,6 @@ class WebSocketAdapter:
                             "exception_type": type(exc).__qualname__,
                         },
                     )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
         finally:
             for task in tasks:
                 if not task.done():
@@ -152,8 +154,6 @@ class WebSocketAdapter:
                     "exception_type": type(exc).__qualname__,
                 },
             )
-        finally:
-            state.receiver_done.set()
 
     async def _route_command(
         self,
@@ -172,17 +172,17 @@ class WebSocketAdapter:
             return self._accept_subscription(command, state)
 
         if state.phase == "initial":
-            if isinstance(command, SyncCommand):
+            if isinstance(command, (SyncCommand, SnapshotCommand)):
                 state.phase = "awaiting_subscription"
                 return await self._gateway.handle(command)
             return CommandRejected(
                 request_id=command.request_id,
                 command_kind=command.kind,
                 code="FIRST_COMMAND_REQUIRED",
-                message="首个有效命令必须是 subscribe 或 sync",
+                message="首个有效命令必须是 subscribe、sync 或 snapshot",
             )
         if state.phase == "awaiting_subscription":
-            if isinstance(command, SyncCommand):
+            if isinstance(command, (SyncCommand, SnapshotCommand)):
                 return await self._gateway.handle(command)
             return CommandRejected(
                 request_id=command.request_id,
@@ -240,28 +240,19 @@ class WebSocketAdapter:
         state: _ConnectionState,
     ) -> None:
         """作为连接唯一 writer，合并 receipt 与 live item。"""
-        receipt_task: asyncio.Task[CommandReceipt] | None = asyncio.create_task(
-            receipts.get()
-        )
-        ready_task: asyncio.Task[bool] | None = asyncio.create_task(
-            state.subscription_ready.wait()
-        )
-        done_task: asyncio.Task[bool] | None = asyncio.create_task(
-            state.receiver_done.wait()
-        )
+        receipt_task = asyncio.create_task(receipts.get())
+        ready_task: asyncio.Task[bool] | None = asyncio.create_task(state.subscription_ready.wait())
         stream_task: asyncio.Task[GatewayStreamItem] | None = None
         try:
             while True:
                 pending = {
-                    task
-                    for task in (receipt_task, ready_task, done_task, stream_task)
-                    if task is not None
+                    task for task in (receipt_task, ready_task, stream_task) if task is not None
                 }
                 completed, _ = await asyncio.wait(
                     pending,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if receipt_task is not None and receipt_task in completed:
+                if receipt_task in completed:
                     receipt = receipt_task.result()
                     await send(receipt.model_dump_json())
                     receipts.task_done()
@@ -269,10 +260,10 @@ class WebSocketAdapter:
                     receipt_task = asyncio.create_task(receipts.get())
                     continue
                 if ready_task is not None and ready_task in completed:
-                    state.subscription_ready.clear()
                     ready_task = None
-                    if state.subscription is not None:
-                        stream_task = asyncio.create_task(anext(state.subscription))
+                    # Ready 仅在唯一订阅已绑定后设置，该对象直到 serve 收尾都有效。
+                    subscription = cast(GatewaySubscription, state.subscription)
+                    stream_task = asyncio.create_task(anext(subscription))
                     continue
                 if stream_task is not None and stream_task in completed:
                     try:
@@ -281,24 +272,14 @@ class WebSocketAdapter:
                         stream_task = None
                     else:
                         await send(item.model_dump_json())
-                        stream_task = (
-                            asyncio.create_task(anext(state.subscription))
-                            if state.subscription is not None
-                            else None
-                        )
+                        stream_task = asyncio.create_task(anext(subscription))
                     continue
-                if done_task is not None and done_task in completed:
-                    return
         finally:
-            for task in (receipt_task, ready_task, done_task, stream_task):
+            for task in (receipt_task, ready_task, stream_task):
                 if task is not None and not task.done():
                     task.cancel()
             await asyncio.gather(
-                *(
-                    task
-                    for task in (receipt_task, ready_task, done_task, stream_task)
-                    if task is not None
-                ),
+                *(task for task in (receipt_task, ready_task, stream_task) if task is not None),
                 return_exceptions=True,
             )
 

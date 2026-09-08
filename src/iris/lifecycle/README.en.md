@@ -43,6 +43,9 @@ provider clients, tasks, locks, signals, or callbacks.
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
+`RunCommit.session_revision` returns the committed revision only when a mutation changes history;
+it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
+needed. Exact retries return current facts with empty events, rather than the original snapshot.
 Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
 Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
@@ -53,11 +56,19 @@ advances once per non-empty message delta regardless of how many messages that d
 Persistence message counts and ordinals do not enter lifecycle public models or commands.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
-`load_tool_call(run_id, tool_call_id)` reads one exact composite identity, while
-`load_run_control(run_id)` returns only the eight fence/cancellation fields in
-`RunControlSnapshot`. Neither read replaces mutation CAS or changes the synchronous store boundary.
+`load_tool_call(run_id, tool_call_id)` reads one exact composite identity.
+`list_tool_calls(run_id, step_index=...)` limits ordered tool reads to one model step; omitting the
+filter returns the whole run.
+`load_run_control(run_id)` returns only the session identity and fence/cancellation fields in
+`RunControlSnapshot`. Gateways can confirm that a run belongs to the requested session without
+loading a complete run. These reads do not replace mutation CAS or change the synchronous store
+boundary.
 
 ## Public API
+
+Public command construction validates the request/checkpoint identity in `CreateRun` and the
+disposition/activation combination in `RecoverActiveRun`. Stores trust these established optional
+relationships and check current durable facts, mutation CAS, identity, and fences.
 
 All contract models, enums, commands, `LifecycleStore`, `snapshot_run()`, and `project_result()` are
 importable from `iris.lifecycle`, including the minimal read projection `RunControlSnapshot`. The

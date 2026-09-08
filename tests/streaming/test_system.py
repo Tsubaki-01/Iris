@@ -672,9 +672,7 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
 
     direct = runner.list_tool_calls(receipt.run_id)[0]
     assert direct.result is not None and direct.result.artifact is not None
-    remote = gateway.durable_sync([DurableRunCursor(run_id=receipt.run_id, after_sequence=0)]).runs[
-        0
-    ]
+    remote = gateway.durable_snapshot([receipt.run_id]).runs[0]
     remote_call = remote.tool_calls[0]
     assert remote_call.result is not None
     assert remote_call.result.data == {}
@@ -1027,9 +1025,10 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
         run_id="run-sqlite-complete",
         after_sequence=4,
     )
-    assert waiting_page.result is not None
-    assert waiting_page.result.run.phase is RunPhase.WAITING
-    assert waiting_page.result.pending_interaction is not None
+    waiting_snapshot = restarted_gateway.durable_snapshot([waiting_page.run_id]).runs[0]
+    assert waiting_snapshot.result is not None
+    assert waiting_snapshot.result.run.phase is RunPhase.WAITING
+    assert waiting_snapshot.result.pending_interaction is not None
 
     seen_sequences = [event.sequence for event in completed_page.events]
     cursor = completed_page.next_cursor
@@ -1056,7 +1055,7 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
             )
         }
         dump = "\n".join(connection.iterdump())
-    assert identity == [("agent_lifecycle", 2)]
+    assert identity == [("agent_lifecycle", 3)]
     expected_tables = {
         "agent_runs",
         "lifecycle_schema",

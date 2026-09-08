@@ -448,19 +448,9 @@ class _SessionEventBuffer:
                 tracker.delivered_highest_sequence,
                 limit=page_limit,
             )
-            if len(rows) > page_limit:
-                raise IrisRunStateError("store 返回的 durable event 批次超过请求上限")
-            replayed = sorted(
-                {
-                    event.sequence: event
-                    for event in rows
-                    if tracker.delivered_highest_sequence < event.sequence <= target
-                }.values(),
-                key=lambda event: event.sequence,
-            )
-            if not replayed:
+            if not rows:
                 raise IrisRunStateError("durable event watermark 无法从 store 补齐", run_id=run_id)
-            self._replayed_events.extend(replayed)
+            self._replayed_events.extend(rows)
             return self._pop_replayed_event()
         return None
 
@@ -551,7 +541,7 @@ class _SessionSteeringPort:
             if manager._closed or manager._current_run_id != run_id:
                 return None
             try:
-                snapshot = manager._runner.get_run(run_id)
+                snapshot = manager._runner.get_run_control(run_id)
             except IrisRunNotFoundError:
                 return None
             if (

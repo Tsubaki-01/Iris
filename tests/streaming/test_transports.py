@@ -15,12 +15,15 @@ from iris.streaming.gateway import GatewaySubscription, StreamingGateway
 from iris.streaming.models import (
     CommandReceipt,
     CommandRejected,
+    DurableSnapshot,
     DurableSync,
     DurableSyncItem,
     GatewayCommand,
     GatewayStreamItem,
     LiveEnvelope,
     ReplayGap,
+    SnapshotAccepted,
+    SnapshotCommand,
     SubmitAccepted,
     SubmitCommand,
     SubscribeCommand,
@@ -112,6 +115,11 @@ class FakeGateway:
                 request_id=command.request_id,
                 sync=DurableSync(session_id="session-1"),
             )
+        if isinstance(command, SnapshotCommand):
+            return SnapshotAccepted(
+                request_id=command.request_id,
+                snapshot=DurableSnapshot(session_id="session-1"),
+            )
         return CommandRejected(
             request_id=command.request_id,
             command_kind=command.kind,
@@ -161,7 +169,7 @@ async def test_sse_encodes_envelope_and_control_items_without_fake_ids() -> None
     assert b"id:" not in frames[1]
     assert b"event: replay.gap\n" in frames[1]
     assert b"id:" not in frames[2]
-    assert b"event: sync.snapshot\n" in frames[2]
+    assert b"event: sync.page\n" in frames[2]
     assert b"id:" not in frames[3]
     assert subscription.closed
 
@@ -184,7 +192,8 @@ async def test_sse_heartbeat_reuses_pending_anext_and_cleanup_only_closes() -> N
 
 
 @pytest.mark.asyncio
-async def test_websocket_sync_first_then_subscribe_and_stream() -> None:
+@pytest.mark.parametrize("first_kind", ["sync", "snapshot"])
+async def test_websocket_reads_before_subscribe_and_stream(first_kind: str) -> None:
     subscription = FakeSubscription(_envelope())
     gateway = FakeGateway(subscription)
     sent: list[str] = []
@@ -194,7 +203,12 @@ async def test_websocket_sync_first_then_subscribe_and_stream() -> None:
 
     frames = deque(
         (
-            SyncCommand(request_id="sync-1").model_dump_json(),
+            (
+                SyncCommand(request_id="sync-1")
+                if first_kind == "sync"
+                else SnapshotCommand(request_id="snapshot-1", run_ids=("run-1",))
+            ).model_dump_json(),
+            SnapshotCommand(request_id="snapshot-2", run_ids=("run-1",)).model_dump_json(),
             SubscribeCommand(
                 request_id="subscribe-1",
                 scope="session",
@@ -218,7 +232,10 @@ async def test_websocket_sync_first_then_subscribe_and_stream() -> None:
 
     payloads = [json.loads(value) for value in sent]
     events = [payload["event"] for payload in payloads if "event" in payload]
-    assert events.index("command.sync.accepted") < events.index("command.subscribe.accepted")
+    assert events.index(f"command.{first_kind}.accepted") < events.index(
+        "command.subscribe.accepted"
+    )
+    assert events.index("command.snapshot.accepted") < events.index("command.subscribe.accepted")
     assert any(payload.get("kind") == "model.block.delta" for payload in payloads)
     assert subscription.closed
 

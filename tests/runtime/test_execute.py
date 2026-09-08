@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1581,7 +1582,7 @@ async def test_execute_rejects_wrong_claim_version_before_tool_effect(
     class WrongVersionPort(FakeRuntimeCommitPort):
         def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
             claim = super().claim_tool_call(call)
-            return claim.model_copy(update={"tool_version": claim.tool_version + 1})
+            return replace(claim, tool_version=claim.tool_version + 1)
 
     registry = ToolRegistry()
     registry.register_function(echo, description="回显")

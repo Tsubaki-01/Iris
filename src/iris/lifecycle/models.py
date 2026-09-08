@@ -470,9 +470,10 @@ class RunRecord(_FrozenModel):
 
 
 class RunControlSnapshot(_FrozenModel):
-    """Commit port 判断 activation/cancellation 所需的最小 run 投影。"""
+    """包含 session 归属与 activation/cancellation 事实的最小 run 投影。"""
 
     run_id: str
+    session_id: str
     phase: RunPhase
     revision: int = Field(ge=1)
     current_activation_id: str | None
@@ -481,10 +482,10 @@ class RunControlSnapshot(_FrozenModel):
     last_event_sequence: int = Field(ge=1)
     updated_at: datetime
 
-    @field_validator("run_id")
+    @field_validator("run_id", "session_id")
     @classmethod
-    def _validate_run_id(cls, value: str) -> str:
-        return _trim_required(value, field_name="run_id")
+    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _trim_required(value, field_name=str(info.field_name))
 
     @field_validator("current_activation_id", "cancellation_reason")
     @classmethod

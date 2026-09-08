@@ -23,6 +23,8 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
   interaction service；
 - runtime 不 import harness，也不直接写 SQLite；
 - exact session、checkpoint、tool claim/result 与 interaction 写入由 commit port 提供。
+- commit、reservation 与 claim DTO 使用不可变 dataclass，仅传递进程内已验证事实；
+  包装提交事实不会再次扫描 cursor。持久化 cursor 的完整解析仍由 load/recovery 边界负责。
 - 可选的 `RuntimeSteeringPort` 只向当前 activation 的安全边界提供瞬时输入，不拥有 queue 或
   persistence。
 
@@ -61,6 +63,9 @@ cursor 位置只有：
 原子提交 waiting checkpoint 与 interaction；恢复不会重复已经提交的前缀调用。
 人工响应绑定该 durable subject。等待期间动态权限变为 ALLOW 时，批准可继续执行；变为
 DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_REJECTED`，执行前仍刷新权限。
+
+工具路径通过 `ToolBridge.preflight()` 形成计划，再调用带执行守卫的 `execute_prepared()`；
+工具结果统一经 `ToolResult.to_msg()` 投影为 history 消息。
 
 ## 可选 live streaming
 
@@ -156,11 +161,21 @@ runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
 Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配置由 harness composition
 解释；直接调用 Factory 时该字段不会产生持久化副作用。
 
+Factory 创建 `ProviderClient` 时，将合并全局配置后的有效 provider、LiteLLM provider、endpoint
+和 headers 投影到 `RuntimeEnvironment.provider_fingerprint`，供 harness 比较恢复环境；API key
+不参与。显式注入的 provider 由 host 负责声明版本：在创建 runner 前设置
+`runtime.environment.provider_fingerprint = {"version": "my-provider-v2"}`。默认空字典不推断
+自定义 provider 的内部实现，未实际使用的原始路由配置也不计入指纹。
+
 Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户声明的工具。若
 `skills.enabled: true`，它以该 workspace 做一次项目级发现快照：非空结果会追加
 `available_skills` system slot，并在创建 `ToolRegistryView` / `ToolExecutor` 前注册共享同一
 registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过 catalog 和 loader，不改变
 原有 context/tool 形状；每个 factory/runtime 实例内不自动刷新快照。
+
+`RuntimeEnvironment.skill_registry` 保存这个共享 registry，供 harness 将启动发现的 Skill
+内容版本纳入恢复指纹；不再次读取 Skill 文件。`load_skill` 完整读取时会核对发现版本，文件
+变化后返回 `SKILL_VERSION_CHANGED`，需要重新创建 runtime 并开始新 run。
 
 `skills.root` 越出 workspace、`skills.require` 缺失，或 `load_skill` 与用户工具名称/别名冲突，
 都会在装配阶段转为 `IrisConfigError` 并 fail closed。完整契约见

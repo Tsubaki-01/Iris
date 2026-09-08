@@ -57,6 +57,7 @@ from ..lifecycle import (
     ResolveInteraction,
     ResumeWaitingRun,
     RunCheckpoint,
+    RunControlSnapshot,
     RunErrorInfo,
     RunEvent,
     RunPhase,
@@ -86,6 +87,7 @@ from ..runtime import (
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal
 from ._commit_port import StoreRuntimeCommitPort
+from ._events import _RunEventCollector
 from ._fingerprint import compute_environment_fingerprint
 from .observer import RunEventObserver
 
@@ -169,9 +171,8 @@ class ActiveActivation:
         task (asyncio.Task[RuntimeActivationResult] | None): 正在执行的 engine task。
         deadline_task (asyncio.Task[None] | None): absolute deadline 触发器。
         settled (asyncio.Event): activation 结算完成的进程内通知，供 cancel 观察者等待。
-        events (list[RunEvent]): 本次 activation 累积的 durable events，settlement 后统一投递。
+        event_collector (_RunEventCollector): 与 commit port 共享的事件收集与同步 relay。
         steering (RuntimeSteeringPort | None): managed 组合层注入的安全边界 steering port。
-        durable_event_callback (Callable[[RunEvent], None] | None): managed 组合层的同步 relay。
     """
 
     run_id: str
@@ -180,9 +181,8 @@ class ActiveActivation:
     task: asyncio.Task[RuntimeActivationResult] | None = None
     deadline_task: asyncio.Task[None] | None = None
     settled: asyncio.Event = field(default_factory=asyncio.Event)
-    events: list[RunEvent] = field(default_factory=list)
+    event_collector: _RunEventCollector = field(default_factory=_RunEventCollector)
     steering: RuntimeSteeringPort | None = None
-    durable_event_callback: Callable[[RunEvent], None] | None = None
 
 
 class AgentRunner:
@@ -383,10 +383,10 @@ class AgentRunner:
         )
         # --- 2. 提交 create 并处理立即 terminal ---
         # 立即 terminal（例如 create 时已超过 deadline）不进入 engine，也不产生 admission signal。
-        events: list[RunEvent] = []
-        self._record_events(events, created.events, durable_event_callback)
+        events = self._event_collector(durable_event_callback)
+        events.record(created.events)
         if created.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(events)
+            await self._deliver_events(events.events)
             return self._require_result(run_id)
         if created.checkpoint != checkpoint:
             raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
@@ -396,9 +396,8 @@ class AgentRunner:
             run_id=run_id,
             activation_id=activation_id,
             signal=_MutableCancellationSignal(),
-            events=events,
+            event_collector=events,
             steering=steering,
-            durable_event_callback=durable_event_callback,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -406,8 +405,7 @@ class AgentRunner:
             activation_id=activation_id,
             cursor=cursor,
             clock=self._now,
-            event_sink=active.events,
-            durable_event_callback=self._compose_durable_event_callback(durable_event_callback),
+            event_collector=active.event_collector,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -499,13 +497,9 @@ class AgentRunner:
         now = self._now()
         settled = self._settle_waiting_if_due(run, interaction, now=now)
         if settled is not None:
-            events: list[RunEvent] = []
-            self._record_events(
-                events,
-                self.store.list_events(run.run_id, event_cursor),
-                durable_event_callback,
-            )
-            await self._deliver_events(events)
+            events = self._event_collector(durable_event_callback)
+            events.record(self.store.list_events(run.run_id, event_cursor))
+            await self._deliver_events(events.events)
             return settled
 
         # --- 3. 校验 checkpoint 并解决 interaction ---
@@ -536,13 +530,13 @@ class AgentRunner:
                 )
             )
             run = resolved.run
-            events = []
-            self._record_events(events, resolved.events, durable_event_callback)
+            events = self._event_collector(durable_event_callback)
+            events.record(resolved.events)
             if resolved.interaction is None:
                 raise IrisRunStateError("resolve commit 缺少 interaction")
             interaction = resolved.interaction
         else:
-            events = []
+            events = self._event_collector(durable_event_callback)
         # --- 4. rebind 新 activation 并推进 ---
         projection = self.interaction_service.project_response(interaction, response)
         activation_id = f"act_{uuid.uuid4().hex}"
@@ -556,7 +550,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(events, begun.events, durable_event_callback)
+        events.record(begun.events)
         if begun.checkpoint is None:
             raise IrisRunStateError("begin activation 缺少 rebound checkpoint")
         if begun.checkpoint.engine_cursor != checkpoint.engine_cursor:
@@ -576,9 +570,8 @@ class AgentRunner:
             run_id=run.run_id,
             activation_id=activation_id,
             signal=_MutableCancellationSignal(),
-            events=events,
+            event_collector=events,
             steering=steering,
-            durable_event_callback=durable_event_callback,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -586,8 +579,7 @@ class AgentRunner:
             activation_id=activation_id,
             cursor=cursor,
             clock=self._now,
-            event_sink=active.events,
-            durable_event_callback=self._compose_durable_event_callback(durable_event_callback),
+            event_collector=active.event_collector,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -653,13 +645,9 @@ class AgentRunner:
             run = committed.run
             active = self._active.get(run.run_id)
             if active is not None:
-                self._record_events(
-                    active.events,
-                    committed.events,
-                    active.durable_event_callback,
-                )
+                active.event_collector.record(committed.events)
             else:
-                self._record_events([], committed.events)
+                self._event_collector().record(committed.events)
         # 必须在 durable 请求落库之后才 signal，否则本地中断可能领先于持久化事实。
         # activation id 相等是 fence：跨进程或已换代的 activation 不受本进程 signal 影响。
         active = self._active.get(run.run_id)
@@ -756,9 +744,9 @@ class AgentRunner:
             cursor = run.last_event_sequence
             settled = self._settle_waiting_if_due(run, interaction, now=self._now())
             if settled is not None:
-                events: list[RunEvent] = []
-                self._record_events(events, self.store.list_events(run.run_id, cursor))
-                await self._deliver_events(events)
+                events = self._event_collector()
+                events.record(self.store.list_events(run.run_id, cursor))
+                await self._deliver_events(events.events)
                 return settled
             raise IrisRunStateError(
                 "waiting run 必须通过 resume 继续",
@@ -818,10 +806,10 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        recovered_events: list[RunEvent] = []
-        self._record_events(recovered_events, recovered.events)
+        recovered_events = self._event_collector()
+        recovered_events.record(recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(recovered_events)
+            await self._deliver_events(recovered_events.events)
             return self._require_result(run.run_id)
         if recovered.checkpoint is None or recovered_cursor is None or new_activation_id is None:
             raise IrisRunRecoveryError("recover commit 缺少 rebound activation facts")
@@ -834,7 +822,7 @@ class AgentRunner:
             run_id=run.run_id,
             activation_id=new_activation_id,
             signal=_MutableCancellationSignal(),
-            events=recovered_events,
+            event_collector=recovered_events,
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
@@ -842,8 +830,7 @@ class AgentRunner:
             activation_id=new_activation_id,
             cursor=recovered_cursor,
             clock=self._now,
-            event_sink=active.events,
-            durable_event_callback=self._compose_durable_event_callback(None),
+            event_collector=active.event_collector,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
@@ -997,14 +984,7 @@ class AgentRunner:
             )
         current_call = cursor.tool_calls[cursor.next_tool_index]
         subject = interaction.request.tool_call
-        current_record = next(
-            (
-                item
-                for item in self.store.list_tool_calls(run.run_id)
-                if item.tool_call_id == subject.tool_call_id
-            ),
-            None,
-        )
+        current_record = self.store.load_tool_call(run.run_id, subject.tool_call_id)
         if (
             cursor.step_index != interaction.step_index
             or current_call.id != subject.tool_call_id
@@ -1102,6 +1082,13 @@ class AgentRunner:
         if record is None:
             raise IrisRunNotFoundError("run 不存在", run_id=run_id)
         return snapshot_run(record)
+
+    def get_run_control(self, run_id: str) -> RunControlSnapshot:
+        """读取 run 的窄控制快照，不加载完整请求、选项和模型输出。"""
+        control = self.store.load_run_control(self._required_id(run_id))
+        if control is None:
+            raise IrisRunNotFoundError("run 不存在", run_id=run_id)
+        return control
 
     def get_session(self, session_id: str) -> SessionSnapshot:
         """读取 exact runner store 中的 session durable snapshot。"""
@@ -1211,7 +1198,7 @@ class AgentRunner:
                 if current is active:
                     self._active.pop(active.run_id, None)
                 active.settled.set()
-            await self._deliver_events(active.events)
+            await self._deliver_events(active.event_collector.events)
         return self._require_result(active.run_id)
 
     def _finish_cancelled_task(
@@ -1257,7 +1244,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events, active.durable_event_callback)
+        active.event_collector.record(committed.events)
 
     def _settle_engine_result(
         self,
@@ -1315,7 +1302,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events, active.durable_event_callback)
+        active.event_collector.record(committed.events)
 
     def _finish_unexpected(
         self,
@@ -1362,7 +1349,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        self._record_events(active.events, committed.events, active.durable_event_callback)
+        active.event_collector.record(committed.events)
 
     def _start_deadline_task(
         self,
@@ -1482,33 +1469,12 @@ class AgentRunner:
             raise IrisRunStateError("run_id 不能为空")
         return normalized
 
-    def _record_events(
+    def _event_collector(
         self,
-        target: list[RunEvent],
-        events: Sequence[RunEvent],
         durable_event_callback: Callable[[RunEvent], None] | None = None,
-    ) -> None:
-        """去重收集 durable events，并同步隔离可选 callback。
-
-        Notes:
-            callback 异常只记录日志，不回滚已提交的 mutation，也不改变最终 ``RunResult``。
-        """
-        keys = {(event.run_id, event.sequence) for event in target}
-        for event in events:
-            key = (event.run_id, event.sequence)
-            if key in keys:
-                continue
-            keys.add(key)
-            target.append(event)
-            if durable_event_callback is not None:
-                try:
-                    durable_event_callback(event)
-                except Exception:
-                    logger.exception(
-                        "durable event callback 处理失败",
-                        extra={"run_id": event.run_id, "sequence": event.sequence},
-                    )
-            self._publish_live_fact(event)
+    ) -> _RunEventCollector:
+        """构造一次事件收集 owner，绑定 managed callback 与 live publisher。"""
+        return _RunEventCollector(self._compose_durable_event_callback(durable_event_callback))
 
     def _publish_live_fact(self, fact: LiveFact) -> None:
         """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
@@ -1554,15 +1520,11 @@ class AgentRunner:
             return None
 
         def relay(event: RunEvent) -> None:
-            if callback is not None:
-                try:
+            try:
+                if callback is not None:
                     callback(event)
-                except Exception:
-                    logger.exception(
-                        "durable event callback 处理失败",
-                        extra={"run_id": event.run_id, "sequence": event.sequence},
-                    )
-            self._publish_live_fact(event)
+            finally:
+                self._publish_live_fact(event)
 
         return relay
 

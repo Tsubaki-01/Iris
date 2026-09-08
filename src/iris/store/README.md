@@ -20,7 +20,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v2 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v3 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，调用方需要替换后重新创建；
 constructor 不重置或修改原文件。
@@ -34,8 +34,11 @@ constructor 不重置或修改原文件。
 `SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
 读取目标 run、session、lane owner、interaction、checkpoint、tool calls 或 events；跨多条查询的
 read 在同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
+SQLite row decode 已创建独立对象，public read 直接返回解析结果，不再做统一 deepcopy；
+内存实现继续通过 deepcopy 隔离 store-owned facts。
 exact tool call 读取复用现有 `(run_id, tool_call_id)` 主键；run control 读取只选择
-`RunControlSnapshot` 所需的八列，不解码 request/options/usage/message/error JSON。内存实现以
+`RunControlSnapshot` 所需的 session 归属与控制字段，不解码 request/options/usage/message/error
+JSON。内存实现以
 per-run call-ID 索引列举目标 run，权威事实仍保存在原有 tuple-key dict。
 
 Mutation 使用 `BEGIN IMMEDIATE`，只加载当前 command 校验和变更所需的 rows。run、session、
@@ -47,11 +50,20 @@ rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
 load/recovery 边界；replay key 与 durable command 的 JSON 投影共用同一个 store 私有 serializer。
-schema v2 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
+schema v3 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
 CAS 推进 metadata；完整 `SessionSnapshot` 读取仍按 ordinal 重建并校验 `1..message_count`。
+Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生成回执重读完整 history。
 
-schema v2 包含：
+精确重试缓存只保留 run ID、是否返回 session revision 和 interaction ID；命中后从当前权威
+存储重建事实，events 为空。每次 mutation 只编码一次完整 canonical command key。缓存维持
+原有进程内有效期，没有 TTL/LRU 淘汰；完整 command key 仍会随提交数量增长。
+
+`agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
+时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v3，
+不迁移或读取旧 schema。
+
+schema v3 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
@@ -70,7 +82,7 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 `iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：只接受 schema v2 的持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v3 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -79,7 +91,9 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-额外索引或连接池，schema identity 为 lifecycle v2。
+额外索引或连接池，schema identity 为 lifecycle v3。
+`list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
+条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
 
 `list_events(run_id, after_sequence=0, limit=None)` 始终按 sequence 返回；`limit` 如提供必须是正
 整数。内存实现先定位游标再复制有限 slice，SQLite 实现把 `LIMIT` 下推到查询，避免分页 consumer
@@ -101,6 +115,8 @@ recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcom
 effect 前的预检失败与 `CIRCUIT_OPEN` 熔断结果允许直接从 `PREPARED` 提交，不产生 claim
 event；两个 store 使用 `_tool_results.py` 的同一分类规则。真实工具执行仍必须先 claim。
 
+终态工具消息与 Runtime 提交共用 `ToolResult.to_msg()`，直接投影已归一化元数据。
+
 任何 terminal mutation 都在同一 aggregate transaction 内闭合仍为 `PREPARED` 或 `CLAIMED` 的
 tool history。`CLAIMED` fact 转为 `OUTCOME_UNKNOWN`，并追加既有的
 `TOOL_CALL_OUTCOME_UNKNOWN` event；`PREPARED` fact 保持不变且不追加 outcome event。两者都会向
@@ -112,7 +128,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v2、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v3、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
