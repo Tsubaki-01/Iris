@@ -20,8 +20,9 @@ $env:IRIS_PROVIDER_API_KEYS__DEEPSEEK = "sk-..."
 uv run iris chat examples/chat/agent.yaml --session-id example
 ```
 
-Chat 会通过 runtime live stream 在模型文本 delta 到达时立即写入终端；成功终态只负责 durable
-结算，不会再次打印同一条完整助手消息。
+Chat 的本地输出器在 runtime 所属 event loop 中直接消费 typed 文本 delta 并同步写入终端。
+`SessionManager` 的单一事件消费者负责 durable 终态与 HITL 提示；已显示的成功响应不会重复
+打印，没有文本增量时仍补显完整结果，失败或取消时会收尾已输出的文本行。
 
 当前 run 执行期间可以继续输入普通文本，它会作为 `steer` 在下一个安全边界进入当前 run；使用
 `/follow-up <消息>` 可以排入下一轮。Ctrl-C 会先请求中断当前 run，再保持原有行为退出 chat。

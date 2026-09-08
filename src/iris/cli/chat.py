@@ -16,7 +16,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from ..config import init_config, is_config_initialized
 from ..exceptions import HITLCheckpointInvalidError, IrisError
@@ -31,6 +31,7 @@ from ..harness import (
     SessionManager,
     SubmissionEvent,
 )
+from ..harness.streaming import LiveFact
 from ..hitl import (
     HumanInteraction,
     PermissionInteractionResponse,
@@ -38,12 +39,14 @@ from ..hitl import (
     QuestionInteractionResponse,
     QuestionPrompt,
 )
-from ..streaming import (
-    LiveEnvelope,
-    LiveStreamBroker,
-    LiveSubscription,
-    LiveSubscriptionRequest,
+from ..message import (
+    ModelBlockDelta,
+    ModelResponseCancelled,
+    ModelResponseCompleted,
+    ModelResponseFailed,
+    ModelResponseStarted,
 )
+from ..runtime import RuntimeStreamEvent
 
 # endregion
 
@@ -104,13 +107,12 @@ def run_chat(
     try:
         if not is_config_initialized():
             init_config(env_file=str(options.env_file) if options.env_file is not None else None)
-        live_broker = LiveStreamBroker(
-            replay_capacity_per_scope=256,
-            subscription_capacity=64,
+        live_output = _ChatLiveOutput(
+            output_func or (lambda fragment: print(fragment, end="", flush=True))
         )
         runner = AgentRunner.from_config_path(
             options.config_path,
-            live_publisher=live_broker,
+            live_publisher=live_output,
         )
     except IrisError as exc:
         write_error(_format_iris_error(exc))
@@ -119,7 +121,7 @@ def run_chat(
     return run_chat_loop(
         runner=runner,
         options=options,
-        live_broker=live_broker,
+        live_output=live_output,
         input_func=input_func,
         output_func=output_func,
         error_func=write_error,
@@ -130,10 +132,9 @@ def run_chat_loop(
     *,
     runner: AgentRunner,
     options: ChatOptions,
-    live_broker: LiveStreamBroker | None = None,
+    live_output: _ChatLiveOutput | None = None,
     input_func: Callable[[str], str] | None = None,
     output_func: Callable[[str], None] | None = None,
-    stream_output_func: Callable[[str], None] | None = None,
     error_func: Callable[[str], None] | None = None,
 ) -> int:
     """在主线程读取终端输入，并在后台 event loop 推进 session。
@@ -144,10 +145,9 @@ def run_chat_loop(
     Args:
         runner (AgentRunner): complete-run SDK facade。
         options (ChatOptions): chat 命令选项。
-        live_broker (LiveStreamBroker | None): 与 runner 共享的可选 live broker。
+        live_output (_ChatLiveOutput | None): 与 runner 共享的可选同步文本输出。
         input_func (Callable[[str], str] | None): 可选输入回调。
         output_func (Callable[[str], None] | None): 可选标准输出回调。
-        stream_output_func (Callable[[str], None] | None): 可选文本增量输出回调。
         error_func (Callable[[str], None] | None): 可选标准错误回调。
 
     Returns:
@@ -155,18 +155,12 @@ def run_chat_loop(
     """
     read_input = input_func or builtins.input
     write_output = output_func or builtins.print
-    write_stream = stream_output_func or (
-        write_output
-        if output_func is not None
-        else lambda fragment: print(fragment, end="", flush=True)
-    )
     write_error = error_func or (lambda message: print(message, file=sys.stderr))
     host = _ChatSessionHost(
         runner=runner,
         options=options,
-        live_broker=live_broker,
+        live_output=live_output,
         output_func=write_output,
-        stream_output_func=write_stream,
         error_func=write_error,
     )
     host.start()
@@ -216,6 +210,55 @@ def run_chat_loop(
         host.close(reason=close_reason)
 
 
+class _ChatLiveOutput:
+    """在 runner 所属 event loop 中同步显示模型文本，保留逐 run 收尾标记。"""
+
+    def __init__(self, write: Callable[[str], None]) -> None:
+        """保存文本回调；显示状态只在同一个 event loop 中读写。"""
+        self._write = write
+        self._open_runs: set[str] = set()
+        self._completed_runs: set[str] = set()
+
+    def publish(self, fact: LiveFact) -> None:
+        """消费模型文本事件；durable 与 submission 事实由 manager 处理。"""
+        if not isinstance(fact, RuntimeStreamEvent):
+            return
+        event = fact.model_event
+        if isinstance(event, ModelResponseStarted):
+            self._completed_runs.discard(fact.run_id)
+        elif isinstance(event, ModelBlockDelta) and event.channel == "text":
+            self._write(event.delta)
+            self._open_runs.add(fact.run_id)
+        elif isinstance(
+            event, (ModelResponseCompleted, ModelResponseFailed, ModelResponseCancelled)
+        ):
+            displayed = fact.run_id in self._open_runs
+            self._finish_text(fact.run_id)
+            if displayed and isinstance(event, ModelResponseCompleted):
+                self._completed_runs.add(fact.run_id)
+            else:
+                self._completed_runs.discard(fact.run_id)
+
+    def finish_run(self, run_id: str) -> bool:
+        """收尾并清理该 run，返回完整模型文本是否已经展示。"""
+        self._finish_text(run_id)
+        displayed = run_id in self._completed_runs
+        self._completed_runs.discard(run_id)
+        return displayed
+
+    def close(self) -> None:
+        """关闭 host 时收尾尚无模型终态的文本行，并释放完成标记。"""
+        for run_id in tuple(self._open_runs):
+            self._finish_text(run_id)
+        self._completed_runs.clear()
+
+    def _finish_text(self, run_id: str) -> None:
+        """只为已经输出文本的模型调用补一次换行。"""
+        if run_id in self._open_runs:
+            self._write("\n")
+            self._open_runs.remove(run_id)
+
+
 class _ChatSessionHost:
     """把同步终端输入桥接到单 session 的异步 facade。
 
@@ -225,9 +268,8 @@ class _ChatSessionHost:
     Attributes:
         _runner (AgentRunner): durable complete-run owner。
         _options (ChatOptions): CLI 会话与 run 选项。
-        _live_broker (LiveStreamBroker | None): Runner 与 CLI 共享的 live fact broker。
+        _live_output (_ChatLiveOutput | None): Runner 与 CLI 共享的同步文本输出。
         _output_func (Callable[[str], None]): 标准输出回调。
-        _stream_output_func (Callable[[str], None]): 文本增量输出回调。
         _error_func (Callable[[str], None]): 标准错误回调。
         _thread (threading.Thread): 承载 asyncio event loop 的后台线程。
         _ready (threading.Event): 后台 host 已可接收调用的同步点。
@@ -236,11 +278,6 @@ class _ChatSessionHost:
         _manager (SessionManager | None): 当前 CLI 使用的单 session facade。
         _pending_interaction (HumanInteraction | None): 等待下一行输入的 typed HITL。
         _close_reason (str | None): 退出时交给 runner 的取消原因。
-        _live_terminal_events (dict[str, asyncio.Event]): Live consumer 的 per-run terminal 水位。
-        _live_stream_closed (bool): Live consumer 是否已结束。
-        _stream_snapshots (dict[tuple[str, str, str], str]): 文本块的最近输出快照。
-        _text_streams (set[tuple[str, str]]): 已输出文本的模型流。
-        _completed_streamed_runs (set[str]): 可跳过 durable 重复文本的 run。
         _exit_code (int | None): terminal failure 请求的 CLI 退出码。
         _thread_error (BaseException | None): 后台 host 的未处理错误。
 
@@ -248,9 +285,8 @@ class _ChatSessionHost:
         host = _ChatSessionHost(
             runner=runner,
             options=options,
-            live_broker=None,
+            live_output=None,
             output_func=print,
-            stream_output_func=print,
             error_func=print,
         )
         host.start()
@@ -266,17 +302,15 @@ class _ChatSessionHost:
         self,
         runner: AgentRunner,
         options: ChatOptions,
-        live_broker: LiveStreamBroker | None,
+        live_output: _ChatLiveOutput | None,
         output_func: Callable[[str], None],
-        stream_output_func: Callable[[str], None],
         error_func: Callable[[str], None],
     ) -> None:
         """保存 host 依赖；异步资源由后台线程创建。"""
         self._runner = runner
         self._options = options
-        self._live_broker = live_broker
+        self._live_output = live_output
         self._output_func = output_func
-        self._stream_output_func = stream_output_func
         self._error_func = error_func
         self._thread = threading.Thread(target=self._run, name="iris-chat-host")
         self._ready = threading.Event()
@@ -285,11 +319,6 @@ class _ChatSessionHost:
         self._manager: SessionManager | None = None
         self._pending_interaction: HumanInteraction | None = None
         self._close_reason: str | None = None
-        self._live_terminal_events: dict[str, asyncio.Event] = {}
-        self._live_stream_closed = live_broker is None
-        self._stream_snapshots: dict[tuple[str, str, str], str] = {}
-        self._text_streams: set[tuple[str, str]] = set()
-        self._completed_streamed_runs: set[str] = set()
         self._exit_code: int | None = None
         self._thread_error: BaseException | None = None
 
@@ -348,28 +377,18 @@ class _ChatSessionHost:
         self._manager = SessionManager(
             self._runner,
             self._options.session_id,
-            submission_publisher=self._live_broker,
         )
-        live_consumer: asyncio.Task[None] | None = None
-        if self._live_broker is not None:
-            subscription = self._live_broker.subscribe(
-                LiveSubscriptionRequest(
-                    scope="session",
-                    scope_id=self._options.session_id,
-                )
-            )
-            live_consumer = asyncio.create_task(self._consume_live_events(subscription))
         consumer = asyncio.create_task(self._consume_events())
         self._ready.set()
         await self._stop.wait()
         try:
             await self._manager.close(cancel_run=True, reason=self._close_reason)
         finally:
-            if self._live_broker is not None:
-                self._live_broker.close()
-            await consumer
-            if live_consumer is not None:
-                await live_consumer
+            try:
+                await consumer
+            finally:
+                if self._live_output is not None:
+                    self._live_output.close()
 
     async def _submit(
         self,
@@ -432,7 +451,6 @@ class _ChatSessionHost:
                 )
                 continue
             if event.kind is RunEventKind.RUN_TERMINAL:
-                await self._wait_for_live_terminal(event.run_id)
                 result = self._runner.get_result(event.run_id)
                 if result is None:
                     raise HITLCheckpointInvalidError("terminal 事件缺少 durable result")
@@ -440,10 +458,10 @@ class _ChatSessionHost:
                     result,
                     output_func=self._output_func,
                     error_func=self._error_func,
-                    include_assistant=event.run_id not in self._completed_streamed_runs,
+                    include_assistant=(
+                        self._live_output is None or not self._live_output.finish_run(event.run_id)
+                    ),
                 )
-                self._completed_streamed_runs.discard(event.run_id)
-                self._live_terminal_events.pop(event.run_id, None)
                 if result.run.stop_reason in {
                     RunStopReason.FAILED,
                     RunStopReason.OUTCOME_UNKNOWN,
@@ -454,73 +472,6 @@ class _ChatSessionHost:
                     and self._pending_interaction.run_id == event.run_id
                 ):
                     self._pending_interaction = None
-
-    async def _consume_live_events(self, subscription: LiveSubscription) -> None:
-        """消费 session live stream，并输出模型文本增量。"""
-        try:
-            async for item in subscription:
-                if isinstance(item, LiveEnvelope):
-                    self._handle_live_envelope(item)
-        finally:
-            self._live_stream_closed = True
-            if self._text_streams:
-                self._stream_output_func("\n")
-                self._text_streams.clear()
-            for terminal_event in self._live_terminal_events.values():
-                terminal_event.set()
-
-    def _handle_live_envelope(self, envelope: LiveEnvelope) -> None:
-        """把 allowlisted live envelope 投影为终端文本。"""
-        kind = envelope.kind
-        if kind == "model.response.started":
-            self._completed_streamed_runs.discard(cast(str, envelope.run_id))
-            return
-        if kind == "model.block.delta" and envelope.payload.get("channel") == "text":
-            run_id = cast(str, envelope.run_id)
-            model_stream_id = cast(str, envelope.payload["model_stream_id"])
-            block_id = cast(str, envelope.payload["block_id"])
-            snapshot = cast(str, envelope.payload["snapshot"])
-            snapshot_key = (run_id, model_stream_id, block_id)
-            previous = self._stream_snapshots.get(snapshot_key, "")
-            fragment = snapshot[len(previous) :]
-            self._stream_snapshots[snapshot_key] = snapshot
-            if fragment:
-                self._stream_output_func(fragment)
-                self._text_streams.add((run_id, model_stream_id))
-            return
-        if kind in {
-            "model.response.completed",
-            "model.response.failed",
-            "model.response.cancelled",
-        }:
-            self._finish_model_stream(envelope)
-            return
-        if kind == RunEventKind.RUN_TERMINAL.value:
-            run_id = cast(str, envelope.run_id)
-            self._live_terminal_events.setdefault(run_id, asyncio.Event()).set()
-
-    def _finish_model_stream(self, envelope: LiveEnvelope) -> None:
-        """结束一次模型文本展示，并记录是否可跳过 durable 重复文本。"""
-        run_id = cast(str, envelope.run_id)
-        model_stream_id = cast(str, envelope.payload["model_stream_id"])
-        stream_key = (run_id, model_stream_id)
-        if stream_key in self._text_streams:
-            self._stream_output_func("\n")
-            if envelope.kind == "model.response.completed":
-                self._completed_streamed_runs.add(run_id)
-        else:
-            self._completed_streamed_runs.discard(run_id)
-        self._text_streams.discard(stream_key)
-        for snapshot_key in tuple(self._stream_snapshots):
-            if snapshot_key[:2] == stream_key:
-                del self._stream_snapshots[snapshot_key]
-
-    async def _wait_for_live_terminal(self, run_id: str) -> None:
-        """等待 live consumer 处理到同一个 durable terminal。"""
-        if self._live_broker is None or self._live_stream_closed:
-            return
-        terminal_event = self._live_terminal_events.setdefault(run_id, asyncio.Event())
-        await terminal_event.wait()
 
     # endregion
 

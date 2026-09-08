@@ -77,10 +77,14 @@ def test_plain_text_routes_while_previous_terminal_display_is_pending(
     finished = threading.Event()
     errors: list[str] = []
     original_submit = _ChatSessionHost._submit
+    original_consume = _ChatSessionHost._consume_events
 
-    async def delay_display(self: _ChatSessionHost, run_id: str) -> None:
+    async def delay_display(self: _ChatSessionHost) -> None:
+        while not provider.requests or len(store.load_session("cli").messages) < 2:
+            await asyncio.sleep(0)
         terminal_pending.set()
         assert await asyncio.to_thread(release_display.wait, 2)
+        await original_consume(self)
 
     async def submit_and_release(
         self: _ChatSessionHost, input: str, *, mode: Literal["follow_up"] | None = None
@@ -91,7 +95,7 @@ def test_plain_text_routes_while_previous_terminal_display_is_pending(
             if input == "继续":
                 release_display.set()
 
-    monkeypatch.setattr(_ChatSessionHost, "_wait_for_live_terminal", delay_display)
+    monkeypatch.setattr(_ChatSessionHost, "_consume_events", delay_display)
     monkeypatch.setattr(_ChatSessionHost, "_submit", submit_and_release)
     index = 0
 
@@ -150,9 +154,8 @@ def test_exit_before_waiting_prompt_consumption_ignores_stale_prompt(
     host = _ChatSessionHost(
         runner=runner,
         options=ChatOptions(config_path=tmp_path / "agent.yaml"),
-        live_broker=None,
+        live_output=None,
         output_func=outputs.append,
-        stream_output_func=outputs.append,
         error_func=outputs.append,
     )
     host.start()
