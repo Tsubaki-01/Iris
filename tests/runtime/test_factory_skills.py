@@ -20,7 +20,7 @@ from iris.exceptions import IrisConfigError, IrisContextError
 from iris.harness._fingerprint import compute_environment_fingerprint
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import RuntimeFactory
-from iris.runtime.factory import _prepare_skills
+from iris.runtime._assembly import _prepare_skills
 from iris.skill import CATALOG_SLOT_NAME, LoadSkillTool
 from iris.tools import ReadFileState, ToolExecutionContext
 
@@ -76,6 +76,31 @@ def _config(
 def _active_tool_names(runtime: object) -> tuple[str, ...]:
     environment = runtime.environment  # type: ignore[attr-defined]
     return tuple(tool.definition.name for tool in environment.tool_bridge.tool_view.active_tools)
+
+
+def test_child_skills_are_discovered_in_effective_workspace(tmp_path: Path) -> None:
+    from iris.runtime._assembly import (
+        RuntimeExecutionScope,
+        assemble_runtime,
+        resolve_runtime_boundary,
+    )
+
+    _write_skill(tmp_path, "parent-only")
+    child_workspace = tmp_path / "child"
+    _write_skill(child_workspace, "child-only")
+    parent = resolve_runtime_boundary(_config(tmp_path))
+    config = _config(child_workspace, skills=AgentSkillsConfig(enabled=True))
+    boundary = resolve_runtime_boundary(config, parent_boundary=parent)
+    runtime = assemble_runtime(
+        config,
+        config_path=None,
+        provider=_provider(),
+        memory_service=None,
+        api_key=None,
+        execution_scope=RuntimeExecutionScope.CHILD,
+        boundary=boundary,
+    )
+    assert runtime.environment.skill_registry.names() == ("child-only",)
 
 
 @pytest.mark.parametrize(

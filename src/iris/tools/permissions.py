@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..exceptions import IrisConfigError, IrisToolValidationError
 from .base import BaseTool, ToolCapability, ToolExecutionContext
+from .subagent import SubagentTool
 
 
 class PermissionEffect(StrEnum):
@@ -113,6 +114,8 @@ class DefaultPermissionPolicy(PermissionPolicy):
     ) -> PermissionDecision:
         """只读允许，写入依 write_mode，其他高风险能力需要人工确认。"""
         del context
+        if isinstance(tool, SubagentTool):
+            return PermissionDecision(effect=PermissionEffect.ALLOW)
         if tool.definition.capabilities <= {ToolCapability.READ}:
             return PermissionDecision(effect=PermissionEffect.ALLOW)
         if tool.definition.capabilities <= {
@@ -139,4 +142,33 @@ class DefaultPermissionPolicy(PermissionPolicy):
             "type": "default",
             "version": 1,
             "write_mode": self.write_mode,
+        }
+
+
+class MostRestrictivePermissionPolicy(PermissionPolicy):
+    """对实际 child 工具分别裁决，两侧同级时保留 parent 决策。"""
+
+    def __init__(self, parent: PermissionPolicy, child: PermissionPolicy) -> None:
+        self.parent = parent
+        self.child = child
+
+    def check(
+        self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
+    ) -> PermissionDecision:
+        """取 DENY、REQUIRE_HUMAN、ALLOW 顺序中更严格的原始决策。"""
+        parent = self.parent.check(tool, params, context)
+        child = self.child.check(tool, params, context)
+        priority = {
+            PermissionEffect.ALLOW: 0,
+            PermissionEffect.REQUIRE_HUMAN: 1,
+            PermissionEffect.DENY: 2,
+        }
+        return child if priority[child.effect] > priority[parent.effect] else parent
+
+    def fingerprint_payload(self) -> dict[str, object]:
+        """将两侧策略状态交给既有 environment fingerprint owner。"""
+        return {
+            "type": "most_restrictive",
+            "parent": self.parent.fingerprint_payload(),
+            "child": self.child.fingerprint_payload(),
         }

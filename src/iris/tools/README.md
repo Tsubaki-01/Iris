@@ -17,6 +17,11 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 `SubagentTool.execute_subagent()` 通过窄 port 返回 `ToolResult | ChildWaiting`；
 直接 `arun()` 抛 `IrisToolExecutionError`。普通 `BaseTool.arun()` 的返回契约不变。
 
+默认策略只对具体内置 `SubagentTool` 返回 ALLOW，其他 AGENT 工具仍要求人工确认。
+内部 `MostRestrictivePermissionPolicy` 对真实 child 工具分别调用父子策略，按
+DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/metadata。
+两侧 payload 直接纳入既有 environment fingerprint。
+
 ```mermaid
 graph TD
     A["函数 / BaseTool"] --> B["ToolDefinition + input_schema"]
