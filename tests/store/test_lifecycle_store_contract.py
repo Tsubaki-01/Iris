@@ -24,18 +24,22 @@ from iris.hitl import (
     InteractionStatus,
     QuestionInteractionResponse,
     QuestionPrompt,
+    SubagentExpiryOwner,
+    SubagentProxyOrigin,
     ToolCallSnapshot,
 )
-from iris.hitl.models import SubagentExpiryOwner, SubagentProxyOrigin
 from iris.lifecycle import (
+    AdmitChildRun,
     AgentRunOptions,
     AgentRunRequest,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
+    FinalizeSubagentResult,
     FinishRun,
     LifecycleStore,
+    RebindSubagentProxy,
     RecoverActiveRun,
     RecoveryDisposition,
     RequestCancellation,
@@ -49,9 +53,9 @@ from iris.lifecycle import (
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SubagentRunLink,
     SuspendRun,
 )
-from iris.lifecycle.store import AdmitChildRun, FinalizeSubagentResult, RebindSubagentProxy
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolResult
@@ -1431,6 +1435,9 @@ def test_admit_child_run_is_atomic_and_parent_stays_prepared(
     parent = _subagent_parent(store)
     _admit_child(store, parent)
     link = store.load_subagent_link("parent", "delegate")
+    assert link == SubagentRunLink(
+        parent_run_id="parent", parent_tool_call_id="delegate", child_run_id="run-1"
+    )
     assert link.model_dump() == {
         "parent_run_id": "parent",
         "parent_tool_call_id": "delegate",

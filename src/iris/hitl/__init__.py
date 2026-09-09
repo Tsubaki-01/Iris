@@ -14,6 +14,8 @@ from .models import (
     PermissionPrompt,
     QuestionInteractionResponse,
     QuestionPrompt,
+    SubagentExpiryOwner,
+    SubagentProxyOrigin,
     ToolCallSnapshot,
     make_call_fingerprint,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "PermissionInteractionResponse",
     "QuestionPrompt",
     "QuestionInteractionResponse",
+    "SubagentExpiryOwner",
+    "SubagentProxyOrigin",
     "ToolCallSnapshot",
     "make_call_fingerprint",
 ]

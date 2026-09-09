@@ -2,12 +2,16 @@
 
 # `iris.lifecycle`
 
-Internal Sub Agent contracts link independent runs through
+Public Sub Agent contracts link independent runs through
 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id)` while the parent tool stays
 PREPARED. The store adds `AdmitChildRun`, `RebindSubagentProxy`, `FinalizeSubagentResult`, and an
 exact link point read. Rebind returns complete WAITING `RunCommit` facts. WAITING finalize returns
 the ACTIVE run/checkpoint bound to a fresh RESUME activation in the same commit, without an extra
 ordinary resume mutation. Child usage remains run-local.
+All four types are imported directly from `iris.lifecycle`. Rebind changes only proxy binding and
+checkpoint sequence, preserving history/usage/cursor. Finalize commits the parent result, message,
+usage, and cursor. The three mutations reuse existing revisions, activation fences, and store
+transactions without new concurrency fields.
 
 `iris.lifecycle` is the pure data and synchronous store contract for logical runs. It defines
 immutable run/session/activation/checkpoint/tool-call/event/result boundary models, JSON-safe

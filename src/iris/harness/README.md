@@ -25,7 +25,7 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 
 ## 公共操作
 
-内部 `_subagent.ChildProviderFactory` 定义 selected child provider 注入协议：
+`iris.harness.ChildProviderFactory` 定义 selected child provider 注入协议：
 `__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`。
 它接收已加载的普通 child 配置，不依赖 parent provider 的单次凭据覆盖。
 
@@ -55,6 +55,45 @@ Outer timeout 以 durable `child.created_at` 为起点，权限等待不计入�
 不重置。Proxy 保存的 expiry owner 决定停止 parent 还是继续处理工具错误；parent 同刻到期优先。
 Parent stream 只含 parent start/proxy/final facts；linked recovery 不重复 started，child 内部
 stream 与 usage 不转发，错误仍用带 `is_error` 的 `tool.completed`。
+Parent 保留最终回答权，只得到 child 的最终文本；child usage 留在 child run。
+结果 metadata 仅含 `agent_selector`、admission 后的 `child_run_id` 和普通 artifact metadata。
+Live event 是 best-effort，不承诺跨进程 exactly-once。
+
+最小 Sub Agent 示例包含三个文件，使用前述 `AgentRunner.from_config_path("agent.yaml")`
+运行 parent；模型凭据按既有 provider 配置提供。
+
+```yaml
+# agent.yaml
+name: parent
+model: openai/gpt-4o-mini
+system: 将专注的子任务交给 researcher，再结合其结果给出最终回答。
+tools:
+  subagent: subagents.yaml
+```
+
+```yaml
+# subagents.yaml
+default: researcher
+agents:
+  researcher:
+    path: agents/researcher/agent.yaml
+    description: 梳理专注的子任务并给出简洁结论。
+```
+
+```yaml
+# agents/researcher/agent.yaml
+name: researcher
+model: openai/gpt-4o-mini
+system: 只处理交给你的子任务，必要时向用户提问，最后返回结论。
+tools:
+  builtin: [human.ask]
+```
+
+Host 收到 parent `pending_interaction` 后，仍按普通 typed HITL 调用 parent `resume()`。
+无需操作 child runner。Catalog default/selector/description 改变若导致普通 environment
+fingerprint 不匹配，恢复会拒绝；不会绕过检查或新建替代 child。
+Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE recovery 仍从该 interaction
+恢复存储回答。Child 的 `IrisRunRecoveryError` 原样传播，保留 parent/child 的可恢复状态。
 
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
