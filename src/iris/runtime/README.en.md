@@ -170,6 +170,9 @@ outer responses and prepares those calls without permission checks while preserv
 Subagent remains a serial boundary under existing concurrency rules. Linked WAITING/terminal
 outcomes use commit-port rebind/finalize without a parent effect claim. ACTIVE and WAITING paths
 share tool-result cursor projection; WAITING delegates only final result normalization.
+Harness owns the special branch's absolute timeout from child admission; runtime does not apply
+ordinary tool timeout. After the child await, runtime checks parent cancellation/deadline before
+rebind/finalize. Only fresh dispatch emits `tool.started`; linked recovery retains the logical start.
 
 Internal `_assembly.py` assembles context, skills, providers, and tools. ROOT registers `subagent`
 only with a preloaded routes/port bundle; CHILD always excludes it. The boundary resolver selects

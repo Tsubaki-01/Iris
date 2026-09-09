@@ -44,6 +44,18 @@ Linked continuation 不重复 outer permission；未 admission 的存储批准�
 WAITING finalize 成功后先发布原工具 activation 的 `tool.completed`，再执行 fresh RESUME
 activation。SessionManager 在第一次 child await 前完成 resume admission，并拒绝并行回答。
 
+Parent 取消、deadline 或 parent-owned proxy 到期先结算 exact child，再结束 parent。
+Linked proxy 的 `request_cancel()` 返回仍为 WAITING 的请求快照；`cancel()` 或 manager
+settlement task 完成后才 terminal。`settlement_timeout` 覆盖 child 等待和 parent observation，
+超时保留 durable cancellation，后续 `cancel()` / `recover()` 可继续结算。连续 interrupt
+共享原 cleanup task，follow-up 等到 parent 真正 terminal 才启动。
+
+Child interaction/deadline 或 outer tool timeout 先结算 child，再提交 `SUBAGENT_TIMEOUT`。
+Outer timeout 以 durable `child.created_at` 为起点，权限等待不计入，resume/rebind/recover
+不重置。Proxy 保存的 expiry owner 决定停止 parent 还是继续处理工具错误；parent 同刻到期优先。
+Parent stream 只含 parent start/proxy/final facts；linked recovery 不重复 started，child 内部
+stream 与 usage 不转发，错误仍用带 `is_error` 的 `tool.completed`。
+
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
 - `request_cancel(run_id, reason=None)`：只保证首次请求持久化；active 本地 activation 在提交后

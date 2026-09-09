@@ -158,6 +158,9 @@ identity，也不改变普通 file read state。Runtime 在两处整批 prefligh
 outer response，使用 raw-only prepare 保留模型顺序；subagent 作为现有并发规则中的串行边界。
 Linked WAITING/terminal 分别调用 commit port 的 rebind/finalize，不创建 parent effect claim。
 ACTIVE 与 WAITING continuation 共用结果 cursor 投影，WAITING 只委托最终结果归一化。
+Special branch 的 timeout 由 harness 按 child admission absolute 时间管理；runtime 不套
+普通工具 timeout。Child await 后先检查 parent cancellation/deadline，再 rebind/finalize。
+只有 fresh dispatch 发布 `tool.started`，linked recovery 保留原 logical start。
 
 内部 `_assembly.py` 统一装配 context、skills、provider 与工具。ROOT 接收已加载的路由/port
 bundle 才注册 `subagent`；CHILD 始终排除它。唯一 boundary resolver 选择父子 workspace 的

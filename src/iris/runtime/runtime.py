@@ -282,7 +282,7 @@ class AgentRuntime:
             elif isinstance(prepared.tool, SubagentTool):
                 call = SubagentParentCall(activation.run_id, prepared.tool_use.id)
                 linked = commits.load_subagent_link(tool_call_id=prepared.tool_use.id)
-                if stream_sink is not None:
+                if stream_sink is not None and linked is None:
                     stream_sink.emit(
                         _runtime_stream_event(
                             "tool.started",
@@ -309,6 +309,18 @@ class AgentRuntime:
                     else None,
                     linked_continuation=linked is not None,
                 )
+                if _activation_cancelled(commits, cancellation):
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.CANCELLED,
+                        cursor=cursor,
+                        assistant_message=cursor.assistant_message,
+                    )
+                if _deadline_expired(commits):
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                        cursor=cursor,
+                        assistant_message=cursor.assistant_message,
+                    )
                 if isinstance(outcome, ChildWaiting):
                     suspended = commits.rebind_subagent_proxy(
                         call=call, waiting=outcome, cursor=cursor
