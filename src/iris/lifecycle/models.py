@@ -200,6 +200,19 @@ class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
 
 
+class SubagentRunLink(_FrozenModel):
+    """父工具调用到唯一 child run 的 durable locator。"""
+
+    parent_run_id: str
+    parent_tool_call_id: str
+    child_run_id: str
+
+    @field_validator("parent_run_id", "parent_tool_call_id", "child_run_id")
+    @classmethod
+    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _trim_required(value, field_name=str(info.field_name))
+
+
 class RunLimits(_FrozenModel):
     """一次 logical run 的固定预算与截止约束。"""
 

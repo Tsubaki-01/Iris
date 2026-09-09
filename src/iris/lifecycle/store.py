@@ -31,6 +31,7 @@ from .models import (
     RunToolCallRecord,
     RunUsage,
     SessionSnapshot,
+    SubagentRunLink,
 )
 
 
@@ -58,6 +59,50 @@ class CreateRun:
             raise ValueError("initial checkpoint sequence 必须为 1")
         if self.initial_checkpoint.environment_fingerprint != self.environment_fingerprint:
             raise ValueError("initial checkpoint environment fingerprint 不匹配")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AdmitChildRun:
+    """同事务创建普通 child run 并绑定 exact parent prepared tool。"""
+
+    parent_run_id: str
+    expected_parent_run_revision: int
+    parent_activation_id: str
+    parent_tool_call_id: str
+    expected_parent_tool_version: int
+    child_create: CreateRun
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RebindSubagentProxy:
+    """保持 parent 工具未提交，首次绑定或替换已回答的 proxy。"""
+
+    parent_run_id: str
+    expected_parent_run_revision: int
+    parent_activation_id: str | None
+    parent_tool_call_id: str
+    expected_parent_tool_version: int
+    pending_proxy: HumanInteraction
+    replaced_proxy_interaction_id: str | None
+    now: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FinalizeSubagentResult:
+    """Child terminal 后原子提交 parent 结果并按需创建 RESUME activation。"""
+
+    parent_run_id: str
+    expected_parent_run_revision: int
+    parent_activation_id: str | None
+    expected_parent_session_revision: int
+    parent_tool_call_id: str
+    expected_parent_tool_version: int
+    proxy_interaction_id: str | None
+    resume_activation_id: str | None
+    result: ToolResult
+    message_delta: list[Msg]
+    checkpoint: RunCheckpoint
+    now: datetime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -219,6 +264,16 @@ class LifecycleStore(Protocol):
     """Logical run aggregate 的同步 durable boundary。"""
 
     def create_run(self, command: CreateRun) -> RunCommit: ...
+
+    def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink: ...
+
+    def rebind_subagent_proxy(self, command: RebindSubagentProxy) -> RunCommit: ...
+
+    def finalize_subagent_result(self, command: FinalizeSubagentResult) -> RunCommit: ...
+
+    def load_subagent_link(
+        self, parent_run_id: str, parent_tool_call_id: str
+    ) -> SubagentRunLink | None: ...
 
     def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit: ...
 

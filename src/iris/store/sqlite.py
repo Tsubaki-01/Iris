@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v3 的同步 SQLite store。"""
+"""精确 lifecycle schema v4 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -50,15 +50,19 @@ from ..lifecycle.models import (
     RunToolCallRecord,
     RunUsage,
     SessionSnapshot,
+    SubagentRunLink,
     ToolCallPhase,
     project_result,
 )
 from ..lifecycle.store import (
+    AdmitChildRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
+    FinalizeSubagentResult,
     FinishRun,
+    RebindSubagentProxy,
     RecoverActiveRun,
     RequestCancellation,
     ReserveModelStep,
@@ -81,6 +85,13 @@ from ..tools.base import ToolErrorInfo, ToolResult
 from ._replay import ReplayRecord, replay_key
 from ._serialization import jsonable as _jsonable
 from ._sqlite_schema import create_schema, require_exact_schema
+from ._subagent import (
+    validate_current_proxy,
+    validate_final_proxy,
+    validate_final_result,
+    validate_parent_tool,
+    validate_proxy_binding,
+)
 from ._terminal_closure import build_terminal_tool_closure
 from ._tool_results import is_preflight_result
 
@@ -143,6 +154,325 @@ class SQLiteStore:
                 "无法初始化 lifecycle SQLite store",
                 path=str(self.path),
             ) from exc
+
+    def load_subagent_link(
+        self, parent_run_id: str, parent_tool_call_id: str
+    ) -> SubagentRunLink | None:
+        """读取 exact parent key 对应的三字段 link。"""
+        return self._read(
+            "load_subagent_link",
+            lambda connection: self._select_subagent_link(
+                connection,
+                parent_run_id,
+                parent_tool_call_id,
+                operation="load_subagent_link",
+            ),
+        )
+
+    def _select_subagent_link(
+        self, connection: sqlite3.Connection, run_id: str, tool_call_id: str, *, operation: str
+    ) -> SubagentRunLink | None:
+        """从 durable row 的解析边界加载 link。"""
+        row = connection.execute(
+            "SELECT parent_run_id, parent_tool_call_id, child_run_id FROM subagent_run_links "
+            "WHERE parent_run_id = ? AND parent_tool_call_id = ?",
+            (run_id, tool_call_id),
+        ).fetchone()
+        return (
+            None
+            if row is None
+            else _decode_row(
+                _subagent_link_from_row,
+                row,
+                path=self.path,
+                operation=operation,
+            )
+        )
+
+    def _require_subagent_link(
+        self, connection: sqlite3.Connection, run_id: str, tool_call_id: str, *, operation: str
+    ) -> SubagentRunLink:
+        """要求 exact parent key 已有 child，不扫描或创建替代。"""
+        link = self._select_subagent_link(connection, run_id, tool_call_id, operation=operation)
+        if link is None:
+            raise IrisRunConflictError("parent tool 缺少 Sub Agent link", run_id=run_id)
+        return link
+
+    def _require_subagent_parent(
+        self,
+        connection: sqlite3.Connection,
+        command: AdmitChildRun | RebindSubagentProxy | FinalizeSubagentResult,
+        now: datetime,
+        *,
+        operation: str,
+    ) -> tuple[RunRecord, RunToolCallRecord]:
+        """在当前事务中核对 parent mutation 的 CAS 与操作边界。"""
+        run = self._require_run(connection, command.parent_run_id, operation=operation)
+        self._require_revision(run, command.expected_parent_run_revision)
+        self._require_lane(connection, run)
+        tool = self._require_tool_call(
+            connection, run.run_id, command.parent_tool_call_id, operation=operation
+        )
+        validate_parent_tool(
+            run,
+            tool,
+            activation_id=command.parent_activation_id,
+            tool_version=command.expected_parent_tool_version,
+            now=now,
+        )
+        return run, tool
+
+    def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink:
+        """在一个 IMMEDIATE transaction 中创建 child 与 link；重入优先复用 link。"""
+        with self._lock:
+            try:
+                with self._connect() as connection:
+                    _execute(connection, "BEGIN IMMEDIATE")
+                    link = self._select_subagent_link(
+                        connection,
+                        command.parent_run_id,
+                        command.parent_tool_call_id,
+                        operation="admit_child_run",
+                    )
+                    if link is not None:
+                        return link
+                    self._require_subagent_parent(
+                        connection,
+                        command,
+                        command.child_create.now,
+                        operation="admit_child_run",
+                    )
+                    child = self._create_run(connection, command.child_create)
+                    link = SubagentRunLink.model_construct(
+                        parent_run_id=command.parent_run_id,
+                        parent_tool_call_id=command.parent_tool_call_id,
+                        child_run_id=child.run.run_id,
+                    )
+                    _execute(
+                        connection,
+                        "INSERT INTO subagent_run_links "
+                        "(parent_run_id, parent_tool_call_id, child_run_id) "
+                        "VALUES (?, ?, ?)",
+                        (link.parent_run_id, link.parent_tool_call_id, link.child_run_id),
+                    )
+                    connection.commit()
+                    return link
+            except sqlite3.IntegrityError as exc:
+                raise IrisRunConflictError(
+                    "lifecycle SQLite constraint 冲突",
+                    path=str(self.path),
+                    operation="admit_child_run",
+                ) from exc
+            except sqlite3.Error as exc:
+                raise IrisRunPersistenceError(
+                    "lifecycle SQLite transaction 失败",
+                    path=str(self.path),
+                    operation="admit_child_run",
+                ) from exc
+
+    def rebind_subagent_proxy(self, command: RebindSubagentProxy) -> RunCommit:
+        """原子绑定 parent proxy 并返回完整 WAITING facts。"""
+        return self._mutate("rebind_subagent_proxy", command, self._rebind_subagent_proxy)
+
+    def finalize_subagent_result(self, command: FinalizeSubagentResult) -> RunCommit:
+        """原子提交 parent tool，并按需建立 RESUME activation。"""
+        return self._mutate("finalize_subagent_result", command, self._finalize_subagent_result)
+
+    def _rebind_subagent_proxy(
+        self,
+        connection: sqlite3.Connection,
+        command: RebindSubagentProxy,
+    ) -> RunCommit:
+        """复用事务中的 typed parent/child facts，保持 history/usage/cursor 不变。"""
+        operation = "rebind_subagent_proxy"
+        run, tool = self._require_subagent_parent(
+            connection, command, command.now, operation=operation
+        )
+        link = self._require_subagent_link(
+            connection, run.run_id, tool.tool_call_id, operation=operation
+        )
+        child = self._require_run(connection, link.child_run_id, operation=operation)
+        if child.phase is not RunPhase.WAITING:
+            raise IrisRunStateError("child 必须 WAITING 才能绑定 proxy")
+        child_interaction = self._require_interaction(
+            connection, child.pending_interaction_id, operation=operation
+        )
+        proxy = command.pending_proxy
+        validate_proxy_binding(run, tool, link, child, child_interaction, proxy)
+        if (
+            self._select_interaction(connection, proxy.interaction_id, operation=operation)
+            is not None
+        ):
+            raise IrisRunConflictError("interaction_id 已存在")
+        old_proxy: HumanInteraction | None = None
+        activation: ActivationRecord | None = None
+        if command.parent_activation_id is not None:
+            if command.replaced_proxy_interaction_id is not None:
+                raise IrisRunStateError("ACTIVE rebind 不能替换 proxy")
+            activation = self._require_activation(
+                connection, command.parent_activation_id, operation=operation
+            )
+        else:
+            old_proxy = self._require_interaction(
+                connection, run.pending_interaction_id, operation=operation
+            )
+            validate_current_proxy(
+                run, tool, link, old_proxy, command.replaced_proxy_interaction_id
+            )
+            if old_proxy.status is not InteractionStatus.RESOLVED:
+                raise IrisRunStateError("只能替换已回答 proxy")
+        checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
+        rebound = checkpoint.model_copy(update={"sequence": checkpoint.sequence + 1})
+        sequence = run.last_event_sequence + 1
+        updated = replace_run(
+            run,
+            phase=RunPhase.WAITING,
+            revision=run.revision + 1,
+            current_activation_id=None,
+            pending_interaction_id=proxy.interaction_id,
+            checkpoint_sequence=rebound.sequence,
+            last_event_sequence=sequence,
+            updated_at=command.now,
+        )
+        event = _make_event(
+            updated,
+            RunEventKind.INTERACTION_SUSPENDED,
+            command.now,
+            sequence=sequence,
+            activation_id=command.parent_activation_id,
+            step_index=tool.step_index,
+            correlation_id=proxy.interaction_id,
+        )
+        result = project_result(updated, proxy)
+        if old_proxy is not None:
+            closed = _closed_interaction(old_proxy, command.now, "subagent_rebind")
+            self._update_interaction(connection, old_proxy, closed)
+        if activation is not None:
+            self._update_activation(
+                connection,
+                activation,
+                settle_activation(
+                    activation,
+                    outcome=ActivationOutcome.SUSPENDED,
+                    ended_at=command.now,
+                ),
+            )
+        self._update_run(connection, run, updated, checkpoint.session_revision)
+        self._update_checkpoint(connection, checkpoint, rebound, command.now)
+        self._insert_interaction(connection, proxy)
+        self._update_tool_call(
+            connection, tool, tool.model_copy(update={"interaction_id": proxy.interaction_id})
+        )
+        self._insert_event(connection, event)
+        return RunCommit(
+            run=updated, checkpoint=rebound, interaction=proxy, events=(event,), result=result
+        )
+
+    def _finalize_subagent_result(
+        self,
+        connection: sqlite3.Connection,
+        command: FinalizeSubagentResult,
+    ) -> RunCommit:
+        """仅在 child terminal 后提交一次工具结果与 parent history。"""
+        operation = "finalize_subagent_result"
+        run, tool = self._require_subagent_parent(
+            connection, command, command.now, operation=operation
+        )
+        link = self._require_subagent_link(
+            connection, run.run_id, tool.tool_call_id, operation=operation
+        )
+        child = self._require_run(connection, link.child_run_id, operation=operation)
+        validate_final_result(command, tool, child)
+        session = self._require_history_preconditions(
+            connection, run, command.expected_parent_session_revision, operation=operation
+        )
+        checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
+        next_session_revision = session.revision + bool(command.message_delta)
+        activation_id = command.parent_activation_id or cast(str, command.resume_activation_id)
+        _validate_checkpoint_replacement(
+            run,
+            checkpoint,
+            command.checkpoint,
+            activation_id,
+            next_session_revision,
+            run.usage,
+        )
+        activation: ActivationRecord | None = None
+        closed: HumanInteraction | None = None
+        events: list[RunEvent] = []
+        if command.parent_activation_id is None:
+            proxy = self._require_interaction(
+                connection, run.pending_interaction_id, operation=operation
+            )
+            validate_current_proxy(run, tool, link, proxy, command.proxy_interaction_id)
+            validate_final_proxy(proxy, command.now)
+            if self._select_activation(connection, activation_id, operation=operation) is not None:
+                raise IrisRunConflictError("activation_id 已存在", activation_id=activation_id)
+            row = connection.execute(
+                "SELECT COALESCE(MAX(ordinal), 0) AS max_ordinal "
+                "FROM run_activations WHERE run_id = ?",
+                (run.run_id,),
+            ).fetchone()
+            ordinal = int(row["max_ordinal"]) + 1
+            activation = ActivationRecord(
+                activation_id=activation_id,
+                run_id=run.run_id,
+                ordinal=ordinal,
+                kind=ActivationKind.RESUME,
+                status=ActivationStatus.ACTIVE,
+                started_at=command.now,
+            )
+            closed = _closed_interaction(proxy, command.now, "subagent_finalized")
+            events.append(
+                _make_event(
+                    run,
+                    RunEventKind.ACTIVATION_STARTED,
+                    command.now,
+                    sequence=run.last_event_sequence + 1,
+                    activation_id=activation_id,
+                )
+            )
+        updated = replace_run(
+            run,
+            phase=RunPhase.ACTIVE,
+            revision=run.revision + 1,
+            current_activation_id=activation_id,
+            pending_interaction_id=None,
+            usage=commit_tool_usage(run.usage),
+            checkpoint_sequence=command.checkpoint.sequence,
+            last_event_sequence=run.last_event_sequence + len(events) + 1,
+            updated_at=command.now,
+        )
+        events.append(
+            _make_event(
+                updated,
+                RunEventKind.TOOL_CALL_COMMITTED,
+                command.now,
+                sequence=updated.last_event_sequence,
+                activation_id=activation_id,
+                step_index=tool.step_index,
+                correlation_id=tool.tool_call_id,
+            )
+        )
+        committed = commit_tool_call(tool, result=command.result, now=command.now)
+        if command.message_delta:
+            self._update_session(connection, session, command.message_delta, command.now)
+        self._update_run(connection, run, updated, next_session_revision)
+        self._update_checkpoint(connection, checkpoint, command.checkpoint, command.now)
+        self._update_tool_call(connection, tool, committed)
+        if closed is not None:
+            self._update_interaction(connection, proxy, closed)
+        if activation is not None:
+            self._insert_activation(connection, activation)
+        for event in events:
+            self._insert_event(connection, event)
+        return RunCommit(
+            run=updated,
+            session_revision=next_session_revision if command.message_delta else None,
+            checkpoint=command.checkpoint,
+            interaction=closed,
+            events=tuple(events),
+        )
 
     def create_run(self, command: CreateRun) -> RunCommit:
         return self._mutate(
@@ -2833,6 +3163,15 @@ def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:
         revision=row["revision"],
         message_count=row["message_count"],
         updated_at=row["updated_at"],
+    )
+
+
+def _subagent_link_from_row(row: sqlite3.Row) -> SubagentRunLink:
+    """只解析三字段 durable link。"""
+    return SubagentRunLink(
+        parent_run_id=row["parent_run_id"],
+        parent_tool_call_id=row["parent_tool_call_id"],
+        child_run_id=row["child_run_id"],
     )
 
 

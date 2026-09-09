@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v3 schema 与 session history 的硬边界测试。"""
+"""Lifecycle SQLite v4 schema 与 session history 的硬边界测试。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from iris.message import Msg
 from iris.store import SQLiteStore
 
 _TABLES = {
+    "subagent_run_links",
     "agent_runs",
     "lifecycle_schema",
     "run_activations",
@@ -25,6 +26,7 @@ _TABLES = {
     "sessions",
 }
 _COLUMNS = {
+    "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
     "lifecycle_schema": ["component", "version"],
     "sessions": ["session_id", "revision", "message_count", "updated_at"],
     "session_messages": ["session_id", "ordinal", "message_json"],
@@ -130,7 +132,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v3_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v4_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -162,18 +164,24 @@ def test_empty_database_creates_exact_v3_schema_and_reopens(tmp_path: Path) -> N
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
         }
         message_fks = connection.execute("PRAGMA foreign_key_list(session_messages)").fetchall()
+        link_fks = connection.execute("PRAGMA foreign_key_list(subagent_run_links)").fetchall()
 
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 3)]
+    assert identity == [("agent_lifecycle", 4)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
     ]
+    assert {(row[2], row[3], row[4]) for row in link_fks} == {
+        ("run_tool_calls", "parent_run_id", "run_id"),
+        ("run_tool_calls", "parent_tool_call_id", "tool_call_id"),
+        ("agent_runs", "child_run_id", "run_id"),
+    }
 
 
-@pytest.mark.parametrize("kind", ["legacy", "extra", "missing", "unknown_version"])
+@pytest.mark.parametrize("kind", ["legacy", "v3", "extra", "missing", "unknown_version"])
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
     kind: str,
@@ -198,6 +206,9 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("CREATE TABLE unexpected (value TEXT)")
             elif kind == "missing":
                 connection.execute("DROP TABLE run_events")
+            elif kind == "v3":
+                connection.execute("DROP TABLE subagent_run_links")
+                connection.execute("UPDATE lifecycle_schema SET version = 3")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()

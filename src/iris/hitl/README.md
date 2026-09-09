@@ -18,6 +18,10 @@ interaction facts 由同一个 `LifecycleStore` 与 run aggregate 一起提交�
 内部 `models.SubagentExpiryOwner` 统一命名 parent deadline/interaction timeout、child
 interaction expiry/effective deadline 与 outer tool timeout，供跨包等待结果引用。
 
+`HumanInteractionRequest.subagent_origin` 默认 `None`；proxy 请求保存 frozen
+`SubagentProxyOrigin`，仅含 child run/interaction ID、agent selector 和 expiry owner。
+它随既有 interaction request JSON 序列化，不另存状态或重验 catalog membership。
+
 字段 parsing 先产生完整 typed request；`HumanInteraction` 的 model-level 校验随后只比较
 `tool_call_id`、request subject 和 lifecycle delta，不重复防御必填字段缺失。
 

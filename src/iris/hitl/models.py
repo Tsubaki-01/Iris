@@ -203,11 +203,28 @@ class ApprovedToolCall(BaseModel):
         return _trim_required(value, field_name=str(info.field_name))
 
 
+class SubagentProxyOrigin(BaseModel):
+    """Parent proxy 所对应的 exact child interaction 与期限归属。"""
+
+    child_run_id: str
+    child_interaction_id: str
+    agent_selector: str
+    expiry_owner: SubagentExpiryOwner | None = None
+
+    model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=False)
+
+    @field_validator("child_run_id", "child_interaction_id", "agent_selector")
+    @classmethod
+    def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
+        return _trim_required(value, field_name=str(info.field_name))
+
+
 class HumanInteractionRequest(BaseModel):
     """所有人工 gate 共用的工具调用与提示信封。"""
 
     tool_call: ToolCallSnapshot
     prompt: HumanInteractionPrompt
+    subagent_origin: SubagentProxyOrigin | None = None
 
     model_config = ConfigDict(extra="forbid", use_enum_values=False)
 

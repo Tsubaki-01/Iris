@@ -26,6 +26,7 @@ from iris.hitl import (
     QuestionPrompt,
     ToolCallSnapshot,
 )
+from iris.hitl.models import SubagentExpiryOwner, SubagentProxyOrigin
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -50,6 +51,7 @@ from iris.lifecycle import (
     RunUsage,
     SuspendRun,
 )
+from iris.lifecycle.store import AdmitChildRun, FinalizeSubagentResult, RebindSubagentProxy
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolResult
@@ -60,6 +62,8 @@ _T2 = _NOW + timedelta(seconds=2)
 _T3 = _NOW + timedelta(seconds=3)
 _ENVIRONMENT_FINGERPRINT = "environment-v1"
 _TOOL_FINGERPRINT = "a" * 64
+
+
 _INTERACTION_ID = "int_" + "1" * 32
 
 
@@ -1235,3 +1239,460 @@ def test_read_methods_apply_cursor_and_validation_contract(
     for invalid_limit in (0, -1, True, 1.5):
         with pytest.raises(IrisRunStateError):
             lifecycle_store.list_events("run-1", limit=cast(int, invalid_limit))
+
+
+def _subagent_parent(store: LifecycleStore) -> RunCommit:
+    """用普通 model commit 构造 parent 的 prepared subagent 调用。"""
+    created = _create(store, run_id="parent", session_id="parent-session", activation_id="parent-a")
+    created = store.reserve_model_step(
+        ReserveModelStep(
+            run_id="parent",
+            expected_run_revision=created.run.revision,
+            activation_id="parent-a",
+            now=_NOW,
+        )
+    )
+    assistant = Msg.assistant(
+        [ToolUseBlock(id="delegate", name="subagent", input={"prompt": "work"})]
+    )
+    return store.commit_model_step(
+        CommitModelStep(
+            run_id="parent",
+            expected_run_revision=created.run.revision,
+            activation_id="parent-a",
+            expected_session_revision=0,
+            message_delta=[assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            prepared_tool_calls=[
+                RunToolCallRecord(
+                    run_id="parent",
+                    step_index=0,
+                    ordinal=1,
+                    tool_call_id="delegate",
+                    tool_name="subagent",
+                    arguments={"prompt": "work"},
+                    fingerprint=_TOOL_FINGERPRINT,
+                    phase="prepared",
+                    version=1,
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            ],
+            checkpoint=_checkpoint(
+                run_id="parent",
+                sequence=2,
+                activation_id="parent-a",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ),
+            assistant_message=assistant,
+            now=_NOW,
+        )
+    )
+
+
+def _admit_child(store: LifecycleStore, parent: RunCommit) -> AdmitChildRun:
+    command = AdmitChildRun(
+        parent_run_id="parent",
+        expected_parent_run_revision=parent.run.revision,
+        parent_activation_id="parent-a",
+        parent_tool_call_id="delegate",
+        expected_parent_tool_version=1,
+        child_create=_create_command(),
+    )
+    store.admit_child_run(command)
+    return command
+
+
+def _child_commit(store: LifecycleStore) -> RunCommit:
+    return RunCommit(run=store.load_run("run-1"), checkpoint=store.load_checkpoint("run-1"))
+
+
+def _proxy(
+    child: HumanInteraction,
+    *,
+    interaction_id: str = "proxy-1",
+    expires_at: datetime | None = None,
+    expiry_owner: SubagentExpiryOwner | None = None,
+) -> HumanInteraction:
+    return HumanInteraction(
+        interaction_id=interaction_id,
+        session_id="parent-session",
+        run_id="parent",
+        step_index=0,
+        tool_call_id="delegate",
+        created_at=_NOW,
+        expires_at=expires_at,
+        request=HumanInteractionRequest(
+            tool_call=ToolCallSnapshot(
+                tool_call_id="delegate",
+                tool_name="subagent",
+                arguments={"prompt": "work"},
+                workspace_root="workspace",
+                fingerprint=_TOOL_FINGERPRINT,
+            ),
+            prompt=child.request.prompt,
+            subagent_origin=SubagentProxyOrigin(
+                child_run_id="run-1",
+                child_interaction_id=child.interaction_id,
+                agent_selector="researcher",
+                expiry_owner=expiry_owner,
+            ),
+        ),
+    )
+
+
+def _bind_proxy(
+    store: LifecycleStore,
+    parent: RunCommit,
+    proxy: HumanInteraction,
+    *,
+    replaced: str | None = None,
+) -> RunCommit:
+    return store.rebind_subagent_proxy(
+        RebindSubagentProxy(
+            parent_run_id="parent",
+            expected_parent_run_revision=parent.run.revision,
+            parent_activation_id=parent.run.current_activation_id,
+            parent_tool_call_id="delegate",
+            expected_parent_tool_version=1,
+            pending_proxy=proxy,
+            replaced_proxy_interaction_id=replaced,
+            now=_T1,
+        )
+    )
+
+
+def _resolve_proxy(store: LifecycleStore, waiting: RunCommit) -> RunCommit:
+    return store.resolve_interaction(
+        ResolveInteraction(
+            run_id="parent",
+            expected_run_revision=waiting.run.revision,
+            interaction_id=waiting.interaction.interaction_id,
+            expected_interaction_version=waiting.interaction.version,
+            response=QuestionInteractionResponse(answer="continue"),
+            expected_fingerprint=_TOOL_FINGERPRINT,
+            now=_T2,
+        )
+    )
+
+
+def _terminal_child(store: LifecycleStore) -> None:
+    child = store.load_run("run-1")
+    store.finish_run(
+        FinishRun(
+            run_id=child.run_id,
+            expected_run_revision=child.revision,
+            activation_id=child.current_activation_id,
+            stop_reason=RunStopReason.COMPLETED,
+            assistant_message=Msg.assistant("child answer"),
+            now=_T3,
+        )
+    )
+
+
+def _finalize_command(store: LifecycleStore, *, waiting: bool) -> FinalizeSubagentResult:
+    parent = store.load_run("parent")
+    checkpoint = store.load_checkpoint("parent")
+    result = ToolResult(
+        tool_use_id="delegate",
+        tool_name="subagent",
+        content=[TextBlock(text="done")],
+        metadata={"agent_selector": "researcher", "child_run_id": "run-1"},
+    )
+    return FinalizeSubagentResult(
+        parent_run_id="parent",
+        expected_parent_run_revision=parent.revision,
+        parent_activation_id=parent.current_activation_id,
+        expected_parent_session_revision=1,
+        parent_tool_call_id="delegate",
+        expected_parent_tool_version=1,
+        proxy_interaction_id=parent.pending_interaction_id,
+        resume_activation_id="parent-resume" if waiting else None,
+        result=result,
+        message_delta=[result.to_msg()],
+        checkpoint=checkpoint.model_copy(
+            update={
+                "sequence": checkpoint.sequence + 1,
+                "activation_id": "parent-resume" if waiting else "parent-a",
+                "session_revision": 2,
+                "engine_cursor": {"next_tool_index": 1},
+            }
+        ),
+        now=_T3,
+    )
+
+
+def test_admit_child_run_is_atomic_and_parent_stays_prepared(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    link = store.load_subagent_link("parent", "delegate")
+    assert link.model_dump() == {
+        "parent_run_id": "parent",
+        "parent_tool_call_id": "delegate",
+        "child_run_id": "run-1",
+    }
+    assert store.load_run("parent") == parent.run
+    assert store.load_tool_call("parent", "delegate").phase.value == "prepared"
+    assert store.load_run("run-1").phase.value == "active"
+    assert store.load_session_lane("session-1") == "run-1"
+    assert store.load_checkpoint("run-1").activation_id == "activation-1"
+    assert len(store.list_events("run-1")) == 2
+    if isinstance(store, SQLiteStore):
+        reopened = SQLiteStore(store.path)
+        assert reopened.load_subagent_link("parent", "delegate") == link
+        assert reopened.load_run("run-1") == store.load_run("run-1")
+
+
+def test_admit_child_run_reentry_returns_original_link_without_new_child(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    command = _admit_child(store, _subagent_parent(store))
+    replacement = replace(
+        command,
+        child_create=_create_command(
+            run_id="other",
+            session_id="other-session",
+            activation_id="other-a",
+        ),
+    )
+    assert store.admit_child_run(replacement).child_run_id == "run-1"
+    assert store.load_run("other") is None
+    assert len(store.list_events("run-1")) == 2
+
+
+def test_admit_child_run_failure_leaves_no_child_or_link(lifecycle_store: LifecycleStore) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _create(store, run_id="occupied", activation_id="occupied-a")
+    command = AdmitChildRun(
+        parent_run_id="parent",
+        expected_parent_run_revision=parent.run.revision,
+        parent_activation_id="parent-a",
+        parent_tool_call_id="delegate",
+        expected_parent_tool_version=1,
+        child_create=_create_command(),
+    )
+    with pytest.raises(IrisRunConflictError):
+        store.admit_child_run(command)
+    assert store.load_subagent_link("parent", "delegate") is None
+    assert store.load_run("run-1") is None
+    assert store.load_run("parent") == parent.run
+
+
+def test_rebind_subagent_proxy_moves_active_parent_to_waiting_without_committing_tool(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    child = _suspend(store, _child_commit(store))
+    proxy = _proxy(child.interaction)
+    result = _bind_proxy(store, parent, proxy)
+    assert result.run.phase.value == "waiting"
+    assert result.run.current_activation_id is None
+    assert result.run.pending_interaction_id == proxy.interaction_id
+    assert result.result.pending_interaction == proxy
+    assert result.interaction == store.load_interaction(proxy.interaction_id) == proxy
+    assert result.checkpoint.engine_cursor == parent.checkpoint.engine_cursor
+    assert result.checkpoint.sequence == parent.checkpoint.sequence + 1
+    assert result.checkpoint.activation_id == "parent-a"
+    assert result.run.usage == parent.run.usage
+    call = store.load_tool_call("parent", "delegate")
+    assert (call.phase.value, call.version, call.interaction_id) == ("prepared", 1, "proxy-1")
+    assert store.load_session("parent-session").revision == 1
+    assert [event.kind.value for event in result.events] == ["interaction.suspended"]
+
+
+def test_rebind_subagent_proxy_rejects_mismatched_child_interaction_atomically(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    child = _suspend(store, _child_commit(store))
+    proxy = _proxy(child.interaction.model_copy(update={"interaction_id": "wrong-child-question"}))
+    with pytest.raises(IrisRunConflictError):
+        _bind_proxy(store, parent, proxy)
+    assert store.load_run("parent") == parent.run
+    assert store.load_checkpoint("parent") == parent.checkpoint
+    assert store.load_interaction("proxy-1") is None
+
+
+def test_rebind_subagent_proxy_replaces_resolved_proxy_while_parent_stays_waiting(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    child = _suspend(store, _child_commit(store))
+    waiting = _bind_proxy(store, parent, _proxy(child.interaction))
+    resolved = _resolve_proxy(store, waiting)
+    # 正常 child resume 后提交原问题回答，再进入第二个问题。
+    _, child_resolved = _resolve(store, child)
+    active = store.resume_waiting_run(
+        ResumeWaitingRun(
+            run_id="run-1",
+            expected_run_revision=child_resolved.run.revision,
+            new_activation_id="child-resume",
+            kind="resume",
+            expected_checkpoint_sequence=child_resolved.checkpoint.sequence,
+            now=_T2,
+        )
+    )
+    answer = ToolResult(
+        tool_use_id="call-question",
+        tool_name="ask_question",
+        content=[TextBlock(text="继续")],
+        data={"answer": "继续"},
+    )
+    answered = store.commit_tool_result(
+        CommitToolResult(
+            run_id="run-1",
+            expected_run_revision=active.run.revision,
+            activation_id="child-resume",
+            expected_session_revision=0,
+            tool_call_id="call-question",
+            expected_tool_version=1,
+            result=answer,
+            message_delta=[answer.to_msg()],
+            checkpoint=active.checkpoint.model_copy(
+                update={"sequence": active.checkpoint.sequence + 1, "session_revision": 1}
+            ),
+            now=_T2,
+        )
+    )
+    question = child.interaction.model_copy(
+        update={
+            "interaction_id": "child-question-2",
+            "tool_call_id": "question-2",
+            "request": child.interaction.request.model_copy(
+                update={
+                    "tool_call": child.interaction.request.tool_call.model_copy(
+                        update={"tool_call_id": "question-2"}
+                    ),
+                }
+            ),
+        }
+    )
+    next_child = store.suspend_run(
+        SuspendRun(
+            run_id="run-1",
+            expected_run_revision=answered.run.revision,
+            activation_id="child-resume",
+            expected_session_revision=1,
+            checkpoint=answered.checkpoint.model_copy(
+                update={"sequence": answered.checkpoint.sequence + 1}
+            ),
+            pending_interaction=question,
+            usage=answered.run.usage,
+            prepared_tool_calls=[
+                RunToolCallRecord(
+                    run_id="run-1",
+                    step_index=0,
+                    ordinal=2,
+                    tool_call_id="question-2",
+                    tool_name="ask_question",
+                    arguments={"question": "继续吗？"},
+                    fingerprint=_TOOL_FINGERPRINT,
+                    phase="prepared",
+                    version=1,
+                    created_at=_T2,
+                    updated_at=_T2,
+                )
+            ],
+            now=_T2,
+        )
+    )
+    rebound = _bind_proxy(
+        store,
+        resolved,
+        _proxy(next_child.interaction, interaction_id="proxy-2"),
+        replaced="proxy-1",
+    )
+    assert rebound.run.phase.value == "waiting"
+    assert rebound.run.current_activation_id is None
+    assert rebound.result.pending_interaction.interaction_id == "proxy-2"
+    assert rebound.checkpoint.engine_cursor == waiting.checkpoint.engine_cursor
+    assert rebound.checkpoint.activation_id == waiting.checkpoint.activation_id
+    assert rebound.run.usage == parent.run.usage
+    assert store.load_interaction("proxy-1").status == InteractionStatus.CLOSED
+    assert (
+        store.load_interaction("proxy-2").request.subagent_origin.child_interaction_id
+        == "child-question-2"
+    )
+    assert store.load_session("parent-session").revision == 1
+
+
+@pytest.mark.parametrize("mode", ["active", "resolved", "expired"])
+def test_finalize_subagent_result_commits_parent_once_without_claim(
+    lifecycle_store: LifecycleStore,
+    mode: str,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    if mode != "active":
+        child = _suspend(store, _child_commit(store))
+        waiting = _bind_proxy(
+            store,
+            parent,
+            _proxy(
+                child.interaction,
+                expires_at=_T3 if mode == "expired" else None,
+                expiry_owner=SubagentExpiryOwner.OUTER_TOOL_TIMEOUT if mode == "expired" else None,
+            ),
+        )
+        if mode == "resolved":
+            _resolve_proxy(store, waiting)
+    _terminal_child(store)
+    command = _finalize_command(store, waiting=mode != "active")
+    result = store.finalize_subagent_result(command)
+    assert result.run.phase.value == "active"
+    assert result.run.pending_interaction_id is None
+    assert result.result is None
+    assert (
+        result.checkpoint.activation_id
+        == result.run.current_activation_id
+        == ("parent-a" if mode == "active" else "parent-resume")
+    )
+    assert result.checkpoint.engine_cursor == {"next_tool_index": 1}
+    assert result.run.usage.tool_calls_committed == 1
+    call = store.load_tool_call("parent", "delegate")
+    assert call.phase.value == "committed"
+    assert call.claim_activation_id is None
+    assert call.result.model_content == "done"
+    events = [event.kind.value for event in result.events]
+    assert events == (
+        ["tool_call.committed"]
+        if mode == "active"
+        else ["activation.started", "tool_call.committed"]
+    )
+    assert len(store.load_session("parent-session").messages) == 2
+    if mode != "active":
+        closed = store.load_interaction("proxy-1")
+        assert closed.status == InteractionStatus.CLOSED
+        if mode == "expired":
+            assert closed.response is None
+    replay = store.finalize_subagent_result(command)
+    assert replay.run == result.run
+    assert replay.events == ()
+    assert store.load_run("parent").usage.tool_calls_committed == 1
+    assert len(store.load_session("parent-session").messages) == 2
+
+
+def test_finalize_subagent_result_rejects_nonterminal_child_without_parent_delta(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    store = lifecycle_store
+    parent = _subagent_parent(store)
+    _admit_child(store, parent)
+    with pytest.raises(IrisRunStateError):
+        store.finalize_subagent_result(_finalize_command(store, waiting=False))
+    assert store.load_run("parent") == parent.run
+    assert store.load_session("parent-session").revision == 1

@@ -20,12 +20,20 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v3 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v4 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，调用方需要替换后重新创建；
 constructor 不重置或修改原文件。
 
 ## 实现架构
+
+Sub Agent 新增且只新增三条 mutation：`admit_child_run()` 同事务创建普通 child run 与
+`subagent_run_links` 三字段 link；重入 exact parent key 返回原 child。`rebind_subagent_proxy()`
+保持 parent 工具 PREPARED、history/usage/cursor 不变，返回完整 WAITING snapshot。
+`finalize_subagent_result()` 要求 child 已 terminal，提交一次 parent tool result/message/usage；
+WAITING 模式同时关闭 proxy、建立 fresh RESUME activation，并返回其 checkpoint。
+无回答的 PENDING proxy 仅在 child-owned 到期且 child 已结算后允许 finalize。
+两个实现共用 `_subagent.py` 的操作边界检查；SQLite link 没有额外状态列或显式 index。
 
 `InMemoryLifecycleStore` 和 `SQLiteStore` 是两个独立、平级的 protocol 实现。内存实现以一把
 `RLock` 管理进程内 facts，并对输入/输出做深拷贝隔离；内部追加只复制 list 容器与新 delta，
@@ -50,7 +58,7 @@ rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
 load/recovery 边界；replay key 与 durable command 的 JSON 投影共用同一个 store 私有 serializer。
-schema v3 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
+schema v4 的 `sessions` 只保存 revision、message count 与更新时间；消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
 CAS 推进 metadata；完整 `SessionSnapshot` 读取仍按 ordinal 重建并校验 `1..message_count`。
 Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生成回执重读完整 history。
@@ -60,13 +68,14 @@ Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生
 原有进程内有效期，没有 TTL/LRU 淘汰；完整 command key 仍会随提交数量增长。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
-时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v3，
+时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v4，
 不迁移或读取旧 schema。
 
-schema v3 包含：
+schema v4 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
+- `subagent_run_links(parent_run_id, parent_tool_call_id, child_run_id)`；
 - `run_interactions`、`run_events`；
 - partial unique index `one_open_interaction_per_run`。
 
@@ -82,7 +91,7 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 `iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：只接受 schema v3 的持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v4 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -91,7 +100,7 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-额外索引或连接池，schema identity 为 lifecycle v3。
+额外索引或连接池，schema identity 为 lifecycle v4。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
 
@@ -128,7 +137,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v3、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v4、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 

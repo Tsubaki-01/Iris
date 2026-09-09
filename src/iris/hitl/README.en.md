@@ -18,6 +18,11 @@
 Internal `models.SubagentExpiryOwner` names parent deadline/interaction timeout, child
 interaction expiry/effective deadline, and outer tool timeout for cross-package waiting outcomes.
 
+`HumanInteractionRequest.subagent_origin` defaults to `None`. Proxy requests carry a frozen
+`SubagentProxyOrigin` containing only child run/interaction IDs, the agent selector, and expiry
+owner. It round-trips through the existing request JSON without separate state or repeated catalog
+membership validation.
+
 Field parsing first produces a complete typed request. `HumanInteraction` model-level validation
 then compares the `tool_call_id`, request subject, and lifecycle delta without rechecking whether
 required fields exist.
