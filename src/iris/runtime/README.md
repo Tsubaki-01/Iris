@@ -152,6 +152,10 @@ HITL resume 产生的 provider 请求不会再次附加这条动态 memory。新
 
 ## Factory
 
+`ToolBridge` 的内部 Sub Agent adapters 分别提供 raw-only continuation prepare 与专用执行，
+只在 bridge 从现有 run/call ID 构造 `SubagentParentCall`。它们不读取 store、不新增 context
+identity，也不改变普通 file read state；parent loop 接入由 lifecycle 调用方决定。
+
 内部 `_assembly.py` 统一装配 context、skills、provider 与工具。ROOT 接收已加载的路由/port
 bundle 才注册 `subagent`；CHILD 始终排除它。唯一 boundary resolver 选择父子 workspace 的
 较窄目录，不相交时报配置错误，并组合实际 parent policy 与 child 默认 policy。

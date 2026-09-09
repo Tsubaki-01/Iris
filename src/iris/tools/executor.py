@@ -52,6 +52,13 @@ from .permissions import (
     PermissionPolicy,
 )
 from .registry import ToolRegistry
+from .subagent import (
+    ChildWaiting,
+    SubagentCallInput,
+    SubagentExecutionOutcome,
+    SubagentParentCall,
+    SubagentTool,
+)
 
 
 class ToolEffectGuard(Protocol):
@@ -224,6 +231,50 @@ class ToolExecutor:
             effect_guard=effect_guard,
         )
 
+    def prepare_subagent_continuation(
+        self, tool_use: ToolUseBlock, context: ToolExecutionContext
+    ) -> PreparedToolCall:
+        """恢复已关联 child 或 outer response 的 raw 输入，不重复 outer permission。"""
+        return self._prepare_input(tool_use)
+
+    async def execute_subagent_prepared(
+        self,
+        prepared: PreparedToolCall,
+        context: ToolExecutionContext,
+        *,
+        parent_call: SubagentParentCall,
+        approved_tool_call_id: str | None = None,
+        linked_continuation: bool = False,
+    ) -> SubagentExecutionOutcome:
+        """专用委派入口；不进入 middleware、breaker 或 parent effect claim。"""
+        current = prepared if linked_continuation else self._refresh_permission(prepared, context)
+        permission_error = self._permission_error(
+            current,
+            approved_tool_call_id=approved_tool_call_id,
+        )
+        if permission_error is not None:
+            return permission_error
+        tool = cast(SubagentTool, current.tool)
+        params = cast(SubagentCallInput, current.validated_input)
+        context.call_id = current.tool_use.id
+        context.tool_name = current.tool_use.name
+        if context.cancellation is not None:
+            context.cancellation.raise_if_requested()
+        outcome = await tool.execute_subagent(params, context, parent_call=parent_call)
+        if isinstance(outcome, ChildWaiting):
+            return outcome
+        # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
+        try:
+            return self._normalize_result_identity_and_artifact(
+                tool_use=current.tool_use,
+                tool=tool,
+                result=outcome,
+                context=context,
+            )
+        except IrisToolExecutionError as exc:
+            code, message = _tool_error_code_and_message(exc.message, allow_structured=True)
+            return self._error_result(current.tool_use, code, message)
+
     async def _execute_current(
         self,
         prepared: PreparedToolCall,
@@ -257,6 +308,10 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> PreparedToolCall:
         """查找、校验并鉴权一条调用，不触发执行生命周期。"""
+        return self._refresh_permission(self._prepare_input(tool_use), context)
+
+    def _prepare_input(self, tool_use: ToolUseBlock) -> PreparedToolCall:
+        """共享 lookup/raw validation，不拥有权限裁决。"""
         tool: BaseTool | None = None
         try:
             tool = self.registry.get(tool_use.name)
@@ -266,13 +321,12 @@ class ToolExecutor:
                 if isinstance(validated_input, BaseModel)
                 else dict(validated_input)
             )
-            prepared = PreparedToolCall(
+            return PreparedToolCall(
                 tool_use=tool_use,
                 tool=tool,
                 validated_input=validated_input,
                 arguments=arguments,
             )
-            return self._refresh_permission(prepared, context)
         except IrisToolNotFoundError:
             return PreparedToolCall(
                 tool_use=tool_use,
@@ -471,16 +525,12 @@ class ToolExecutor:
                 }
             )
             final_result = await self._run_after_call(tool, normalized, context)
-            final_result = final_result.model_copy(
-                update={
-                    "tool_use_id": final_result.tool_use_id or tool_use.id,
-                    "tool_name": final_result.tool_name or tool_use.name,
-                }
-            )
             # Hook 可以改写正文，长度限制必须作用于最终交付给模型的结果。
-            final_result = self._artifact_store(context).persist_if_large(
-                final_result,
-                max_chars=tool.definition.max_result_chars,
+            final_result = self._normalize_result_identity_and_artifact(
+                tool_use=tool_use,
+                tool=tool,
+                result=final_result,
+                context=context,
             )
             self._record_breaker_result(tool.name, final_result)
             return final_result
@@ -505,6 +555,26 @@ class ToolExecutor:
             result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
             self._record_breaker_result(tool.name, result)
             return result
+
+    def _normalize_result_identity_and_artifact(
+        self,
+        *,
+        tool_use: ToolUseBlock,
+        tool: BaseTool,
+        result: ToolResult,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """填充缺失 identity，并对最终交付正文执行 ordinary artifact 归一化。"""
+        normalized = result.model_copy(
+            update={
+                "tool_use_id": result.tool_use_id or tool_use.id,
+                "tool_name": result.tool_name or tool_use.name,
+            }
+        )
+        return self._artifact_store(context).persist_if_large(
+            normalized,
+            max_chars=tool.definition.max_result_chars,
+        )
 
     def _error_result(
         self,

@@ -30,6 +30,14 @@ Internal `_subagent.ChildProviderFactory` defines selected-child provider inject
 `__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`. It receives the loaded
 ordinary child configuration, independently of one-off parent provider credential overrides.
 
+`from_config*()` accepts `permission_policy=` and `child_provider_factory=`. With a catalog,
+the runner reads one route snapshot and assembles an internal controller. The selected child uses
+ordinary AgentConfig, independent session/run IDs, fresh `AgentRunOptions()`, empty request
+metadata, no memory service, and the parent's store/clock. CHILD excludes subagent. Linked ACTIVE
+runs continue through ordinary recovery; WAITING/TERMINAL paths read the existing result. Dedicated
+execution currently returns `ToolResult | ChildWaiting` while the parent tool stays PREPARED;
+parent-loop proxy and final-result commits are not yet connected.
+
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.
 - `request_cancel()` guarantees only that the first request is durable. A local active activation
