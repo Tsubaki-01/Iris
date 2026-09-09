@@ -994,7 +994,8 @@ class AgentRunner:
     ) -> RunResult:
         """根据精确 activation fence 与 durable facts 显式恢复 run。
 
-        只针对 active run 做 takeover：waiting run 应使用 ``resume()``，terminal run 退化为
+        Active run 需要精确 takeover fence；waiting 默认使用 ``resume()``，但已保存回答的
+        Sub Agent proxy/outer gate 可直接恢复，已到期 waiting 则按 owner 结算。Terminal run
         幂等读取。存在 unresolved claim 时绝不重放工具，而是把该 activation 结算为
         ``outcome_unknown``，因为已经发出的 effect 无法证明。
 
@@ -1131,7 +1132,7 @@ class AgentRunner:
             activation_id=new_activation_id,
             session_id=run.session_id,
             kind="recover",
-            interaction_projection=self._stored_subagent_projection(
+            interaction_projection=self._stored_interaction_projection(
                 recovered.run, recovered_cursor
             ),
             # 只有 before_model/step 0 的输入尚未随 provider commit 进入 session history，
@@ -1153,18 +1154,18 @@ class AgentRunner:
     #         Recovery & Settlement Helpers
     # ==========================================
     # region
-    def _stored_subagent_projection(
+    def _stored_interaction_projection(
         self,
         run: RunRecord,
         cursor: RuntimeCursor,
     ) -> RuntimeApprovedToolCall | ToolResult | None:
-        """恢复尚无 link 的 outer gate 回答，避免生成第二个人工 gate。"""
+        """恢复当前工具已有的 HITL 回答；linked subagent 由 controller 继续。"""
         if cursor.position != "tool_batch":
             return None
         call = cursor.tool_calls[cursor.next_tool_index]
         if (
-            call.name != "subagent"
-            or self.store.load_subagent_link(run.run_id, call.id) is not None
+            call.name == "subagent"
+            and self.store.load_subagent_link(run.run_id, call.id) is not None
         ):
             return None
         record = self.store.load_tool_call(run.run_id, call.id)
@@ -1568,6 +1569,7 @@ class AgentRunner:
                 IrisRunConflictError,
                 IrisRunNotFoundError,
                 IrisRunPersistenceError,
+                IrisRunRecoveryError,
                 IrisRunStateError,
             ):
                 # lifecycle 一致性错误说明 durable 事实已不可信，不再尝试写入 terminal。

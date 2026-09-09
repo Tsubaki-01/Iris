@@ -14,6 +14,7 @@ from ..lifecycle import (
     RuntimeExecutionOptions,
     RunUsage,
 )
+from ._subagent import ChildProviderFactory
 from .observer import RunEventObserver
 from .runner import AgentRunner
 from .session_manager import (
@@ -29,6 +30,7 @@ __all__ = [
     "AgentRunOptions",
     "AgentRunRequest",
     "AgentRunner",
+    "ChildProviderFactory",
     "LiveFact",
     "LivePublisher",
     "ResumeReceipt",

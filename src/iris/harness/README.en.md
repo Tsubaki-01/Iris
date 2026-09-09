@@ -26,7 +26,7 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 
 ## Public operations
 
-Internal `_subagent.ChildProviderFactory` defines selected-child provider injection through
+`iris.harness.ChildProviderFactory` defines selected-child provider injection through
 `__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`. It receives the loaded
 ordinary child configuration, independently of one-off parent provider credential overrides.
 
@@ -61,6 +61,46 @@ and never resets on resume/rebind/recover. The stored proxy expiry owner determi
 parent stops or handles a tool error; parent expiry wins ties. Parent streams contain only parent
 start/proxy/final facts, without child streams or usage. Linked recovery does not repeat started;
 errors still use `tool.completed` with `is_error`.
+The parent retains the final answer and receives only the child's final text. Usage stays on the
+child run. Result metadata contains only `agent_selector`, admitted `child_run_id`, and ordinary
+artifact metadata. Live events are best-effort, without cross-process exactly-once guarantees.
+
+This minimal Sub Agent example uses three files. Run the parent with the preceding
+`AgentRunner.from_config_path("agent.yaml")` example and supply normal provider credentials.
+
+```yaml
+# agent.yaml
+name: parent
+model: openai/gpt-4o-mini
+system: Delegate focused tasks to researcher, then use its result to give the final answer.
+tools:
+  subagent: subagents.yaml
+```
+
+```yaml
+# subagents.yaml
+default: researcher
+agents:
+  researcher:
+    path: agents/researcher/agent.yaml
+    description: Analyze a focused task and return concise findings.
+```
+
+```yaml
+# agents/researcher/agent.yaml
+name: researcher
+model: openai/gpt-4o-mini
+system: Handle only the delegated task, ask the user when needed, and return your findings.
+tools:
+  builtin: [human.ask]
+```
+
+When the host receives parent `pending_interaction`, it uses ordinary typed HITL on parent
+`resume()` without managing a child runner. Catalog default/selector/description changes that alter
+the ordinary environment fingerprint reject recovery, without bypassing checks or replacing the child.
+If the child has closed its HITL interaction but not committed the tool result, ordinary ACTIVE
+recovery restores its stored response. Child `IrisRunRecoveryError` propagates unchanged, preserving
+recoverable parent/child state.
 
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.

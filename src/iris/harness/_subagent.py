@@ -58,7 +58,15 @@ class ChildProviderFactory(Protocol):
     """按选中 child 的普通配置构造独立 provider。"""
 
     def __call__(self, config: AgentConfig, *, config_path: Path) -> RuntimeProvider:
-        """接收已加载的 child 配置和声明路径。"""
+        """接收已加载的 child 配置，构造独立 provider。
+
+        Args:
+            config: 被选择的普通 child AgentConfig。
+            config_path: Child YAML 的声明路径，供 provider 工厂解析相关资源。
+
+        Returns:
+            RuntimeProvider: 本次 child 执行使用的 provider。
+        """
         ...
 
 
@@ -210,7 +218,7 @@ class HarnessSubagentController:
     async def _continue_linked(
         self, route: SubagentRoute, parent: RunRecord, child_run_id: str, parent_tool_call_id: str
     ) -> SubagentExecutionOutcome:
-        """ACTIVE 走普通 recover；其余阶段只读已有结果，不重建 child。"""
+        """ACTIVE 走普通 recover；WAITING 读取或按到期 owner 结算，TERMINAL 只读。"""
         child = self._load_run(child_run_id)
         if child.phase is RunPhase.ACTIVE:
             runner = self._assemble_child(route)

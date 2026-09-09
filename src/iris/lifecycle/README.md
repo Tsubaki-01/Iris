@@ -2,11 +2,14 @@
 
 # `iris.lifecycle`
 
-内部 Sub Agent 契约以 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id)`
+公开 Sub Agent 契约以 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id)`
 关联独立运行；parent 工具保持 PREPARED。Store 增加 `AdmitChildRun`、`RebindSubagentProxy`、
 `FinalizeSubagentResult` 与 exact link point read。Rebind 返回完整 WAITING `RunCommit`；
 WAITING finalize 在同一 commit 返回绑定 fresh RESUME activation 的 ACTIVE run/checkpoint，
 调用方无需追加普通 resume mutation。Child usage 保持 run-local。
+四个类型直接从 `iris.lifecycle` 导入。Rebind 只更新 proxy binding 与 checkpoint sequence，
+保持 history/usage/cursor；Finalize 才提交 parent result/message/usage/cursor。三条 mutation
+沿用既有 revision、activation fence 和 store 事务，不增加新的并发字段。
 
 `iris.lifecycle` 是 logical run 的纯数据与同步 store contract。它定义不可变 run/session/
 activation/checkpoint/tool-call/event/result 边界模型、JSON-safe validation、投影函数和 CAS

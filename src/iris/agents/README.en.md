@@ -13,6 +13,9 @@ default. The path is relative to the parent YAML. Catalog `default` must exactly
 `agents` kebab-case key; each entry supplies a catalog-relative `path` and nonblank `description`.
 The internal loader reads only the catalog and freezes its routes without loading child YAML.
 `build_tool_registry()` continues to handle only builtin/Python tools.
+The runner reads the catalog once at startup and loads only the selected child YAML on execution.
+CHILD excludes subagent and never reads a nested catalog. See the complete three-file example in
+the [harness README](../harness/README.en.md).
 
 ```mermaid
 flowchart LR

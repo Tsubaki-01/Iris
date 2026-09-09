@@ -15,13 +15,16 @@
 - `HumanInteraction` has `pending | resolved | closed` state, version, and timestamps.
 - `ApprovedToolCall` is the exact approval projection passed to the engine.
 
-Internal `models.SubagentExpiryOwner` names parent deadline/interaction timeout, child
+Public `SubagentExpiryOwner` names parent deadline/interaction timeout, child
 interaction expiry/effective deadline, and outer tool timeout for cross-package waiting outcomes.
 
 `HumanInteractionRequest.subagent_origin` defaults to `None`. Proxy requests carry a frozen
 `SubagentProxyOrigin` containing only child run/interaction IDs, the agent selector, and expiry
 owner. It round-trips through the existing request JSON without separate state or repeated catalog
 membership validation.
+Both `SubagentProxyOrigin` and `SubagentExpiryOwner` are imported from `iris.hitl`. The host uses
+parent `resume()` for a current PENDING proxy; parent `recover()` automatically continues the exact
+child from a RESOLVED response after a crash.
 
 Field parsing first produces a complete typed request. `HumanInteraction` model-level validation
 then compares the `tool_call_id`, request subject, and lifecycle delta without rechecking whether
