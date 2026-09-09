@@ -22,6 +22,11 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/metadata。
 两侧 payload 直接纳入既有 environment fingerprint。
 
+`ToolExecutor` 的专用 Sub Agent 入口保留 raw 参数解析、fresh permission refresh 与最终
+identity/artifact 归一化；linked continuation 跳过 outer permission。ChildWaiting 直接返回，
+不进入 middleware、breaker、parent claim 或普通 timeout。普通工具仍在 after_call 后归一化
+最终正文并落盘。Controller 的 lifecycle/persistence/recovery 异常原样传播。
+
 ```mermaid
 graph TD
     A["函数 / BaseTool"] --> B["ToolDefinition + input_schema"]

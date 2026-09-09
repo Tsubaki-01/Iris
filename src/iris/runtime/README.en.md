@@ -162,6 +162,11 @@ runtime does not consume a late result after cancellation.
 
 ## Factory
 
+Internal Sub Agent adapters on `ToolBridge` provide raw-only continuation preparation and dedicated
+execution. The bridge alone builds `SubagentParentCall` from the existing run/call IDs. They neither
+read the store nor add context identity or change ordinary file read state; the lifecycle caller
+owns parent-loop integration.
+
 Internal `_assembly.py` assembles context, skills, providers, and tools. ROOT registers `subagent`
 only with a preloaded routes/port bundle; CHILD always excludes it. The boundary resolver selects
 the narrower parent/child workspace, rejects disjoint roots, and combines the actual parent policy

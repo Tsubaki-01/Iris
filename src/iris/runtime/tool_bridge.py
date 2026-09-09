@@ -23,6 +23,7 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
+from ..tools.subagent import SubagentExecutionOutcome, SubagentParentCall
 
 
 class ToolBridge:
@@ -145,6 +146,62 @@ class ToolBridge:
         if context.read_state is not None:
             self._read_states[session_id] = context.read_state
         return result
+
+    def prepare_subagent_continuation(
+        self,
+        tool_use: ToolUseBlock,
+        *,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        cancellation: CancellationSignal | None = None,
+    ) -> PreparedToolCall:
+        """委托 raw-only continuation prepare；link 选择由 lifecycle caller 决定。"""
+        context = self._execution_context(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            metadata=metadata,
+            cancellation=cancellation,
+        )
+        return self.tool_executor.prepare_subagent_continuation(tool_use, context)
+
+    async def execute_subagent_prepared(
+        self,
+        prepared: PreparedToolCall,
+        *,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        cancellation: CancellationSignal | None = None,
+        approved_tool_call_id: str | None = None,
+        linked_continuation: bool = False,
+    ) -> SubagentExecutionOutcome:
+        """只在此构造 parent identity，然后驱动专用 child 执行入口。"""
+        context = self._execution_context(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            metadata=metadata,
+            cancellation=cancellation,
+        )
+        return await self.tool_executor.execute_subagent_prepared(
+            prepared,
+            context,
+            parent_call=SubagentParentCall(run_id, prepared.tool_use.id),
+            approved_tool_call_id=approved_tool_call_id,
+            linked_continuation=linked_continuation,
+        )
 
     def _execution_context(
         self,

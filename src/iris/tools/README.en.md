@@ -19,6 +19,12 @@ human approval. Internal `MostRestrictivePermissionPolicy` evaluates both polici
 actual child tool and selects the original decision by DENY > REQUIRE_HUMAN > ALLOW. Ties retain
 the parent's reason/metadata. Both payloads participate in the existing environment fingerprint.
 
+The dedicated `ToolExecutor` Sub Agent path preserves raw input parsing, fresh permission refresh,
+and final identity/artifact normalization. Linked continuation skips outer permission. ChildWaiting
+returns directly, without middleware, breaker, parent claim, or ordinary timeout. Ordinary tools
+still normalize and persist the final body after after_call. Controller lifecycle, persistence,
+and recovery errors propagate unchanged.
+
 ```mermaid
 flowchart TD
     Source["callable / BaseTool"] --> Definition["ToolDefinition + input_schema"]

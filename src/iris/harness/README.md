@@ -29,6 +29,13 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`。
 它接收已加载的普通 child 配置，不依赖 parent provider 的单次凭据覆盖。
 
+`from_config*()` 接受 `permission_policy=` 与 `child_provider_factory=`。配置 catalog 时，
+runner 读取一次路由快照并装配内部 controller。Selected child 使用普通 AgentConfig、独立
+session/run、fresh `AgentRunOptions()`、空 request metadata、无 memory service，并共享 parent
+store/clock。Child 不注册 subagent；linked ACTIVE 通过 ordinary recover 继续原 child，
+WAITING/TERMINAL 只读原结果。专用执行当前返回 `ToolResult | ChildWaiting`，parent 工具仍为
+PREPARED；parent loop 的 proxy 与最终结果提交尚未接入。
+
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
 - `request_cancel(run_id, reason=None)`：只保证首次请求持久化；active 本地 activation 在提交后

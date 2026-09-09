@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ..agents import AgentConfig, load_agent_config
+from ..agents.config.subagent import load_subagent_catalog
 from ..exceptions import (
     HITLConflictError,
     IrisCancellationRequestedError,
@@ -79,16 +80,22 @@ from ..runtime import (
     RuntimeApprovedToolCall,
     RuntimeCursor,
     RuntimeEventSink,
-    RuntimeFactory,
     RuntimeProvider,
     RuntimeSteeringPort,
     RuntimeStreamEvent,
 )
+from ..runtime._assembly import (
+    RuntimeExecutionScope,
+    SubagentAssembly,
+    assemble_runtime,
+    resolve_runtime_boundary,
+)
 from ..store import InMemoryLifecycleStore, SQLiteStore
-from ..tools import CancellationSignal
+from ..tools import CancellationSignal, PermissionPolicy
 from ._commit_port import StoreRuntimeCommitPort
 from ._events import _RunEventCollector
 from ._fingerprint import compute_environment_fingerprint
+from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
 if TYPE_CHECKING:
@@ -245,6 +252,7 @@ class AgentRunner:
 
             self._stream_sink = _RuntimeLiveSink(_RunnerPublisherRelay(self))
         self._active: dict[str, ActiveActivation] = {}
+        self._subagent_controller: HarnessSubagentController | None = None
 
     @classmethod
     def from_config_path(
@@ -252,6 +260,8 @@ class AgentRunner:
         path: str | Path,
         *,
         provider: RuntimeProvider | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
@@ -266,6 +276,8 @@ class AgentRunner:
             load_agent_config(config_path),
             config_path=config_path,
             provider=provider,
+            permission_policy=permission_policy,
+            child_provider_factory=child_provider_factory,
             memory_service=memory_service,
             store=store,
             observers=observers,
@@ -282,6 +294,8 @@ class AgentRunner:
         *,
         config_path: Path | None = None,
         provider: RuntimeProvider | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
@@ -291,24 +305,48 @@ class AgentRunner:
         live_publisher: LivePublisher | None = None,
     ) -> AgentRunner:
         """从已校验配置装配 engine；durable ownership 只属于 harness。"""
-        runtime = RuntimeFactory.from_config(
+        resolved_store = (
+            store if store is not None else _build_lifecycle_store(config, config_path=config_path)
+        )
+        resolved_clock = clock if clock is not None else _SystemClock()
+        boundary = resolve_runtime_boundary(
+            config,
+            config_path=config_path,
+            permission_policy=permission_policy,
+        )
+        controller: HarnessSubagentController | None = None
+        subagent: SubagentAssembly | None = None
+        if config.tools.subagent is not None:
+            base_dir = Path.cwd() if config_path is None else config_path.parent
+            routes = load_subagent_catalog(base_dir / config.tools.subagent)
+            controller = HarnessSubagentController(
+                routes=routes,
+                store=resolved_store,
+                parent_boundary=boundary,
+                child_provider_factory=child_provider_factory,
+                clock=resolved_clock,
+            )
+            subagent = SubagentAssembly(routes, controller)
+        runtime = assemble_runtime(
             config,
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
             api_key=api_key,
+            execution_scope=RuntimeExecutionScope.ROOT,
+            boundary=boundary,
+            subagent=subagent,
         )
-        resolved_store = (
-            store if store is not None else _build_lifecycle_store(config, config_path=config_path)
-        )
-        return cls(
+        runner = cls(
             runtime=runtime,
             store=resolved_store,
             observers=observers,
             observer_event_timeout_s=observer_event_timeout_s,
-            clock=clock,
+            clock=resolved_clock,
             live_publisher=live_publisher,
         )
+        runner._subagent_controller = controller
+        return runner
 
     # endregion
 
@@ -353,8 +391,32 @@ class AgentRunner:
         Raises:
             IrisRunConflictError: 当 create 返回的 initial checkpoint 与本地构造不一致时。
         """
-        # --- 1. 构造 identity 与 initial checkpoint ---
-        resolved_options = options or AgentRunOptions()
+        command, cursor = self._build_start_facts(request, options=options)
+        created = self.store.create_run(command)
+        events = self._event_collector(durable_event_callback)
+        events.record(created.events)
+        if created.run.phase is RunPhase.TERMINAL:
+            await self._deliver_events(events.events)
+            return self._require_result(created.run.run_id)
+        if created.checkpoint != command.initial_checkpoint:
+            raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
+        return await self._run_start_activation(
+            created.run,
+            activation_id=command.start_activation_id,
+            cursor=cursor,
+            events=events,
+            steering=steering,
+            activation_started=activation_started,
+        )
+
+    def _build_start_facts(
+        self,
+        request: AgentRunRequest,
+        *,
+        options: AgentRunOptions | None = None,
+    ) -> tuple[CreateRun, RuntimeCursor]:
+        """为普通 start 与 child admission 构造同一组初始事实。"""
+        resolved_options = options if options is not None else AgentRunOptions()
         run_id = request.run_id or f"run_{uuid.uuid4().hex}"
         resolved_request = request.model_copy(update={"run_id": run_id})
         activation_id = f"act_{uuid.uuid4().hex}"
@@ -370,30 +432,50 @@ class AgentRunner:
             model_steps_committed=0,
             environment_fingerprint=self.environment_fingerprint,
         )
-        created = self.store.create_run(
-            CreateRun(
-                request=resolved_request,
-                options=resolved_options,
-                agent_id=self.runtime.environment.agent_config.name,
-                environment_fingerprint=self.environment_fingerprint,
-                start_activation_id=activation_id,
-                initial_checkpoint=checkpoint,
-                now=self._now(),
-            )
-        )
-        # --- 2. 提交 create 并处理立即 terminal ---
-        # 立即 terminal（例如 create 时已超过 deadline）不进入 engine，也不产生 admission signal。
-        events = self._event_collector(durable_event_callback)
-        events.record(created.events)
-        if created.run.phase is RunPhase.TERMINAL:
+        return CreateRun(
+            request=resolved_request,
+            options=resolved_options,
+            agent_id=self.runtime.environment.agent_config.name,
+            environment_fingerprint=self.environment_fingerprint,
+            start_activation_id=activation_id,
+            initial_checkpoint=checkpoint,
+            now=self._now(),
+        ), cursor
+
+    async def _run_admitted_start(self, *, run_id: str, activation_id: str) -> RunResult:
+        """驱动已由 parent admission 创建的 START，不再次 CreateRun。"""
+        run = self.store.load_run(run_id)
+        if run is None:
+            raise IrisRunNotFoundError("admitted child run 不存在", run_id=run_id)
+        events = self._event_collector()
+        events.record(self.store.list_events(run_id))
+        if run.phase is RunPhase.TERMINAL:
             await self._deliver_events(events.events)
             return self._require_result(run_id)
-        if created.checkpoint != checkpoint:
-            raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
+        checkpoint = self.store.load_checkpoint(run_id)
+        if checkpoint is None:
+            raise IrisRunRecoveryError("admitted child 缺少 checkpoint", run_id=run_id)
+        cursor = RuntimeCursor.model_validate(checkpoint.engine_cursor)
+        return await self._run_start_activation(
+            run,
+            activation_id=activation_id,
+            cursor=cursor,
+            events=events,
+        )
 
-        # --- 3. 绑定 live resources 并推进 activation ---
+    async def _run_start_activation(
+        self,
+        run: RunRecord,
+        *,
+        activation_id: str,
+        cursor: RuntimeCursor,
+        events: _RunEventCollector,
+        steering: RuntimeSteeringPort | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """共享 start live 资源注册；保留 managed admission signal 的原有顺序。"""
         active = ActiveActivation(
-            run_id=run_id,
+            run_id=run.run_id,
             activation_id=activation_id,
             signal=_MutableCancellationSignal(),
             event_collector=events,
@@ -401,23 +483,23 @@ class AgentRunner:
         )
         port = StoreRuntimeCommitPort(
             store=self.store,
-            run=created.run,
+            run=run,
             activation_id=activation_id,
             cursor=cursor,
             clock=self._now,
-            event_collector=active.event_collector,
+            event_collector=events,
             interaction_service=self.interaction_service,
         )
         activation = RuntimeActivationInput(
-            run_id=run_id,
+            run_id=run.run_id,
             activation_id=activation_id,
-            session_id=resolved_request.session_id,
+            session_id=run.session_id,
             kind="start",
-            input=resolved_request.input,
+            input=run.request.input,
             cursor=cursor,
-            options=resolved_options.runtime,
+            options=run.options.runtime,
         )
-        self._register(active, created.run.current_activation_id)
+        self._register(active, run.current_activation_id)
         if activation_started is not None:
             activation_started.set()
         return await self._run_activation(active, activation=activation, port=port)
