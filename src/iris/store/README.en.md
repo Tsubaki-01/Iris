@@ -13,6 +13,15 @@ This package owns concrete storage only. Domain models and command/read protocol
 
 ## Quick start
 
+Sub Agent adds exactly three mutations. `admit_child_run()` atomically creates an ordinary child
+and its three-field `subagent_run_links` row; reentry returns the original child for the exact
+parent key. `rebind_subagent_proxy()` keeps the parent tool PREPARED and preserves history, usage,
+and cursor, returning complete WAITING facts. `finalize_subagent_result()` requires a terminal
+child and commits one parent result/message/usage update. Its WAITING mode also closes the proxy,
+creates a fresh RESUME activation, and returns the corresponding checkpoint. An unanswered
+PENDING proxy can finalize only after child-owned expiry and child settlement. Both stores share
+the operation checks in `_subagent.py`; the link has no additional state columns or explicit index.
+
 ```python
 from iris.store import SQLiteStore
 
@@ -21,7 +30,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v3
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v4
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported and must be replaced before creating a new store; the
@@ -58,7 +67,7 @@ history precondition checks only the session revision. Both stores share lifecyc
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
 load/recovery boundaries such as SQLite row decoding, while one private store serializer projects
-replay keys and durable commands to JSON values. Schema v3 keeps only revision,
+replay keys and durable commands to JSON values. Schema v4 keeps only revision,
 message count, and update time in `sessions`; messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
 metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and
@@ -73,9 +82,9 @@ without TTL/LRU eviction; complete command keys still grow with the number of mu
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v3; older schemas are not migrated or read.
+when rows are first loaded. The current database is schema v4; older schemas are not migrated or read.
 
-Schema v3 contains:
+Schema v4 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
@@ -94,7 +103,7 @@ conflict/state errors.
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v3-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v4-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -105,7 +114,7 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v3.
+schema identity is lifecycle v4.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
 exact tool-call read.
@@ -150,7 +159,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v3, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v4, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 

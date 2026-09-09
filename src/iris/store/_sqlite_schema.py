@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -175,6 +175,16 @@ SCHEMA_STATEMENTS = (
     _SESSIONS_STATEMENT,
     _SESSION_MESSAGES_STATEMENT,
     *_COMMON_STATEMENTS,
+    """
+    CREATE TABLE subagent_run_links (
+        parent_run_id TEXT NOT NULL,
+        parent_tool_call_id TEXT NOT NULL,
+        child_run_id TEXT NOT NULL UNIQUE REFERENCES agent_runs(run_id),
+        PRIMARY KEY (parent_run_id, parent_tool_call_id),
+        FOREIGN KEY (parent_run_id, parent_tool_call_id)
+            REFERENCES run_tool_calls(run_id, tool_call_id)
+    )
+    """,
 )
 
 

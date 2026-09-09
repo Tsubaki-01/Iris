@@ -47,15 +47,19 @@ from ..lifecycle.models import (
     RunToolCallRecord,
     RunUsage,
     SessionSnapshot,
+    SubagentRunLink,
     ToolCallPhase,
     project_result,
 )
 from ..lifecycle.store import (
+    AdmitChildRun,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
+    FinalizeSubagentResult,
     FinishRun,
+    RebindSubagentProxy,
     RecoverActiveRun,
     RequestCancellation,
     ReserveModelStep,
@@ -76,6 +80,13 @@ from ..lifecycle.transitions import (
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._replay import ReplayRecord, replay_key
+from ._subagent import (
+    validate_current_proxy,
+    validate_final_proxy,
+    validate_final_result,
+    validate_parent_tool,
+    validate_proxy_binding,
+)
 from ._terminal_closure import build_terminal_tool_closure
 from ._tool_results import is_preflight_result
 
@@ -104,6 +115,237 @@ class InMemoryLifecycleStore:
         self._events: dict[str, list[RunEvent]] = {}
         self._results: dict[str, RunResult] = {}
         self._replays: dict[str, ReplayRecord] = {}
+        self._subagent_links: dict[tuple[str, str], SubagentRunLink] = {}
+
+    def load_subagent_link(
+        self, parent_run_id: str, parent_tool_call_id: str
+    ) -> SubagentRunLink | None:
+        """按 exact parent key 返回唯一 child locator。"""
+        with self._lock:
+            return self._subagent_links.get((parent_run_id, parent_tool_call_id))
+
+    def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink:
+        """在同一把锁中创建 child 普通事实与 link；重入直接复用 link。"""
+        command = deepcopy(command)
+        with self._lock:
+            key = (command.parent_run_id, command.parent_tool_call_id)
+            link = self._subagent_links.get(key)
+            if link is not None:
+                return link
+            self._require_subagent_parent(command, command.child_create.now)
+            link = SubagentRunLink.model_construct(
+                parent_run_id=command.parent_run_id,
+                parent_tool_call_id=command.parent_tool_call_id,
+                child_run_id=command.child_create.request.run_id,
+            )
+            # RLock 保持整个 admission 原子性；普通 create 先完成全部检查再写入。
+            self.create_run(command.child_create)
+            self._subagent_links[key] = link
+            return link
+
+    def _require_subagent_parent(
+        self, command: AdmitChildRun | RebindSubagentProxy | FinalizeSubagentResult, now: datetime
+    ) -> tuple[RunRecord, RunToolCallRecord]:
+        """在 store 锁内读取并核对 parent admission/mutation envelope。"""
+        run = self._require_run(command.parent_run_id)
+        self._require_revision(run, command.expected_parent_run_revision)
+        self._require_lane(run)
+        tool = self._require_tool_call(run.run_id, command.parent_tool_call_id)
+        validate_parent_tool(
+            run,
+            tool,
+            activation_id=command.parent_activation_id,
+            tool_version=command.expected_parent_tool_version,
+            now=now,
+        )
+        return run, tool
+
+    def _require_subagent_link(self, run_id: str, tool_call_id: str) -> SubagentRunLink:
+        """要求 exact parent key 已有 durable child。"""
+        link = self._subagent_links.get((run_id, tool_call_id))
+        if link is None:
+            raise IrisRunConflictError("parent tool 缺少 Sub Agent link", run_id=run_id)
+        return link
+
+    def rebind_subagent_proxy(self, command: RebindSubagentProxy) -> RunCommit:
+        """首次挂起或替换已回答 proxy，不改变历史、usage 和 engine cursor。"""
+        command = deepcopy(command)
+        with self._lock:
+            key = replay_key("rebind_subagent_proxy", command)
+            replay = self._load_replay(key)
+            if replay is not None:
+                return replay
+            run, tool = self._require_subagent_parent(command, command.now)
+            link = self._require_subagent_link(run.run_id, tool.tool_call_id)
+            child = self._require_run(link.child_run_id)
+            if child.phase is not RunPhase.WAITING:
+                raise IrisRunStateError("child 必须 WAITING 才能绑定 proxy")
+            child_interaction = self._require_interaction(child.pending_interaction_id)
+            proxy = command.pending_proxy
+            validate_proxy_binding(run, tool, link, child, child_interaction, proxy)
+            if proxy.interaction_id in self._interactions:
+                raise IrisRunConflictError("interaction_id 已存在")
+            old_proxy: HumanInteraction | None = None
+            activation: ActivationRecord | None = None
+            if command.parent_activation_id is not None:
+                if command.replaced_proxy_interaction_id is not None:
+                    raise IrisRunStateError("ACTIVE rebind 不能替换 proxy")
+                activation = self._require_activation(command.parent_activation_id)
+            else:
+                old_proxy = self._require_interaction(run.pending_interaction_id)
+                validate_current_proxy(
+                    run, tool, link, old_proxy, command.replaced_proxy_interaction_id
+                )
+                if old_proxy.status is not InteractionStatus.RESOLVED:
+                    raise IrisRunStateError("只能替换已回答 proxy")
+            checkpoint = self._require_checkpoint(run.run_id)
+            rebound = checkpoint.model_copy(update={"sequence": checkpoint.sequence + 1})
+            sequence = run.last_event_sequence + 1
+            updated = replace_run(
+                run,
+                phase=RunPhase.WAITING,
+                revision=run.revision + 1,
+                current_activation_id=None,
+                pending_interaction_id=proxy.interaction_id,
+                checkpoint_sequence=rebound.sequence,
+                last_event_sequence=sequence,
+                updated_at=command.now,
+            )
+            event = self._event(
+                updated,
+                RunEventKind.INTERACTION_SUSPENDED,
+                command.now,
+                sequence=sequence,
+                activation_id=command.parent_activation_id,
+                step_index=tool.step_index,
+                correlation_id=proxy.interaction_id,
+            )
+            result = project_result(updated, proxy)
+            if old_proxy is not None:
+                closed = self._close_interaction(run, command.now, "subagent_rebind")
+                self._interactions[closed.interaction_id] = closed
+            if activation is not None:
+                self._activations[activation.activation_id] = settle_activation(
+                    activation,
+                    outcome=ActivationOutcome.SUSPENDED,
+                    ended_at=command.now,
+                )
+            self._runs[run.run_id] = updated
+            self._checkpoints[run.run_id] = rebound
+            self._interactions[proxy.interaction_id] = proxy
+            self._set_tool_call(tool.model_copy(update={"interaction_id": proxy.interaction_id}))
+            self._events[run.run_id].append(event)
+            self._results[run.run_id] = result
+            return self._store_replay(
+                key,
+                RunCommit(
+                    run=updated,
+                    checkpoint=rebound,
+                    interaction=proxy,
+                    events=(event,),
+                    result=result,
+                ),
+            )
+
+    def finalize_subagent_result(self, command: FinalizeSubagentResult) -> RunCommit:
+        """Child terminal 后提交唯一 parent 结果，WAITING 同事务建立 fresh RESUME。"""
+        command = deepcopy(command)
+        with self._lock:
+            key = replay_key("finalize_subagent_result", command)
+            replay = self._load_replay(key)
+            if replay is not None:
+                return replay
+            run, tool = self._require_subagent_parent(command, command.now)
+            link = self._require_subagent_link(run.run_id, tool.tool_call_id)
+            child = self._require_run(link.child_run_id)
+            validate_final_result(command, tool, child)
+            session = self._require_history_preconditions(
+                run, command.expected_parent_session_revision
+            )
+            checkpoint = self._require_checkpoint(run.run_id)
+            next_session = self._append_messages(session, command.message_delta)
+            activation_id = command.parent_activation_id or cast(str, command.resume_activation_id)
+            self._validate_checkpoint_replacement(
+                run,
+                checkpoint,
+                command.checkpoint,
+                activation_id,
+                next_session.revision,
+                run.usage,
+            )
+            activation: ActivationRecord | None = None
+            closed: HumanInteraction | None = None
+            events: list[RunEvent] = []
+            if command.parent_activation_id is None:
+                proxy = self._require_interaction(run.pending_interaction_id)
+                validate_current_proxy(run, tool, link, proxy, command.proxy_interaction_id)
+                validate_final_proxy(proxy, command.now)
+                if activation_id in self._activations:
+                    raise IrisRunConflictError("activation_id 已存在", activation_id=activation_id)
+                ordinal = 1 + max(
+                    item.ordinal for item in self._activations.values() if item.run_id == run.run_id
+                )
+                activation = ActivationRecord(
+                    activation_id=activation_id,
+                    run_id=run.run_id,
+                    ordinal=ordinal,
+                    kind=ActivationKind.RESUME,
+                    status=ActivationStatus.ACTIVE,
+                    started_at=command.now,
+                )
+                closed = self._close_interaction(run, command.now, "subagent_finalized")
+                events.append(
+                    self._event(
+                        run,
+                        RunEventKind.ACTIVATION_STARTED,
+                        command.now,
+                        sequence=run.last_event_sequence + 1,
+                        activation_id=activation_id,
+                    )
+                )
+            updated = replace_run(
+                run,
+                phase=RunPhase.ACTIVE,
+                revision=run.revision + 1,
+                current_activation_id=activation_id,
+                pending_interaction_id=None,
+                usage=commit_tool_usage(run.usage),
+                checkpoint_sequence=command.checkpoint.sequence,
+                last_event_sequence=run.last_event_sequence + len(events) + 1,
+                updated_at=command.now,
+            )
+            events.append(
+                self._event(
+                    updated,
+                    RunEventKind.TOOL_CALL_COMMITTED,
+                    command.now,
+                    sequence=updated.last_event_sequence,
+                    activation_id=activation_id,
+                    step_index=tool.step_index,
+                    correlation_id=tool.tool_call_id,
+                )
+            )
+            committed = commit_tool_call(tool, result=command.result, now=command.now)
+            self._runs[run.run_id] = updated
+            self._sessions[session.session_id] = next_session
+            self._checkpoints[run.run_id] = command.checkpoint
+            self._set_tool_call(committed)
+            self._events[run.run_id].extend(events)
+            if closed is not None:
+                self._interactions[closed.interaction_id] = closed
+            if activation is not None:
+                self._activations[activation.activation_id] = activation
+            self._results.pop(run.run_id, None)
+            return self._store_replay(
+                key,
+                RunCommit(
+                    run=updated,
+                    session_revision=next_session.revision if command.message_delta else None,
+                    checkpoint=command.checkpoint,
+                    interaction=closed,
+                    events=tuple(events),
+                ),
+            )
 
     def create_run(self, command: CreateRun) -> RunCommit:
         """原子创建 run、lane、activation、checkpoint 与起始事件。"""
