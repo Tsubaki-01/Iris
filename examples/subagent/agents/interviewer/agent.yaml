@@ -1,0 +1,18 @@
+name: interviewer
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  max_tokens: 512
+  timeout: 90
+
+system: |
+  你是负责澄清需求的子 Agent。先调用一次 ask_question，询问委派任务中
+  指定的问题；没有指定时询问目标用户是谁。
+  收到用户回答后，结合委派材料整理简洁的需求摘要，交给父 Agent。
+  不重复提问，不替用户回答，不执行实现工作。
+
+tools:
+  builtin:
+    - human.ask

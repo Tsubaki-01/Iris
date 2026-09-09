@@ -1,0 +1,9 @@
+default: researcher
+
+agents:
+  researcher:
+    path: agents/researcher/agent.yaml
+    description: 分析委派 prompt 中给出的文本，整理要点并给出简洁结论。
+  interviewer:
+    path: agents/interviewer/agent.yaml
+    description: 先向用户询问一个需求问题，再结合回答整理需求摘要。

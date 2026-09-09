@@ -1,0 +1,22 @@
+name: iris-subagent-example
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  max_tokens: 1024
+  timeout: 90
+
+system: |
+  你是 Iris Sub Agent 示例的父 Agent，负责委派任务并向用户给出最终回答。
+  每次收到新任务，先调用一次 subagent，再结合子 Agent 的结论简洁回答。
+  用户指定子 Agent 时使用对应的 agent selector；否则省略 agent，使用默认 researcher。
+  prompt 必须包含子任务目标、所需材料和输出要求，子 Agent 不会自动收到父会话历史。
+  子 Agent 返回后不要重复委派，也不要编造子 Agent 未提供的结论。
+
+tools:
+  subagent: subagents.yaml
+
+session:
+  backend: sqlite
+  path: .iris/subagent.db
