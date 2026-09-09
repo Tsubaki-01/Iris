@@ -49,6 +49,19 @@ Successful WAITING finalization publishes `tool.completed` with the original too
 running the fresh RESUME activation. SessionManager admits resume before the first child await and
 rejects concurrent answers.
 
+Parent cancellation, deadline, and parent-owned proxy expiry settle the exact child before ending
+the parent. `request_cancel()` leaves a linked proxy WAITING; `cancel()` or the manager's settlement
+task completes it. `settlement_timeout` covers child cleanup and parent observation, preserving
+durable cancellation on timeout so later `cancel()`/`recover()` can finish. Repeated interrupts share
+the cleanup task; follow-ups start only after true parent terminal settlement.
+
+Child interaction/deadline expiry and outer tool timeout settle the child, then commit
+`SUBAGENT_TIMEOUT`. The outer timer starts at durable `child.created_at`, excludes permission waits,
+and never resets on resume/rebind/recover. The stored proxy expiry owner determines whether the
+parent stops or handles a tool error; parent expiry wins ties. Parent streams contain only parent
+start/proxy/final facts, without child streams or usage. Linked recovery does not repeat started;
+errors still use `tool.completed` with `is_error`.
+
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.
 - `request_cancel()` guarantees only that the first request is durable. A local active activation

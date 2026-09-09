@@ -696,6 +696,7 @@ class SessionManager:
         self._claimed_steer: dict[str, _PendingInput] = {}
         self._current_run_id: str | None = None
         self._current_task: asyncio.Task[RunResult] | None = None
+        self._interrupt_task: asyncio.Task[RunResult] | None = None
         self._closed = False
         self._event_consumer_started = False
         self._steering = _SessionSteeringPort(self)
@@ -941,6 +942,16 @@ class SessionManager:
             )
             if snapshot.phase is RunPhase.TERMINAL:
                 await self._handle_terminal_locked(run_id)
+            elif snapshot.phase is RunPhase.WAITING:
+                if self._current_task is not None and not self._current_task.done():
+                    if self._interrupt_task is not self._current_task:
+                        self._current_task.cancel()
+                else:
+                    task = asyncio.create_task(self._runner.cancel(run_id, reason=reason))
+                    self._current_task = task
+                    self._attach_settlement_callback(task, run_id, submission=None)
+                # 连续 interrupt 共享已有 cleanup owner，不能取消正在执行的 settlement。
+                self._interrupt_task = self._current_task
             return snapshot
 
     def events(self) -> AsyncIterator[SessionEvent]:
@@ -1139,6 +1150,8 @@ class SessionManager:
         try:
             async with self._lock:
                 # 取锁期间 facade 可能已换代或已关闭，非当前 owner 一律不再改状态。
+                if self._interrupt_task is task:
+                    self._interrupt_task = None
                 if self._current_task is not task or self._current_run_id != run_id:
                     return
                 self._current_task = None

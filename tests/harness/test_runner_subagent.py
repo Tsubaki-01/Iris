@@ -1,13 +1,19 @@
 """真实 child Runner 与 shared-store 委派的确定性集成测试。"""
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from iris.agents import AgentConfig
-from iris.exceptions import IrisRunPersistenceError, IrisRunRecoveryError, IrisRunStateError
+from iris.exceptions import (
+    IrisRunObservationTimeoutError,
+    IrisRunPersistenceError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
+)
 from iris.harness import AgentRunner, SessionManager
 from iris.hitl import (
     InteractionStatus,
@@ -34,9 +40,17 @@ from iris.lifecycle import (
     ToolErrorPolicy,
 )
 from iris.lifecycle.store import AdmitChildRun
-from iris.message import Msg, ToolUseBlock
+from iris.message import (
+    LLMRequest,
+    ModelResponseCompleted,
+    ModelResponseStarted,
+    ModelStreamEvent,
+    ModelStreamScope,
+    Msg,
+    ToolUseBlock,
+)
 from iris.runtime import RuntimeCursor, RuntimeProvider, RuntimeStreamEvent
-from iris.store import SQLiteStore
+from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import PreparedToolCall, ToolResult
 from iris.tools._paths import safe_path_segment
 from iris.tools.permissions import DefaultPermissionPolicy, PermissionDecision, PermissionEffect
@@ -63,6 +77,328 @@ def _parent_provider() -> StaticProvider:
         ),
         text_response("Parent complete"),
     )
+
+
+class RecordingInMemoryLifecycleStore(InMemoryLifecycleStore):
+    """记录实际 finish 顺序以验证 child-first。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.finished: list[str] = []
+
+    def finish_run(self, command: FinishRun) -> object:
+        result = super().finish_run(command)
+        self.finished.append(command.run_id)
+        return result
+
+
+class StreamingStaticProvider(StaticProvider):
+    """沿用静态响应队列，仅补充 parent live 测试所需的 typed stream。"""
+
+    async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
+        response = await self.complete(request)
+        scope = ModelStreamScope(
+            model_stream_id=response.id, provider=response.provider, model=response.model, attempt=1
+        )
+        now = FrozenClock().now()
+        yield ModelResponseStarted(
+            scope=scope, sequence=1, occurred_at=now, response_id=response.id
+        )
+        yield ModelResponseCompleted(
+            scope=scope,
+            sequence=2,
+            occurred_at=now,
+            response=response,
+            semantic_output_emitted=False,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow", ["active", "proxy", "error", "linked"])
+async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, flow: str) -> None:
+    publisher = RecordingPublisher()
+    parent = StreamingStaticProvider(
+        *(
+            []
+            if flow == "linked"
+            else [
+                tool_response(
+                    ToolUseBlock(id="delegate", name="subagent", input={"prompt": "Child task"})
+                )
+            ]
+        ),
+        text_response("Parent done"),
+    )
+    child = StaticProvider(
+        *(
+            [
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                )
+            ]
+            if flow == "proxy"
+            else []
+        ),
+        text_response("Child done"),
+    )
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=parent,
+        child_provider_factory=ChildProviders(child),
+        live_publisher=publisher,
+    )
+    if flow == "linked":
+        await _dispatch(runner, _prepare_parent(runner))
+        result = await runner.recover(
+            "parent", expected_activation_id=runner.store.load_run("parent").current_activation_id
+        )
+    else:
+        if flow == "error":
+            (tmp_path / "child.yaml").write_text("[broken", encoding="utf-8")
+        result = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+        if flow == "proxy":
+            assert result.pending_interaction is not None, result.error
+            result = await runner.resume(
+                "parent",
+                interaction_id=result.pending_interaction.interaction_id,
+                response=QuestionInteractionResponse(answer="Continue"),
+            )
+    assert result.run.stop_reason == RunStopReason.COMPLETED, result.error
+    assert all(fact.run_id == "parent" for fact in publisher.facts)
+    starts = [
+        fact
+        for fact in publisher.facts
+        if isinstance(fact, RuntimeStreamEvent) and fact.kind == "tool.started"
+    ]
+    finals = [
+        fact
+        for fact in publisher.facts
+        if isinstance(fact, RuntimeStreamEvent) and fact.kind == "tool.completed"
+    ]
+    assert len(starts) == int(flow != "linked")
+    assert len(finals) == 1 and finals[0].tool_call_id == "delegate"
+    assert finals[0].tool_result.is_error == (flow == "error")
+    if flow == "proxy":
+        assert any(fact.kind == "interaction.suspended" for fact in publisher.facts)
+        assert any(fact.kind == "interaction.resolved" for fact in publisher.facts)
+
+
+@pytest.mark.asyncio
+async def test_active_parent_deadline_drains_child_before_parent(tmp_path: Path) -> None:
+    clock = FrozenClock()
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        clock=clock,
+        child_provider_factory=ChildProviders(BlockingProvider()),
+    )
+    result = await asyncio.wait_for(
+        runner.start(
+            AgentRunRequest(input="Start", run_id="parent"),
+            options=AgentRunOptions(
+                limits=RunLimits(deadline_at=clock.now() + timedelta(seconds=0.02))
+            ),
+        ),
+        timeout=1,
+    )
+    child_id = store.load_subagent_link("parent", "delegate").child_run_id
+    assert result.run.stop_reason == RunStopReason.DEADLINE_EXCEEDED
+    assert store.finished == [child_id, "parent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_waits", [False, True])
+async def test_remote_parent_cancel_observed_before_child_result_commit(
+    tmp_path: Path, child_waits: bool
+) -> None:
+    path = _write_configs(tmp_path)
+    child = BlockingProvider(
+        tool_response(ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"}))
+        if child_waits
+        else text_response("Child done")
+    )
+    runner = AgentRunner.from_config_path(
+        path, provider=_parent_provider(), child_provider_factory=ChildProviders(child)
+    )
+    task = asyncio.create_task(runner.start(AgentRunRequest(input="Start", run_id="parent")))
+    await asyncio.wait_for(child.started.wait(), timeout=1)
+    observer = AgentRunner.from_config_path(path, provider=StaticProvider(), store=runner.store)
+    observer.request_cancel("parent")
+    child.release.set()
+    result = await task
+    assert result.run.stop_reason == RunStopReason.CANCELLED
+    child_id = runner.store.load_subagent_link("parent", "delegate").child_run_id
+    assert runner.store.load_run(child_id).phase == RunPhase.TERMINAL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_cancelling_parent_settles_linked_child_first(tmp_path: Path, waiting: bool) -> None:
+    child_provider = (
+        StaticProvider(
+            tool_response(
+                ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+            )
+        )
+        if waiting
+        else BlockingProvider()
+    )
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        child_provider_factory=ChildProviders(child_provider),
+    )
+    running = asyncio.create_task(runner.start(AgentRunRequest(input="Start", run_id="parent")))
+    if waiting:
+        await running
+    else:
+        await asyncio.wait_for(child_provider.started.wait(), timeout=1)
+    child_id = store.load_subagent_link("parent", "delegate").child_run_id
+    snapshot = runner.request_cancel("parent")
+    assert snapshot.phase == (RunPhase.WAITING if waiting else RunPhase.ACTIVE)
+    result = await runner.cancel("parent", settlement_timeout=1)
+    assert result.run.stop_reason == RunStopReason.CANCELLED
+    assert store.load_run(child_id).phase == RunPhase.TERMINAL
+    assert store.finished[-1] == "parent"
+    if not waiting:
+        assert store.finished == [child_id, "parent"]
+        assert await running == result
+
+
+@pytest.mark.asyncio
+async def test_active_outer_timeout_settles_child_and_parent_continues(tmp_path: Path) -> None:
+    child = BlockingProvider()
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        child_provider_factory=ChildProviders(child),
+    )
+    result = await asyncio.wait_for(
+        runner.start(
+            AgentRunRequest(input="Start", run_id="parent"),
+            options=AgentRunOptions(runtime=RuntimeExecutionOptions(tool_timeout_seconds=0.02)),
+        ),
+        timeout=1,
+    )
+    child_id = store.load_subagent_link("parent", "delegate").child_run_id
+    assert store.finished == [child_id, "parent"]
+    assert result.run.stop_reason == RunStopReason.COMPLETED
+    assert store.load_tool_call("parent", "delegate").result.error.code == "SUBAGENT_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_repeated_active_cancel_does_not_interrupt_child_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    child = BlockingProvider()
+    factory = ChildProviders(child)
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        child_provider_factory=factory,
+    )
+    task = asyncio.create_task(runner.start(AgentRunRequest(input="Start", run_id="parent")))
+    await asyncio.wait_for(child.started.wait(), timeout=1)
+    started, release = asyncio.Event(), asyncio.Event()
+    original = runner._subagent_controller.cancel_linked
+
+    async def delayed(**kwargs: object) -> None:
+        started.set()
+        await release.wait()
+        await original(**kwargs)
+
+    monkeypatch.setattr(runner._subagent_controller, "cancel_linked", delayed)
+    runner.request_cancel("parent")
+    await asyncio.wait_for(started.wait(), timeout=1)
+    runner.request_cancel("parent")
+    await asyncio.sleep(0)
+    release.set()
+    result = await asyncio.wait_for(task, timeout=1)
+    child_id = store.load_subagent_link("parent", "delegate").child_run_id
+    assert store.finished == [child_id, "parent"]
+    assert result.run.stop_reason == RunStopReason.CANCELLED
+    assert len(factory.configs) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "owner", ["deadline", "parent_interaction", "outer", "child_interaction", "child_deadline"]
+)
+async def test_proxy_due_owner_settles_child_before_parent_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str
+) -> None:
+    clock = FrozenClock()
+    build_start = AgentRunner._build_start_facts
+
+    def child_limits(
+        self: AgentRunner, request: AgentRunRequest, *, options: AgentRunOptions | None
+    ) -> object:
+        if self.runtime.environment.agent_config.name == "researcher":
+            options = AgentRunOptions(
+                limits=RunLimits(
+                    deadline_at=clock.now() + timedelta(seconds=1)
+                    if owner == "child_deadline"
+                    else None,
+                    interaction_timeout_seconds=1 if owner == "child_interaction" else None,
+                )
+            )
+        return build_start(self, request, options=options)
+
+    monkeypatch.setattr(AgentRunner, "_build_start_facts", child_limits)
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        clock=clock,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                )
+            )
+        ),
+    )
+    options = AgentRunOptions(
+        limits=RunLimits(
+            deadline_at=clock.now() + timedelta(seconds=1) if owner == "deadline" else None,
+            interaction_timeout_seconds=1 if owner == "parent_interaction" else None,
+        ),
+        runtime=RuntimeExecutionOptions(tool_timeout_seconds=1 if owner == "outer" else None),
+    )
+    waiting = await runner.start(AgentRunRequest(input="Start", run_id="parent"), options=options)
+    proxy = waiting.pending_interaction
+    child_id = proxy.request.subagent_origin.child_run_id
+    clock.advance(seconds=2)
+    result = await runner.recover("parent")
+    assert store.load_run(child_id).phase == RunPhase.TERMINAL
+    assert (
+        result.run.stop_reason
+        == {
+            "deadline": RunStopReason.DEADLINE_EXCEEDED,
+            "parent_interaction": RunStopReason.INTERACTION_EXPIRED,
+            "outer": RunStopReason.COMPLETED,
+            "child_interaction": RunStopReason.COMPLETED,
+            "child_deadline": RunStopReason.COMPLETED,
+        }[owner]
+    )
+    assert store.load_interaction(proxy.interaction_id).response is None
+    if owner in {"outer", "child_interaction", "child_deadline"}:
+        assert store.load_tool_call("parent", "delegate").result.error.code == "SUBAGENT_TIMEOUT"
+    if owner.startswith("child_"):
+        assert store.load_run(child_id).stop_reason == (
+            RunStopReason.INTERACTION_EXPIRED
+            if owner == "child_interaction"
+            else RunStopReason.DEADLINE_EXCEEDED
+        )
 
 
 @pytest.mark.asyncio
@@ -103,6 +439,239 @@ async def test_mixed_read_subagent_batch_keeps_serial_order(tmp_path: Path) -> N
         "delegate",
         "after",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fresh_process_cancel_recovers_linked_active_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write_configs(tmp_path)
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(),
+        store=store,
+        child_provider_factory=ChildProviders(StaticProvider()),
+    )
+    prepared = _prepare_parent(runner)
+
+    async def stop_after_admission(*args: object, **kwargs: object) -> RunResult:
+        raise IrisRunPersistenceError("process stopped after admission")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AgentRunner, "_run_admitted_start", stop_after_admission)
+        with pytest.raises(IrisRunPersistenceError):
+            await _dispatch(runner, prepared)
+    child_id = store.load_subagent_link("parent", "delegate").child_run_id
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(),
+        store=store,
+        child_provider_factory=ChildProviders(StaticProvider()),
+    )
+    result = await restarted.cancel("parent", settlement_timeout=1)
+    assert result.run.stop_reason == RunStopReason.CANCELLED
+    child = store.load_run(child_id)
+    assert child.stop_reason == RunStopReason.CANCELLED
+    assert child.cancellation_requested_at is not None
+    assert store.finished == [child_id, "parent"]
+
+
+@pytest.mark.asyncio
+async def test_linked_cancel_budget_covers_child_settlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                )
+            )
+        ),
+    )
+    waiting = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    started, release = asyncio.Event(), asyncio.Event()
+    controller = runner._subagent_controller
+    original = controller.cancel_linked
+
+    async def delayed(**kwargs: object) -> None:
+        started.set()
+        await release.wait()
+        await original(**kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(controller, "cancel_linked", delayed)
+        with pytest.raises(IrisRunObservationTimeoutError):
+            await runner.cancel("parent", settlement_timeout=0.02)
+    assert started.is_set()
+    assert runner.store.load_run("parent").phase == RunPhase.WAITING
+    assert runner.store.load_run("parent").cancellation_requested_at is not None
+    assert (
+        runner.store.load_run(
+            waiting.pending_interaction.request.subagent_origin.child_run_id
+        ).phase
+        == RunPhase.WAITING
+    )
+    assert (await runner.recover("parent")).run.stop_reason == RunStopReason.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_active_parent_recovery_enforces_expired_waiting_child_budget(tmp_path: Path) -> None:
+    path = _write_configs(tmp_path)
+    clock = FrozenClock()
+    factory = ChildProviders(
+        StaticProvider(
+            tool_response(
+                ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+            )
+        )
+    )
+    runner = AgentRunner.from_config_path(
+        path, provider=StaticProvider(), clock=clock, child_provider_factory=factory
+    )
+    prepared = _prepare_parent(
+        runner, options=AgentRunOptions(runtime=RuntimeExecutionOptions(tool_timeout_seconds=1))
+    )
+    await _dispatch(runner, prepared)
+    clock.advance(seconds=2)
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(text_response("Timeout handled")),
+        clock=clock,
+        store=runner.store,
+        child_provider_factory=factory,
+    )
+    result = await restarted.recover(
+        "parent", expected_activation_id=runner.store.load_run("parent").current_activation_id
+    )
+    assert result.run.stop_reason == RunStopReason.COMPLETED
+    assert runner.store.load_tool_call("parent", "delegate").result.error.code == "SUBAGENT_TIMEOUT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resuming", [False, True])
+async def test_manager_interrupt_keeps_child_cleanup_owner_and_blocks_follow_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resuming: bool
+) -> None:
+    from .test_session_manager import _wait_until
+
+    factory = ChildProviders(
+        StaticProvider(
+            tool_response(
+                ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+            )
+        )
+    )
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path), provider=_parent_provider(), child_provider_factory=factory
+    )
+    manager = SessionManager(runner, "managed-session")
+    current = await manager.submit("Start")
+    await asyncio.wait_for(asyncio.shield(manager._current_task), timeout=1)
+    proxy = runner.store.load_result(current.run_id).pending_interaction
+    if resuming:
+        blocker = BlockingProvider()
+        factory.provider = blocker
+        await manager.admit_resume(
+            interaction_id=proxy.interaction_id,
+            response=QuestionInteractionResponse(answer="Continue"),
+        )
+        await asyncio.wait_for(blocker.started.wait(), timeout=1)
+        continuation = manager._current_task
+    started, release = asyncio.Event(), asyncio.Event()
+    original = runner._subagent_controller.cancel_linked
+
+    async def delayed(**kwargs: object) -> None:
+        started.set()
+        await release.wait()
+        await original(**kwargs)
+
+    monkeypatch.setattr(runner._subagent_controller, "cancel_linked", delayed)
+    try:
+        snapshot = await asyncio.wait_for(manager.interrupt(), timeout=1)
+        assert snapshot.phase == RunPhase.WAITING
+        await asyncio.wait_for(started.wait(), timeout=1)
+        if resuming:
+            assert manager._current_task is continuation
+        await asyncio.wait_for(manager.interrupt(), timeout=1)
+        follow = await manager.submit("Next run", mode="follow_up")
+        assert runner.store.load_run(follow.run_id) is None
+        assert runner.store.load_run(current.run_id).phase == RunPhase.WAITING
+        release.set()
+        await asyncio.wait_for(asyncio.shield(manager._current_task), timeout=1)
+        await _wait_until(lambda: runner.store.load_result(follow.run_id) is not None)
+        assert runner.store.load_run(current.run_id).stop_reason == RunStopReason.CANCELLED
+        assert (
+            runner.store.load_run(proxy.request.subagent_origin.child_run_id).phase
+            == RunPhase.TERMINAL
+        )
+    finally:
+        release.set()
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_outer_timeout_anchor_survives_permission_wait_proxy_rebind_and_restart(
+    tmp_path: Path,
+) -> None:
+    path = _write_configs(tmp_path)
+    clock = FrozenClock()
+    policy = RecordingPermissionPolicy("subagent")
+    runner = AgentRunner.from_config_path(
+        path,
+        provider=_parent_provider(),
+        clock=clock,
+        permission_policy=policy,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask1", name="ask_question", input={"question": "First?"})
+                ),
+                tool_response(
+                    ToolUseBlock(id="ask2", name="ask_question", input={"question": "Second?"})
+                ),
+            )
+        ),
+    )
+    waiting = await runner.start(
+        AgentRunRequest(input="Start", run_id="parent"),
+        options=AgentRunOptions(runtime=RuntimeExecutionOptions(tool_timeout_seconds=10)),
+    )
+    assert runner.store.load_subagent_link("parent", "delegate") is None
+    clock.advance(seconds=30)
+    first = await runner.resume(
+        "parent",
+        interaction_id=waiting.pending_interaction.interaction_id,
+        response=PermissionInteractionResponse(decision="approve"),
+    )
+    child_id = first.pending_interaction.request.subagent_origin.child_run_id
+    anchor = runner.store.load_run(child_id).created_at
+    assert anchor == clock.now()
+    clock.advance(seconds=6)
+    second = await runner.resume(
+        "parent",
+        interaction_id=first.pending_interaction.interaction_id,
+        response=QuestionInteractionResponse(answer="One"),
+    )
+    assert second.pending_interaction.expires_at == anchor + timedelta(seconds=10)
+    clock.advance(seconds=5)
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(text_response("Timed out child")),
+        store=runner.store,
+        clock=clock,
+        permission_policy=policy,
+        child_provider_factory=ChildProviders(StaticProvider()),
+    )
+    result = await restarted.recover("parent")
+    assert result.run.stop_reason == RunStopReason.COMPLETED
+    assert restarted.store.load_run(child_id).created_at == anchor
+    assert (
+        restarted.store.load_tool_call("parent", "delegate").result.error.code == "SUBAGENT_TIMEOUT"
+    )
 
 
 @pytest.mark.asyncio

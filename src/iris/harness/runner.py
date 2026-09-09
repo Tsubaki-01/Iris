@@ -44,6 +44,7 @@ from ..hitl import (
     HumanInteractionService,
     InteractionStatus,
 )
+from ..hitl.models import SubagentExpiryOwner
 from ..lifecycle import (
     ActivationKind,
     AgentRunOptions,
@@ -94,7 +95,7 @@ from ..runtime._assembly import (
 from ..runtime.runtime import _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal, PermissionPolicy, ToolResult
-from ..tools.subagent import ChildWaiting, SubagentParentCall
+from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._events import _RunEventCollector
 from ._fingerprint import compute_environment_fingerprint
@@ -582,13 +583,16 @@ class AgentRunner:
 
         # --- 2. 优先结算已到期的 waiting run ---
         # cancellation/deadline/interaction 过期都优先于人工响应，避免消费一个已作废的决定。
-        event_cursor = run.last_event_sequence
         now = self._now()
-        settled = self._settle_waiting_if_due(run, interaction, now=now)
+        settled = await self._settle_waiting_if_due(
+            run,
+            interaction,
+            now=now,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
+            activation_started=activation_started,
+        )
         if settled is not None:
-            events = self._event_collector(durable_event_callback)
-            events.record(self.store.list_events(run.run_id, event_cursor))
-            await self._deliver_events(events.events)
             return settled
 
         # --- 3. 校验 checkpoint 并解决 interaction ---
@@ -706,7 +710,48 @@ class AgentRunner:
         controller = cast(HarnessSubagentController, self._subagent_controller)
         if activation_started is not None:
             activation_started.set()
-        outcome = await controller.resume_proxy(parent_run=parent_run, proxy=proxy)
+        try:
+            outcome = await controller.resume_proxy(parent_run=parent_run, proxy=proxy)
+        except asyncio.CancelledError:
+            current = cast(RunRecord, self.store.load_run(parent_run.run_id))
+            if current.cancellation_requested_at is None:
+                raise
+            settled = await self._settle_waiting_if_due(
+                current, proxy, now=self._now(), event_collector=event_collector
+            )
+            return cast(RunResult, settled)
+        current = cast(RunRecord, self.store.load_run(parent_run.run_id))
+        if current.phase is RunPhase.TERMINAL:
+            await self._deliver_events(event_collector.events)
+            return self._require_result(current.run_id)
+        settled = await self._settle_waiting_if_due(
+            current, proxy, now=self._now(), event_collector=event_collector
+        )
+        if settled is not None:
+            return settled
+        return await self._complete_subagent_proxy(
+            parent_run=current,
+            proxy=proxy,
+            parent_checkpoint=parent_checkpoint,
+            cursor=cursor,
+            outcome=outcome,
+            event_collector=event_collector,
+            steering=steering,
+        )
+
+    async def _complete_subagent_proxy(
+        self,
+        *,
+        parent_run: RunRecord,
+        proxy: HumanInteraction,
+        parent_checkpoint: RunCheckpoint,
+        cursor: RuntimeCursor,
+        outcome: SubagentExecutionOutcome,
+        event_collector: _RunEventCollector,
+        steering: RuntimeSteeringPort | None = None,
+    ) -> RunResult:
+        """正常回答与 child-owned 到期共用 WAITING rebind/finalize 后续编排。"""
+        controller = cast(HarnessSubagentController, self._subagent_controller)
         adapter = _WaitingSubagentContinuationAdapter(
             store=self.store,
             interaction_service=self.interaction_service,
@@ -827,7 +872,8 @@ class AgentRunner:
                         run.current_activation_id if run.phase is RunPhase.ACTIVE else None
                     ),
                     reason=normalized_reason,
-                    settle_waiting=run.phase is RunPhase.WAITING,
+                    settle_waiting=run.phase is RunPhase.WAITING
+                    and not self._is_subagent_proxy(run),
                     now=self._now(),
                 )
             )
@@ -855,7 +901,7 @@ class AgentRunner:
         reason: str | None = None,
         settlement_timeout: float | None = None,
     ) -> RunResult:
-        """请求取消并只观察 durable settlement；超时不写入新事实。
+        """请求取消、结算 linked child 并观察 durable settlement；观察超时不写 terminal。
 
         同步且不协作的工具可能延迟 settlement，因此本方法不会提前返回 cancelled，只等待
         store 出现 terminal result。
@@ -886,10 +932,59 @@ class AgentRunner:
                 self.store.list_events(normalized, before.last_event_sequence)
             )
             return self._require_result(normalized)
-        return await self._observe_settlement(
-            normalized,
-            settlement_timeout=settlement_timeout,
-        )
+        budget = asyncio.timeout(settlement_timeout)
+        try:
+            async with budget:
+                current = cast(RunRecord, self.store.load_run(normalized))
+                await self._settle_linked_before_parent_stop(
+                    parent_run=current, reason="parent cancelled"
+                )
+                current = cast(RunRecord, self.store.load_run(normalized))
+                if current.phase is RunPhase.WAITING:
+                    interaction = cast(
+                        HumanInteraction,
+                        self.store.load_interaction(current.pending_interaction_id or ""),
+                    )
+                    await self._settle_waiting_if_due(current, interaction, now=self._now())
+                elif (
+                    current.phase is RunPhase.ACTIVE
+                    and normalized not in self._active
+                    and self._subagent_controller is not None
+                    and any(
+                        self.store.load_subagent_link(normalized, tool.tool_call_id) is not None
+                        for tool in self.store.list_tool_calls(normalized)
+                        if tool.phase is ToolCallPhase.PREPARED
+                    )
+                ):
+                    await self.recover(
+                        normalized, expected_activation_id=current.current_activation_id
+                    )
+                return await self._observe_settlement(normalized, settlement_timeout=None)
+        except TimeoutError as exc:
+            if not budget.expired():
+                raise
+            raise IrisRunObservationTimeoutError(
+                "等待 run cancellation settlement 超时", run_id=normalized
+            ) from exc
+
+    def _is_subagent_proxy(self, run: RunRecord) -> bool:
+        """在 WAITING cancellation 操作边界识别需要 child-first 的 proxy。"""
+        interaction = self.store.load_interaction(run.pending_interaction_id or "")
+        return interaction is not None and interaction.request.subagent_origin is not None
+
+    async def _settle_linked_before_parent_stop(
+        self, *, parent_run: RunRecord, reason: str
+    ) -> None:
+        """停止 parent 前只结算当前 PREPARED 调用关联的 child。"""
+        if self._subagent_controller is None:
+            return
+        for tool in self.store.list_tool_calls(parent_run.run_id):
+            if tool.phase is ToolCallPhase.PREPARED:
+                await self._subagent_controller.cancel_linked(
+                    parent_run_id=parent_run.run_id,
+                    parent_tool_call_id=tool.tool_call_id,
+                    reason=reason,
+                )
 
     async def recover(
         self,
@@ -930,12 +1025,8 @@ class AgentRunner:
                 raise IrisRunRecoveryError(
                     "waiting run 缺少 durable interaction", run_id=run.run_id
                 )
-            cursor = run.last_event_sequence
-            settled = self._settle_waiting_if_due(run, interaction, now=self._now())
+            settled = await self._settle_waiting_if_due(run, interaction, now=self._now())
             if settled is not None:
-                events = self._event_collector()
-                events.record(self.store.list_events(run.run_id, cursor))
-                await self._deliver_events(events.events)
                 return settled
             if (
                 interaction.status is InteractionStatus.RESOLVED
@@ -1253,27 +1344,69 @@ class AgentRunner:
             )
         return result
 
-    def _settle_waiting_if_due(
+    async def _settle_waiting_if_due(
         self,
         run: RunRecord,
         interaction: HumanInteraction,
         *,
         now: datetime,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+        event_collector: _RunEventCollector | None = None,
     ) -> RunResult | None:
         """把已到期的 waiting run 就地结算为 terminal，否则返回 None。
 
         waiting run 不占用 engine，只能在 resume/recover 等外部触点上判断到期。优先级为
         cancellation > deadline / interaction 过期；两者同时到期时取更早的时间点作为原因。
         """
+        origin = interaction.request.subagent_origin
+        deadline = run.options.limits.deadline_at
+        child_owned = origin is not None and origin.expiry_owner in {
+            SubagentExpiryOwner.CHILD_INTERACTION_EXPIRY,
+            SubagentExpiryOwner.CHILD_EFFECTIVE_DEADLINE,
+            SubagentExpiryOwner.OUTER_TOOL_TIMEOUT,
+        }
+        if (
+            child_owned
+            and interaction.status is InteractionStatus.PENDING
+            and interaction.expires_at is not None
+            and now >= interaction.expires_at
+            and run.cancellation_requested_at is None
+            and (deadline is None or now < deadline)
+        ):
+            checkpoint = self.store.load_checkpoint(run.run_id)
+            if checkpoint is None:
+                raise IrisRunRecoveryError("waiting run 缺少 durable checkpoint", run_id=run.run_id)
+            cursor = self._validate_resume_checkpoint(run, interaction, checkpoint)
+            if activation_started is not None:
+                activation_started.set()
+            controller = cast(HarnessSubagentController, self._subagent_controller)
+            outcome = await controller.expire_proxy(parent_run=run, proxy=interaction)
+            current = cast(RunRecord, self.store.load_run(run.run_id))
+            if current.cancellation_requested_at is not None or (
+                deadline is not None and self._now() >= deadline
+            ):
+                return await self._settle_waiting_if_due(current, interaction, now=self._now())
+            return await self._complete_subagent_proxy(
+                parent_run=current,
+                proxy=interaction,
+                parent_checkpoint=checkpoint,
+                cursor=cursor,
+                outcome=outcome,
+                event_collector=event_collector or self._event_collector(durable_event_callback),
+                steering=steering,
+            )
         stop_reason: RunStopReason | None = None
         close_reason: str | None = None
         if run.cancellation_requested_at is not None:
             stop_reason = RunStopReason.CANCELLED
             close_reason = "cancelled"
         else:
-            deadline = run.options.limits.deadline_at
             expiry = (
-                interaction.expires_at if interaction.status is InteractionStatus.PENDING else None
+                interaction.expires_at
+                if interaction.status is InteractionStatus.PENDING and not child_owned
+                else None
             )
             if deadline is not None and expiry is not None and now >= deadline and now >= expiry:
                 stop_reason = (
@@ -1290,6 +1423,18 @@ class AgentRunner:
                 close_reason = "interaction_expired"
         if stop_reason is None:
             return None
+        event_cursor = run.last_event_sequence
+        if activation_started is not None:
+            activation_started.set()
+        await self._settle_linked_before_parent_stop(parent_run=run, reason=stop_reason.value)
+        run = cast(RunRecord, self.store.load_run(run.run_id))
+        if run.phase is RunPhase.TERMINAL:
+            if event_collector is not None:
+                await self._deliver_events(event_collector.events)
+            return self._require_result(run.run_id)
+        if run.cancellation_requested_at is not None:
+            stop_reason = RunStopReason.CANCELLED
+            close_reason = "cancelled"
         committed = self.store.finish_run(
             FinishRun(
                 run_id=run.run_id,
@@ -1301,6 +1446,9 @@ class AgentRunner:
         )
         if committed.result is None:
             raise IrisRunStateError("waiting settlement 缺少 durable result", run_id=run.run_id)
+        events = event_collector or self._event_collector(durable_event_callback)
+        events.record(self.store.list_events(run.run_id, event_cursor))
+        await self._deliver_events(events.events)
         return committed.result
 
     # endregion
@@ -1403,11 +1551,18 @@ class AgentRunner:
             # --- 2. 把每种退出路径映射为 durable outcome ---
             try:
                 engine_result = await active.task
+                if engine_result.outcome is not RuntimeActivationOutcome.SUSPENDED:
+                    await self._settle_linked_before_parent_stop(
+                        parent_run=port.run, reason="parent execution finished"
+                    )
                 self._settle_engine_result(active, engine_result, port)
             except asyncio.CancelledError:
                 # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
                 if not active.signal.requested:
                     raise
+                await self._settle_linked_before_parent_stop(
+                    parent_run=port.run, reason="parent interrupted"
+                )
                 self._finish_cancelled_task(active, port)
             except (
                 IrisRunConflictError,
