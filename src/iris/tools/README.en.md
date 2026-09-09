@@ -14,6 +14,11 @@ must be nonblank. `SubagentTool.execute_subagent()` returns `ToolResult | ChildW
 a narrow port. Direct `arun()` raises `IrisToolExecutionError`; ordinary `BaseTool.arun()` retains
 its terminal `ToolResult` contract.
 
+The default policy allows only the concrete builtin `SubagentTool`; other AGENT tools still need
+human approval. Internal `MostRestrictivePermissionPolicy` evaluates both policies against each
+actual child tool and selects the original decision by DENY > REQUIRE_HUMAN > ALLOW. Ties retain
+the parent's reason/metadata. Both payloads participate in the existing environment fingerprint.
+
 ```mermaid
 flowchart TD
     Source["callable / BaseTool"] --> Definition["ToolDefinition + input_schema"]

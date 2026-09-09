@@ -162,6 +162,13 @@ runtime does not consume a late result after cancellation.
 
 ## Factory
 
+Internal `_assembly.py` assembles context, skills, providers, and tools. ROOT registers `subagent`
+only with a preloaded routes/port bundle; CHILD always excludes it. The boundary resolver selects
+the narrower parent/child workspace, rejects disjoint roots, and combines the actual parent policy
+with the child's default policy. Public `RuntimeFactory.from_config*()` retains its ordinary
+parameters and requires `AgentRunner.from_config*()` for `tools.subagent`, since delegation needs
+the complete lifecycle owner.
+
 ```python
 from iris.runtime import RuntimeFactory
 

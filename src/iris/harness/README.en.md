@@ -26,6 +26,10 @@ selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`
 
 ## Public operations
 
+Internal `_subagent.ChildProviderFactory` defines selected-child provider injection through
+`__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`. It receives the loaded
+ordinary child configuration, independently of one-off parent provider credential overrides.
+
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.
 - `request_cancel()` guarantees only that the first request is durable. A local active activation

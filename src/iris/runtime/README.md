@@ -152,6 +152,12 @@ HITL resume 产生的 provider 请求不会再次附加这条动态 memory。新
 
 ## Factory
 
+内部 `_assembly.py` 统一装配 context、skills、provider 与工具。ROOT 接收已加载的路由/port
+bundle 才注册 `subagent`；CHILD 始终排除它。唯一 boundary resolver 选择父子 workspace 的
+较窄目录，不相交时报配置错误，并组合实际 parent policy 与 child 默认 policy。
+Public `RuntimeFactory.from_config*()` 保持普通参数；配置 `tools.subagent` 时要求使用
+`AgentRunner.from_config*()`，因为委派需要完整 lifecycle owner。
+
 ```python
 from iris.runtime import RuntimeFactory
 

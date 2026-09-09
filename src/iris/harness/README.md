@@ -25,6 +25,10 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 
 ## 公共操作
 
+内部 `_subagent.ChildProviderFactory` 定义 selected child provider 注入协议：
+`__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`。
+它接收已加载的普通 child 配置，不依赖 parent provider 的单次凭据覆盖。
+
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
 - `request_cancel(run_id, reason=None)`：只保证首次请求持久化；active 本地 activation 在提交后
