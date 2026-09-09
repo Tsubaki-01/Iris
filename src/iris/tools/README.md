@@ -25,7 +25,8 @@ DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/me
 `ToolExecutor` 的专用 Sub Agent 入口保留 raw 参数解析、fresh permission refresh 与最终
 identity/artifact 归一化；linked continuation 跳过 outer permission。ChildWaiting 直接返回，
 不进入 middleware、breaker、parent claim 或普通 timeout。普通工具仍在 after_call 后归一化
-最终正文并落盘。Controller 的 lifecycle/persistence/recovery 异常原样传播。
+最终正文并落盘。ACTIVE/WAITING 共用最终归一化与 `ARTIFACT_ERROR` 投影。
+Controller 的 lifecycle/persistence/recovery 异常原样传播。
 
 ```mermaid
 graph TD

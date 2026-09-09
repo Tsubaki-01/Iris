@@ -23,7 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
 from ..agents.config.subagent import load_subagent_catalog
@@ -69,6 +69,7 @@ from ..lifecycle import (
     RunToolCallRecord,
     SessionSnapshot,
     ToolCallPhase,
+    ToolErrorPolicy,
     snapshot_run,
 )
 from ..memory import MemoryService
@@ -90,9 +91,11 @@ from ..runtime._assembly import (
     assemble_runtime,
     resolve_runtime_boundary,
 )
+from ..runtime.runtime import _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
-from ..tools import CancellationSignal, PermissionPolicy
-from ._commit_port import StoreRuntimeCommitPort
+from ..tools import CancellationSignal, PermissionPolicy, ToolResult
+from ..tools.subagent import ChildWaiting, SubagentParentCall
+from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._events import _RunEventCollector
 from ._fingerprint import compute_environment_fingerprint
 from ._subagent import ChildProviderFactory, HarnessSubagentController
@@ -482,6 +485,10 @@ class AgentRunner:
             steering=steering,
         )
         port = StoreRuntimeCommitPort(
+            workspace_root=self.runtime.environment.workspace_root,
+            subagent_routes=self._subagent_controller.routes
+            if self._subagent_controller is not None
+            else None,
             store=self.store,
             run=run,
             activation_id=activation_id,
@@ -620,7 +627,17 @@ class AgentRunner:
         else:
             events = self._event_collector(durable_event_callback)
         # --- 4. rebind 新 activation 并推进 ---
-        projection = self.interaction_service.project_response(interaction, response)
+        if interaction.request.subagent_origin is not None:
+            return await self._resume_subagent_proxy(
+                parent_run=run,
+                proxy=interaction,
+                parent_checkpoint=checkpoint,
+                cursor=cursor,
+                steering=steering,
+                event_collector=events,
+                activation_started=activation_started,
+            )
+        projection = self.interaction_service.project_response(interaction)
         activation_id = f"act_{uuid.uuid4().hex}"
         begun = self.store.resume_waiting_run(
             ResumeWaitingRun(
@@ -638,16 +655,7 @@ class AgentRunner:
         if begun.checkpoint.engine_cursor != checkpoint.engine_cursor:
             raise IrisRunConflictError("rebound checkpoint cursor 与 waiting checkpoint 不匹配")
         # HITL 领域模型与 runtime 输入模型是两套边界类型，批准分支需要显式转换。
-        runtime_projection = (
-            RuntimeApprovedToolCall.model_construct(
-                interaction_id=projection.interaction_id,
-                tool_call_id=projection.tool_call_id,
-                tool_name=projection.tool_name,
-                fingerprint=projection.fingerprint,
-            )
-            if isinstance(projection, ApprovedToolCall)
-            else projection
-        )
+        runtime_projection = _runtime_interaction_projection(projection)
         active = ActiveActivation(
             run_id=run.run_id,
             activation_id=activation_id,
@@ -656,6 +664,10 @@ class AgentRunner:
             steering=steering,
         )
         port = StoreRuntimeCommitPort(
+            workspace_root=self.runtime.environment.workspace_root,
+            subagent_routes=self._subagent_controller.routes
+            if self._subagent_controller is not None
+            else None,
             store=self.store,
             run=begun.run,
             activation_id=activation_id,
@@ -677,6 +689,101 @@ class AgentRunner:
         self._register(active, begun.run.current_activation_id)
         if activation_started is not None:
             activation_started.set()
+        return await self._run_activation(active, activation=activation, port=port)
+
+    async def _resume_subagent_proxy(
+        self,
+        *,
+        parent_run: RunRecord,
+        proxy: HumanInteraction,
+        parent_checkpoint: RunCheckpoint,
+        cursor: RuntimeCursor,
+        event_collector: _RunEventCollector,
+        steering: RuntimeSteeringPort | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """Response 已 durable 后推进 child，WAITING adapter 独占 parent rebind/finalize。"""
+        controller = cast(HarnessSubagentController, self._subagent_controller)
+        if activation_started is not None:
+            activation_started.set()
+        outcome = await controller.resume_proxy(parent_run=parent_run, proxy=proxy)
+        adapter = _WaitingSubagentContinuationAdapter(
+            store=self.store,
+            interaction_service=self.interaction_service,
+            clock=self._now,
+            publish_live_fact=self._publish_live_fact,
+            event_collector=event_collector,
+            workspace_root=self.runtime.environment.workspace_root,
+            routes=controller.routes,
+        )
+        call = SubagentParentCall(parent_run.run_id, proxy.tool_call_id)
+        if isinstance(outcome, ChildWaiting):
+            rebound = adapter.rebind(
+                parent_run=parent_run, call=call, replaced_proxy=proxy, waiting=outcome
+            )
+            await self._deliver_events(event_collector.events)
+            return cast(RunResult, rebound.result)
+        result = self.runtime.environment.tool_bridge._normalize_subagent_result(
+            cursor.tool_calls[cursor.next_tool_index],
+            outcome,
+            session_id=parent_run.session_id,
+            run_id=parent_run.run_id,
+            agent_id=parent_run.agent_id,
+            workspace_root=self.runtime.environment.workspace_root,
+            permission_mode=self.runtime.environment.agent_config.permissions.writes,
+        )
+        cursor_after = _project_tool_result_cursor(cursor, result, read_state=cursor.read_state)
+        resumed = adapter.finalize(
+            parent_run=parent_run,
+            parent_checkpoint=parent_checkpoint,
+            call=call,
+            proxy=proxy,
+            result=result,
+            cursor_after=cursor_after,
+        )
+        if result.is_error and parent_run.options.runtime.tool_error_policy is ToolErrorPolicy.STOP:
+            finished = self.store.finish_run(
+                FinishRun(
+                    run_id=parent_run.run_id,
+                    expected_run_revision=resumed.run.revision,
+                    activation_id=resumed.activation_id,
+                    stop_reason=RunStopReason.FAILED,
+                    assistant_message=cursor.assistant_message,
+                    error=_tool_run_error(result),
+                    now=self._now(),
+                )
+            )
+            event_collector.record(finished.events)
+            await self._deliver_events(event_collector.events)
+            return self._require_result(parent_run.run_id)
+        active = ActiveActivation(
+            run_id=parent_run.run_id,
+            activation_id=resumed.activation_id,
+            signal=_MutableCancellationSignal(),
+            event_collector=event_collector,
+            steering=steering,
+        )
+        port = StoreRuntimeCommitPort(
+            store=self.store,
+            run=resumed.run,
+            activation_id=resumed.activation_id,
+            cursor=resumed.cursor,
+            clock=self._now,
+            event_collector=event_collector,
+            interaction_service=self.interaction_service,
+            workspace_root=self.runtime.environment.workspace_root,
+            subagent_routes=controller.routes,
+        )
+        activation = RuntimeActivationInput(
+            run_id=parent_run.run_id,
+            activation_id=resumed.activation_id,
+            session_id=parent_run.session_id,
+            kind="resume",
+            input=None,
+            cursor=resumed.cursor,
+            options=parent_run.options.runtime,
+        )
+        self._register(active, resumed.activation_id)
         return await self._run_activation(active, activation=activation, port=port)
 
     def request_cancel(
@@ -830,6 +937,15 @@ class AgentRunner:
                 events.record(self.store.list_events(run.run_id, cursor))
                 await self._deliver_events(events.events)
                 return settled
+            if (
+                interaction.status is InteractionStatus.RESOLVED
+                and interaction.request.tool_call.tool_name == "subagent"
+            ):
+                return await self._resume_managed(
+                    run.run_id,
+                    interaction_id=interaction.interaction_id,
+                    response=cast(HumanInteractionResponse, interaction.response),
+                )
             raise IrisRunStateError(
                 "waiting run 必须通过 resume 继续",
                 run_id=run.run_id,
@@ -907,6 +1023,10 @@ class AgentRunner:
             event_collector=recovered_events,
         )
         port = StoreRuntimeCommitPort(
+            workspace_root=self.runtime.environment.workspace_root,
+            subagent_routes=self._subagent_controller.routes
+            if self._subagent_controller is not None
+            else None,
             store=self.store,
             run=recovered.run,
             activation_id=new_activation_id,
@@ -920,6 +1040,9 @@ class AgentRunner:
             activation_id=new_activation_id,
             session_id=run.session_id,
             kind="recover",
+            interaction_projection=self._stored_subagent_projection(
+                recovered.run, recovered_cursor
+            ),
             # 只有 before_model/step 0 的输入尚未随 provider commit 进入 session history，
             # 需要从 durable request 重建；后续 checkpoint 再注入会造成重复输入。
             input=(
@@ -939,6 +1062,34 @@ class AgentRunner:
     #         Recovery & Settlement Helpers
     # ==========================================
     # region
+    def _stored_subagent_projection(
+        self,
+        run: RunRecord,
+        cursor: RuntimeCursor,
+    ) -> RuntimeApprovedToolCall | ToolResult | None:
+        """恢复尚无 link 的 outer gate 回答，避免生成第二个人工 gate。"""
+        if cursor.position != "tool_batch":
+            return None
+        call = cursor.tool_calls[cursor.next_tool_index]
+        if (
+            call.name != "subagent"
+            or self.store.load_subagent_link(run.run_id, call.id) is not None
+        ):
+            return None
+        record = self.store.load_tool_call(run.run_id, call.id)
+        if record is None or record.interaction_id is None:
+            return None
+        interaction = self.store.load_interaction(record.interaction_id)
+        if (
+            interaction is not None
+            and interaction.status in {InteractionStatus.RESOLVED, InteractionStatus.CLOSED}
+            and interaction.response is not None
+        ):
+            return _runtime_interaction_projection(
+                self.interaction_service.project_response(interaction)
+            )
+        return None
+
     def _validate_recovery_checkpoint(
         self,
         run: RunRecord,
@@ -1611,6 +1762,20 @@ class AgentRunner:
         return relay
 
     # endregion
+
+
+def _runtime_interaction_projection(
+    projection: ApprovedToolCall | ToolResult,
+) -> RuntimeApprovedToolCall | ToolResult:
+    """将 HITL 批准投影到 runtime 当前契约，工具结果直接复用。"""
+    if isinstance(projection, ApprovedToolCall):
+        return RuntimeApprovedToolCall.model_construct(
+            interaction_id=projection.interaction_id,
+            tool_call_id=projection.tool_call_id,
+            tool_name=projection.tool_name,
+            fingerprint=projection.fingerprint,
+        )
+    return projection
 
 
 def _build_lifecycle_store(

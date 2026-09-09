@@ -63,6 +63,7 @@ def _store_commit_port(
         )
     )
     port = StoreRuntimeCommitPort(
+        workspace_root=Path("workspace"),
         store=store,
         run=created.run,
         activation_id="activation_1",
@@ -266,6 +267,7 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
     collector = _RunEventCollector()
     collector.record(created.events)
     port = StoreRuntimeCommitPort(
+        workspace_root=Path("workspace"),
         store=owner,
         run=created.run,
         activation_id="activation_1",

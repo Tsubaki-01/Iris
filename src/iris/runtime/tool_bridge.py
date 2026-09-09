@@ -203,6 +203,35 @@ class ToolBridge:
             linked_continuation=linked_continuation,
         )
 
+    def _normalize_subagent_result(
+        self,
+        tool_use: ToolUseBlock,
+        result: ToolResult,
+        *,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ToolResult:
+        """WAITING child 完成后只归一化 parent identity/artifact，不重新执行或鉴权。"""
+        context = self._execution_context(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            metadata=metadata,
+            cancellation=None,
+        )
+        return self.tool_executor._normalize_subagent_result(
+            tool_use=tool_use,
+            tool=self.tool_view.get(tool_use.name),
+            result=result,
+            context=context,
+        )
+
     def _execution_context(
         self,
         *,

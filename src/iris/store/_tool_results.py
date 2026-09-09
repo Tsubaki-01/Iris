@@ -15,6 +15,16 @@ def is_preflight_result(result: ToolResult) -> bool:
     return (
         result.is_error
         and result.error is not None
-        and result.error.code
-        in {"NOT_FOUND", "PERMISSION_ERROR", "TOOL_NOT_ALLOWED", "VALIDATION_ERROR", "CIRCUIT_OPEN"}
+        and (
+            result.error.code
+            in {
+                "NOT_FOUND",
+                "PERMISSION_ERROR",
+                "TOOL_NOT_ALLOWED",
+                "VALIDATION_ERROR",
+                "CIRCUIT_OPEN",
+            }
+            or result.tool_name == "subagent"
+            and result.error.code in {"SUBAGENT_CONFIG_ERROR", "SUBAGENT_WORKSPACE_DISJOINT"}
+        )
     )

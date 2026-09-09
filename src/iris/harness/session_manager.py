@@ -890,6 +890,8 @@ class SessionManager:
             snapshot = self._runner.get_run(run_id)
             if snapshot.phase is not RunPhase.WAITING:
                 raise IrisRunStateError("current run 不处于 waiting phase", run_id=run_id)
+            if self._current_task is not None and not self._current_task.done():
+                raise IrisRunStateError("current run 已有 managed continuation", run_id=run_id)
             if snapshot.pending_interaction_id != interaction_id.strip():
                 raise IrisRunStateError("interaction_id 不是 current waiting interaction")
             started = asyncio.Event()

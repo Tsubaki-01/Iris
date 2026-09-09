@@ -1,14 +1,20 @@
 """真实 child Runner 与 shared-store 委派的确定性集成测试。"""
 
+import asyncio
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
 from iris.agents import AgentConfig
-from iris.exceptions import IrisRunPersistenceError, IrisRunRecoveryError
-from iris.harness import AgentRunner
-from iris.hitl import make_call_fingerprint
+from iris.exceptions import IrisRunPersistenceError, IrisRunRecoveryError, IrisRunStateError
+from iris.harness import AgentRunner, SessionManager
+from iris.hitl import (
+    InteractionStatus,
+    PermissionInteractionResponse,
+    QuestionInteractionResponse,
+    make_call_fingerprint,
+)
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -25,16 +31,553 @@ from iris.lifecycle import (
     RuntimeExecutionOptions,
     RunToolCallRecord,
     RunUsage,
+    ToolErrorPolicy,
 )
 from iris.lifecycle.store import AdmitChildRun
 from iris.message import Msg, ToolUseBlock
-from iris.runtime import RuntimeCursor, RuntimeProvider
+from iris.runtime import RuntimeCursor, RuntimeProvider, RuntimeStreamEvent
 from iris.store import SQLiteStore
 from iris.tools import PreparedToolCall, ToolResult
+from iris.tools._paths import safe_path_segment
 from iris.tools.permissions import DefaultPermissionPolicy, PermissionDecision, PermissionEffect
 from iris.tools.subagent import ChildWaiting, SubagentExecutionOutcome
 
-from .fakes import FrozenClock, StaticProvider, text_response, tool_response
+from .fakes import (
+    BlockingProvider,
+    FrozenClock,
+    RecordingPublisher,
+    StaticProvider,
+    text_response,
+    tool_response,
+)
+
+
+def _parent_provider() -> StaticProvider:
+    return StaticProvider(
+        tool_response(
+            ToolUseBlock(
+                id="delegate",
+                name="subagent",
+                input={"prompt": "Child task"},
+            )
+        ),
+        text_response("Parent complete"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_read_subagent_batch_keeps_serial_order(tmp_path: Path) -> None:
+    path = _write_configs(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("tools:\n", "tools:\n  builtin: [file.read]\n"),
+        encoding="utf-8",
+    )
+    (tmp_path / "notes.txt").write_text("Notes", encoding="utf-8")
+    from .fakes import tool_batch_response
+
+    child = BlockingProvider(text_response("Child answer"))
+    runner = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(
+            tool_batch_response(
+                ToolUseBlock(id="before", name="read_file", input={"file_path": "notes.txt"}),
+                ToolUseBlock(id="delegate", name="subagent", input={"prompt": "Read the task"}),
+                ToolUseBlock(id="after", name="read_file", input={"file_path": "notes.txt"}),
+            ),
+            text_response("Parent done"),
+        ),
+        child_provider_factory=ChildProviders(child),
+    )
+    task = asyncio.create_task(runner.start(AgentRunRequest(input="Start", run_id="parent")))
+    try:
+        await asyncio.wait_for(child.started.wait(), timeout=1)
+        calls = runner.store.list_tool_calls("parent")
+        assert [call.phase.value for call in calls] == ["committed", "prepared", "prepared"]
+        assert calls[1].claim_activation_id is None
+    finally:
+        child.release.set()
+    completed = await task
+    assert completed.run.usage.tool_calls_committed == 3
+    assert [call.tool_call_id for call in runner.store.list_tool_calls("parent")] == [
+        "before",
+        "delegate",
+        "after",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_parent_loop_commits_child_result_once(tmp_path: Path) -> None:
+    parent_provider = _parent_provider()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=parent_provider,
+        child_provider_factory=ChildProviders(StaticProvider(text_response("Child answer"))),
+    )
+    result = await runner.start(
+        AgentRunRequest(input="Start", run_id="parent", session_id="parent-session")
+    )
+    assert result.run.stop_reason == RunStopReason.COMPLETED
+    assert result.assistant_message.text == "Parent complete"
+    call = runner.store.load_tool_call("parent", "delegate")
+    assert call.phase.value == "committed" and call.claim_activation_id is None
+    assert call.result.model_content == "Child answer"
+    assert result.run.usage.tool_calls_committed == 1
+    assert result.run.usage.total_tokens == 13
+    assert runner.store.load_run(call.result.metadata["child_run_id"]).usage.total_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_subagent_unadmitted_config_error_is_committed_without_claim(tmp_path: Path) -> None:
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=StaticProvider(
+            tool_response(
+                ToolUseBlock(
+                    id="delegate", name="subagent", input={"prompt": "x", "agent": "broken"}
+                )
+            ),
+            text_response("Config unavailable"),
+        ),
+    )
+    result = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    assert result.run.stop_reason == RunStopReason.COMPLETED
+    call = runner.store.load_tool_call("parent", "delegate")
+    assert call.result.error.code == "SUBAGENT_CONFIG_ERROR"
+    assert call.claim_activation_id is None
+    assert runner.store.load_subagent_link("parent", "delegate") is None
+
+
+@pytest.mark.asyncio
+async def test_subagent_repeated_waiting_rebinds_proxy_without_advancing_parent_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_provider = StaticProvider(
+        tool_response(ToolUseBlock(id="ask-1", name="ask_question", input={"question": "First?"})),
+        tool_response(ToolUseBlock(id="ask-2", name="ask_question", input={"question": "Second?"})),
+        text_response("Child done"),
+    )
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        child_provider_factory=ChildProviders(child_provider),
+    )
+    first = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    resume_waiting = runner.store.resume_waiting_run
+
+    def child_only_resume(command: object) -> object:
+        assert command.run_id != "parent"
+        return resume_waiting(command)
+
+    monkeypatch.setattr(runner.store, "resume_waiting_run", child_only_resume)
+    assert first.run.phase == RunPhase.WAITING
+    first_proxy = first.pending_interaction
+    assert first_proxy.run_id == "parent" and first_proxy.tool_call_id == "delegate"
+    child_id = first_proxy.request.subagent_origin.child_run_id
+    checkpoint = runner.store.load_checkpoint("parent")
+    assert runner.store.load_tool_call("parent", "delegate").phase.value == "prepared"
+    second = await runner.resume(
+        "parent",
+        interaction_id=first_proxy.interaction_id,
+        response=QuestionInteractionResponse(answer="One"),
+    )
+    assert second.run.phase == RunPhase.WAITING
+    assert second.pending_interaction.interaction_id != first_proxy.interaction_id
+    assert second.pending_interaction.request.subagent_origin.child_run_id == child_id
+    assert runner.store.load_checkpoint("parent").engine_cursor == checkpoint.engine_cursor
+    assert second.run.usage == first.run.usage
+    assert (
+        runner.store.load_interaction(first_proxy.interaction_id).status == InteractionStatus.CLOSED
+    )
+    completed = await runner.resume(
+        "parent",
+        interaction_id=second.pending_interaction.interaction_id,
+        response=QuestionInteractionResponse(answer="Two"),
+    )
+    assert completed.run.stop_reason == RunStopReason.COMPLETED
+    assert completed.assistant_message.text == "Parent complete"
+    assert completed.run.usage.tool_calls_committed == 1
+    assert runner.store.load_tool_call("parent", "delegate").result.model_content == "Child done"
+    assert runner.store.load_run(child_id).usage.tool_calls_committed == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nondefault,drift", [(False, False), (True, False), (True, True)])
+async def test_recover_resolved_proxy_uses_stored_response_and_same_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nondefault: bool,
+    drift: bool,
+) -> None:
+    from iris.harness._subagent import HarnessSubagentController
+
+    path = _write_configs(tmp_path)
+    if nondefault:
+        (tmp_path / "broken.yaml").write_text(
+            (tmp_path / "child.yaml").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    parent_provider = StaticProvider(
+        tool_response(
+            ToolUseBlock(
+                id="delegate",
+                name="subagent",
+                input={"prompt": "Child task", **({"agent": "broken"} if nondefault else {})},
+            )
+        )
+    )
+    db = tmp_path / "state.db"
+    runner = AgentRunner.from_config_path(
+        path,
+        provider=parent_provider,
+        store=SQLiteStore(db),
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(
+                        id="ask",
+                        name="ask_question",
+                        input={"question": "Which?"},
+                    )
+                )
+            )
+        ),
+    )
+    first = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    proxy = first.pending_interaction
+    child_id = proxy.request.subagent_origin.child_run_id
+
+    async def stop_before_child(
+        self: HarnessSubagentController, **kwargs: object
+    ) -> SubagentExecutionOutcome:
+        raise IrisRunPersistenceError("process stopped after response")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(HarnessSubagentController, "resume_proxy", stop_before_child)
+        with pytest.raises(IrisRunPersistenceError):
+            await runner.resume(
+                "parent",
+                interaction_id=proxy.interaction_id,
+                response=QuestionInteractionResponse(answer="Stored answer"),
+            )
+    saved = runner.store.load_interaction(proxy.interaction_id)
+    assert saved.status == InteractionStatus.RESOLVED
+    assert saved.response.answer == "Stored answer"
+    child_interaction = runner.store.load_interaction(
+        proxy.request.subagent_origin.child_interaction_id
+    )
+    assert child_interaction.status == InteractionStatus.PENDING
+    if drift:
+        catalog = tmp_path / "subagents.yaml"
+        catalog.write_text(
+            catalog.read_text(encoding="utf-8").replace("default: researcher", "default: broken"),
+            encoding="utf-8",
+        )
+    factory = ChildProviders(StaticProvider(text_response("Child resumed")))
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(text_response("Parent recovered")),
+        store=SQLiteStore(db),
+        child_provider_factory=factory,
+    )
+    if drift:
+        with pytest.raises(IrisRunRecoveryError):
+            await restarted.recover("parent")
+        assert factory.configs == []
+        return
+    completed = await restarted.recover("parent")
+    assert factory.configs[0][1] == tmp_path / ("broken.yaml" if nondefault else "child.yaml")
+    assert completed.assistant_message.text == "Parent recovered"
+    assert restarted.store.load_subagent_link("parent", "delegate").child_run_id == child_id
+    assert (
+        restarted.store.load_tool_call("parent", "delegate").result.model_content == "Child resumed"
+    )
+    assert (
+        restarted.store.load_interaction(child_interaction.interaction_id).response.answer
+        == "Stored answer"
+    )
+
+
+class RecordingPermissionPolicy(DefaultPermissionPolicy):
+    """记录 outer/actual tool，并支持在已有批准后改变执行裁决。"""
+
+    def __init__(self, gated_tool: str) -> None:
+        self.gated_tool = gated_tool
+        self.effect = PermissionEffect.REQUIRE_HUMAN
+        self.calls: list[str] = []
+
+    def check(self, tool: object, params: object, context: object) -> PermissionDecision:
+        self.calls.append(tool.name)
+        return PermissionDecision(
+            effect=self.effect if tool.name == self.gated_tool else PermissionEffect.ALLOW,
+            reason="Confirm selected tool",
+        )
+
+    def fingerprint_payload(self) -> dict[str, object]:
+        return {"type": "recording", "gated_tool": self.gated_tool}
+
+
+@pytest.mark.asyncio
+async def test_permission_proxy_keeps_actual_refresh_without_repeating_outer_gate(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "notes.txt").write_text("Selected notes", encoding="utf-8")
+    policy = RecordingPermissionPolicy("read_file")
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        permission_policy=policy,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="read", name="read_file", input={"file_path": "notes.txt"})
+                ),
+                text_response("Child read notes"),
+            )
+        ),
+    )
+    waiting = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    proxy = waiting.pending_interaction
+    assert proxy.request.prompt.kind.value == "permission"
+    assert policy.calls == ["subagent", "subagent", "read_file"]
+    completed = await runner.resume(
+        "parent",
+        interaction_id=proxy.interaction_id,
+        response=PermissionInteractionResponse(decision="approve"),
+    )
+    assert completed.run.stop_reason == RunStopReason.COMPLETED
+    assert policy.calls == ["subagent", "subagent", "read_file", "read_file", "read_file"]
+    child_id = proxy.request.subagent_origin.child_run_id
+    assert not runner.store.load_tool_call(child_id, "read").result.is_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("closed", [False, True])
+@pytest.mark.parametrize(
+    "decision,deny", [("approve", False), ("approve", True), ("reject", False)]
+)
+async def test_recover_stored_outer_response_preserves_fresh_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closed: bool, decision: str, deny: bool
+) -> None:
+    path = _write_configs(tmp_path)
+    policy = RecordingPermissionPolicy("subagent")
+    runner = AgentRunner.from_config_path(
+        path, provider=_parent_provider(), permission_policy=policy
+    )
+    waiting = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    assert runner.store.load_subagent_link("parent", "delegate") is None
+
+    async def stop_activation(*args: object, **kwargs: object) -> RunResult:
+        raise IrisRunPersistenceError("process stopped after closing outer gate")
+
+    def stop_begin(*args: object, **kwargs: object) -> object:
+        raise IrisRunPersistenceError("process stopped after resolving outer gate")
+
+    with monkeypatch.context() as patch:
+        if closed:
+            patch.setattr(runner, "_run_activation", stop_activation)
+        else:
+            patch.setattr(runner.store, "resume_waiting_run", stop_begin)
+        with pytest.raises(IrisRunPersistenceError):
+            await runner.resume(
+                "parent",
+                interaction_id=waiting.pending_interaction.interaction_id,
+                response=PermissionInteractionResponse(decision=decision),
+            )
+    policy.calls.clear()
+    if deny:
+        policy.effect = PermissionEffect.DENY
+    factory = ChildProviders(StaticProvider(text_response("Admitted child")))
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(text_response("Parent recovered")),
+        store=runner.store,
+        permission_policy=policy,
+        child_provider_factory=factory,
+    )
+    run = restarted.store.load_run("parent")
+    completed = await restarted.recover(
+        "parent", expected_activation_id=run.current_activation_id if closed else None
+    )
+    assert completed.run.stop_reason == RunStopReason.COMPLETED
+    admitted = decision == "approve" and not deny
+    assert (restarted.store.load_subagent_link("parent", "delegate") is not None) == admitted
+    assert policy.calls == ([] if decision == "reject" else ["subagent"])
+    assert len(factory.configs) == int(admitted)
+    if not admitted:
+        assert restarted.store.load_tool_call("parent", "delegate").result.error.code == (
+            "USER_REJECTED" if decision == "reject" else "PERMISSION_ERROR"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_phase", ["active", "waiting", "terminal"])
+async def test_parent_active_recovery_reuses_linked_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, child_phase: str
+) -> None:
+    path = _write_configs(tmp_path)
+    provider = StaticProvider(
+        tool_response(ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"}))
+        if child_phase == "waiting"
+        else text_response("Original child")
+    )
+    runner = AgentRunner.from_config_path(
+        path, provider=StaticProvider(), child_provider_factory=ChildProviders(provider)
+    )
+    prepared = _prepare_parent(runner)
+
+    async def stop_after_admission(*args: object, **kwargs: object) -> RunResult:
+        raise IrisRunPersistenceError("process stopped after admission")
+
+    if child_phase == "active":
+        with monkeypatch.context() as patch:
+            patch.setattr(AgentRunner, "_run_admitted_start", stop_after_admission)
+            with pytest.raises(IrisRunPersistenceError):
+                await _dispatch(runner, prepared)
+    else:
+        await _dispatch(runner, prepared)
+    link = runner.store.load_subagent_link("parent", "delegate")
+    assert runner.store.load_run(link.child_run_id).phase.value == child_phase
+    policy = RecordingPermissionPolicy("subagent")
+    policy.effect = PermissionEffect.DENY
+    # 保持原 policy fingerprint，运行时裁决可收紧但 linked call 不再次询问 outer。
+    restarted = AgentRunner.from_config_path(
+        path,
+        provider=StaticProvider(text_response("Parent recovered")),
+        store=runner.store,
+        child_provider_factory=ChildProviders(StaticProvider(text_response("Recovered child"))),
+    )
+    monkeypatch.setattr(
+        restarted.runtime.environment.tool_bridge.tool_executor.permission_policy,
+        "check",
+        policy.check,
+    )
+    result = await restarted.recover(
+        "parent", expected_activation_id=runner.store.load_run("parent").current_activation_id
+    )
+    assert restarted.store.load_subagent_link("parent", "delegate") == link
+    assert policy.calls == []
+    if child_phase == "waiting":
+        assert result.run.phase == RunPhase.WAITING
+        assert result.pending_interaction.request.subagent_origin.child_run_id == link.child_run_id
+        with pytest.raises(IrisRunStateError, match="resume"):
+            await restarted.recover("parent")
+    else:
+        assert result.run.stop_reason == RunStopReason.COMPLETED
+        assert result.run.usage.tool_calls_committed == 1
+        assert await restarted.recover("parent") == result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "child", "artifact"])
+async def test_waiting_final_uses_parent_artifact_and_publishes_before_continuing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    provider = _parent_provider()
+    child_text = "Long child answer " * 3000
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=provider,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                ),
+                text_response(child_text),
+            )
+        ),
+    )
+    waiting = await runner.start(
+        AgentRunRequest(input="Start", run_id="parent", session_id="parent-session"),
+        options=AgentRunOptions(
+            runtime=RuntimeExecutionOptions(tool_error_policy=ToolErrorPolicy.STOP)
+        ),
+    )
+    old_activation = runner.store.load_checkpoint("parent").activation_id
+    publisher = RecordingPublisher()
+    # 仅接收 continuation 发布；无需让无 streaming 的测试 provider 改走 streaming。
+    monkeypatch.setattr(runner, "_publish_live_fact", publisher.publish)
+    original = provider.complete
+
+    async def assert_final_before_model(request: object) -> object:
+        assert any(
+            isinstance(fact, RuntimeStreamEvent) and fact.kind == "tool.completed"
+            for fact in publisher.facts
+        )
+        return await original(request)
+
+    monkeypatch.setattr(provider, "complete", assert_final_before_model)
+    if failure == "child":
+        child_id = waiting.pending_interaction.request.subagent_origin.child_run_id
+        child = runner._subagent_controller._assemble_child(
+            runner._subagent_controller.routes.routes["researcher"]
+        )
+        child.request_cancel(child_id)
+    elif failure == "artifact":
+        (tmp_path / ".iris" / "tool-results").parent.mkdir(exist_ok=True)
+        (tmp_path / ".iris" / "tool-results").write_text(
+            "A file occupies the artifact directory", encoding="utf-8"
+        )
+    completed = await runner.resume(
+        "parent",
+        interaction_id=waiting.pending_interaction.interaction_id,
+        response=QuestionInteractionResponse(answer="Continue"),
+    )
+    final = [
+        fact
+        for fact in publisher.facts
+        if isinstance(fact, RuntimeStreamEvent) and fact.kind == "tool.completed"
+    ]
+    assert len(final) == 1 and final[0].activation_id == old_activation
+    assert final[0].run_id == "parent" and final[0].tool_call_id == "delegate"
+    call = runner.store.load_tool_call("parent", "delegate")
+    if failure is not None:
+        assert completed.run.stop_reason == RunStopReason.FAILED
+        assert len(provider.requests) == 1
+        assert call.result.error.code == (
+            "SUBAGENT_CANCELLED" if failure == "child" else "ARTIFACT_ERROR"
+        )
+    else:
+        assert completed.run.stop_reason == RunStopReason.COMPLETED
+        assert call.result.artifact.path.read_text(encoding="utf-8") == child_text
+        assert call.result.artifact.path.is_relative_to(
+            tmp_path / ".iris" / "tool-results" / safe_path_segment("parent-session")
+        )
+    assert call.result.tool_use_id == "delegate" and call.claim_activation_id is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_managed_admission_releases_lock_and_rejects_second_response(
+    tmp_path: Path,
+) -> None:
+    child_factory = ChildProviders(
+        StaticProvider(
+            tool_response(
+                ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+            )
+        )
+    )
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path), provider=_parent_provider(), child_provider_factory=child_factory
+    )
+    manager = SessionManager(runner, "managed-session")
+    receipt = await manager.submit("Start")
+    await asyncio.wait_for(asyncio.shield(manager._current_task), timeout=2)
+    proxy = runner.store.load_result(receipt.run_id).pending_interaction
+    blocker = BlockingProvider(text_response("Child complete"))
+    child_factory.provider = blocker
+    try:
+        response = QuestionInteractionResponse(answer="Continue")
+        admitted = await asyncio.wait_for(
+            manager.admit_resume(interaction_id=proxy.interaction_id, response=response), timeout=1
+        )
+        assert admitted.run_id == receipt.run_id
+        await asyncio.wait_for(blocker.started.wait(), timeout=1)
+        assert not manager._lock.locked()
+        with pytest.raises(IrisRunStateError, match="managed continuation"):
+            await manager.admit_resume(interaction_id=proxy.interaction_id, response=response)
+    finally:
+        blocker.release.set()
+        await manager.close()
 
 
 def _write_configs(tmp_path: Path) -> Path:

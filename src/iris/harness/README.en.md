@@ -35,8 +35,19 @@ the runner reads one route snapshot and assembles an internal controller. The se
 ordinary AgentConfig, independent session/run IDs, fresh `AgentRunOptions()`, empty request
 metadata, no memory service, and the parent's store/clock. CHILD excludes subagent. Linked ACTIVE
 runs continue through ordinary recovery; WAITING/TERMINAL paths read the existing result. Dedicated
-execution currently returns `ToolResult | ChildWaiting` while the parent tool stays PREPARED;
-parent-loop proxy and final-result commits are not yet connected.
+execution creates a parent proxy when the child waits, keeping the tool PREPARED. The host submits
+answers only to parent `resume()`: the response becomes durable before the exact child continues.
+Another wait replaces the proxy; terminal finalization advances the parent cursor once, applying
+parent identity, artifact handling, and tool error policy.
+
+After a crash following response persistence, `recover(parent_run_id)` continues a RESOLVED proxy
+or outer permission from the stored response. Ordinary PENDING waits still require `resume()`;
+ACTIVE recovery still requires its activation fence. A fresh process uses the durable selector
+against its catalog snapshot and retains ordinary parent/child fingerprint checks. Linked calls
+skip outer permission; stored approval without admission still requires execution refresh.
+Successful WAITING finalization publishes `tool.completed` with the original tool activation before
+running the fresh RESUME activation. SessionManager admits resume before the first child await and
+rejects concurrent answers.
 
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.

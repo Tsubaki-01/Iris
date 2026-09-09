@@ -33,8 +33,16 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 runner 读取一次路由快照并装配内部 controller。Selected child 使用普通 AgentConfig、独立
 session/run、fresh `AgentRunOptions()`、空 request metadata、无 memory service，并共享 parent
 store/clock。Child 不注册 subagent；linked ACTIVE 通过 ordinary recover 继续原 child，
-WAITING/TERMINAL 只读原结果。专用执行当前返回 `ToolResult | ChildWaiting`，parent 工具仍为
-PREPARED；parent loop 的 proxy 与最终结果提交尚未接入。
+WAITING/TERMINAL 只读原结果。Child 等待时创建 parent proxy，工具保持 PREPARED。Host 只向
+parent `resume()` 提交回答；回答先持久化，再继续 exact child。再次等待只替换 proxy，最终结果
+通过单次 finalize 推进 parent cursor，使用 parent identity/artifact 与 tool error policy。
+
+回答已持久化但推进中断时，`recover(parent_run_id)` 从 RESOLVED proxy 或 outer permission
+恢复；普通 PENDING waiting 仍需 `resume()`。ACTIVE recovery 仍要求 activation fence。
+新进程按 durable selector 取当前 catalog 快照，保留普通 parent/child fingerprint 检查。
+Linked continuation 不重复 outer permission；未 admission 的存储批准仍执行 permission refresh。
+WAITING finalize 成功后先发布原工具 activation 的 `tool.completed`，再执行 fresh RESUME
+activation。SessionManager 在第一次 child await 前完成 resume admission，并拒绝并行回答。
 
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
