@@ -8,6 +8,11 @@
 
 ## 架构
 
+`tools.subagent: subagents.yaml` 可声明内部 Sub Agent catalog，默认不启用。
+路径相对 parent YAML；catalog 的 `default` 必须命中 `agents` 的 exact kebab-case key，
+每个 entry 包含相对 catalog 的 `path` 和非空 `description`。内部 loader 只读取 catalog、
+冻结路由，不加载 child YAML。`build_tool_registry()` 仍只处理 builtin/Python 工具。
+
 ```mermaid
 flowchart LR
     YAML["agent.yaml"] --> Loader["load_agent_config"]

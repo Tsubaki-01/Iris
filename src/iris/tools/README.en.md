@@ -8,6 +8,12 @@ normalization, large-output artifacts, middleware, and circuit breaking.
 
 ## Architecture
 
+Internal `subagent.py` defines the fixed `subagent(prompt, agent?)` schema and immutable routes.
+`agent` selects an exact catalog key, defaulting to the catalog default; `prompt` is trimmed and
+must be nonblank. `SubagentTool.execute_subagent()` returns `ToolResult | ChildWaiting` through
+a narrow port. Direct `arun()` raises `IrisToolExecutionError`; ordinary `BaseTool.arun()` retains
+its terminal `ToolResult` contract.
+
 ```mermaid
 flowchart TD
     Source["callable / BaseTool"] --> Definition["ToolDefinition + input_schema"]

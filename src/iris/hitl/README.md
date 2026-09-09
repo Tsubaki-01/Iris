@@ -15,6 +15,9 @@ interaction facts 由同一个 `LifecycleStore` 与 run aggregate 一起提交�
 - `HumanInteraction`：`pending | resolved | closed` 状态、version 与时间事实；
 - `ApprovedToolCall`：批准后传给 engine 的 exact projection。
 
+内部 `models.SubagentExpiryOwner` 统一命名 parent deadline/interaction timeout、child
+interaction expiry/effective deadline 与 outer tool timeout，供跨包等待结果引用。
+
 字段 parsing 先产生完整 typed request；`HumanInteraction` 的 model-level 校验随后只比较
 `tool_call_id`、request subject 和 lifecycle delta，不重复防御必填字段缺失。
 

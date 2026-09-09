@@ -34,6 +34,16 @@ class InteractionStatus(StrEnum):
     CLOSED = "closed"
 
 
+class SubagentExpiryOwner(StrEnum):
+    """Sub Agent proxy 最早到期期限的归属。"""
+
+    PARENT_RUN_DEADLINE = "parent_run_deadline"
+    PARENT_INTERACTION_TIMEOUT = "parent_interaction_timeout"
+    CHILD_INTERACTION_EXPIRY = "child_interaction_expiry"
+    CHILD_EFFECTIVE_DEADLINE = "child_effective_deadline"
+    OUTER_TOOL_TIMEOUT = "outer_tool_timeout"
+
+
 def _new_interaction_id() -> str:
     return f"int_{uuid.uuid4().hex}"
 
