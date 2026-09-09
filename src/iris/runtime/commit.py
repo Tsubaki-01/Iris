@@ -15,8 +15,10 @@ from typing import Protocol
 from ..exceptions import IrisRunConflictError, IrisRunStateError
 from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerprint
 from ..lifecycle import CheckpointResumability, SessionSnapshot
+from ..lifecycle.models import SubagentRunLink
 from ..message import Msg
 from ..tools import PreparedToolCall, ToolEffectGuard, ToolResult
+from ..tools.subagent import ChildWaiting, SubagentParentCall
 from .models import RuntimeActivationInput, RuntimeCursor
 
 # endregion
@@ -131,6 +133,27 @@ class RuntimeCommitPort(Protocol):
 
     def suspend(self, suspension: RuntimeSuspension) -> RuntimeSuspensionResult:
         """原子提交模型事实并结束当前 activation 为 waiting。"""
+
+    def load_subagent_link(self, *, tool_call_id: str) -> SubagentRunLink | None:
+        """按绑定 parent run 与工具 ID 点查 link。"""
+
+    def rebind_subagent_proxy(
+        self,
+        *,
+        call: SubagentParentCall,
+        waiting: ChildWaiting,
+        cursor: RuntimeCursor,
+    ) -> RuntimeSuspensionResult:
+        """保持当前工具未提交并原子挂起 parent。"""
+
+    def finalize_subagent_result(
+        self,
+        *,
+        call: SubagentParentCall,
+        result: ToolResult,
+        cursor_after: RuntimeCursor,
+    ) -> RuntimeCursor:
+        """Child terminal 后原子提交 parent 工具结果与 cursor。"""
 
     def cancellation_requested(self) -> bool:
         """读取 logical run 的 durable cancellation request。"""

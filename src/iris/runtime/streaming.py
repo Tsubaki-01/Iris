@@ -41,7 +41,7 @@ class RuntimeStreamEvent:
         kind (str): Runtime fact 类型。
         run_id (str): Logical run identity。
         session_id (str): Session identity。
-        activation_id (str): 当前 activation identity。
+        activation_id (str): 事件所属 activation；completed 可描述上一 activation 创建的工具。
         step_index (int): 当前 model step。
         model_event (ModelStreamEvent | None): Provider-neutral model event。
         tool_call_id (str | None): Tool call identity。
@@ -76,7 +76,9 @@ class RuntimeEventSink(Protocol):
 def _runtime_stream_event(
     kind: _RuntimeStreamEventKind,
     *,
-    activation: RuntimeActivationInput,
+    run_id: str,
+    session_id: str,
+    activation_id: str,
     step_index: int,
     model_event: ModelStreamEvent | None = None,
     tool_call_id: str | None = None,
@@ -87,9 +89,9 @@ def _runtime_stream_event(
     """从 trusted runtime objects 构造唯一的 live event 形状。"""
     return RuntimeStreamEvent(
         kind=kind,
-        run_id=activation.run_id,
-        session_id=activation.session_id,
-        activation_id=activation.activation_id,
+        run_id=run_id,
+        session_id=session_id,
+        activation_id=activation_id,
         step_index=step_index,
         model_event=model_event,
         tool_call_id=tool_call_id,
@@ -123,7 +125,9 @@ class _LiveToolEffectGuard:
         self._sink.emit(
             _runtime_stream_event(
                 "tool.started",
-                activation=self._activation,
+                run_id=self._activation.run_id,
+                session_id=self._activation.session_id,
+                activation_id=self._activation.activation_id,
                 step_index=self._step_index,
                 tool_call_id=prepared.tool_use.id,
                 tool_name=prepared.tool_use.name,

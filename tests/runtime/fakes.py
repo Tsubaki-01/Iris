@@ -11,7 +11,9 @@ from iris.hitl import (
     PermissionPrompt,
     QuestionPrompt,
 )
+from iris.hitl.models import HumanInteractionRequest, SubagentProxyOrigin, ToolCallSnapshot
 from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
+from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
 from iris.runtime import (
@@ -41,6 +43,7 @@ from iris.tools import (
     ToolRegistryView,
     ToolResult,
 )
+from iris.tools.subagent import ChildWaiting, SubagentParentCall
 
 
 class MutableCancellationSignal:
@@ -124,6 +127,9 @@ class FakeRuntimeCommitPort:
         self._outstanding_reservation: RuntimeCursor | None = None
         self._prepared_calls: dict[str, RuntimeToolCall] = {}
         self._interaction_kinds: dict[str, str] = {}
+        self.subagent_links: dict[str, SubagentRunLink] = {}
+        self.subagent_rebinds: list[ChildWaiting] = []
+        self.subagent_finalizations: list[ToolResult] = []
 
     def load_session(self) -> SessionSnapshot:
         """返回当前 revisioned history。"""
@@ -239,6 +245,62 @@ class FakeRuntimeCommitPort:
         """返回 durable cancellation request。"""
         self._record("cancellation_requested")
         return self.cancel_requested
+
+    def load_subagent_link(self, *, tool_call_id: str) -> SubagentRunLink | None:
+        """读取测试设置的 exact child link。"""
+        return self.subagent_links.get(tool_call_id)
+
+    def rebind_subagent_proxy(
+        self,
+        *,
+        call: SubagentParentCall,
+        waiting: ChildWaiting,
+        cursor: RuntimeCursor,
+    ) -> RuntimeSuspensionResult:
+        """记录专用 rebind 并返回 parent proxy，不推进 cursor。"""
+        self._record("rebind_subagent_proxy")
+        self._require_cursor(cursor)
+        tool = self._prepared_calls[call.parent_tool_call_id]
+        self.subagent_rebinds.append(waiting)
+        proxy = HumanInteraction(
+            run_id=call.parent_run_id,
+            session_id=self.activation.session_id,
+            step_index=tool.step_index,
+            tool_call_id=tool.tool_call_id,
+            expires_at=waiting.proxy_expires_at,
+            request=HumanInteractionRequest(
+                tool_call=ToolCallSnapshot(
+                    tool_call_id=tool.tool_call_id,
+                    tool_name=tool.tool_name,
+                    arguments=tool.arguments,
+                    fingerprint=tool.fingerprint,
+                    workspace_root="workspace",
+                ),
+                prompt=waiting.child_interaction.request.prompt,
+                subagent_origin=SubagentProxyOrigin(
+                    child_run_id=waiting.child_run_id,
+                    child_interaction_id=waiting.child_interaction.interaction_id,
+                    agent_selector=tool.arguments.get("agent") or "child",
+                    expiry_owner=waiting.expiry_owner,
+                ),
+            ),
+        )
+        return RuntimeSuspensionResult(cursor=cursor, interaction=proxy)
+
+    def finalize_subagent_result(
+        self,
+        *,
+        call: SubagentParentCall,
+        result: ToolResult,
+        cursor_after: RuntimeCursor,
+    ) -> RuntimeCursor:
+        """记录 child final 并提交唯一 parent message。"""
+        self._record("finalize_subagent_result")
+        self.subagent_finalizations.append(result)
+        self.messages.append(result.to_msg())
+        self.cursor = cursor_after
+        self._revision += 1
+        return self.cursor
 
     def remaining_deadline_seconds(self) -> float | None:
         """返回测试配置的剩余 deadline。"""

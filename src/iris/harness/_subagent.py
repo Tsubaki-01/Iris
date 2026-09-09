@@ -8,8 +8,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
-from ..exceptions import IrisConfigError, IrisRunNotFoundError, IrisRunStateError
-from ..hitl.models import SubagentExpiryOwner
+from ..exceptions import (
+    IrisConfigError,
+    IrisRunConflictError,
+    IrisRunNotFoundError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
+)
+from ..hitl.models import (
+    HumanInteraction,
+    HumanInteractionResponse,
+    InteractionStatus,
+    SubagentExpiryOwner,
+    SubagentProxyOrigin,
+)
 from ..lifecycle.models import (
     AgentRunOptions,
     AgentRunRequest,
@@ -143,6 +155,43 @@ class HarnessSubagentController:
             boundary=boundary,
         )
         return AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
+
+    async def resume_proxy(
+        self,
+        *,
+        parent_run: RunRecord,
+        proxy: HumanInteraction,
+    ) -> SubagentExecutionOutcome:
+        """从已保存 response 和 durable selector 继续原 child，不重新 admission。"""
+        origin = cast(SubagentProxyOrigin, proxy.request.subagent_origin)
+        link = self.store.load_subagent_link(parent_run.run_id, proxy.tool_call_id)
+        if link is None or link.child_run_id != origin.child_run_id:
+            raise IrisRunConflictError("proxy 与 exact child link 不匹配")
+        route = self.routes.routes.get(origin.agent_selector)
+        if route is None:
+            raise IrisRunRecoveryError(
+                "proxy selector 不在当前 catalog", selector=origin.agent_selector
+            )
+        child = self._load_run(link.child_run_id)
+        if child.phase is RunPhase.WAITING:
+            if child.pending_interaction_id == origin.child_interaction_id:
+                runner = self._assemble_child(route)
+                result = await runner.resume(
+                    child.run_id,
+                    interaction_id=origin.child_interaction_id,
+                    response=cast(HumanInteractionResponse, proxy.response),
+                )
+                return self._project_outcome(
+                    route.selector, parent_run, self._load_run(child.run_id), result
+                )
+            previous = self.store.load_interaction(origin.child_interaction_id)
+            if (
+                previous is None
+                or previous.status is not InteractionStatus.CLOSED
+                or previous.response != proxy.response
+            ):
+                raise IrisRunConflictError("child 当前 interaction 无法由 proxy response 解释")
+        return await self._continue_linked(route, parent_run, child.run_id)
 
     async def _continue_linked(
         self, route: SubagentRoute, parent: RunRecord, child_run_id: str

@@ -165,7 +165,11 @@ runtime does not consume a late result after cancellation.
 Internal Sub Agent adapters on `ToolBridge` provide raw-only continuation preparation and dedicated
 execution. The bridge alone builds `SubagentParentCall` from the existing run/call IDs. They neither
 read the store nor add context identity or change ordinary file read state; the lifecycle caller
-owns parent-loop integration.
+owns parent-loop integration. Before either batch preflight, runtime checks exact links or stored
+outer responses and prepares those calls without permission checks while preserving model order.
+Subagent remains a serial boundary under existing concurrency rules. Linked WAITING/terminal
+outcomes use commit-port rebind/finalize without a parent effect claim. ACTIVE and WAITING paths
+share tool-result cursor projection; WAITING delegates only final result normalization.
 
 Internal `_assembly.py` assembles context, skills, providers, and tools. ROOT registers `subagent`
 only with a preloaded routes/port bundle; CHILD always excludes it. The boundary resolver selects

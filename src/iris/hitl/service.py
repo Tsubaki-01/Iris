@@ -86,16 +86,36 @@ class HumanInteractionService:
         if interaction.status is InteractionStatus.RESOLVED and interaction.response != response:
             raise HITLConflictError("interaction 已由不同 response 解决")
 
+    def create_subagent_proxy(
+        self,
+        request: HumanInteractionRequest,
+        *,
+        parent: RunSnapshot,
+        step_index: int,
+        expires_at: datetime | None,
+    ) -> HumanInteraction:
+        """投影 typed parent/child facts；ACTIVE/WAITING delta 由 store 独占检查。"""
+        return HumanInteraction.model_construct(
+            session_id=parent.session_id,
+            run_id=parent.run_id,
+            step_index=step_index,
+            tool_call_id=request.tool_call.tool_call_id,
+            request=request,
+            created_at=parent.updated_at,
+            expires_at=expires_at,
+        )
+
     def project_response(
         self,
         interaction: HumanInteraction,
-        response: HumanInteractionResponse,
     ) -> ToolResult | ApprovedToolCall:
-        """把 resolved response 投影为无副作用结果或精确批准 DTO。"""
-        if interaction.status is not InteractionStatus.RESOLVED or interaction.response is None:
-            raise IrisRunStateError("只有 resolved interaction 可以投影 response")
-        if interaction.response != response or response.kind != interaction.request.prompt.kind:
-            raise HITLResponseMismatchError("response 与 resolved interaction 不匹配")
+        """仅从已保存的 RESOLVED/CLOSED response 投影结果，不接收第二份回答。"""
+        if (
+            interaction.status not in {InteractionStatus.RESOLVED, InteractionStatus.CLOSED}
+            or interaction.response is None
+        ):
+            raise IrisRunStateError("只有已回答的 resolved/closed interaction 可以投影 response")
+        response = interaction.response
         subject = interaction.request.tool_call
         if isinstance(response, QuestionInteractionResponse):
             return ToolResult(

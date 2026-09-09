@@ -32,9 +32,10 @@ have been removed.
 
 ## Stateless service
 
-`HumanInteractionService` only constructs a pending value, validates a response against exact
-run/interaction/environment facts, and projects the response to either `ToolResult` or
-`ApprovedToolCall`. It performs no persistence. Harness uses lifecycle commands, including
+`HumanInteractionService` constructs pending values and typed child proxies, validates responses
+against exact run/interaction/environment facts, and projects a stored response to `ToolResult` or
+`ApprovedToolCall`. `project_response(interaction)` reads the RESOLVED/CLOSED interaction's response
+without accepting a second copy. It performs no persistence. Harness uses lifecycle commands, including
 `ResumeWaitingRun`, for atomic state transitions.
 
 ## Fingerprint

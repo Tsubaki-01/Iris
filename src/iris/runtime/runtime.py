@@ -7,6 +7,7 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 from ..exceptions import (
@@ -40,6 +41,7 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
+from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentTool
 from .commit import (
     CommitPortToolEffectGuard,
     RuntimeCommitPort,
@@ -183,8 +185,10 @@ class AgentRuntime:
                     tool_calls=cursor.tool_calls[cursor.next_tool_index :],
                     start_ordinal=cursor.next_tool_index + 1,
                 )
-                plan = self.environment.tool_bridge.preflight_once(
+                plan = self._prepare_tool_plan(
                     assistant_message=cast(Msg, cursor.assistant_message),
+                    commits=commits,
+                    interaction_projection=interaction_projection,
                     session_id=activation.session_id,
                     run_id=activation.run_id,
                     agent_id=self.environment.agent_config.name,
@@ -256,6 +260,7 @@ class AgentRuntime:
 
             # --- 7. 取得当前工具结果 ---
             # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
+            subagent_call: SubagentParentCall | None = None
             if projected_result is not None:
                 result = projected_result
                 claim = None
@@ -274,6 +279,56 @@ class AgentRuntime:
                     prepared=prepared,
                     workspace_root=self.environment.workspace_root,
                 )
+            elif isinstance(prepared.tool, SubagentTool):
+                call = SubagentParentCall(activation.run_id, prepared.tool_use.id)
+                linked = commits.load_subagent_link(tool_call_id=prepared.tool_use.id)
+                if stream_sink is not None:
+                    stream_sink.emit(
+                        _runtime_stream_event(
+                            "tool.started",
+                            run_id=activation.run_id,
+                            session_id=activation.session_id,
+                            activation_id=activation.activation_id,
+                            step_index=cursor.step_index,
+                            tool_call_id=prepared.tool_use.id,
+                            tool_name=prepared.tool_use.name,
+                            tool_ordinal=cursor.next_tool_index + 1,
+                        )
+                    )
+                outcome = await self.environment.tool_bridge.execute_subagent_prepared(
+                    prepared,
+                    session_id=activation.session_id,
+                    run_id=activation.run_id,
+                    agent_id=self.environment.agent_config.name,
+                    workspace_root=self.environment.workspace_root,
+                    permission_mode=self.environment.agent_config.permissions.writes,
+                    metadata={"activation_id": activation.activation_id},
+                    cancellation=cancellation,
+                    approved_tool_call_id=prepared.tool_use.id
+                    if approved_projection is not None
+                    else None,
+                    linked_continuation=linked is not None,
+                )
+                if isinstance(outcome, ChildWaiting):
+                    suspended = commits.rebind_subagent_proxy(
+                        call=call, waiting=outcome, cursor=cursor
+                    )
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.SUSPENDED,
+                        cursor=suspended.cursor,
+                        assistant_message=cursor.assistant_message,
+                        suspension=suspended.interaction,
+                    )
+                result = outcome
+                claim = None
+                tool_call = build_runtime_tool_call(
+                    activation=activation,
+                    cursor=cursor,
+                    prepared=prepared,
+                    workspace_root=self.environment.workspace_root,
+                )
+                if commits.load_subagent_link(tool_call_id=prepared.tool_use.id) is not None:
+                    subagent_call = call
             else:
                 if _activation_cancelled(commits, cancellation):
                     return RuntimeActivationResult(
@@ -372,6 +427,7 @@ class AgentRuntime:
                 cancellation=cancellation,
                 steering=steering,
                 stream_sink=stream_sink,
+                subagent_call=subagent_call,
             )
             if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
@@ -386,6 +442,70 @@ class AgentRuntime:
                     assistant_message=batch_assistant,
                     error=_tool_run_error(result),
                 )
+
+    def _prepare_tool_plan(
+        self,
+        *,
+        assistant_message: Msg,
+        commits: RuntimeCommitPort,
+        session_id: str,
+        run_id: str,
+        agent_id: str,
+        workspace_root: Path,
+        permission_mode: str,
+        metadata: Mapping[str, Any] | None,
+        tools_enabled: bool,
+        cancellation: CancellationSignal,
+        interaction_projection: ToolResult | RuntimeApprovedToolCall | None = None,
+    ) -> ToolBatchPlan:
+        """在任何 outer permission 前识别 linked/已回答调用，保留原模型顺序。"""
+        bridge = self.environment.tool_bridge
+        subagent_names = {
+            tool.name for tool in bridge.tool_view.active_tools if isinstance(tool, SubagentTool)
+        }
+        projected_id = (
+            interaction_projection.tool_use_id
+            if isinstance(interaction_projection, ToolResult)
+            else interaction_projection.tool_call_id
+            if interaction_projection is not None
+            else None
+        )
+        continuations = {
+            call.id
+            for call in assistant_message.tool_calls
+            if tools_enabled
+            and call.name in subagent_names
+            and (
+                commits.load_subagent_link(tool_call_id=call.id) is not None
+                or call.id == projected_id
+            )
+        }
+        context = dict(
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            metadata=metadata,
+            cancellation=cancellation,
+        )
+        if not continuations:
+            return bridge.preflight_once(
+                assistant_message=assistant_message, tools_enabled=tools_enabled, **context
+            )
+        calls = []
+        for call in assistant_message.tool_calls:
+            if call.id in continuations:
+                calls.append(bridge.prepare_subagent_continuation(call, **context))
+            else:
+                calls.extend(
+                    bridge.preflight_once(
+                        assistant_message=assistant_message.model_copy(update={"content": [call]}),
+                        tools_enabled=tools_enabled,
+                        **context,
+                    ).calls
+                )
+        return ToolBatchPlan(calls=tuple(calls))
 
     async def _execute_parallel_tool_window(
         self,
@@ -593,30 +713,21 @@ class AgentRuntime:
         cancellation: CancellationSignal,
         steering: RuntimeSteeringPort | None,
         stream_sink: RuntimeEventSink | None,
+        subagent_call: SubagentParentCall | None = None,
     ) -> RuntimeCursor:
         """封装既有的单步 result commit 与 cursor 推进。"""
         next_index = cursor.next_tool_index + 1
-        if next_index == len(cursor.tool_calls):
-            cursor_after = RuntimeCursor(
-                position="before_model",
-                step_index=cursor.step_index + 1,
-                read_state=_read_state_snapshot(
-                    self.environment.tool_bridge.read_state(activation.session_id)
-                ),
-            )
-        else:
-            cursor_after = cursor.model_copy(
-                update={
-                    "next_tool_index": next_index,
-                    "tool_results": (*cursor.tool_results, result),
-                    "read_state": _read_state_snapshot(
-                        self.environment.tool_bridge.read_state(activation.session_id)
-                    ),
-                }
-            )
+        cursor_after = _project_tool_result_cursor(
+            cursor,
+            result,
+            read_state=_read_state_snapshot(
+                self.environment.tool_bridge.read_state(activation.session_id)
+            ),
+        )
         steering_claim = None
         if (
             steering is not None
+            and subagent_call is None
             and next_index == len(cursor.tool_calls)
             and not (
                 result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP
@@ -635,15 +746,22 @@ class AgentRuntime:
             _, claimed_input = steering_claim
             message_delta = (*message_delta, claimed_input.message)
         try:
-            committed_cursor = commits.commit_tool_result(
-                RuntimeToolResultCommit(
-                    tool_call=tool_call,
-                    claim=claim,
+            if subagent_call is not None:
+                committed_cursor = commits.finalize_subagent_result(
+                    call=subagent_call,
                     result=result,
-                    message_delta=message_delta,
                     cursor_after=cursor_after,
                 )
-            )
+            else:
+                committed_cursor = commits.commit_tool_result(
+                    RuntimeToolResultCommit(
+                        tool_call=tool_call,
+                        claim=claim,
+                        result=result,
+                        message_delta=message_delta,
+                        cursor_after=cursor_after,
+                    )
+                )
             if committed_cursor != cursor_after:
                 raise IrisRunConflictError("tool-result commit 返回了意外 cursor")
         except Exception:
@@ -667,7 +785,9 @@ class AgentRuntime:
             stream_sink.emit(
                 _runtime_stream_event(
                     "tool.completed",
-                    activation=activation,
+                    run_id=activation.run_id,
+                    session_id=activation.session_id,
+                    activation_id=activation.activation_id,
                     step_index=tool_call.step_index,
                     tool_call_id=tool_call.tool_call_id,
                     tool_name=tool_call.tool_name,
@@ -755,7 +875,9 @@ class AgentRuntime:
             stream_sink.emit(
                 _runtime_stream_event(
                     "model.step.started",
-                    activation=activation,
+                    run_id=activation.run_id,
+                    session_id=activation.session_id,
+                    activation_id=activation.activation_id,
                     step_index=cursor.step_index,
                 )
             )
@@ -893,8 +1015,9 @@ class AgentRuntime:
             tool_calls=tuple(assistant.tool_calls),
             start_ordinal=1,
         )
-        plan = self.environment.tool_bridge.preflight_once(
+        plan = self._prepare_tool_plan(
             assistant_message=assistant,
+            commits=commits,
             session_id=activation.session_id,
             run_id=activation.run_id,
             agent_id=self.environment.agent_config.name,
@@ -969,7 +1092,9 @@ class AgentRuntime:
                     stream_sink.emit(
                         _runtime_stream_event(
                             "model.event",
-                            activation=activation,
+                            run_id=activation.run_id,
+                            session_id=activation.session_id,
+                            activation_id=activation.activation_id,
                             step_index=cursor.step_index,
                             model_event=model_event,
                         )
@@ -1045,6 +1170,27 @@ class AgentRuntime:
         )
 
 
+def _project_tool_result_cursor(
+    cursor: RuntimeCursor,
+    result: ToolResult,
+    *,
+    read_state: dict[str, Any] | None,
+) -> RuntimeCursor:
+    """从 pre-tool cursor 投影唯一的结果前缀与下一位置。"""
+    next_index = cursor.next_tool_index + 1
+    if next_index == len(cursor.tool_calls):
+        return RuntimeCursor(
+            position="before_model", step_index=cursor.step_index + 1, read_state=read_state
+        )
+    return cursor.model_copy(
+        update={
+            "next_tool_index": next_index,
+            "tool_results": (*cursor.tool_results, result),
+            "read_state": read_state,
+        }
+    )
+
+
 def _parallel_tool_window(
     *,
     start: int,
@@ -1077,7 +1223,9 @@ def _emit_tool_preparing(
         sink.emit(
             _runtime_stream_event(
                 "tool.preparing",
-                activation=activation,
+                run_id=activation.run_id,
+                session_id=activation.session_id,
+                activation_id=activation.activation_id,
                 step_index=cursor.step_index,
                 tool_call_id=tool_call.id,
                 tool_name=tool_call.name,

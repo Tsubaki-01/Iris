@@ -23,7 +23,8 @@ The dedicated `ToolExecutor` Sub Agent path preserves raw input parsing, fresh p
 and final identity/artifact normalization. Linked continuation skips outer permission. ChildWaiting
 returns directly, without middleware, breaker, parent claim, or ordinary timeout. Ordinary tools
 still normalize and persist the final body after after_call. Controller lifecycle, persistence,
-and recovery errors propagate unchanged.
+and recovery errors propagate unchanged. ACTIVE and WAITING share final normalization and
+`ARTIFACT_ERROR` projection.
 
 ```mermaid
 flowchart TD

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from ..exceptions import (
     IrisCancellationRequestedError,
@@ -12,6 +16,7 @@ from ..exceptions import (
     IrisRunStateError,
 )
 from ..hitl import HumanInteraction, HumanInteractionService
+from ..hitl.models import HumanInteractionRequest, SubagentProxyOrigin, ToolCallSnapshot
 from ..lifecycle import (
     CheckpointResumability,
     ClaimToolCall,
@@ -22,6 +27,7 @@ from ..lifecycle import (
     RunCheckpoint,
     RunCommit,
     RunControlSnapshot,
+    RunEvent,
     RunEventKind,
     RunPhase,
     RunRecord,
@@ -32,6 +38,8 @@ from ..lifecycle import (
     ToolCallPhase,
     snapshot_run,
 )
+from ..lifecycle.models import SubagentRunLink
+from ..lifecycle.store import FinalizeSubagentResult, RebindSubagentProxy
 from ..runtime import (
     ModelStepReservation,
     RuntimeCommitPort,
@@ -43,7 +51,13 @@ from ..runtime import (
     RuntimeToolResultCommit,
     ToolCallClaim,
 )
+from ..runtime.streaming import _runtime_stream_event
+from ..tools import ToolResult
+from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentRouteTable
 from ._events import _RunEventCollector
+
+if TYPE_CHECKING:
+    from .streaming import LiveFact
 
 
 class StoreRuntimeCommitPort(RuntimeCommitPort):
@@ -58,6 +72,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         cursor: RuntimeCursor,
         clock: Callable[[], datetime],
         event_collector: _RunEventCollector,
+        workspace_root: Path,
+        subagent_routes: SubagentRouteTable | None = None,
         interaction_service: HumanInteractionService | None = None,
     ) -> None:
         if run.phase is not RunPhase.ACTIVE or run.current_activation_id != activation_id:
@@ -75,6 +91,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._activation_id = activation_id
         self._clock = clock
         self._event_collector = event_collector
+        self._workspace_root = workspace_root
+        self._subagent_routes = subagent_routes
         self._interaction_service = interaction_service or HumanInteractionService()
         self._reusable_model_reservation = (
             checkpoint.model_steps_reserved == checkpoint.model_steps_committed + 1
@@ -302,6 +320,67 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         """返回最近 committed run 上的 durable cancellation fact。"""
         self._refresh_control_from_store()
         return self._run.cancellation_requested_at is not None
+
+    def load_subagent_link(self, *, tool_call_id: str) -> SubagentRunLink | None:
+        """只读点查，不把 read 扩展为工具 phase/CAS 校验。"""
+        return self._store.load_subagent_link(self._run.run_id, tool_call_id)
+
+    def rebind_subagent_proxy(
+        self,
+        *,
+        call: SubagentParentCall,
+        waiting: ChildWaiting,
+        cursor: RuntimeCursor,
+    ) -> RuntimeSuspensionResult:
+        """从当前 ACTIVE port 提交首次 proxy，并保留 tool-batch cursor。"""
+        self._require_writable()
+        self._require_cursor(cursor)
+        tool = self._tool_record(call.parent_tool_call_id)
+        command = _build_rebind_subagent_proxy_command(
+            parent_run=self._run,
+            call=call,
+            tool=tool,
+            waiting=waiting,
+            activation_id=self._activation_id,
+            replaced_proxy_id=None,
+            routes=cast(SubagentRouteTable, self._subagent_routes),
+            workspace_root=self._workspace_root,
+            interaction_service=self._interaction_service,
+            now=self._clock(),
+        )
+        stored = self._store.rebind_subagent_proxy(command)
+        self._accept(stored)
+        self._writable = False
+        if stored.interaction is None or stored.checkpoint is None:
+            raise IrisRunStateError("subagent rebind 缺少 interaction/checkpoint")
+        return RuntimeSuspensionResult(cursor=cursor, interaction=stored.interaction)
+
+    def finalize_subagent_result(
+        self,
+        *,
+        call: SubagentParentCall,
+        result: ToolResult,
+        cursor_after: RuntimeCursor,
+    ) -> RuntimeCursor:
+        """Child terminal 后提交 ACTIVE parent 唯一工具结果。"""
+        self._require_writable()
+        command = _build_finalize_subagent_result_command(
+            parent_run=self._run,
+            parent_checkpoint=self._checkpoint,
+            call=call,
+            tool=self._tool_record(call.parent_tool_call_id),
+            result=result,
+            cursor_after=cursor_after,
+            activation_id=self._activation_id,
+            proxy_id=None,
+            resume_activation_id=None,
+            now=self._clock(),
+        )
+        return self._accept_checkpoint(
+            self._store.finalize_subagent_result(command),
+            command.checkpoint,
+            cursor_after,
+        )
 
     def remaining_deadline_seconds(self) -> float | None:
         """按 absolute deadline 与 injected clock 计算非负剩余秒数。"""
@@ -549,6 +628,216 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             step_index=suspension.cursor.step_index,
             expires_at=expires_at,
         )
+
+
+def _build_rebind_subagent_proxy_command(
+    *,
+    parent_run: RunRecord,
+    call: SubagentParentCall,
+    tool: RunToolCallRecord,
+    waiting: ChildWaiting,
+    activation_id: str | None,
+    replaced_proxy_id: str | None,
+    routes: SubagentRouteTable,
+    workspace_root: Path,
+    interaction_service: HumanInteractionService,
+    now: datetime,
+) -> RebindSubagentProxy:
+    """唯一 proxy/request 与 rebind envelope builder，复用本次路由快照。"""
+    selected = tool.arguments.get("agent")
+    selector = routes.default if selected is None else cast(str, selected)
+    request = HumanInteractionRequest.model_construct(
+        tool_call=ToolCallSnapshot.model_construct(
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
+            arguments=tool.arguments,
+            workspace_root=str(workspace_root),
+            fingerprint=tool.fingerprint,
+        ),
+        prompt=waiting.child_interaction.request.prompt,
+        subagent_origin=SubagentProxyOrigin.model_construct(
+            child_run_id=waiting.child_run_id,
+            child_interaction_id=waiting.child_interaction.interaction_id,
+            agent_selector=selector,
+            expiry_owner=waiting.expiry_owner,
+        ),
+    )
+    proxy = interaction_service.create_subagent_proxy(
+        request,
+        parent=snapshot_run(parent_run).model_copy(update={"updated_at": now}),
+        step_index=tool.step_index,
+        expires_at=waiting.proxy_expires_at,
+    )
+    return RebindSubagentProxy(
+        parent_run_id=call.parent_run_id,
+        expected_parent_run_revision=parent_run.revision,
+        parent_activation_id=activation_id,
+        parent_tool_call_id=call.parent_tool_call_id,
+        expected_parent_tool_version=tool.version,
+        pending_proxy=proxy,
+        replaced_proxy_interaction_id=replaced_proxy_id,
+        now=now,
+    )
+
+
+def _build_finalize_subagent_result_command(
+    *,
+    parent_run: RunRecord,
+    parent_checkpoint: RunCheckpoint,
+    call: SubagentParentCall,
+    tool: RunToolCallRecord,
+    result: ToolResult,
+    cursor_after: RuntimeCursor,
+    activation_id: str | None,
+    proxy_id: str | None,
+    resume_activation_id: str | None,
+    now: datetime,
+) -> FinalizeSubagentResult:
+    """唯一 final result/checkpoint envelope builder，不复制 child usage。"""
+    checkpoint = parent_checkpoint.model_copy(
+        update={
+            "sequence": parent_checkpoint.sequence + 1,
+            "activation_id": activation_id if activation_id is not None else resume_activation_id,
+            "session_revision": parent_checkpoint.session_revision + 1,
+            "engine_cursor": cursor_after.model_dump(mode="json"),
+        }
+    )
+    return FinalizeSubagentResult(
+        parent_run_id=call.parent_run_id,
+        expected_parent_run_revision=parent_run.revision,
+        parent_activation_id=activation_id,
+        expected_parent_session_revision=parent_checkpoint.session_revision,
+        parent_tool_call_id=call.parent_tool_call_id,
+        expected_parent_tool_version=tool.version,
+        proxy_interaction_id=proxy_id,
+        resume_activation_id=resume_activation_id,
+        result=result,
+        message_delta=[result.to_msg()],
+        checkpoint=checkpoint,
+        now=now,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumedSubagentParent:
+    """WAITING finalize 同一 commit 所返回的可执行 parent facts。"""
+
+    run: RunRecord
+    checkpoint: RunCheckpoint
+    activation_id: str
+    cursor: RuntimeCursor
+    events: tuple[RunEvent, ...]
+
+
+class _WaitingSubagentContinuationAdapter:
+    """WAITING parent 的唯一 rebind/finalize owner，不伪造 ACTIVE port。"""
+
+    def __init__(
+        self,
+        *,
+        store: LifecycleStore,
+        interaction_service: HumanInteractionService,
+        clock: Callable[[], datetime],
+        publish_live_fact: Callable[[LiveFact], None],
+        event_collector: _RunEventCollector,
+        workspace_root: Path,
+        routes: SubagentRouteTable,
+    ) -> None:
+        self._store = store
+        self._interaction_service = interaction_service
+        self._clock = clock
+        self._publish_live_fact = publish_live_fact
+        self._events = event_collector
+        self._workspace_root = workspace_root
+        self._routes = routes
+
+    def rebind(
+        self,
+        *,
+        parent_run: RunRecord,
+        call: SubagentParentCall,
+        replaced_proxy: HumanInteraction,
+        waiting: ChildWaiting,
+    ) -> RunCommit:
+        """替换已回答 proxy，直接返回 store 提供的新 WAITING snapshot。"""
+        tool = self._tool_record(call)
+        command = _build_rebind_subagent_proxy_command(
+            parent_run=parent_run,
+            call=call,
+            tool=tool,
+            waiting=waiting,
+            activation_id=None,
+            replaced_proxy_id=replaced_proxy.interaction_id,
+            routes=self._routes,
+            workspace_root=self._workspace_root,
+            interaction_service=self._interaction_service,
+            now=self._clock(),
+        )
+        commit = self._store.rebind_subagent_proxy(command)
+        if commit.result is None or commit.interaction is None or commit.checkpoint is None:
+            raise IrisRunStateError("WAITING rebind 缺少完整 waiting facts")
+        self._events.record(commit.events)
+        return commit
+
+    def finalize(
+        self,
+        *,
+        parent_run: RunRecord,
+        parent_checkpoint: RunCheckpoint,
+        call: SubagentParentCall,
+        proxy: HumanInteraction,
+        result: ToolResult,
+        cursor_after: RuntimeCursor,
+    ) -> _ResumedSubagentParent:
+        """原子 finalize 后发布旧工具 final，并返回新 RESUME facts。"""
+        tool = self._tool_record(call)
+        activation_id = f"act_{uuid.uuid4().hex}"
+        command = _build_finalize_subagent_result_command(
+            parent_run=parent_run,
+            parent_checkpoint=parent_checkpoint,
+            call=call,
+            tool=tool,
+            result=result,
+            cursor_after=cursor_after,
+            activation_id=None,
+            proxy_id=proxy.interaction_id,
+            resume_activation_id=activation_id,
+            now=self._clock(),
+        )
+        commit = self._store.finalize_subagent_result(command)
+        checkpoint = commit.checkpoint
+        if checkpoint is None or commit.run.current_activation_id is None:
+            raise IrisRunStateError("WAITING finalize 缺少 RESUME facts")
+        if (
+            checkpoint.activation_id != activation_id
+            or commit.run.current_activation_id != activation_id
+        ):
+            raise IrisRunConflictError("WAITING finalize 返回了不同 activation fence")
+        cursor = RuntimeCursor.model_validate(checkpoint.engine_cursor)
+        self._events.record(commit.events)
+        self._publish_live_fact(
+            _runtime_stream_event(
+                "tool.completed",
+                run_id=parent_run.run_id,
+                session_id=parent_run.session_id,
+                activation_id=parent_checkpoint.activation_id,
+                step_index=tool.step_index,
+                tool_call_id=tool.tool_call_id,
+                tool_name=tool.tool_name,
+                tool_ordinal=tool.ordinal,
+                tool_result=result,
+            )
+        )
+        return _ResumedSubagentParent(commit.run, checkpoint, activation_id, cursor, commit.events)
+
+    def _tool_record(self, call: SubagentParentCall) -> RunToolCallRecord:
+        """按 exact parent key 读取 builder 所需工具事实。"""
+        tool = self._store.load_tool_call(call.parent_run_id, call.parent_tool_call_id)
+        if tool is None:
+            raise IrisRunNotFoundError(
+                "parent subagent tool 不存在", tool_call_id=call.parent_tool_call_id
+            )
+        return tool
 
 
 __all__ = ["StoreRuntimeCommitPort"]

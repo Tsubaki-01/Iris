@@ -264,16 +264,29 @@ class ToolExecutor:
         if isinstance(outcome, ChildWaiting):
             return outcome
         # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
+        return self._normalize_subagent_result(
+            tool_use=current.tool_use, tool=tool, result=outcome, context=context
+        )
+
+    def _normalize_subagent_result(
+        self,
+        *,
+        tool_use: ToolUseBlock,
+        tool: BaseTool,
+        result: ToolResult,
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """ACTIVE 与 WAITING 共用最终归一化及 artifact 失败投影。"""
         try:
             return self._normalize_result_identity_and_artifact(
-                tool_use=current.tool_use,
+                tool_use=tool_use,
                 tool=tool,
-                result=outcome,
+                result=result,
                 context=context,
             )
         except IrisToolExecutionError as exc:
             code, message = _tool_error_code_and_message(exc.message, allow_structured=True)
-            return self._error_result(current.tool_use, code, message)
+            return self._error_result(tool_use, code, message)
 
     async def _execute_current(
         self,

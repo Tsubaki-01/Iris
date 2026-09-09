@@ -29,11 +29,13 @@ interaction expiry/effective deadline 与 outer tool timeout，供跨包等待�
 
 ## 无状态服务
 
-`HumanInteractionService` 只有三个职责：
+`HumanInteractionService` 提供以下无状态操作：
 
 - `create_pending()`：从 active run snapshot 构造尚未持久化的 pending value；
+- `create_subagent_proxy()`：从 typed child prompt 与 parent snapshot 构造 proxy；
 - `validate_response()`：校验 run/interaction identity、kind、expiry 与 environment fingerprint；
-- `project_response()`：把回答投影为 `ToolResult`，或把批准投影为 `ApprovedToolCall`。
+- `project_response(interaction)`：读取 RESOLVED/CLOSED interaction 的存储回答，投影为
+  `ToolResult` 或 `ApprovedToolCall`，不再接受第二份 response。
 
 服务不做 persistence。Harness 通过 lifecycle `SuspendRun`、`ResolveInteraction`、
 `ResumeWaitingRun` 和 `FinishRun` commands 完成原子状态转换。
