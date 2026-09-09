@@ -105,12 +105,23 @@ class ToolsConfig(BaseModel):
     Attributes:
         builtin (list[str]): 内置工具公开 YAML 名称。
         python (PythonToolsConfig): Python 扩展引用配置。
+        subagent (Path | None): 相对 parent YAML 的 Sub Agent catalog 路径。
     """
 
     builtin: list[str] = Field(default_factory=list)
     python: PythonToolsConfig = Field(default_factory=PythonToolsConfig)
+    subagent: Path | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("subagent")
+    @classmethod
+    def _resolve_subagent_path(cls, value: Path | None, info: ValidationInfo) -> Path | None:
+        """按声明它的 parent YAML 解析 catalog 路径，不读取目标。"""
+        config_path: Path | None = (info.context or {}).get("config_path")
+        if value is not None and config_path is not None and not value.is_absolute():
+            return (config_path.parent / value).resolve()
+        return value
 
     @model_validator(mode="before")
     @classmethod

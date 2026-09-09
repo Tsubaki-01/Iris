@@ -8,6 +8,12 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
+`tools.subagent: subagents.yaml` declares an optional internal Sub Agent catalog, disabled by
+default. The path is relative to the parent YAML. Catalog `default` must exactly match an
+`agents` kebab-case key; each entry supplies a catalog-relative `path` and nonblank `description`.
+The internal loader reads only the catalog and freezes its routes without loading child YAML.
+`build_tool_registry()` continues to handle only builtin/Python tools.
+
 ```mermaid
 flowchart LR
     YAML["agent.yaml"] --> Loader["load_agent_config"]

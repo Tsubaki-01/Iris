@@ -15,6 +15,9 @@
 - `HumanInteraction` has `pending | resolved | closed` state, version, and timestamps.
 - `ApprovedToolCall` is the exact approval projection passed to the engine.
 
+Internal `models.SubagentExpiryOwner` names parent deadline/interaction timeout, child
+interaction expiry/effective deadline, and outer tool timeout for cross-package waiting outcomes.
+
 Field parsing first produces a complete typed request. `HumanInteraction` model-level validation
 then compares the `tool_call_id`, request subject, and lifecycle delta without rechecking whether
 required fields exist.

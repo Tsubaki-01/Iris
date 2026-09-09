@@ -12,6 +12,11 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 
 ## 架构
 
+内部 `subagent.py` 定义固定的 `subagent(prompt, agent?)` schema 和只读路由投影。
+`agent` 按 catalog exact selector 选择，省略时使用 default；`prompt` trim 后必须非空。
+`SubagentTool.execute_subagent()` 通过窄 port 返回 `ToolResult | ChildWaiting`；
+直接 `arun()` 抛 `IrisToolExecutionError`。普通 `BaseTool.arun()` 的返回契约不变。
+
 ```mermaid
 graph TD
     A["函数 / BaseTool"] --> B["ToolDefinition + input_schema"]
