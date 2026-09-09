@@ -40,6 +40,61 @@ Chat 示例在 `examples/chat/workspace/.agents/skills/` 内提供 `review-pytho
 模型会先从 system context 的 Skill catalog 发现该名称，再调用自动注册的 `load_skill` 读取
 `SKILL.md`；无需把 `load_skill` 写进 `tools.builtin`。
 
+## Sub Agent
+
+`examples/subagent/` 演示父 Agent 通过 `subagent` 工具委派任务，再根据子 Agent 的最终文本
+汇总回答。它包含以下配置：
+
+| 文件 | 用途 |
+| --- | --- |
+| [subagent/agent.yaml](subagent/agent.yaml) | 父 Agent，通过 `tools.subagent` 启用 catalog |
+| [subagent/subagents.yaml](subagent/subagents.yaml) | 声明默认子 Agent、selector、配置路径和职责 |
+| [researcher/agent.yaml](subagent/agents/researcher/agent.yaml) | 分析 prompt 中提供的文本 |
+| [interviewer/agent.yaml](subagent/agents/interviewer/agent.yaml) | 调用 `ask_question` 澄清需求 |
+
+父子 Agent 都使用 DeepSeek，按前面的运行前提配置 API key，然后启动父 Agent：
+
+```powershell
+uv run iris chat examples/subagent/agent.yaml --session-id subagent-example
+```
+
+在 chat 中输入以下内容，体验默认 `researcher` 委派：
+
+```text
+请使用默认子 Agent 分析这段需求，归纳两个要点：Iris 面向 Python 开发者，使用 YAML 配置本地 Agent，由宿主应用负责界面和输入输出。
+```
+
+父 Agent 会调用 `subagent({"prompt": "..."})`；省略 `agent` 时使用 catalog 的 `default`。
+要体验显式选择和子 Agent 提问，可以输入：
+
+```text
+请委派给 interviewer，先询问我这个项目的目标用户是谁，再整理一段需求摘要。
+```
+
+此时父 Agent 调用 `subagent({"agent": "interviewer", "prompt": "..."})`。终端显示问题后
+输入答案，Iris 会继续原来的子任务，最后由父 Agent 回答。
+
+也可以复用 lifecycle 脚本，观察子 Agent 的问题如何让父 run 进入 `waiting`：
+
+```powershell
+uv run python -m examples.lifecycle.start --config examples/subagent/agent.yaml --session-id subagent-hitl --input "请委派给 interviewer，先询问目标用户是谁，再整理需求摘要。"
+```
+
+取输出中父 run 的 `run.run_id` 和 `pending_interaction.interaction_id`，在新进程中提交答案：
+
+```powershell
+uv run python -m examples.lifecycle.resume --config examples/subagent/agent.yaml --run-id RUN_ID --interaction-id INTERACTION_ID --answer "希望用 YAML 快速搭建本地 Agent 的 Python 开发者"
+```
+
+父子 run 共用 `examples/subagent/.iris/subagent.db`，各自有独立的 session/run identity。
+回答始终提交给父 run，无需操作 child runner。读取状态和事件也可复用下方 lifecycle 命令，
+每次都传入同一个 `--config examples/subagent/agent.yaml`。
+
+Catalog 路径相对父 YAML，child 配置路径相对 catalog；只有被选中的 child YAML 才会加载。
+Child 是普通 Agent 配置，当前只支持一层委派；它仅接收委派 prompt，不自动继承父会话历史。
+需要传递的材料应直接写入 prompt。Python SDK 的装配与恢复接口见
+[harness README](../src/iris/harness/README.md)。
+
 ## Provider
 
 基础调用展示 provider-neutral 请求和流式事件；文本 delta 会在到达时立即写入终端，成功终态

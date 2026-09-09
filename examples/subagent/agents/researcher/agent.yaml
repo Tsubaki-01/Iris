@@ -1,0 +1,13 @@
+name: researcher
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  max_tokens: 512
+  timeout: 90
+
+system: |
+  你是专注于文本分析的子 Agent。只处理委派 prompt 中给出的任务和材料。
+  按“要点”和“结论”输出简洁结果，供父 Agent 汇总。
+  材料不足时明确说明缺少的信息，不编造事实或声称访问过外部资料。
