@@ -1,5 +1,6 @@
 """Logical run 生命周期的 dependency-neutral 公共契约。"""
 
+from .history import ForkPoint, ForkPointCursor, ForkPointPage, RunHistorySnapshot
 from .models import (
     ActivationKind,
     ActivationOutcome,
@@ -40,6 +41,7 @@ from .store import (
     CreateRun,
     FinalizeSubagentResult,
     FinishRun,
+    ForkSession,
     LifecycleStore,
     RebindSubagentProxy,
     RecoverActiveRun,
@@ -67,6 +69,10 @@ __all__ = [
     "CreateRun",
     "FinishRun",
     "FinalizeSubagentResult",
+    "ForkPoint",
+    "ForkPointCursor",
+    "ForkPointPage",
+    "ForkSession",
     "LifecycleStore",
     "RecoveryDisposition",
     "RecoverActiveRun",
@@ -79,6 +85,7 @@ __all__ = [
     "RunErrorSource",
     "RunEvent",
     "RunEventKind",
+    "RunHistorySnapshot",
     "RunLimits",
     "RunPhase",
     "RunControlSnapshot",

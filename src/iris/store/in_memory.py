@@ -28,6 +28,7 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
+from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -59,6 +60,7 @@ from ..lifecycle.store import (
     CreateRun,
     FinalizeSubagentResult,
     FinishRun,
+    ForkSession,
     RebindSubagentProxy,
     RecoverActiveRun,
     RequestCancellation,
@@ -80,6 +82,11 @@ from ..lifecycle.transitions import (
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._replay import ReplayRecord, replay_key
+from ._session_history import (
+    build_fork_point_page,
+    project_fork_point,
+    validate_fork_source,
+)
 from ._subagent import (
     validate_current_proxy,
     validate_final_proxy,
@@ -1460,6 +1467,94 @@ class InMemoryLifecycleStore:
         """返回 session snapshot；缺失 session 表示 revision 0 的空历史。"""
         with self._lock:
             return deepcopy(self._sessions.get(session_id, SessionSnapshot(session_id=session_id)))
+
+    def list_fork_points(
+        self,
+        session_id: str,
+        *,
+        after: ForkPointCursor | None = None,
+        limit: int = 50,
+    ) -> ForkPointPage:
+        """按创建时间分页返回顶层终态节点，先筛选再限制条数。
+
+        Args:
+            session_id: 要浏览的会话。
+            after: 上一页返回的游标，省略时从头开始。
+            limit: 本页最多返回的条数，必须大于零。
+
+        Returns:
+            分支点及下一页游标；没有合格节点时返回空页。
+        """
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+        with self._lock:
+            child_run_ids = {link.child_run_id for link in self._subagent_links.values()}
+            runs = sorted(
+                (
+                    run
+                    for run in self._runs.values()
+                    if run.session_id == session_id
+                    and run.phase is RunPhase.TERMINAL
+                    and run.run_id not in child_run_ids
+                    and (
+                        after is None
+                        or (run.created_at, run.run_id) > (after.created_at, after.run_id)
+                    )
+                ),
+                key=lambda run: (run.created_at, run.run_id),
+            )
+            return build_fork_point_page(
+                [project_fork_point(run) for run in runs[: limit + 1]], limit=limit
+            )
+
+    def load_session_at_run(self, source_run_id: str) -> RunHistorySnapshot:
+        """在同一锁内读取合格来源的完整历史前缀，返回独立消息副本。"""
+        with self._lock:
+            run = self._load_fork_source(source_run_id)
+            point = project_fork_point(run)
+            messages = self._sessions[run.session_id].messages[: point.message_count]
+            return RunHistorySnapshot(point=point, messages=tuple(deepcopy(messages)))
+
+    def fork_session(self, command: ForkSession) -> SessionSnapshot:
+        """原子复制历史前缀至新 session，源会话可继续运行。
+
+        Args:
+            command: 来源、全新目标身份与创建时间。
+
+        Returns:
+            revision 为零、包含直接来源的新会话快照。
+
+        Raises:
+            IrisRunNotFoundError: 来源 run 不存在。
+            IrisRunStateError: 来源不是 terminal 顶层 run。
+            IrisRunConflictError: 目标 session 已存在。
+        """
+        with self._lock:
+            run = self._load_fork_source(command.source_run_id)
+            if command.target_session_id in self._sessions:
+                raise IrisRunConflictError(
+                    "目标 session 已存在", session_id=command.target_session_id
+                )
+            point = project_fork_point(run)
+            branch = SessionSnapshot.model_construct(
+                session_id=command.target_session_id,
+                revision=0,
+                messages=deepcopy(self._sessions[run.session_id].messages[: point.message_count]),
+                forked_from_run_id=run.run_id,
+            )
+            self._sessions[branch.session_id] = branch
+            return deepcopy(branch)
+
+    def _load_fork_source(self, source_run_id: str) -> RunRecord:
+        """复用调用方持有的锁，在唯一来源操作边界检查资格。"""
+        run = self._require_run(source_run_id)
+        validate_fork_source(
+            run,
+            is_child=any(
+                link.child_run_id == source_run_id for link in self._subagent_links.values()
+            ),
+        )
+        return run
 
     def load_session_lane(self, session_id: str) -> str | None:
         """返回当前 session 的 non-terminal lane owner。"""

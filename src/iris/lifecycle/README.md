@@ -58,7 +58,7 @@ reads。
 `RunCommit.session_revision` 只在 mutation 改变 history 时返回提交后的 revision，不携带完整
 `SessionSnapshot`；需要 history 时显式调用 `load_session()`。精确重试返回当前事实与空 events，
 而不是第一次提交的旧快照。
-每个 mutation command 携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
+Run 状态 mutation 按各自契约携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
 checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。
@@ -71,6 +71,34 @@ checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable mo
 `load_run_control(run_id)` 只返回 `RunControlSnapshot` 的 session 归属与 fence/cancellation 字段。
 gateway 可以据此确认 run 属于所请求的 session，无需加载完整 run。上述读取都不
 替代 mutation CAS，也不改变同步 store boundary。
+
+## 会话历史契约
+
+`history.py` 定义四个 frozen slots dataclass，均从 `iris.lifecycle` 导出：
+
+- `ForkPointCursor(created_at, run_id)`：分支点分页位置；
+- `ForkPoint`：run/session/agent identity、原始 input、stop reason、创建与结束时间及 `message_count`；
+- `ForkPointPage(items, next_cursor)`：分支点 tuple 和下一页游标；
+- `RunHistorySnapshot(point, messages)`：指定 run 末尾的历史预览，messages 为独立消息对象的 tuple，
+  不携带当前 session 的 CAS revision。
+
+`LifecycleStore` 提供三个同步方法：
+
+| 方法 | 返回值 | 契约 |
+| --- | --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage` | 按 `(created_at, run_id)` 升序，`after` 接受 `ForkPointCursor`，`limit > 0` |
+| `load_session_at_run(source_run_id)` | `RunHistorySnapshot` | 读取 terminal 消息截点内的完整已提交前缀 |
+| `fork_session(command)` | `SessionSnapshot` | 接受 `ForkSession` command，原子创建新 session |
+
+来源必须是 terminal 顶层 run；全部 `RunStopReason` 均可使用。有 inbound `SubagentRunLink` 的
+child 被排除，拥有 outgoing child link 的 parent 仍可使用。来源 session 正在运行后续轮次时也可
+fork，截点不随新消息增长。来源资格、分页参数与目标 identity 由 store 负责检查。
+
+`ForkSession` 是从 `iris.lifecycle` 导出的 keyword-only frozen slots command，携带
+`source_run_id`、`target_session_id` 和 `now`。
+新 session 的 `revision=0`，`forked_from_run_id` 指向直接来源；继承消息不占用新 revision，
+后续非空追加从 1 开始且保留来源。Fork 只复制消息历史，不创建 run、activation、checkpoint、
+tool execution fact、interaction、event 或 lane，也不恢复源执行位置。
 
 ## 公开接口
 

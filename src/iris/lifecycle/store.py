@@ -16,6 +16,7 @@ from typing import Protocol
 from ..hitl.models import HumanInteraction, HumanInteractionResponse
 from ..message.message import Msg
 from ..tools.base import ToolResult
+from .history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
 from .models import (
     ActivationKind,
     AgentRunOptions,
@@ -33,6 +34,15 @@ from .models import (
     SessionSnapshot,
     SubagentRunLink,
 )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ForkSession:
+    """从 terminal 顶层 run 的消息截点原子创建独立 session。"""
+
+    source_run_id: str
+    target_session_id: str
+    now: datetime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -300,6 +310,24 @@ class LifecycleStore(Protocol):
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
+
+    def list_fork_points(
+        self,
+        session_id: str,
+        *,
+        after: ForkPointCursor | None = None,
+        limit: int = 50,
+    ) -> ForkPointPage:
+        """按创建时间与 run ID 升序分页返回 terminal 顶层 run。"""
+        ...
+
+    def load_session_at_run(self, source_run_id: str) -> RunHistorySnapshot:
+        """读取指定合格 run 末尾的已提交历史，不包含后续轮次。"""
+        ...
+
+    def fork_session(self, command: ForkSession) -> SessionSnapshot:
+        """同事务复制来源历史和 lineage，不创建运行或占用 lane。"""
+        ...
 
     def load_session_lane(self, session_id: str) -> str | None: ...
 

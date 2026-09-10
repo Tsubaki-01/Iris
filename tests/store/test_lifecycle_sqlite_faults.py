@@ -23,6 +23,7 @@ from iris.lifecycle import (
     ClaimToolCall,
     CommitModelStep,
     CreateRun,
+    ForkSession,
     RecoverActiveRun,
     RecoveryDisposition,
     ReserveModelStep,
@@ -34,6 +35,8 @@ from iris.lifecycle import (
 )
 from iris.message import Msg, ToolUseBlock
 from iris.store import SQLiteStore
+
+from .test_lifecycle_store_contract import _complete_history_turn
 
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _TOOL_FINGERPRINT = "a" * 64
@@ -291,6 +294,60 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
     assert store.list_events("run-1") == events_before
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM session_messages").fetchone() == (0,)
+
+
+def test_fork_second_message_failure_rolls_back_session_and_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """复制第二条消息失败必须撤销目标和首条消息，并保留正确的持久化错误。"""
+    store = SQLiteStore(tmp_path / "fork-copy-failure.db")
+    _complete_history_turn(store, run_id="source", session_id="main")
+    source_before = store.load_session("main")
+    run_before = store.load_run("source")
+    events_before = store.list_events("source")
+    original_connect = store._connect
+    injected_connections: list[sqlite3.Connection] = []
+
+    def connect_with_copy_failure() -> sqlite3.Connection:
+        """在实际 fork 连接上注入第二条消息失败。"""
+        connection = original_connect()
+        connection.execute(
+            """CREATE TEMP TRIGGER fail_fork_message
+            BEFORE INSERT ON session_messages
+            WHEN NEW.session_id = 'branch-failed' AND NEW.ordinal = 2
+            BEGIN
+                SELECT RAISE(ABORT, 'injected fork copy failure');
+            END"""
+        )
+        injected_connections.append(connection)
+        return connection
+
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(store, "_connect", connect_with_copy_failure)
+            with pytest.raises(IrisRunPersistenceError) as captured:
+                store.fork_session(
+                    ForkSession(source_run_id="source", target_session_id="branch-failed", now=_NOW)
+                )
+        assert captured.value.context["operation"] == "fork_session"
+        assert isinstance(captured.value.__cause__, sqlite3.IntegrityError)
+        assert "injected fork copy failure" in str(captured.value.__cause__)
+    finally:
+        for connection in injected_connections:
+            connection.execute("DROP TRIGGER temp.fail_fork_message")
+            connection.close()
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sessions WHERE session_id = 'branch-failed'"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = 'branch-failed'"
+        ).fetchone() == (0,)
+    assert store.load_session("main") == source_before
+    assert store.load_run("source") == run_before
+    assert store.list_events("source") == events_before
 
 
 def _create_command() -> CreateRun:
