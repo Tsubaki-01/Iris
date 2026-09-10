@@ -177,11 +177,61 @@ belongs to runtime and is not persisted; lifecycle schema v5, config, commands, 
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
+## Session history queries and forks
+
+Both stores provide the same synchronous methods. Import their return types and command from
+`iris.lifecycle`:
+
+| Method | Return value |
+| --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage` |
+| `load_session_at_run(source_run_id)` | `RunHistorySnapshot` |
+| `fork_session(command)` | `SessionSnapshot` |
+
+Fork points include only terminal top-level runs, accepting every stop reason: `completed`, `failed`,
+`cancelled`, `deadline_exceeded`, `interaction_expired`, `budget_exhausted`, and `outcome_unknown`.
+A child with an inbound `SubagentRunLink` is ineligible. A top-level parent that called a child
+remains eligible; only its session history is copied, without the child transcript or link.
+
+Lists use ascending `(created_at, run_id)` order. Pass the previous page's `next_cursor` as `after`;
+`next_cursor=None` means no more results. An absent session or one without eligible runs returns an
+empty page. The store checks `limit > 0` and filters children before pagination. SQLite filters in
+SQL and reads at most `limit + 1` runs without reading messages. Pagination promises neither
+admission order nor a fixed snapshot across pages; refresh from the first page.
+
+Preview returns an independent `RunHistorySnapshot(point, messages)` without a session CAS revision.
+Its `point.message_count` comes from the selected run's terminal cutoff, and messages contain only
+that prefix, excluding later turns. SQLite reads the source and messages with `ordinal <= count`
+in one read transaction. `_sqlite_messages.py` provides the shared decoder for prefix and full
+history reads. A run whose deadline expired at creation before committing its input can have an
+empty preview; its `ForkPoint.input` still retains the original request.
+
+The `ForkSession` command carries `source_run_id`, a new `target_session_id`, and `now`.
+The new session starts at `revision=0`, with its direct source in `forked_from_run_id`; later
+non-empty appends start at 1 and preserve the source.
+Message IDs, content blocks, tool references, and metadata remain unchanged, and returned objects
+are isolated from stored messages. Fork does not call providers or tools, copy execution-control
+facts, or occupy a lane. The source session may be running a later turn while an older cutoff is
+copied.
+
+`_session_history.py` shares source checks and result projections. The in-memory store copies the
+prefix and inserts the target once under the same `RLock`. SQLite checks the source, creates the
+target session with its source field, copies messages through `INSERT ... SELECT`, reads the target,
+and commits within one `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
+empty target or partial messages. This operation requires neither the source's current session
+revision nor a free lane. The current schema v5 policy still provides no migration.
+
+Preview and fork raise `IrisRunNotFoundError` for an absent source. A non-terminal or child source,
+or a nonpositive list limit, raises `IrisRunStateError`. An existing target, including an empty
+session, raises `IrisRunConflictError` without overwrite or retry. SQLite read/write and parsing
+failures use `IrisRunPersistenceError`.
+
 ## Maintenance and verification
 
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| History lists, previews, and forks | `_session_history.py`, `_sqlite_messages.py`, both stores | `tests/store/test_lifecycle_store_contract.py`, `tests/store/test_lifecycle_sqlite_faults.py` |
 | Current schema creation and exact validation | `_sqlite_schema.py`, `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transactions and fault rollback | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
 | Public exports | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |

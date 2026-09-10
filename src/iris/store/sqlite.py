@@ -29,6 +29,7 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
+from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -62,6 +63,7 @@ from ..lifecycle.store import (
     CreateRun,
     FinalizeSubagentResult,
     FinishRun,
+    ForkSession,
     RebindSubagentProxy,
     RecoverActiveRun,
     RequestCancellation,
@@ -84,6 +86,8 @@ from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._replay import ReplayRecord, replay_key
 from ._serialization import jsonable as _jsonable
+from ._session_history import build_fork_point_page, project_fork_point, validate_fork_source
+from ._sqlite_messages import decode_session_messages
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._subagent import (
     validate_current_proxy,
@@ -594,6 +598,128 @@ class SQLiteStore:
                 operation="load_session",
             ),
         )
+
+    def list_fork_points(
+        self,
+        session_id: str,
+        *,
+        after: ForkPointCursor | None = None,
+        limit: int = 50,
+    ) -> ForkPointPage:
+        """按创建时间和 run ID 升序分页读取顶层终态分支点。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+        operation = "list_fork_points"
+
+        def read(connection: sqlite3.Connection) -> ForkPointPage:
+            query = """SELECT candidate.* FROM agent_runs AS candidate
+            WHERE candidate.session_id = ? AND candidate.phase = 'terminal'
+              AND NOT EXISTS (
+                  SELECT 1 FROM subagent_run_links AS link
+                  WHERE link.child_run_id = candidate.run_id
+              )"""
+            parameters: tuple[object, ...] = (session_id,)
+            if after is not None:
+                query += " AND (candidate.created_at, candidate.run_id) > (?, ?)"
+                parameters += (after.created_at.isoformat(), after.run_id)
+            query += " ORDER BY candidate.created_at, candidate.run_id LIMIT ?"
+            parameters += (limit + 1,)
+            points = [
+                project_fork_point(
+                    _decode_row(_row_to_run, row, path=self.path, operation=operation)
+                )
+                for row in connection.execute(query, parameters)
+            ]
+            return build_fork_point_page(points, limit=limit)
+
+        return self._read(operation, read)
+
+    def load_session_at_run(self, source_run_id: str) -> RunHistorySnapshot:
+        """在同一只读事务中读取来源资格与终态消息前缀。"""
+        operation = "load_session_at_run"
+
+        def read(connection: sqlite3.Connection) -> RunHistorySnapshot:
+            run = self._require_fork_source(connection, source_run_id, operation=operation)
+            point = project_fork_point(run)
+            rows = connection.execute(
+                """SELECT ordinal, message_json FROM session_messages
+                WHERE session_id = ? AND ordinal <= ? ORDER BY ordinal""",
+                (run.session_id, point.message_count),
+            ).fetchall()
+            messages = decode_session_messages(
+                rows,
+                expected_count=point.message_count,
+                path=self.path,
+                operation=operation,
+            )
+            return RunHistorySnapshot(point=point, messages=tuple(messages))
+
+        return self._read(operation, read)
+
+    def fork_session(self, command: ForkSession) -> SessionSnapshot:
+        """在同一事务中复制来源前缀并创建 revision 为 0 的独立会话。"""
+        operation = "fork_session"
+        with self._lock:
+            try:
+                with self._connect() as connection:
+                    _execute(connection, "BEGIN IMMEDIATE")
+                    run = self._require_fork_source(
+                        connection, command.source_run_id, operation=operation
+                    )
+                    point = project_fork_point(run)
+                    try:
+                        _execute(
+                            connection,
+                            """INSERT INTO sessions(
+                                session_id, revision, message_count, updated_at,
+                                forked_from_run_id
+                            ) VALUES (?, 0, ?, ?, ?)""",
+                            (
+                                command.target_session_id,
+                                point.message_count,
+                                command.now.isoformat(),
+                                run.run_id,
+                            ),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        if exc.sqlite_errorcode != sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+                            raise
+                        raise IrisRunConflictError(
+                            "目标 session 已存在", session_id=command.target_session_id
+                        ) from exc
+                    _execute(
+                        connection,
+                        """INSERT INTO session_messages(session_id, ordinal, message_json)
+                        SELECT ?, ordinal, message_json FROM session_messages
+                        WHERE session_id = ? AND ordinal <= ?""",
+                        (command.target_session_id, run.session_id, point.message_count),
+                    )
+                    branch = self._select_session(
+                        connection, command.target_session_id, operation=operation
+                    )
+                    connection.commit()
+                    return branch
+            except sqlite3.Error as exc:
+                raise IrisRunPersistenceError(
+                    "lifecycle SQLite fork transaction 失败",
+                    path=str(self.path),
+                    operation=operation,
+                ) from exc
+
+    def _require_fork_source(
+        self,
+        connection: sqlite3.Connection,
+        source_run_id: str,
+        *,
+        operation: str,
+    ) -> RunRecord:
+        """读取来源 run，并在当前事务内检查终态与顶层归属。"""
+        run = self._require_run(connection, source_run_id, operation=operation)
+        child = connection.execute(
+            "SELECT 1 FROM subagent_run_links WHERE child_run_id = ?", (source_run_id,)
+        ).fetchone()
+        validate_fork_source(run, is_child=child is not None)
+        return run
 
     def load_session_lane(self, session_id: str) -> str | None:
         def read(connection: sqlite3.Connection) -> str | None:
@@ -2994,20 +3120,15 @@ class SQLiteStore:
             (session_id,),
         ).fetchall()
         try:
-            if len(rows) != metadata.message_count:
-                raise ValueError("session message_count 与 row count 不一致")
-            messages: list[Msg] = []
-            for expected_ordinal, row in enumerate(rows, start=1):
-                if row["ordinal"] != expected_ordinal:
-                    raise ValueError("session message ordinal 不连续")
-                payload = _load_json(row["message_json"])
-                if not isinstance(payload, dict):
-                    raise TypeError("session message JSON 必须是 object")
-                messages.append(Msg.from_dict(payload))
             return SessionSnapshot(
                 session_id=metadata.session_id,
                 revision=metadata.revision,
-                messages=messages,
+                messages=decode_session_messages(
+                    rows,
+                    expected_count=metadata.message_count,
+                    path=self.path,
+                    operation=operation,
+                ),
                 forked_from_run_id=metadata.forked_from_run_id,
             )
         except (

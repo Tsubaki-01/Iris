@@ -10,11 +10,15 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import IrisLifecycleSchemaError, IrisRunPersistenceError
-from iris.lifecycle import AgentRunOptions, FinishRun, RunLimits, RunStopReason
+from iris.lifecycle import AgentRunOptions, FinishRun, ForkSession, RunLimits, RunStopReason
 from iris.message import Msg
 from iris.store import SQLiteStore
 
-from .test_lifecycle_store_contract import _create_command, _prepare_tool_batch
+from .test_lifecycle_store_contract import (
+    _complete_history_turn,
+    _create_command,
+    _prepare_tool_batch,
+)
 
 _TABLES = {
     "subagent_run_links",
@@ -245,8 +249,9 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
         (2, [(1, _message_json("one"))]),
         (2, [(1, _message_json("one")), (3, _message_json("three"))]),
         (1, [(2, _message_json("two"))]),
+        (1, [(1, _message_json("one")), (2, _message_json("extra"))]),
     ],
-    ids=["invalid-json", "invalid-message", "count-mismatch", "gap", "not-one-based"],
+    ids=["invalid-json", "invalid-message", "count-mismatch", "gap", "not-one-based", "extra-row"],
 )
 def test_corrupt_session_messages_are_mapped_to_persistence_error(
     tmp_path: Path,
@@ -329,14 +334,11 @@ def test_session_lineage_survives_message_append_and_reopen(tmp_path: Path) -> N
             options=AgentRunOptions(limits=RunLimits(deadline_at=source_command.now)),
         )
     )
-    # Phase 1 尚无 fork command，直接写入分支初始 metadata 来覆盖既有追加路径。
-    with sqlite3.connect(store.path) as connection:
-        connection.execute(
-            """INSERT INTO sessions(
-                session_id, revision, message_count, updated_at, forked_from_run_id
-            ) VALUES ('session-1', 0, 0, ?, 'source-run')""",
-            (_NOW,),
+    store.fork_session(
+        ForkSession(
+            source_run_id="source-run", target_session_id="session-1", now=source_command.now
         )
+    )
 
     _prepare_tool_batch(store)
     for current_store in (store, SQLiteStore(store.path)):
@@ -345,3 +347,68 @@ def test_session_lineage_survives_message_append_and_reopen(tmp_path: Path) -> N
         assert session.revision == 1
         assert len(session.messages) == 1
         assert current_store.load_run("source-run").terminal_session_message_count == 0
+
+
+def test_reopened_store_lists_previews_and_forks_without_execution_facts(tmp_path: Path) -> None:
+    """重开后可读取旧截点并 fork，新增资源仅为 session 与消息行。"""
+    path = tmp_path / "history.db"
+    store = SQLiteStore(path)
+    first = _complete_history_turn(store, run_id="r1", session_id="main")
+    expected = store.load_session("main")
+    _complete_history_turn(store, run_id="r2", session_id="main")
+    fact_tables = sorted(_TABLES - {"sessions", "session_messages", "lifecycle_schema"})
+    with sqlite3.connect(path) as connection:
+        counts_before = {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in fact_tables
+        }
+    reopened = SQLiteStore(path)
+    assert [point.message_count for point in reopened.list_fork_points("main").items] == [2, 4]
+    assert reopened.load_session_at_run("r1").messages == tuple(expected.messages)
+    branch = reopened.fork_session(
+        ForkSession(source_run_id="r1", target_session_id="branch", now=first.finished_at)
+    )
+    assert branch.messages == expected.messages
+    assert branch.revision == 0
+    assert branch.forked_from_run_id == "r1"
+    assert SQLiteStore(path).load_session("branch") == branch
+    with sqlite3.connect(path) as connection:
+        counts_after = {
+            table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in fact_tables
+        }
+        source_rows = connection.execute(
+            "SELECT ordinal, message_json FROM session_messages "
+            "WHERE session_id = 'main' AND ordinal <= 2 ORDER BY ordinal"
+        ).fetchall()
+        target_rows = connection.execute(
+            "SELECT ordinal, message_json FROM session_messages "
+            "WHERE session_id = 'branch' ORDER BY ordinal"
+        ).fetchall()
+    assert counts_after == counts_before
+    assert target_rows == source_rows
+
+
+def test_preview_and_fork_only_decode_selected_prefix(tmp_path: Path) -> None:
+    """旧截点读取不触及后续消息；完整历史读取仍识别后续损坏。"""
+    store = SQLiteStore(tmp_path / "prefix.db")
+    first = _complete_history_turn(store, run_id="r1", session_id="main")
+    expected = store.load_session("main").messages
+    _complete_history_turn(store, run_id="r2", session_id="main")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE session_messages SET message_json = 'not-json' "
+            "WHERE session_id = 'main' AND ordinal = 3"
+        )
+    assert [point.run_id for point in store.list_fork_points("main").items] == ["r1", "r2"]
+    assert store.load_session_at_run("r1").messages == tuple(expected)
+    assert (
+        store.fork_session(
+            ForkSession(source_run_id="r1", target_session_id="branch", now=first.finished_at)
+        ).messages
+        == expected
+    )
+    with pytest.raises(IrisRunPersistenceError):
+        store.load_session("main")
+    with pytest.raises(IrisRunPersistenceError):
+        store.load_session_at_run("r2")

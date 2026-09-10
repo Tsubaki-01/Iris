@@ -60,7 +60,8 @@ reads.
 `RunCommit.session_revision` returns the committed revision only when a mutation changes history;
 it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
 needed. Exact retries return current facts with empty events, rather than the original snapshot.
-Every mutation carries expected revision/fence facts; stale writers conflict instead of overwriting.
+Run-state mutations carry the expected revision/fence facts required by their contracts; stale
+writers conflict instead of overwriting.
 Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
 SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and
@@ -78,6 +79,37 @@ filter returns the whole run.
 `RunControlSnapshot`. Gateways can confirm that a run belongs to the requested session without
 loading a complete run. These reads do not replace mutation CAS or change the synchronous store
 boundary.
+
+## Session history contract
+
+`history.py` defines four frozen slots dataclasses, all exported from `iris.lifecycle`:
+
+- `ForkPointCursor(created_at, run_id)`: a pagination position for fork points;
+- `ForkPoint`: run/session/agent identities, original input, stop reason, creation and finish times,
+  and `message_count`;
+- `ForkPointPage(items, next_cursor)`: a tuple of fork points and the next-page cursor;
+- `RunHistorySnapshot(point, messages)`: history through the selected run, with a tuple of independent
+  message objects and no current-session CAS revision.
+
+`LifecycleStore` provides three synchronous methods:
+
+| Method | Return value | Contract |
+| --- | --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage` | Ascending `(created_at, run_id)` order; `after` accepts `ForkPointCursor`; `limit > 0` |
+| `load_session_at_run(source_run_id)` | `RunHistorySnapshot` | Read the complete committed prefix through the terminal message cutoff |
+| `fork_session(command)` | `SessionSnapshot` | Accept a `ForkSession` command and atomically create a session |
+
+Sources must be terminal top-level runs; every `RunStopReason` is accepted. A child with an inbound
+`SubagentRunLink` is excluded, while a parent with outgoing child links remains eligible. Forking is
+allowed while the source session runs a later turn, and new messages do not change the cutoff.
+The store owns source eligibility, pagination parameter checks, and target identity checks.
+
+`ForkSession` is a keyword-only frozen slots command exported from `iris.lifecycle`, carrying
+`source_run_id`, `target_session_id`, and `now`.
+The new session starts at `revision=0`, and `forked_from_run_id` records its direct source.
+Inherited messages do not consume revisions; later non-empty appends start at 1 and preserve the
+source. Fork copies message history without creating a run, activation, checkpoint, tool execution
+fact, interaction, event, or lane, and does not restore the source execution position.
 
 ## Public API
 

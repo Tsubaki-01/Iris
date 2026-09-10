@@ -40,6 +40,8 @@ from iris.lifecycle import (
     CreateRun,
     FinalizeSubagentResult,
     FinishRun,
+    ForkPointCursor,
+    ForkSession,
     LifecycleStore,
     RebindSubagentProxy,
     RecoverActiveRun,
@@ -141,6 +143,268 @@ def _create_command(
 
 def _create(store: LifecycleStore, **kwargs: object) -> RunCommit:
     return store.create_run(_create_command(**kwargs))
+
+
+def _complete_history_turn(store: LifecycleStore, *, run_id: str, session_id: str) -> RunRecord:
+    """提交一轮两条消息，供历史前缀与分页测试复用。"""
+    revision = store.load_session(session_id).revision
+    activation_id = f"activation-{run_id}"
+    created = _create(
+        store,
+        run_id=run_id,
+        session_id=session_id,
+        activation_id=activation_id,
+        session_revision=revision,
+    )
+    reserved = store.reserve_model_step(
+        ReserveModelStep(
+            run_id=run_id,
+            expected_run_revision=created.run.revision,
+            activation_id=activation_id,
+            now=_T1,
+        )
+    )
+    assistant = Msg.assistant(run_id)
+    committed = store.commit_model_step(
+        CommitModelStep(
+            run_id=run_id,
+            expected_run_revision=reserved.run.revision,
+            activation_id=activation_id,
+            expected_session_revision=revision,
+            message_delta=[Msg.user("start"), assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            checkpoint=_checkpoint(
+                run_id=run_id,
+                sequence=2,
+                activation_id=activation_id,
+                session_revision=revision + 1,
+                reserved=1,
+                committed=1,
+            ),
+            assistant_message=assistant,
+            now=_T1,
+        )
+    )
+    return store.finish_run(
+        FinishRun(
+            run_id=run_id,
+            expected_run_revision=committed.run.revision,
+            activation_id=activation_id,
+            stop_reason=RunStopReason.COMPLETED,
+            assistant_message=assistant,
+            now=_T2,
+        )
+    ).run
+
+
+def test_fork_uses_terminal_prefix_after_source_history_grows(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Fork 停在所选旧 run，继承的前缀属于新会话初始历史。"""
+    _complete_history_turn(lifecycle_store, run_id="r1", session_id="main")
+    first = lifecycle_store.load_session("main")
+    _complete_history_turn(lifecycle_store, run_id="r2", session_id="main")
+    source_before = lifecycle_store.load_session("main")
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="r1", target_session_id="branch", now=_T3)
+    )
+    assert branch.messages == first.messages
+    assert branch.revision == 0
+    assert branch.forked_from_run_id == "r1"
+    assert lifecycle_store.load_session("main") == source_before
+    assert lifecycle_store.load_session_lane("branch") is None
+    preview = lifecycle_store.load_session_at_run("r1")
+    assert preview.messages == tuple(first.messages)
+    assert preview.point.message_count == 2
+    branch.messages[0].metadata["changed"] = True
+    assert "changed" not in lifecycle_store.load_session("branch").messages[0].metadata
+    assert "changed" not in lifecycle_store.load_session("main").messages[0].metadata
+
+
+def test_fork_points_use_created_at_and_run_id_keyset(lifecycle_store: LifecycleStore) -> None:
+    """同一创建时间按 run ID 翻页，末页不暴露多余游标。"""
+    for run_id in ("r3", "r1", "r2"):
+        _complete_history_turn(lifecycle_store, run_id=run_id, session_id="main")
+    _complete_history_turn(lifecycle_store, run_id="other", session_id="other-session")
+
+    first = lifecycle_store.list_fork_points("main", limit=1)
+    second = lifecycle_store.list_fork_points("main", after=first.next_cursor, limit=1)
+    third = lifecycle_store.list_fork_points("main", after=second.next_cursor, limit=1)
+    assert [page.items[0].run_id for page in (first, second, third)] == ["r1", "r2", "r3"]
+    assert first.next_cursor == ForkPointCursor(created_at=_NOW, run_id="r1")
+    assert second.next_cursor == ForkPointCursor(created_at=_NOW, run_id="r2")
+    assert third.next_cursor is None
+    point = first.items[0]
+    assert (point.session_id, point.agent_id, point.input) == ("main", "agent-1", "start")
+    assert point.stop_reason is RunStopReason.COMPLETED
+    assert (point.created_at, point.finished_at, point.message_count) == (_NOW, _T2, 4)
+    past_end = lifecycle_store.list_fork_points(
+        "main", after=ForkPointCursor(created_at=_T3, run_id="r0"), limit=1
+    )
+    assert past_end.items == ()
+    assert past_end.next_cursor is None
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_fork_point_list_rejects_nonpositive_limit(
+    lifecycle_store: LifecycleStore, limit: int
+) -> None:
+    """Store 作为分页参数 owner 拒绝非正数容量。"""
+    with pytest.raises(IrisRunStateError):
+        lifecycle_store.list_fork_points("missing", limit=limit)
+
+
+@pytest.mark.parametrize("state", ["missing", "active", "waiting"])
+def test_history_source_requires_existing_terminal_run(
+    lifecycle_store: LifecycleStore, state: str
+) -> None:
+    """不存在或尚未结束的来源不提供预览和分支，列表为空。"""
+    if state != "missing":
+        created = _create(lifecycle_store)
+        if state == "waiting":
+            _suspend(lifecycle_store, created)
+    page = lifecycle_store.list_fork_points("session-1")
+    assert page.items == ()
+    assert page.next_cursor is None
+    error = IrisRunNotFoundError if state == "missing" else IrisRunStateError
+    with pytest.raises(error):
+        lifecycle_store.load_session_at_run("run-1")
+    with pytest.raises(error):
+        lifecycle_store.fork_session(
+            ForkSession(source_run_id="run-1", target_session_id="branch", now=_T3)
+        )
+    _complete_history_turn(lifecycle_store, run_id="valid", session_id="valid-session")
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="valid", target_session_id="branch", now=_T3)
+    )
+    assert branch.forked_from_run_id == "valid"
+
+
+@pytest.mark.parametrize("stop_reason", list(RunStopReason))
+def test_all_terminal_stop_reasons_are_forkable(
+    lifecycle_store: LifecycleStore, stop_reason: RunStopReason
+) -> None:
+    """所有终止原因都保留可预览、可分支的终态历史。"""
+    created = _create(lifecycle_store)
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            stop_reason=stop_reason,
+            error=(
+                RunErrorInfo(code="STOPPED", message="运行结束", source="runtime")
+                if stop_reason in {RunStopReason.FAILED, RunStopReason.OUTCOME_UNKNOWN}
+                else None
+            ),
+            now=_T1,
+        )
+    )
+    point = lifecycle_store.list_fork_points("session-1").items[0]
+    assert point.stop_reason is stop_reason
+    assert point.message_count == 0
+    assert lifecycle_store.load_session_at_run("run-1").point == point
+    assert (
+        lifecycle_store.fork_session(
+            ForkSession(source_run_id="run-1", target_session_id="branch", now=_T2)
+        ).messages
+        == []
+    )
+
+
+def test_fork_while_source_has_active_later_run(lifecycle_store: LifecycleStore) -> None:
+    """旧 run 的分支不等待或改变同会话后续 run 的 lane 和执行状态。"""
+    _complete_history_turn(lifecycle_store, run_id="r1", session_id="main")
+    active = _create(
+        lifecycle_store,
+        run_id="r2",
+        session_id="main",
+        activation_id="later-activation",
+        session_revision=1,
+    )
+    events_before = lifecycle_store.list_events("r2")
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="r1", target_session_id="branch", now=_T3)
+    )
+    assert len(branch.messages) == 2
+    assert lifecycle_store.load_session_lane("main") == "r2"
+    assert lifecycle_store.load_run("r2") == active.run
+    assert lifecycle_store.load_checkpoint("r2") == active.checkpoint
+    assert lifecycle_store.list_events("r2") == events_before
+    assert lifecycle_store.load_session_lane("branch") is None
+    assert lifecycle_store.list_fork_points("branch").items == ()
+
+
+def test_deadline_empty_history_fork_can_start_a_fresh_run(lifecycle_store: LifecycleStore) -> None:
+    """未提交输入的 deadline 终态可复制空历史，并在分支启动新一轮。"""
+    expired = lifecycle_store.create_run(
+        replace(
+            _create_command(),
+            options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
+        )
+    )
+    assert expired.checkpoint is None
+    preview = lifecycle_store.load_session_at_run("run-1")
+    assert preview.messages == ()
+    assert preview.point.input == "start"
+    assert preview.point.message_count == 0
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="run-1", target_session_id="branch", now=_T1)
+    )
+    assert branch.messages == []
+    assert branch.revision == 0
+    _complete_history_turn(lifecycle_store, run_id="branch-run", session_id="branch")
+    assert len(lifecycle_store.load_session("branch").messages) == 2
+    assert lifecycle_store.load_session("branch").forked_from_run_id == "run-1"
+    assert lifecycle_store.load_session("session-1").messages == []
+
+
+@pytest.mark.parametrize("target", ["main", "empty", "empty-fork"])
+def test_fork_rejects_existing_target_without_changes(
+    lifecycle_store: LifecycleStore, target: str
+) -> None:
+    """已有目标即使历史为空也冲突，来源与目标均保持原样。"""
+    _complete_history_turn(lifecycle_store, run_id="r1", session_id="main")
+    if target != "main":
+        lifecycle_store.create_run(
+            replace(
+                _create_command(run_id="expired", session_id="empty"),
+                options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
+            )
+        )
+        if target == "empty-fork":
+            lifecycle_store.fork_session(
+                ForkSession(source_run_id="expired", target_session_id=target, now=_T1)
+            )
+    source_before = lifecycle_store.load_session("main")
+    target_before = lifecycle_store.load_session(target)
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.fork_session(
+            ForkSession(source_run_id="r1", target_session_id=target, now=_T3)
+        )
+    assert lifecycle_store.load_session("main") == source_before
+    assert lifecycle_store.load_session(target) == target_before
+
+
+def test_branch_append_and_refork_keep_direct_lineage(lifecycle_store: LifecycleStore) -> None:
+    """分支追加独立推进 revision，再次分支指向所选分支 run。"""
+    _complete_history_turn(lifecycle_store, run_id="r1", session_id="main")
+    first = lifecycle_store.fork_session(
+        ForkSession(source_run_id="r1", target_session_id="branch", now=_T3)
+    )
+    _complete_history_turn(lifecycle_store, run_id="branch-run", session_id="branch")
+    appended = lifecycle_store.load_session("branch")
+    assert appended.revision == 1
+    assert appended.forked_from_run_id == "r1"
+    assert appended.messages[:2] == first.messages
+    assert len(appended.messages) == 4
+    second = lifecycle_store.fork_session(
+        ForkSession(source_run_id="branch-run", target_session_id="branch-again", now=_T3)
+    )
+    assert second.messages == appended.messages
+    assert second.revision == 0
+    assert second.forked_from_run_id == "branch-run"
+    assert lifecycle_store.load_session("main").messages == first.messages
 
 
 def _interaction() -> HumanInteraction:
@@ -270,7 +534,9 @@ def _prepare_tool(store: LifecycleStore) -> RunCommit:
     )
 
 
-def _prepare_tool_batch(store: LifecycleStore) -> RunCommit:
+def _prepare_tool_batch(
+    store: LifecycleStore, *, metadata: dict[str, object] | None = None
+) -> RunCommit:
     """为 claim 顺序测试持久化三条同 batch prepared call。"""
     created = _create(store)
     reserved = store.reserve_model_step(
@@ -285,7 +551,7 @@ def _prepare_tool_batch(store: LifecycleStore) -> RunCommit:
         ToolUseBlock(id=f"call-{ordinal}", name="probe", input={"value": ordinal})
         for ordinal in range(1, 4)
     )
-    assistant = Msg.assistant(uses)
+    assistant = Msg.assistant(uses, metadata={} if metadata is None else metadata)
     prepared = [
         RunToolCallRecord(
             run_id="run-1",
@@ -1922,3 +2188,104 @@ def test_finalize_subagent_result_rejects_nonterminal_child_without_parent_delta
         store.finalize_subagent_result(_finalize_command(store, waiting=False))
     assert store.load_run("parent") == parent.run
     assert store.load_session("parent-session").revision == 1
+
+
+def test_terminal_child_is_excluded_before_fork_point_limit(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """Child 在分页前被排除，不占容量，也不允许预览或分支。"""
+    _admit_child(lifecycle_store, _subagent_parent(lifecycle_store))
+    _terminal_child(lifecycle_store)
+    assert lifecycle_store.list_fork_points("session-1").items == ()
+    with pytest.raises(IrisRunStateError):
+        lifecycle_store.load_session_at_run("run-1")
+    with pytest.raises(IrisRunStateError):
+        lifecycle_store.fork_session(
+            ForkSession(source_run_id="run-1", target_session_id="branch", now=_T3)
+        )
+    _complete_history_turn(lifecycle_store, run_id="run-2", session_id="session-1")
+    _complete_history_turn(lifecycle_store, run_id="run-3", session_id="session-1")
+    first = lifecycle_store.list_fork_points("session-1", limit=1)
+    assert [point.run_id for point in first.items] == ["run-2"]
+    assert first.next_cursor == ForkPointCursor(created_at=_NOW, run_id="run-2")
+    second = lifecycle_store.list_fork_points("session-1", after=first.next_cursor, limit=1)
+    assert [point.run_id for point in second.items] == ["run-3"]
+    assert second.next_cursor is None
+    assert (
+        lifecycle_store.fork_session(
+            ForkSession(source_run_id="run-2", target_session_id="branch", now=_T3)
+        ).forked_from_run_id
+        == "run-2"
+    )
+
+
+def test_parent_with_outgoing_child_can_fork_parent_history(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """调用过 child 的顶层 parent 仍可分支，保留 parent 工具结果中的来源引用。"""
+    _admit_child(lifecycle_store, _subagent_parent(lifecycle_store))
+    _terminal_child(lifecycle_store)
+    finalized = lifecycle_store.finalize_subagent_result(
+        _finalize_command(lifecycle_store, waiting=False)
+    )
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="parent",
+            expected_run_revision=finalized.run.revision,
+            activation_id="parent-a",
+            stop_reason=RunStopReason.COMPLETED,
+            now=_T3,
+        )
+    )
+    parent_history = lifecycle_store.load_session("parent-session")
+    child_before = lifecycle_store.load_run("run-1")
+    link_before = lifecycle_store.load_subagent_link("parent", "delegate")
+    points = lifecycle_store.list_fork_points("parent-session")
+    assert [point.run_id for point in points.items] == ["parent"]
+    preview = lifecycle_store.load_session_at_run("parent")
+    assert preview.messages == tuple(parent_history.messages)
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="parent", target_session_id="branch", now=_T3)
+    )
+    assert branch.messages == parent_history.messages
+    assert len(branch.messages) == 2
+    result = branch.messages[1].tool_results[0]
+    assert result.metadata["extra"]["child_run_id"] == "run-1"
+    assert lifecycle_store.load_run("run-1") == child_before
+    assert lifecycle_store.load_subagent_link("parent", "delegate") == link_before
+    assert lifecycle_store.load_session_lane("branch") is None
+
+
+def test_fork_preserves_tool_ids_and_isolates_nested_messages(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """工具消息 ID、内容和嵌套 metadata 原样复制，返回副本互不影响。"""
+    prepared = _prepare_tool_batch(lifecycle_store, metadata={"nested": {"tags": ["original"]}})
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            stop_reason=RunStopReason.CANCELLED,
+            now=_T2,
+        )
+    )
+    original = lifecycle_store.load_session("session-1")
+    preview = lifecycle_store.load_session_at_run("run-1")
+    branch = lifecycle_store.fork_session(
+        ForkSession(source_run_id="run-1", target_session_id="branch", now=_T3)
+    )
+    assert preview.messages == tuple(original.messages)
+    assert branch.messages == original.messages
+    assert [tool.id for tool in branch.messages[0].tool_calls] == ["call-1", "call-2", "call-3"]
+    assert [message.tool_results[0].tool_use_id for message in branch.messages[1:]] == [
+        "call-1",
+        "call-2",
+        "call-3",
+    ]
+    branch.messages[0].metadata["nested"]["tags"].append("branch change")
+    branch.messages[0].tool_calls[0].input["value"] = 99
+    preview.messages[0].metadata["nested"]["tags"].append("preview change")
+    assert lifecycle_store.load_session("branch").messages == original.messages
+    assert lifecycle_store.load_session("session-1") == original
+    assert lifecycle_store.load_session_at_run("run-1").messages == tuple(original.messages)

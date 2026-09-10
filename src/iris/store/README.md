@@ -152,11 +152,53 @@ correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ord
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
+## 会话历史查询与分支
+
+两个 store 提供同一组同步入口，返回类型和 command 均从 `iris.lifecycle` 导入：
+
+| 方法 | 返回值 |
+| --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage` |
+| `load_session_at_run(source_run_id)` | `RunHistorySnapshot` |
+| `fork_session(command)` | `SessionSnapshot` |
+
+分支点只包含 terminal 顶层 run，接受全部停止原因：`completed`、`failed`、`cancelled`、
+`deadline_exceeded`、`interaction_expired`、`budget_exhausted` 和 `outcome_unknown`。
+有 inbound `SubagentRunLink` 的 child 不合格；调用过 child 的顶层 parent 仍合格，只复制
+parent 的 session history，不复制 child transcript 或 link。
+
+列表按 `(created_at, run_id)` 升序，使用上一页的 `next_cursor` 作为 `after`；没有更多结果时
+`next_cursor=None`。不存在或没有合格 run 的 session 返回空页。Store 检查 `limit > 0`，先过滤
+child 再分页；SQLite 在 SQL 中筛选并读取最多 `limit + 1` 个 run，不读取消息。分页不承诺
+admission 顺序或跨页固定快照，刷新时从首页开始。
+
+预览返回独立的 `RunHistorySnapshot(point, messages)`，不提供 session CAS revision。其
+`point.message_count` 来自选定 run 的终态截点，messages 仅包含该前缀，不含后续轮次。
+SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_sqlite_messages.py` 为前缀
+和完整历史读取共用解码器。创建时 deadline 已过且没有提交 input 的 run 可以预览空历史，
+其 `ForkPoint.input` 仍保留原始请求。
+
+`ForkSession` command 携带 `source_run_id`、全新的 `target_session_id` 和 `now`。
+新 session 从 `revision=0` 开始，`forked_from_run_id` 记录直接来源；后续非空追加从 1 开始且
+保留来源。消息的 ID、内容块、
+工具引用与 metadata 原样保留，返回值与 store 内部消息隔离。Fork 不执行 provider 或工具，
+不复制运行控制事实，也不占用 lane；来源 session 忙于后续 run 时仍可复制旧截点。
+
+`_session_history.py` 共享来源检查与结果投影。内存实现持同一 `RLock` 复制前缀并一次写入目标。
+SQLite 在 `BEGIN IMMEDIATE` 事务内检查来源、创建带来源字段的 session、通过 `INSERT ... SELECT`
+复制消息，再完整读回目标并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
+source 当前 session revision 或空闲 lane。当前 schema v5 的无迁移规则保持不变。
+
+来源不存在时，预览和 fork 抛 `IrisRunNotFoundError`；来源非 terminal 或为 child，以及
+非正数 list limit，使用 `IrisRunStateError`。目标已存在（包括空 session）抛
+`IrisRunConflictError`，不覆盖或重试；SQLite 读写/解析失败使用 `IrisRunPersistenceError`。
+
 ## 维护与验证
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| 历史列表、预览与 fork | `_session_history.py`、`_sqlite_messages.py`、两个 store | `tests/store/test_lifecycle_store_contract.py`、`tests/store/test_lifecycle_sqlite_faults.py` |
 | 当前 schema 创建与精确校验 | `_sqlite_schema.py`、`sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transaction 与故障回滚 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |
 | 公开导出 | `__init__.py` | `tests/store/test_lifecycle_store_contract.py` |
