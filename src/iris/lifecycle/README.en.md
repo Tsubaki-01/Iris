@@ -36,6 +36,9 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 - Model steps reserve before commit, with at most one outstanding reservation.
 - Tool effects claim before execution and commit a result afterward; unresolved claims never replay.
 - A terminal run has no current activation, open interaction, or lane.
+- `RunRecord.terminal_session_message_count` records the cumulative session message count, including
+  tool closers, at its first terminal settlement and remains unchanged afterward. It must be a
+  nonnegative integer for terminal runs and `None` for non-terminal runs.
 - In a terminal run's durable history, every `tool_use` has exactly one matching result. Tool-call
   phase still distinguishes a committed result, unknown outcome, and never-started execution; a
   synthetic closer must not erase side-effect knowledge.
@@ -62,9 +65,10 @@ Stores validate only the phase, counters, identity, and fence affected by the mu
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
 SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and
 encoders retain JSON-safe guarantees.
-`SessionSnapshot` still exposes only `session_id`, CAS `revision`, and complete `messages`. Revision
-advances once per non-empty message delta regardless of how many messages that delta contains.
-Persistence message counts and ordinals do not enter lifecycle public models or commands.
+`SessionSnapshot` exposes `session_id`, CAS `revision`, complete `messages`, and the nullable direct
+source `forked_from_run_id`; later appends preserve that source. Revision advances once per non-empty
+message delta regardless of its message count. The terminal cutoff lives in `RunRecord` and cannot
+be replaced by the session revision. Persistence ordinals do not enter public models.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
 `load_tool_call(run_id, tool_call_id)` reads one exact composite identity.

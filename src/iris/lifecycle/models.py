@@ -425,6 +425,7 @@ class RunRecord(_FrozenModel):
     options: AgentRunOptions
     phase: RunPhase
     stop_reason: RunStopReason | None = None
+    terminal_session_message_count: int | None = Field(default=None, ge=0)
     revision: int = Field(ge=1)
     current_activation_id: str | None = None
     pending_interaction_id: str | None = None
@@ -473,6 +474,8 @@ class RunRecord(_FrozenModel):
             pending_interaction_id=self.pending_interaction_id,
             finished_at=self.finished_at,
         )
+        if (self.phase is RunPhase.TERMINAL) != (self.terminal_session_message_count is not None):
+            raise ValueError("terminal run 必须包含消息截点，非 terminal 必须为空")
         if (self.cancellation_requested_at is None) != (self.cancellation_reason is None):
             raise ValueError("cancellation time 与 reason 必须同时存在")
         if self.usage.model_steps_reserved > self.options.limits.max_model_steps:
@@ -530,11 +533,17 @@ class SessionSnapshot(_FrozenModel):
     session_id: str
     revision: int = Field(default=0, ge=0)
     messages: list[Msg] = Field(default_factory=list)
+    forked_from_run_id: str | None = None
 
     @field_validator("session_id")
     @classmethod
     def _validate_session_id(cls, value: str) -> str:
         return _trim_required(value, field_name="session_id")
+
+    @field_validator("forked_from_run_id")
+    @classmethod
+    def _validate_forked_from_run_id(cls, value: str | None) -> str | None:
+        return None if value is None else _trim_required(value, field_name="forked_from_run_id")
 
 
 class ActivationRecord(_FrozenModel):

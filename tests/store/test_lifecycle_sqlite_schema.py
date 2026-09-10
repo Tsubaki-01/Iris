@@ -1,16 +1,20 @@
-"""Lifecycle SQLite v4 schema 与 session history 的硬边界测试。"""
+"""Lifecycle SQLite v5 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from iris.exceptions import IrisLifecycleSchemaError, IrisRunPersistenceError
+from iris.lifecycle import AgentRunOptions, FinishRun, RunLimits, RunStopReason
 from iris.message import Msg
 from iris.store import SQLiteStore
+
+from .test_lifecycle_store_contract import _create_command, _prepare_tool_batch
 
 _TABLES = {
     "subagent_run_links",
@@ -28,7 +32,7 @@ _TABLES = {
 _COLUMNS = {
     "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
     "lifecycle_schema": ["component", "version"],
-    "sessions": ["session_id", "revision", "message_count", "updated_at"],
+    "sessions": ["session_id", "revision", "message_count", "updated_at", "forked_from_run_id"],
     "session_messages": ["session_id", "ordinal", "message_json"],
     "agent_runs": [
         "run_id",
@@ -54,6 +58,7 @@ _COLUMNS = {
         "started_at",
         "updated_at",
         "finished_at",
+        "terminal_session_message_count",
     ],
     "session_run_lanes": ["session_id", "run_id", "revision", "acquired_at"],
     "run_activations": [
@@ -132,7 +137,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v4_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v5_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -164,16 +169,27 @@ def test_empty_database_creates_exact_v4_schema_and_reopens(tmp_path: Path) -> N
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'")
         }
         message_fks = connection.execute("PRAGMA foreign_key_list(session_messages)").fetchall()
+        session_fks = connection.execute("PRAGMA foreign_key_list(sessions)").fetchall()
         link_fks = connection.execute("PRAGMA foreign_key_list(subagent_run_links)").fetchall()
+        terminal_index = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'terminal_runs_by_session'"
+        ).fetchone()
 
     assert tables == _TABLES
-    assert indexes == {"one_open_interaction_per_run"}
+    assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 4)]
+    assert identity == [("agent_lifecycle", 5)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
     ]
+    assert [(row[2], row[3], row[4]) for row in session_fks] == [
+        ("agent_runs", "forked_from_run_id", "run_id")
+    ]
+    assert " ".join(terminal_index[0].split()) == (
+        "CREATE INDEX terminal_runs_by_session ON agent_runs(session_id, created_at, run_id) "
+        "WHERE phase = 'terminal'"
+    )
     assert {(row[2], row[3], row[4]) for row in link_fks} == {
         ("run_tool_calls", "parent_run_id", "run_id"),
         ("run_tool_calls", "parent_tool_call_id", "tool_call_id"),
@@ -181,7 +197,7 @@ def test_empty_database_creates_exact_v4_schema_and_reopens(tmp_path: Path) -> N
     }
 
 
-@pytest.mark.parametrize("kind", ["legacy", "v3", "extra", "missing", "unknown_version"])
+@pytest.mark.parametrize("kind", ["legacy", "v3", "v4", "extra", "missing", "unknown_version"])
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
     kind: str,
@@ -209,6 +225,8 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
             elif kind == "v3":
                 connection.execute("DROP TABLE subagent_run_links")
                 connection.execute("UPDATE lifecycle_schema SET version = 3")
+            elif kind == "v4":
+                connection.execute("UPDATE lifecycle_schema SET version = 4")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()
@@ -254,3 +272,76 @@ def test_corrupt_session_messages_are_mapped_to_persistence_error(
 
     assert captured.value.context["operation"] == "load_session"
     assert captured.value.context["path"] == str(path)
+
+
+@pytest.mark.parametrize("ignore_checks", [False, True], ids=["sql-check", "row-load"])
+@pytest.mark.parametrize(
+    ("phase", "count"),
+    [("active", 0), ("terminal", None), ("terminal", -1)],
+)
+def test_terminal_cutoff_constraints_apply_to_sql_and_loaded_rows(
+    tmp_path: Path,
+    phase: str,
+    count: int | None,
+    ignore_checks: bool,
+) -> None:
+    """SQL 约束和原始行解析都拒绝与运行阶段不符的消息截点。"""
+    store = SQLiteStore(tmp_path / "cutoff.db")
+    command = _create_command()
+    created = store.create_run(command)
+    if phase == "terminal":
+        store.finish_run(
+            FinishRun(
+                run_id="run-1",
+                expected_run_revision=created.run.revision,
+                activation_id="activation-1",
+                stop_reason=RunStopReason.COMPLETED,
+                now=command.now,
+            )
+        )
+    with sqlite3.connect(store.path) as connection:
+        statement = (
+            "UPDATE agent_runs SET terminal_session_message_count = ? WHERE run_id = 'run-1'"
+        )
+        if ignore_checks:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(statement, (count,))
+        else:
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement, (count,))
+            return
+
+    reopened = SQLiteStore(store.path)
+    with pytest.raises(IrisRunPersistenceError) as captured:
+        reopened.load_run("run-1")
+    assert captured.value.context["operation"] == "load_run"
+
+
+def test_session_lineage_survives_message_append_and_reopen(tmp_path: Path) -> None:
+    """追加消息只推进会话版本和消息数，重开后直接来源仍可读取。"""
+    store = SQLiteStore(tmp_path / "lineage.db")
+    source_command = _create_command(
+        run_id="source-run", session_id="source-session", activation_id="source-activation"
+    )
+    store.create_run(
+        replace(
+            source_command,
+            options=AgentRunOptions(limits=RunLimits(deadline_at=source_command.now)),
+        )
+    )
+    # Phase 1 尚无 fork command，直接写入分支初始 metadata 来覆盖既有追加路径。
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            """INSERT INTO sessions(
+                session_id, revision, message_count, updated_at, forked_from_run_id
+            ) VALUES ('session-1', 0, 0, ?, 'source-run')""",
+            (_NOW,),
+        )
+
+    _prepare_tool_batch(store)
+    for current_store in (store, SQLiteStore(store.path)):
+        session = current_store.load_session("session-1")
+        assert session.forked_from_run_id == "source-run"
+        assert session.revision == 1
+        assert len(session.messages) == 1
+        assert current_store.load_run("source-run").terminal_session_message_count == 0

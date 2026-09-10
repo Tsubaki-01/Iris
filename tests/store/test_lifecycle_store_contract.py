@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
+from pydantic import ValidationError
 
 from iris.exceptions import (
     IrisRunConflictError,
@@ -32,6 +33,7 @@ from iris.lifecycle import (
     AdmitChildRun,
     AgentRunOptions,
     AgentRunRequest,
+    CheckpointResumability,
     ClaimToolCall,
     CommitModelStep,
     CommitToolResult,
@@ -50,9 +52,11 @@ from iris.lifecycle import (
     RunCommit,
     RunErrorInfo,
     RunLimits,
+    RunRecord,
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SessionSnapshot,
     SubagentRunLink,
     SuspendRun,
 )
@@ -321,6 +325,188 @@ def _prepare_tool_batch(store: LifecycleStore) -> RunCommit:
     )
 
 
+def test_terminal_cutoff_counts_messages_after_closure(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """一批多个工具结果的截点按消息数记录，包含终态闭合消息。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    terminal = lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            stop_reason=RunStopReason.CANCELLED,
+            now=_T2,
+        )
+    )
+    session = lifecycle_store.load_session("session-1")
+    assert len(session.messages) == 4
+    assert terminal.run.terminal_session_message_count == 4
+    assert session.revision == 2
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
+
+
+def test_deadline_at_creation_has_zero_cutoff_without_checkpoint(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """创建时已过期的 run 没有提交输入，仍保留零消息截点。"""
+    expired = lifecycle_store.create_run(
+        replace(
+            _create_command(),
+            options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
+        )
+    )
+    assert expired.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
+    assert expired.run.terminal_session_message_count == 0
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 0
+    assert lifecycle_store.load_checkpoint("run-1") is None
+
+
+def test_deadline_at_creation_keeps_existing_history_cutoff(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """创建时过期的后续 run 沿用已提交历史，不计入尚未提交的输入。"""
+    prepared = _prepare_tool_batch(lifecycle_store)
+    lifecycle_store.finish_run(
+        FinishRun(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            stop_reason=RunStopReason.CANCELLED,
+            now=_T2,
+        )
+    )
+    expired = lifecycle_store.create_run(
+        replace(
+            _create_command(run_id="run-2", activation_id="activation-2", session_revision=2),
+            options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
+        )
+    )
+    assert expired.run.terminal_session_message_count == 4
+    assert lifecycle_store.load_run("run-2").terminal_session_message_count == 4
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
+    assert len(lifecycle_store.load_session("session-1").messages) == 4
+    assert lifecycle_store.load_checkpoint("run-2") is None
+
+
+@pytest.mark.parametrize("include_tool_history", [False, True])
+def test_waiting_cancellation_records_terminal_cutoff(
+    lifecycle_store: LifecycleStore,
+    include_tool_history: bool,
+) -> None:
+    """等待中取消将实际追加的工具闭合消息计入截点。"""
+    waiting = _suspend(
+        lifecycle_store,
+        _create(lifecycle_store),
+        include_tool_history=include_tool_history,
+    )
+    assert waiting.run.terminal_session_message_count is None
+    terminal = lifecycle_store.request_cancellation(
+        RequestCancellation(
+            run_id="run-1",
+            expected_run_revision=waiting.run.revision,
+            reason="stop",
+            settle_waiting=True,
+            now=_T2,
+        )
+    )
+    expected_count = 2 if include_tool_history else 1
+    assert terminal.run.stop_reason is RunStopReason.CANCELLED
+    assert terminal.run.terminal_session_message_count == expected_count
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == expected_count
+    assert len(lifecycle_store.load_session("session-1").messages) == expected_count
+
+
+def test_recovery_without_closer_keeps_committed_message_cutoff(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """无工具闭合消息时，恢复结算仍记录已有历史的消息数。"""
+    created = _create(lifecycle_store)
+    reserved = lifecycle_store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            now=_T1,
+        )
+    )
+    assistant = Msg.assistant("done")
+    committed = lifecycle_store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=reserved.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            message_delta=[Msg.user("start"), assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ).model_copy(update={"resumability": CheckpointResumability.OUTCOME_READY}),
+            assistant_message=assistant,
+            now=_T1,
+        )
+    )
+    command = RecoverActiveRun(
+        run_id="run-1",
+        expected_run_revision=committed.run.revision,
+        expected_activation_id="activation-1",
+        expected_checkpoint_sequence=committed.checkpoint.sequence,
+        recovery_disposition=RecoveryDisposition.FINALIZE,
+        now=_T2,
+    )
+    terminal = lifecycle_store.recover_active_run(command)
+    assert terminal.run.phase.value == "terminal"
+    assert terminal.run.terminal_session_message_count == 2
+    assert terminal.session_revision is None
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 2
+    assert lifecycle_store.load_session("session-1").revision == 1
+    assert lifecycle_store.recover_active_run(command).run.terminal_session_message_count == 2
+    if isinstance(lifecycle_store, SQLiteStore):
+        reopened = SQLiteStore(lifecycle_store.path)
+        assert reopened.load_run("run-1").terminal_session_message_count == 2
+
+
+@pytest.mark.parametrize(
+    ("phase", "count"),
+    [("active", 0), ("waiting", 0), ("terminal", None), ("terminal", -1)],
+)
+def test_run_record_parsing_rejects_inconsistent_terminal_cutoff(
+    phase: str,
+    count: int | None,
+) -> None:
+    """原始记录解析时，消息截点必须与运行阶段一致且非负。"""
+    raw = _create(InMemoryLifecycleStore()).run.model_dump(mode="json")
+    raw.update(phase=phase, terminal_session_message_count=count)
+    if phase != "active":
+        raw["current_activation_id"] = None
+    if phase == "waiting":
+        raw["pending_interaction_id"] = _INTERACTION_ID
+    elif phase == "terminal":
+        raw.update(stop_reason="completed", finished_at=_T1.isoformat())
+
+    with pytest.raises(ValidationError):
+        RunRecord.model_validate(raw)
+
+
+@pytest.mark.parametrize("messages", [[], [Msg.user("continue"), Msg.assistant("done")]])
+def test_memory_session_append_preserves_direct_source(messages: list[Msg]) -> None:
+    """追加历史和空增量都保留会话直接来源。"""
+    original = SessionSnapshot(
+        session_id="branch",
+        messages=[Msg.user("inherited")],
+        forked_from_run_id="source-run",
+    )
+    appended = InMemoryLifecycleStore._append_messages(original, messages)
+    assert appended.forked_from_run_id == "source-run"
+    assert appended.messages == [*original.messages, *messages]
+    assert appended.revision == (1 if messages else 0)
+
+
 def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> None:
     """修改 command 或 read snapshot 不得改写 store 内部事实。"""
     command = _create_command(metadata={"nested": {"value": "original"}})
@@ -328,6 +514,7 @@ def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> N
     command.request.metadata["nested"]["value"] = "changed"
     first = lifecycle_store.load_run("run-1")
     assert first is not None
+    assert first.terminal_session_message_count is None
     first.request.metadata["nested"]["value"] = "also-changed"
 
     loaded = lifecycle_store.load_run("run-1")
@@ -464,16 +651,39 @@ def test_reserve_exact_replay_is_noop_and_budget_exhaustion_is_terminal(
     assert replay.run.revision == first.run.revision
     assert lifecycle_store.list_events("run-1") == events_after_first
 
+    assistant = Msg.assistant("done")
+    committed = lifecycle_store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=first.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            message_delta=[Msg.user("start"), assistant],
+            usage=RunUsage(model_steps_reserved=1, model_steps_committed=1),
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ),
+            assistant_message=assistant,
+            now=_T1,
+        )
+    )
     terminal = lifecycle_store.reserve_model_step(
         ReserveModelStep(
             run_id="run-1",
-            expected_run_revision=first.run.revision,
+            expected_run_revision=committed.run.revision,
             activation_id="activation-1",
             now=_T2,
         )
     )
     assert terminal.run.stop_reason == "budget_exhausted"
     assert terminal.result is not None
+    assert terminal.run.terminal_session_message_count == 2
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 2
 
 
 def test_commit_model_step_updates_history_checkpoint_and_tool_intents_atomically(
@@ -978,6 +1188,7 @@ def test_cancellation_request_is_once_only_and_does_not_release_active_lane(
     assert refreshed_replay.run == requested.run
     assert len(lifecycle_store.list_events("run-1")) == event_count
     assert requested.run.phase == "active"
+    assert requested.run.terminal_session_message_count is None
     with pytest.raises(IrisRunConflictError):
         _create(
             lifecycle_store,
@@ -1005,6 +1216,8 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
 
     assert replay.events == ()
     assert replay.run == terminal.run
+    assert terminal.run.terminal_session_message_count == 0
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 0
     next_run = _create(
         lifecycle_store,
         run_id="run-2",
@@ -1087,9 +1300,12 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
     assert terminal.checkpoint.sequence == 2
     assert terminal.checkpoint.session_revision == session.revision
     assert terminal.run.usage.tool_calls_committed == 0
+    assert terminal.run.terminal_session_message_count == 4
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
 
     replay = lifecycle_store.finish_run(command)
     assert replay.events == ()
+    assert replay.run.terminal_session_message_count == 4
     assert lifecycle_store.load_session("session-1") == session
 
 
@@ -1207,9 +1423,12 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     assert recovered.checkpoint is not None
     assert recovered.checkpoint.sequence == claimed.checkpoint.sequence
     assert recovered.checkpoint.session_revision == session.revision
+    assert recovered.run.terminal_session_message_count == 4
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
     if not isinstance(lifecycle_store, SQLiteStore):
         return
     reopened = SQLiteStore(lifecycle_store.path)
+    assert reopened.load_run("run-1").terminal_session_message_count == 4
     reopened_records = reopened.list_tool_calls("run-1")
     with sqlite3.connect(lifecycle_store.path) as connection:
         activation_fact = connection.execute(
