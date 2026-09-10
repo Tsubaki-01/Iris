@@ -17,6 +17,7 @@ from ..lifecycle import (
 from ._subagent import ChildProviderFactory
 from .observer import RunEventObserver
 from .runner import AgentRunner
+from .session_history import SessionHistory
 from .session_manager import (
     ResumeReceipt,
     SessionEvent,
@@ -46,6 +47,7 @@ __all__ = [
     "RunUsage",
     "RuntimeExecutionOptions",
     "SessionEvent",
+    "SessionHistory",
     "SessionManager",
     "SessionSubmissionEvent",
     "SubmissionEvent",

@@ -24,6 +24,61 @@ print(result.run.phase, result.assistant_message)
 `store=`, every durable read and write uses that exact object. Otherwise `session.backend: none`
 selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`.
 
+## Session history branches
+
+`SessionHistory(store)` shares the runner's `LifecycleStore` and provides three synchronous methods.
+It generates the new session ID and creation time; the store owns queries, source eligibility, and
+atomic copying, with domain errors propagated unchanged to the host. It owns neither store closure
+nor the runner's resource lifecycle.
+
+| Method | Return value and behavior |
+| --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage` in ascending `(created_at, run_id)` order; `after` accepts the previous page's `ForkPointCursor`; `limit > 0` |
+| `get_at_run(source_run_id)` | `RunHistorySnapshot` containing the fork point and committed history through it, without a current-session CAS revision |
+| `fork(source_run_id)` | `SessionSnapshot` with an automatically generated target ID; each successful call creates a different branch |
+
+Import these history DTOs from `iris.lifecycle`. Lists return an empty page when no eligible run
+exists, and `next_cursor=None` when there is no later page. Run the following inside the host's
+existing async function, with at least one terminal top-level run already present in `main`:
+
+```python
+from iris.harness import AgentRunner, SessionHistory
+from iris.lifecycle import AgentRunRequest
+from iris.store import SQLiteStore
+
+store = SQLiteStore(".iris/session.db")
+runner = AgentRunner.from_config_path("agent.yaml", store=store)
+history = SessionHistory(store)
+
+page = history.list_fork_points("main", limit=20)
+if page.next_cursor is not None:
+    next_page = history.list_fork_points("main", after=page.next_cursor, limit=20)
+
+point = page.items[0]
+preview = history.get_at_run(point.run_id)
+branch = history.fork(point.run_id)
+result = await runner.start(
+    AgentRunRequest(input="Try another approach.", session_id=branch.session_id)
+)
+```
+
+Every terminal stop reason is eligible. Linked children are rejected, while a top-level parent that
+called a child remains eligible. Copying stops at the selected run's terminal message cutoff; an
+older cutoff can be forked while the source session runs a later turn. The returned session starts
+at `revision=0`, records its direct source in `forked_from_run_id`, and preserves that source on
+later appends. Target IDs use the `session_` prefix and a UUID; `fork()` accepts no target ID argument.
+
+Fork itself neither calls a provider nor creates a run; it copies conversation messages and the
+direct source. The next `start()` uses the host-selected runner's current system, tools, Skills,
+memory, and workspace configuration, without restoring an old checkpoint or copying the old
+execution environment. Artifact references in messages remain unchanged, and files are not copied.
+A host can also construct `SessionManager(runner, branch.session_id)` directly and call
+`await manager.submit("Try another approach.")`, observe the existing event stream, and close the
+manager when done, without attaching or switching the original manager.
+
+The implementation is in `session_history.py`; related integration tests are in
+`tests/harness/test_session_history.py`.
+
 ## Public operations
 
 `iris.harness.ChildProviderFactory` defines selected-child provider injection through
@@ -331,7 +386,8 @@ the provider commit and is not injected again.
 
 ## Public API
 
-`iris.harness` exports `AgentRunner`, `SessionManager`, `SubmitReceipt`, `ResumeReceipt`, `SubmissionEvent`,
+`iris.harness` exports `AgentRunner`, `SessionHistory`, `SessionManager`, `SubmitReceipt`,
+`ResumeReceipt`, `SubmissionEvent`,
 `SessionSubmissionEvent`, `SessionEvent`, `LiveFact`, and `LivePublisher`; run
 request/options/limits/runtime options; phase, stop reason, usage, error, snapshot, and result;
 plus run events and observers. Store commands remain in `iris.lifecycle`.

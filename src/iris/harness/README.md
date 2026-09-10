@@ -23,6 +23,57 @@ print(result.run.phase, result.assistant_message)
 reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
 
+## 会话历史分支
+
+`SessionHistory(store)` 复用与 runner 相同的 `LifecycleStore`，提供三个同步方法。它只生成新
+session ID 和创建时间，查询、来源资格与原子复制由 store 负责，领域异常原样传给 host。
+它不接管 store 的关闭或 runner 的资源生命周期。
+
+| 方法 | 返回值与语义 |
+| --- | --- |
+| `list_fork_points(session_id, *, after=None, limit=50)` | `ForkPointPage`，按 `(created_at, run_id)` 升序；`after` 接受上一页的 `ForkPointCursor`，`limit > 0` |
+| `get_at_run(source_run_id)` | `RunHistorySnapshot`，包含分支点及其末尾的已提交历史，不提供当前 session CAS revision |
+| `fork(source_run_id)` | `SessionSnapshot`，自动生成目标 ID 并创建新 session；每次成功调用都产生不同分支 |
+
+上述历史 DTO 从 `iris.lifecycle` 导入。列表没有合格 run 时返回空页，没有后续页时
+`next_cursor=None`。以下代码在 host 的现有 async 函数中执行，前提是 `main` 已有至少一个
+terminal 顶层 run：
+
+```python
+from iris.harness import AgentRunner, SessionHistory
+from iris.lifecycle import AgentRunRequest
+from iris.store import SQLiteStore
+
+store = SQLiteStore(".iris/session.db")
+runner = AgentRunner.from_config_path("agent.yaml", store=store)
+history = SessionHistory(store)
+
+page = history.list_fork_points("main", limit=20)
+if page.next_cursor is not None:
+    next_page = history.list_fork_points("main", after=page.next_cursor, limit=20)
+
+point = page.items[0]
+preview = history.get_at_run(point.run_id)
+branch = history.fork(point.run_id)
+result = await runner.start(
+    AgentRunRequest(input="Try another approach.", session_id=branch.session_id)
+)
+```
+
+来源接受全部 terminal stop reason；linked child 被拒绝，调用过 child 的顶层 parent 仍可
+使用。复制只到所选 run 的终态消息截点；来源 session 忙于后续 run 时，也可从旧截点创建分支。
+返回的新 session 从 `revision=0` 开始，`forked_from_run_id` 保存直接来源，后续追加保留来源。
+目标 ID 使用 `session_` 前缀与 UUID，`fork()` 不接收目标 ID 参数。
+
+Fork 本身不调用 provider 或创建 run，仅复制对话消息和直接来源。下一次 `start()` 使用 host
+选定 runner 的当前 system、工具、Skill、memory 与 workspace 配置，不恢复旧 checkpoint 或
+复制旧运行环境。消息中的 artifact 引用保持原值，文件不会随 fork 复制。Host 也可直接构造
+`SessionManager(runner, branch.session_id)` 并调用 `await manager.submit("Try another approach.")`，
+按既有事件流观察运行并在结束使用时关闭 manager；无需 attach 或切换原 manager。
+
+实现位于 `session_history.py`，相关集成用例位于
+`tests/harness/test_session_history.py`。
+
 ## 公共操作
 
 `iris.harness.ChildProviderFactory` 定义 selected child provider 注入协议：
@@ -293,7 +344,8 @@ Factory 创建内置 `ProviderClient` 时，把合并全局配置后的 provider
 
 ## 公开接口
 
-`iris.harness` 导出 `AgentRunner`、`SessionManager`、`SubmitReceipt`、`ResumeReceipt`、`SubmissionEvent`、
+`iris.harness` 导出 `AgentRunner`、`SessionHistory`、`SessionManager`、`SubmitReceipt`、
+`ResumeReceipt`、`SubmissionEvent`、
 `SessionSubmissionEvent`、`SessionEvent`、`LiveFact`、`LivePublisher`，以及 run
 request/options/limits/runtime options、phase/stop reason/usage/error/snapshot/result 和 run
 events/observer。Store commands 仍属于 `iris.lifecycle`。
