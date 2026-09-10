@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -23,7 +23,8 @@ CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     message_count INTEGER NOT NULL DEFAULT 0 CHECK (message_count >= 0),
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    forked_from_run_id TEXT REFERENCES agent_runs(run_id)
 )
 """
 
@@ -62,8 +63,15 @@ _COMMON_STATEMENTS = (
         started_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         finished_at TEXT,
-        CHECK ((phase = 'terminal') = (stop_reason IS NOT NULL))
+        terminal_session_message_count INTEGER CHECK (terminal_session_message_count >= 0),
+        CHECK ((phase = 'terminal') = (stop_reason IS NOT NULL)),
+        CHECK ((phase = 'terminal') = (terminal_session_message_count IS NOT NULL))
     )
+    """,
+    """
+    CREATE INDEX terminal_runs_by_session
+    ON agent_runs(session_id, created_at, run_id)
+    WHERE phase = 'terminal'
     """,
     """
     CREATE TABLE session_run_lanes (

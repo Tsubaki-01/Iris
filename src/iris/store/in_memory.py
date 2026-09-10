@@ -386,6 +386,7 @@ class InMemoryLifecycleStore:
                     options=command.options,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.DEADLINE_EXCEEDED,
+                    terminal_session_message_count=len(session.messages),
                     revision=1,
                     current_activation_id=None,
                     pending_interaction_id=None,
@@ -1017,6 +1018,7 @@ class InMemoryLifecycleStore:
                     run,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.CANCELLED,
+                    terminal_session_message_count=len(appended_session.messages),
                     revision=run.revision + 1,
                     pending_interaction_id=None,
                     cancellation_requested_at=command.now,
@@ -1144,6 +1146,7 @@ class InMemoryLifecycleStore:
                 run,
                 phase=RunPhase.TERMINAL,
                 stop_reason=command.stop_reason,
+                terminal_session_message_count=len(updated_session.messages),
                 revision=run.revision + 1,
                 current_activation_id=None,
                 pending_interaction_id=None,
@@ -1249,6 +1252,12 @@ class InMemoryLifecycleStore:
                 else []
             )
             closure_messages = [message for _, _, message in terminal_closures]
+            terminal_message_count = (
+                len(self._sessions[run.session_id].messages) + len(closure_messages)
+                if command.recovery_disposition
+                in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
+                else None
+            )
             updated_session: SessionSnapshot | None = None
             terminal_checkpoint = checkpoint
             if closure_messages:
@@ -1276,6 +1285,7 @@ class InMemoryLifecycleStore:
                     run,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.OUTCOME_UNKNOWN,
+                    terminal_session_message_count=terminal_message_count,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     error=RunErrorInfo(
@@ -1338,6 +1348,7 @@ class InMemoryLifecycleStore:
                     run,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.COMPLETED,
+                    terminal_session_message_count=terminal_message_count,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     last_event_sequence=terminal_sequence,
@@ -1595,12 +1606,14 @@ class InMemoryLifecycleStore:
 
     @staticmethod
     def _append_messages(session: SessionSnapshot, delta: list[Msg]) -> SessionSnapshot:
+        """追加非空消息增量，并保留会话的直接分支来源。"""
         if not delta:
             return deepcopy(session)
-        return SessionSnapshot(
-            session_id=session.session_id,
-            revision=session.revision + 1,
-            messages=[*session.messages, *deepcopy(delta)],
+        return session.model_copy(
+            update={
+                "revision": session.revision + 1,
+                "messages": [*session.messages, *deepcopy(delta)],
+            }
         )
 
     @staticmethod
@@ -1814,6 +1827,7 @@ class InMemoryLifecycleStore:
             run,
             phase=RunPhase.TERMINAL,
             stop_reason=RunStopReason.BUDGET_EXHAUSTED,
+            terminal_session_message_count=len(self._sessions[run.session_id].messages),
             revision=run.revision + 1,
             current_activation_id=None,
             last_event_sequence=sequence,

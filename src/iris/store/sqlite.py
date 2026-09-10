@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v4 的同步 SQLite store。"""
+"""精确 lifecycle schema v5 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -117,6 +117,7 @@ class _SessionMetadata(BaseModel):
     revision: int = Field(ge=0, strict=True)
     message_count: int = Field(ge=0, strict=True)
     updated_at: datetime | None
+    forked_from_run_id: str | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -1118,6 +1119,10 @@ class SQLiteStore:
         run = self._require_active(connection, command, operation=operation)
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
         if run.usage.model_steps_reserved >= run.options.limits.max_model_steps:
+            session_metadata = cast(
+                _SessionMetadata,
+                self._select_session_metadata(connection, run.session_id, operation=operation),
+            )
             activation = self._require_activation(
                 connection,
                 run.current_activation_id,
@@ -1138,6 +1143,7 @@ class SQLiteStore:
                 last_event_sequence=sequence,
                 updated_at=command.now,
                 finished_at=command.now,
+                terminal_session_message_count=session_metadata.message_count,
             )
             event = _make_event(
                 updated,
@@ -1860,6 +1866,9 @@ class SQLiteStore:
                 last_event_sequence=sequence,
                 updated_at=command.now,
                 finished_at=command.now,
+                terminal_session_message_count=(
+                    session_metadata.message_count + len(closure_messages)
+                ),
             )
             events.append(
                 _make_event(
@@ -2022,6 +2031,7 @@ class SQLiteStore:
             last_event_sequence=sequence,
             updated_at=command.now,
             finished_at=command.now,
+            terminal_session_message_count=session_metadata.message_count + len(closure_messages),
         )
         unknown_events = tuple(
             _make_event(
@@ -2143,8 +2153,12 @@ class SQLiteStore:
         closure_messages = [message for _, _, message in terminal_closures]
         session_metadata: _SessionMetadata | None = None
         updated_session_revision: int | None = None
+        terminal_session_message_count: int | None = None
         terminal_checkpoint = checkpoint
-        if closure_messages:
+        if command.recovery_disposition in {
+            RecoveryDisposition.OUTCOME_UNKNOWN,
+            RecoveryDisposition.FINALIZE,
+        }:
             session_metadata = self._select_session_metadata(
                 connection,
                 run.session_id,
@@ -2157,10 +2171,12 @@ class SQLiteStore:
                     message_count=0,
                     updated_at=None,
                 )
-            terminal_checkpoint = checkpoint.model_copy(
-                deep=True,
-                update={"session_revision": session_metadata.revision + 1},
-            )
+            terminal_session_message_count = session_metadata.message_count + len(closure_messages)
+            if closure_messages:
+                terminal_checkpoint = checkpoint.model_copy(
+                    deep=True,
+                    update={"session_revision": session_metadata.revision + 1},
+                )
         unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         activation_next: ActivationRecord | None = None
         rebound: RunCheckpoint | None = None
@@ -2192,6 +2208,7 @@ class SQLiteStore:
                 last_event_sequence=terminal_sequence,
                 updated_at=command.now,
                 finished_at=command.now,
+                terminal_session_message_count=terminal_session_message_count,
             )
             unknown_events = tuple(
                 _make_event(
@@ -2237,6 +2254,7 @@ class SQLiteStore:
                 last_event_sequence=terminal_sequence,
                 updated_at=command.now,
                 finished_at=command.now,
+                terminal_session_message_count=terminal_session_message_count,
             )
             terminal_event = _make_event(
                 updated,
@@ -2474,6 +2492,7 @@ class SQLiteStore:
                 started_at=command.now,
                 updated_at=command.now,
                 finished_at=command.now,
+                terminal_session_message_count=session.message_count,
             )
             event = _make_event(
                 run,
@@ -2989,6 +3008,7 @@ class SQLiteStore:
                 session_id=metadata.session_id,
                 revision=metadata.revision,
                 messages=messages,
+                forked_from_run_id=metadata.forked_from_run_id,
             )
         except (
             ValidationError,
@@ -3012,9 +3032,9 @@ class SQLiteStore:
         *,
         operation: str,
     ) -> _SessionMetadata | None:
-        """只读取 session CAS revision、message_count 与时间。"""
+        """只读取 session CAS metadata、更新时间与直接来源。"""
         row = connection.execute(
-            """SELECT session_id, revision, message_count, updated_at
+            """SELECT session_id, revision, message_count, updated_at, forked_from_run_id
             FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -3163,6 +3183,7 @@ def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:
         revision=row["revision"],
         message_count=row["message_count"],
         updated_at=row["updated_at"],
+        forked_from_run_id=row["forked_from_run_id"],
     )
 
 
@@ -3203,6 +3224,7 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         started_at=row["started_at"],
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
+        terminal_session_message_count=row["terminal_session_message_count"],
     )
 
 
@@ -3318,8 +3340,8 @@ _INSERT_RUN = """INSERT INTO agent_runs(
     pending_interaction_id, cancellation_requested_at, cancellation_reason,
     usage_json,
     assistant_message_json, error_json, checkpoint_sequence, last_event_sequence,
-    created_at, started_at, updated_at, finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    created_at, started_at, updated_at, finished_at, terminal_session_message_count
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _UPDATE_RUN = """UPDATE agent_runs SET
     session_id = ?, agent_id = ?, phase = ?, stop_reason = ?, request_json = ?,
@@ -3327,7 +3349,8 @@ _UPDATE_RUN = """UPDATE agent_runs SET
     run_revision = ?, current_activation_id = ?, pending_interaction_id = ?,
     cancellation_requested_at = ?, cancellation_reason = ?,
     usage_json = ?, assistant_message_json = ?, error_json = ?, checkpoint_sequence = ?,
-    last_event_sequence = ?, created_at = ?, started_at = ?, updated_at = ?, finished_at = ?
+    last_event_sequence = ?, created_at = ?, started_at = ?, updated_at = ?, finished_at = ?,
+    terminal_session_message_count = ?
 WHERE run_id = ? AND run_revision = ?"""
 
 _INSERT_TOOL_CALL = """INSERT INTO run_tool_calls(
@@ -3374,6 +3397,7 @@ def _run_values(run: RunRecord, session_revision: int) -> tuple[object, ...]:
         run.started_at.isoformat(),
         run.updated_at.isoformat(),
         _iso(run.finished_at),
+        run.terminal_session_message_count,
     )
 
 

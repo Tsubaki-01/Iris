@@ -33,6 +33,8 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
 - model step 先 reserve 再 commit，最多一个未提交 reservation；
 - tool effect 先 claim，再 commit result；unresolved claim 不得重放；
 - terminal run 没有 current activation、open interaction 或 lane；
+- `RunRecord.terminal_session_message_count` 在首次 terminal settlement 时记录包含工具闭合消息的
+  session 累计消息数，此后保持不变；terminal 必须为非负整数，non-terminal 必须为 `None`；
 - terminal run 的 durable history 中，每个 `tool_use` 都恰好有一个匹配的 result；tool-call phase
   继续区分已提交结果、结果未知与从未开始，不能用合成 closer 抹去副作用知识；
 - run、checkpoint、session revision、usage counters 与 environment fingerprint 必须交叉一致；
@@ -60,9 +62,9 @@ reads。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
 checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。
-`SessionSnapshot` 继续只公开 `session_id`、CAS `revision` 和完整 `messages`。revision 每次非空
-message delta 只推进一次，与 delta 中的消息条数无关；持久化层的 message count 与 ordinal
-不进入 lifecycle 公共模型或 command。
+`SessionSnapshot` 公开 `session_id`、CAS `revision`、完整 `messages` 和可空的直接来源
+`forked_from_run_id`；后续追加保留来源。revision 每次非空 message delta 只推进一次，与消息条数
+无关。终态截点记录在 `RunRecord`，不能用 session revision 替代；持久化 ordinal 不进入公共模型。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
 `load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
 `list_tool_calls(run_id, step_index=...)` 将有序工具读取限定为一个模型步，省略时返回整 run；
