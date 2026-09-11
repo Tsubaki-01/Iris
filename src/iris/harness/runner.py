@@ -839,8 +839,9 @@ class AgentRunner:
     ) -> RunSnapshot:
         """持久化首次 cancellation request，再 signal 当前进程 activation。
 
-        ``cancellation_requested`` 只是 durable fact，不等于已取消：active run 需要等待协作式
-        收口，waiting run 可在同一事务里直接结算为 terminal cancelled。重复请求是幂等的，
+        ``cancellation_requested`` 只是 durable fact，不等于已取消。已有 claim 的 activation
+        只接收 signal，由 executor 取消普通工具 body 并等待清理。普通 waiting run 可在同一
+        事务里结算为 terminal cancelled；linked child 由 ``cancel()`` 继续结算。重复请求幂等，
         只有首次会写入 durable 事实。
 
         Args:
@@ -903,8 +904,9 @@ class AgentRunner:
     ) -> RunResult:
         """请求取消、结算 linked child 并观察 durable settlement；观察超时不写 terminal。
 
-        同步且不协作的工具可能延迟 settlement，因此本方法不会提前返回 cancelled，只等待
-        store 出现 terminal result。
+        本方法等待 store 出现 terminal result，不保证原 ``start()`` / ``resume()`` task 已退出。
+        慢 middleware、压住 ``CancelledError`` 的工具及 INLINE 阻塞仍可能延迟 settlement。
+        需要等待 managed task 结束的 host 使用 ``SessionManager.close(cancel_run=True)``。
 
         Args:
             run_id (str): 目标 logical run id。

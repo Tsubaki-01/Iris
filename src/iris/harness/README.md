@@ -151,7 +151,7 @@ Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE 
 - `request_cancel(run_id, reason=None)`：只保证首次请求持久化；active 本地 activation 在提交后
   才收到 signal，waiting 可同事务 terminal cancelled；
 - `cancel(..., settlement_timeout=None)`：request + 观察 durable terminal result；观察超时不写
-  新事实；
+  新事实；观察到结算不代表原 `start()` / `resume()` 调用已经退出；
 - `recover(run_id, expected_activation_id=...)`：对 active run 要求精确 fence。safe checkpoint
   创建 recover activation，outcome-ready 只补 terminal，unresolved claim 结算为
   `outcome_unknown`；
@@ -256,6 +256,7 @@ event stream，但不取消或等待当前 run。
 
 即将关闭 event loop 的 host 使用 `close(cancel_run=True, reason=...)`：先关闭 admission 并
 失败掉 pending input，阻止启动下一条 follow-up，再通过 runner 取消并等待当前 run 结算。
+随后等待原 managed `start()` / `resume()` task 结束，包括 WAITING parent 正在继续等待 child 的情况。
 CLI 的 `/exit`、EOF、Ctrl-C 和错误退出均使用这条路径。
 
 Queue、receipt 状态、submission events、claim 和 durable event 水位都只存在于当前进程。Durable
@@ -295,10 +296,16 @@ Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mut
 到期前的 provider 错误保持 `FAILED`。未提交的工具 claim 仍优先结算为
 `OUTCOME_UNKNOWN`。
 
-`cancellation_requested` 是 durable fact，不等于已取消。同步且不协作的工具可能延迟
-settlement；runner 不会提前返回 cancelled。工具 result 若在请求后正常返回，会先 durable
-commit result，再结算 cancelled。claim 后 effect/result 无法证明时必须 fail closed 为
-`TOOL_OUTCOME_UNKNOWN`。
+`cancellation_requested` 是 durable fact，不等于已取消。Runner 先持久化请求，再发送本地
+signal；存在 claim 时不整体取消 activation task。`ToolExecutor` 将 signal 转为普通 async
+callable、自定义异步 `BaseTool` 或 THREAD callable 的 body task 取消，并等待 body 清理结束。
+慢 middleware、压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟 settlement；`cancel()`
+只等待 durable terminal result，不提前返回 cancelled。
+
+body 已完成，或响应 signal 取消后仍正常返回时，结果经过后处理并按既有顺序 durable commit 后再结算
+cancelled。外层 task cancellation、timeout 或 sibling cancellation 已打断 executor 时，清理期间
+的返回值不会替换原中断。未结算 claim 仍使 run 以 `TOOL_OUTCOME_UNKNOWN` 收口，包括只读调用；
+worker 线程可以继续运行，晚到返回不能改写 durable result、history、checkpoint 或 events。
 
 Runner 的 live signal 与 store-backed commit port 使用
 `iris.exceptions.IrisCancellationRequestedError` 通知 runtime 协作式收口；该类型不属于

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from iris.agents import AgentConfig
+from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
 from iris.exceptions import (
     IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
@@ -39,6 +39,7 @@ from iris.lifecycle import (
     RuntimeExecutionOptions,
     RunToolCallRecord,
     RunUsage,
+    ToolCallPhase,
     ToolErrorPolicy,
 )
 from iris.message import (
@@ -52,7 +53,7 @@ from iris.message import (
 )
 from iris.runtime import RuntimeCursor, RuntimeProvider, RuntimeStreamEvent
 from iris.store import InMemoryLifecycleStore, SQLiteStore
-from iris.tools import PreparedToolCall, ToolResult
+from iris.tools import PreparedToolCall, ToolRegistry, ToolResult
 from iris.tools._paths import safe_path_segment
 from iris.tools.permissions import DefaultPermissionPolicy, PermissionDecision, PermissionEffect
 from iris.tools.subagent import ChildWaiting, SubagentExecutionOutcome
@@ -302,6 +303,54 @@ async def test_cancelling_parent_settles_linked_child_first(tmp_path: Path, wait
     if not waiting:
         assert store.finished == [child_id, "parent"]
         assert await running == result
+
+
+@pytest.mark.asyncio
+async def test_active_parent_cancel_drains_claimed_async_child_tool(
+    tmp_path: Path, blocking_child_tool: "BlockingChildTool"
+) -> None:
+    """普通 child 工具先收到 Python 取消并完成清理，parent 才能结算。"""
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(ToolUseBlock(id="blocked", name="blocking_child", input={})),
+                text_response("Child done"),
+            )
+        ),
+    )
+    running = asyncio.create_task(runner.start(AgentRunRequest(input="Start", run_id="parent")))
+    tasks: list[asyncio.Task[object]] = [running]
+    try:
+        await asyncio.wait_for(blocking_child_tool.entered.wait(), timeout=1)
+        child_id = store.load_subagent_link("parent", "delegate").child_run_id
+        assert store.load_run("parent").phase == RunPhase.ACTIVE
+        assert store.load_tool_call(child_id, "blocked").phase == ToolCallPhase.CLAIMED
+
+        cancelling = asyncio.create_task(runner.cancel("parent"))
+        tasks.append(cancelling)
+        await asyncio.wait_for(blocking_child_tool.cancelled.wait(), timeout=1)
+        assert not blocking_child_tool.finished.is_set()
+        assert not running.done() and not cancelling.done()
+        assert store.load_run("parent").phase == RunPhase.ACTIVE
+        assert store.load_tool_call(child_id, "blocked").phase == ToolCallPhase.CLAIMED
+
+        blocking_child_tool.cleanup_release.set()
+        result = await asyncio.wait_for(asyncio.shield(cancelling), timeout=1)
+        assert blocking_child_tool.finished.is_set()
+        assert not blocking_child_tool.body_release.is_set()
+        assert result == await asyncio.wait_for(asyncio.shield(running), timeout=1)
+        assert store.load_tool_call(child_id, "blocked").phase == ToolCallPhase.OUTCOME_UNKNOWN
+        assert store.load_run(child_id).stop_reason == RunStopReason.OUTCOME_UNKNOWN
+        assert result.run.stop_reason == RunStopReason.CANCELLED
+        assert store.finished == [child_id, "parent"]
+    finally:
+        blocking_child_tool.body_release.set()
+        blocking_child_tool.cleanup_release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -645,6 +694,78 @@ async def test_manager_interrupt_keeps_child_cleanup_owner_and_blocks_follow_up(
         )
     finally:
         release.set()
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_manager_close_drains_waiting_parent_resume_and_claimed_async_child_tool(
+    tmp_path: Path, blocking_child_tool: "BlockingChildTool"
+) -> None:
+    """WAITING parent 的 close 等待原 child 调用和 managed resume 完整退出。"""
+    store = RecordingInMemoryLifecycleStore()
+    runner = AgentRunner.from_config_path(
+        _write_configs(tmp_path),
+        provider=_parent_provider(),
+        store=store,
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                ),
+                tool_response(ToolUseBlock(id="blocked", name="blocking_child", input={})),
+                text_response("Child done"),
+            )
+        ),
+    )
+    manager = SessionManager(runner, "managed-session")
+    tasks: list[asyncio.Task[object]] = []
+    try:
+        receipt = await manager.submit("Start")
+        initial = manager._current_task
+        assert initial is not None
+        tasks.append(initial)
+        waiting = await asyncio.wait_for(asyncio.shield(initial), timeout=1)
+        proxy = waiting.pending_interaction
+        assert proxy is not None
+        resuming = asyncio.create_task(
+            manager.resume(
+                interaction_id=proxy.interaction_id,
+                response=QuestionInteractionResponse(answer="Continue"),
+            )
+        )
+        tasks.append(resuming)
+        await asyncio.wait_for(blocking_child_tool.entered.wait(), timeout=1)
+        continuation = manager._current_task
+        assert continuation is not None
+        tasks.append(continuation)
+        child_id = store.load_subagent_link(receipt.run_id, "delegate").child_run_id
+        _, child_task = runner._subagent_controller._live_children[child_id]
+        tasks.append(child_task)
+        assert store.load_run(receipt.run_id).phase == RunPhase.WAITING
+        assert store.load_tool_call(child_id, "blocked").phase == ToolCallPhase.CLAIMED
+
+        closing = asyncio.create_task(manager.close(cancel_run=True))
+        tasks.append(closing)
+        await asyncio.wait_for(blocking_child_tool.cancelled.wait(), timeout=1)
+        assert not blocking_child_tool.finished.is_set()
+        assert not closing.done() and not continuation.done()
+        assert not resuming.done() and not child_task.done()
+        assert store.load_run(receipt.run_id).phase == RunPhase.WAITING
+
+        blocking_child_tool.cleanup_release.set()
+        await asyncio.wait_for(asyncio.shield(closing), timeout=1)
+        assert blocking_child_tool.finished.is_set()
+        assert not blocking_child_tool.body_release.is_set()
+        assert child_task.done() and continuation.done() and resuming.done()
+        assert child_task.result().run.stop_reason == RunStopReason.OUTCOME_UNKNOWN
+        assert continuation.result() == resuming.result()
+        assert resuming.result().run.stop_reason == RunStopReason.CANCELLED
+        assert store.load_tool_call(child_id, "blocked").phase == ToolCallPhase.OUTCOME_UNKNOWN
+        assert store.finished == [child_id, receipt.run_id]
+    finally:
+        blocking_child_tool.body_release.set()
+        blocking_child_tool.cleanup_release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await manager.close()
 
 
@@ -1293,6 +1414,45 @@ async def test_proxy_managed_admission_releases_lock_and_rejects_second_response
     finally:
         blocker.release.set()
         await manager.close()
+
+
+class BlockingChildTool:
+    """不读取 Iris 信号，以独立事件控制业务等待和取消后的清理。"""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.body_release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.cleanup_release = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    async def run(self) -> str:
+        """在 Python cancellation 到达后继续等待测试放行 finally。"""
+        self.entered.set()
+        try:
+            await self.body_release.wait()
+            return "Child body done"
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        finally:
+            await self.cleanup_release.wait()
+            self.finished.set()
+
+
+@pytest.fixture
+def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
+    """保留真实 runtime 装配，仅为 child registry 增加受控普通 callable。"""
+    tool = BlockingChildTool()
+
+    def with_child_tool(config: ToolsConfig) -> ToolRegistry:
+        registry = build_tool_registry(config)
+        if "human.ask" in config.builtin:
+            registry.register_function(tool.run, name="blocking_child")
+        return registry
+
+    monkeypatch.setattr("iris.runtime._assembly.build_tool_registry", with_child_tool)
+    return tool
 
 
 def _write_configs(tmp_path: Path) -> Path:

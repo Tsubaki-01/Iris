@@ -787,40 +787,6 @@ class CallableTool(BaseTool):
     #               Core Execution
     # ==========================================
     # region
-    async def _run_in_thread(
-        self,
-        kwargs: dict[str, Any],
-        cancellation: CancellationSignal | None,
-    ) -> Any:
-        """等待 thread callable，并在 activation 取消后丢弃晚到结果。
-
-        Args:
-            kwargs (dict[str, Any]): 传给同步 callable 的已校验参数。
-            cancellation (CancellationSignal | None): activation 共享的协作取消信号。
-
-        Returns:
-            Any: worker 正常完成时的 callable 返回值。
-
-        Raises:
-            IrisCancellationRequestedError: activation 等待期间收到取消请求。
-            asyncio.CancelledError: 当前 async task 被外部取消。
-            Exception: 同步 callable 的异常原样传播给上层归一化。
-        """
-        worker = asyncio.create_task(asyncio.to_thread(self.func, **kwargs))
-        try:
-            while True:
-                done, _ = await asyncio.wait({worker}, timeout=0.01)
-                if done:
-                    return worker.result()
-                if cancellation is not None:
-                    cancellation.raise_if_requested()
-        except BaseException:
-            if not worker.done():
-                # 这里只取消 async waiter；线程继续自然收口，但已无路径发布晚到结果。
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-            raise
-
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
@@ -829,6 +795,7 @@ class CallableTool(BaseTool):
         """执行 callable 并归一化返回值。
 
         接收处理数据、负责拦截运行报错并将任意格式的数据平滑转换为文本模型可接纳的形式。
+        本方法只负责 callable placement；取消信号由 ToolExecutor 处理，直接调用者自行取消 task。
 
         Args:
             params (BaseModel | dict[str, Any]): 已通过验证的请求数据体。
@@ -850,7 +817,7 @@ class CallableTool(BaseTool):
         start = time.perf_counter()
         try:
             if self.execution_mode is CallableExecutionMode.THREAD:
-                value = await self._run_in_thread(kwargs, context.cancellation)
+                value = await asyncio.to_thread(self.func, **kwargs)
             else:
                 value = self.func(**kwargs)
             if inspect.isawaitable(value):

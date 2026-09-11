@@ -131,10 +131,19 @@ ordinal prefix. The order of multiple `TOOL_CALL_CLAIMED` telemetry events is no
 
 A control interruption commits only the known `ToolResult` prefix before the first exception or
 hole; a later in-memory result never skips that hole. Any uncommitted durable claim makes eventual
-cancellation, deadline, or program interruption fail closed as `OUTCOME_UNKNOWN`. Runtime cancels
-and drains the children it created before a parent-task or infrastructure exit completes.
+cancellation, deadline, or program interruption fail closed as `OUTCOME_UNKNOWN`, including
+read-only calls. Runtime cancels and drains the children it created before a parent-task or
+infrastructure exit completes.
 Cooperative cancellation uses `iris.exceptions.IrisCancellationRequestedError`; runtime converts
 it into an activation outcome rather than an ordinary tool error.
+
+Ordinary async callables, custom async `BaseTool` implementations, and THREAD callables share
+`ToolExecutor`'s body cancellation bridge: the signal cancels the body task and waits for cleanup.
+A completed result or a normal return after signal-driven cancellation still enters existing
+postprocessing and commit paths. Once external cancellation, timeout, or sibling cancellation
+interrupts the executor, it only drains and propagates the original cancellation without consuming
+a cleanup-time return. The body bridge does not interrupt `before_call` / `after_call`; slow
+middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay exit.
 
 Concurrent file reads share one `ReadFileState` identity. Workers only return immutable
 observations, which the event loop merges. The checkpoint snapshot taken after the window settles
@@ -143,8 +152,8 @@ checkpoint dictionary is parsed once by `ToolBridge.restore_read_state()`; runti
 typed state and snapshots it directly.
 Synchronous callables remain inline by default; only explicit `CallableExecutionMode.THREAD`
 placement moves a blocking body to a worker. Threads cannot be safely forced to stop. Cancellation
-or timeout stops waiting and discards the late return; when a durable claim exists, runtime settles
-as `OUTCOME_UNKNOWN`, and the late result cannot advance history, cursor, or checkpoint state.
+or timeout stops only the async waiter; when a claim remains unresolved, runtime settles as
+`OUTCOME_UNKNOWN`, and the late result cannot advance history, cursor, checkpoint, or events.
 Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concurrency requires a new effect, retry, timeout,
 conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
 delta/merge/lock/hash model.

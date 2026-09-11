@@ -103,6 +103,10 @@ assert result.model_content == "你好，Iris"
 
 `CallableTool` 将普通 callable 适配为 `BaseTool`。它会从函数签名、类型注解、docstring 或显式 `input_model` 生成 schema，并把返回值归一化为 `ToolResult`：字符串直接作为文本，`None` 为空内容，其他值优先 JSON 序列化。同步函数默认使用 `CallableExecutionMode.INLINE`，保持既有调用线程与顺序；只有显式声明 `THREAD` 才用 worker thread 执行。async function 不能声明 `THREAD`，会在注册阶段得到 `IrisToolValidationError`。同步函数在线程中返回 awaitable 时，awaitable 仍回到 event loop 等待。
 
+`THREAD` 只通过 `asyncio.to_thread()` 选择执行位置；`CallableTool.arun()` 不独立消费
+`context.cancellation`。直接调用 `arun()` 时，调用者负责取消自己的 task；通过 executor
+执行时，由 executor 统一将 signal 转为 body task 的取消。
+
 `preset_kwargs` 会在执行前注入函数调用，但不会暴露在 schema 中；调用方若传入同名参数会得到校验错误。
 
 每个 `CallableTool` 只使用一个输入模型：未传 `input_model` 时，从函数注解和 docstring
@@ -170,7 +174,7 @@ executor = ToolExecutor(
 `arguments`。Runtime 在同一 tool batch 内复用该 plan；`execute_prepared()` 只刷新 permission，
 不会再次 lookup、降级为 dict 或重复 schema 校验。刷新后按 `preflight_result` / `DENY`、human
 protocol guard、精确 approve 的优先级授权；通过后依次检查 circuit breaker、cancellation、
-effect guard、cancellation，随后才进入 middleware `before_call` → `tool.arun()` →
+effect guard、cancellation，随后才进入 middleware `before_call` → body 前取消检查 → `tool.arun()` →
 middleware after hooks → artifact → breaker 记录。guard 失败时不会进入任何工具 effect；claim 后取消会
 作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
@@ -180,6 +184,18 @@ guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 `ToolExecutionContext` 在 public raw 输入边界解析 read state，后续 file service 直接消费该
 对象，不再重复做类型判断。signal 不会进入 `model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
 `IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
+
+`ToolExecutor` 是 signal 到普通 `arun()` body task 取消与 drain 的唯一 owner，覆盖 async
+callable、自定义异步 `BaseTool` 和 THREAD callable。没有 signal 时直接 await body；有 signal
+时先检查 body 是否完成，再检查取消请求。已完成的结果优先；executor 因 signal 取消 body 后，
+若 body 捕获 `CancelledError` 并正常返回，仍保留其 `ToolResult`。若外部 `Task.cancel()`、timeout
+或 runtime sibling cancellation 已打断 executor，则只等待 body 清理结束并传播原取消，清理期间的
+返回值不替换外层中断。工具自身的普通异常仍走既有错误归一化。
+
+这条取消桥只覆盖 body。`before_call` 返回后若已有请求，body 不启动；取得 body 结果后的
+`after_call`、artifact 和 breaker 处理继续完成。慢 middleware、压住 `CancelledError` 的协程及
+INLINE 阻塞仍可能延迟退出。线程取消只结束 async waiter，worker 可继续运行；未结算 claim
+仍按 `OUTCOME_UNKNOWN` 处理，包括只读调用，晚到返回不能改写 durable 结果。
 
 `read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
 

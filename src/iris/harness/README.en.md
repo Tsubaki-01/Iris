@@ -162,7 +162,7 @@ recoverable parent/child state.
 - `request_cancel()` guarantees only that the first request is durable. A local active activation
   is signalled after commit; a waiting run can settle cancelled in the same transaction.
 - `cancel()` requests cancellation and observes durable settlement. Observation timeout writes no
-  new fact.
+  new fact, and settlement does not imply that the original `start()` / `resume()` call has exited.
 - `recover()` requires the exact active activation fence. Safe checkpoints create a recover
   activation, outcome-ready checkpoints only finalize, and unresolved claims become
   `outcome_unknown`.
@@ -282,7 +282,9 @@ stream, but neither cancels nor waits for the current run.
 
 A host about to close its event loop uses `close(cancel_run=True, reason=...)`: close admission and
 fail pending input first, prevent another follow-up from starting, then cancel and await the current
-run through the runner. CLI `/exit`, EOF, Ctrl-C, and error exits all use this path.
+run through the runner. It then waits for the original managed `start()` / `resume()` task to end,
+including a WAITING parent continuing to await its child. CLI `/exit`, EOF, Ctrl-C, and error exits
+all use this path.
 
 The queue, receipt state, submission events, claims, and durable event watermarks exist only in the
 current process. Durable event payloads do not accumulate in an unbounded process-local queue: a
@@ -327,10 +329,19 @@ independently of timer scheduling. Provider exceptions, `response.failed`, and c
 failures after the deadline settle as `DEADLINE_EXCEEDED`; errors before it remain `FAILED`.
 An uncommitted tool claim still takes precedence as `OUTCOME_UNKNOWN`.
 
-Cancellation requested is a durable fact, not a settlement claim. A non-cooperative synchronous
-tool may delay settlement. If a tool returns after the request, its result is committed before the
-run settles cancelled. If an effect cannot be proven after claim, recovery fails closed with
-`TOOL_OUTCOME_UNKNOWN`.
+`cancellation_requested` is a durable fact, not settlement. The runner persists the request before
+sending the local signal and does not cancel the entire activation task while a claim exists.
+`ToolExecutor` translates the signal into cancellation of an ordinary async callable, custom async
+`BaseTool`, or THREAD callable body task and waits for body cleanup. Slow middleware, coroutines
+that suppress `CancelledError`, and INLINE blocking can still delay settlement; `cancel()` waits
+for a durable terminal result without returning cancelled early.
+
+If the body has completed, or returns normally after signal-driven cancellation, its result goes
+through postprocessing and the existing ordered durable commit before the run settles cancelled.
+Once external task cancellation, timeout, or sibling cancellation interrupts the executor, a cleanup-time return
+does not replace the original interruption. Unresolved claims still settle the run as
+`TOOL_OUTCOME_UNKNOWN`, including read-only calls. Worker threads may continue, but late returns
+cannot change the durable result, history, checkpoint, or events.
 
 The runner's live signal and store-backed commit port use
 `iris.exceptions.IrisCancellationRequestedError` to request cooperative runtime settlement; the

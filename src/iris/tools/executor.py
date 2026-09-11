@@ -523,7 +523,7 @@ class ToolExecutor:
                 self._record_breaker_result(tool.name, middleware_error)
                 return middleware_error
             try:
-                result = await tool.arun(validated_input, context)
+                result = await self._run_tool_body(tool, validated_input, context)
             except IrisCancellationRequestedError:
                 raise
             except Exception as exc:
@@ -568,6 +568,43 @@ class ToolExecutor:
             result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
             self._record_breaker_result(tool.name, result)
             return result
+
+    async def _run_tool_body(
+        self,
+        tool: BaseTool,
+        validated_input: BaseModel | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        """统一响应 body 取消，并在返回或传播外层中断前等待其清理。"""
+        cancellation = context.cancellation
+        if cancellation is None:
+            return await tool.arun(validated_input, context)
+        # before_call 可能让出控制权，body 启动前读取此刻的取消状态。
+        cancellation.raise_if_requested()
+        body = asyncio.create_task(tool.arun(validated_input, context))
+        cancellation_sent = False
+        try:
+            while True:
+                done, _ = await asyncio.wait({body}, timeout=None if cancellation_sent else 0.01)
+                if done:
+                    if cancellation_sent and body.cancelled():
+                        raise IrisCancellationRequestedError("工具 body 响应 activation 取消")
+                    return body.result()
+                if cancellation.requested:
+                    body.cancel()
+                    cancellation_sent = True
+        finally:
+            if not body.done() and not cancellation_sent:
+                body.cancel()
+            # wait 不向 body 转发取消；重复的外层中断不能再次打断 body 清理。
+            while not body.done():
+                try:
+                    await asyncio.wait({body})
+                except asyncio.CancelledError:
+                    continue
+            if not body.cancelled():
+                # 清理中的异常不能覆盖已经在传播的外层中断。
+                body.exception()
 
     def _normalize_result_identity_and_artifact(
         self,

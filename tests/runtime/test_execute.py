@@ -1067,7 +1067,8 @@ async def test_execute_infrastructure_failure_drains_all_window_children(
 
     await asyncio.wait_for(all_entered.wait(), timeout=1)
     release_second_failure.set()
-    with pytest.raises(ControlledInfrastructureExit, match="infra-1"):
+    # sibling 的取消清理不能覆盖最初触发窗口中断的异常。
+    with pytest.raises(ControlledInfrastructureExit, match="infra-2"):
         await asyncio.wait_for(execution, timeout=1)
 
     assert done == {1, 2, 3}

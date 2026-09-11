@@ -125,17 +125,24 @@ session history、checkpoint 和 committed event 只按原始 ordinal 的连续�
 
 control interruption 只提交首个异常/空洞之前的已知 `ToolResult`；后序内存结果不会跳洞。
 任何未提交的 durable claim 都会让取消、deadline 或程序中断最终 fail closed 为
-`OUTCOME_UNKNOWN`。父 task 或基础设施退出前，runtime 会 cancel 并 drain 自己创建的 children。
+`OUTCOME_UNKNOWN`，包括只读调用。父 task 或基础设施退出前，runtime 会 cancel 并 drain
+自己创建的 children。
 协作式取消使用 `iris.exceptions.IrisCancellationRequestedError`；runtime 将它转换为 activation
 outcome，而不是普通工具错误。
+
+普通 async callable、自定义异步 `BaseTool` 和 THREAD callable 共用 `ToolExecutor` 的 body
+取消桥：signal 触发 body task 取消并等待其清理，已完成或响应取消后正常返回的结果仍进入既有
+后处理和提交路径。外层取消、timeout 或 sibling cancellation 已打断 executor 时只 drain 并
+传播原取消，不消费清理期间的返回值。`before_call` / `after_call` 不由这条 body 取消桥中断；
+慢 middleware、压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟退出。
 
 并发文件读取共享同一个 `ReadFileState` identity；worker 只返回不可变 observation，由 event
 loop 合并。窗口 settle 后的 checkpoint snapshot 包含合并记录，后续串行 write barrier 可以
 继续执行 stale-read 检查。checkpoint 中的 raw dict 只在 `ToolBridge.restore_read_state()`
 恢复边界解析一次；runtime 内部始终传递 typed state，snapshot 直接序列化该对象。
 同步 callable 默认 inline；显式 `CallableExecutionMode.THREAD` 才把
-阻塞 body 放入 worker。线程无法安全强停，取消或 timeout 只停止等待并丢弃晚到返回；claim 已
-存在时 runtime 以 `OUTCOME_UNKNOWN` 收口，晚到结果不能推进 history、cursor 或 checkpoint。
+阻塞 body 放入 worker。线程无法安全强停，取消或 timeout 只停止 async waiter；claim 未结算时
+runtime 以 `OUTCOME_UNKNOWN` 收口，晚到结果不能推进 history、cursor、checkpoint 或 events。
 thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来必须另行设计 effect、
 retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
 引入 delta/merge/lock/hash 模型。

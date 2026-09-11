@@ -82,6 +82,10 @@ functions cannot use `THREAD` and fail registration with `IrisToolValidationErro
 thread function returns an awaitable, Iris still awaits it on the event loop. Preset kwargs are
 hidden from schema and callers cannot override them.
 
+`THREAD` only selects execution placement through `asyncio.to_thread()`; `CallableTool.arun()`
+does not independently consume `context.cancellation`. Direct `arun()` callers own cancellation
+of their task. Through the executor, the executor translates the signal into body-task cancellation.
+
 Each `CallableTool` uses one input model. Without an explicit `input_model`, Iris builds a
 Pydantic model from the function annotations and docstring parameter descriptions. That model
 owns both exported JSON Schema and first input validation, including fixed tuple positions,
@@ -133,9 +137,10 @@ question; a human tool under require-human fails closed to prevent nested gates;
 require-human call creates a permission prompt.
 
 After approval, execution checks the circuit breaker, cancellation, the effect guard, and
-cancellation again before entering middleware `before_call`, tool `arun`, middleware after hooks,
-artifact handling, and breaker accounting. A guard failure starts no tool effect. Cancellation
-after a claim propagates as control flow to runtime instead of becoming a normal tool error.
+cancellation again before entering middleware `before_call`, a pre-body cancellation check, tool
+`arun`, middleware after hooks, artifact handling, and breaker accounting. A guard failure starts
+no tool effect. Cancellation after a claim propagates as control flow to runtime instead of becoming
+a normal tool error.
 Low-level executor callers may omit the guard; lifecycle execution requires it through
 `ToolBridge`. Parallel context copies deep-copy only the isolated `metadata`; typed
 `ReadFileState` and cancellation are shared directly without copying their objects or records.
@@ -145,9 +150,23 @@ services consume the typed object directly without repeating type checks.
 The executor performs artifact handling once after every `after_call` hook. Hooks receive the full
 tool result; expanded final content is therefore also subject to `max_result_chars`.
 Cooperative cancellation uses `IrisCancellationRequestedError` from `iris.exceptions`, and
-`CallableTool` propagates it instead of normalizing it as an ordinary tool error. A thread worker
-cannot be forcibly terminated: cancellation or timeout stops waiting, abandons its late return, and
-lets lifecycle settlement fail closed when a durable claim already exists.
+`CallableTool` propagates it instead of normalizing it as an ordinary tool error.
+
+`ToolExecutor` is the sole owner of translating a signal into cancellation and draining of an
+ordinary `arun()` body task, covering async callables, custom async `BaseTool` implementations, and
+THREAD callables. Without a signal it awaits the body directly; with a signal it checks body
+completion before cancellation. A completed result wins. If the executor cancels the body because
+of the signal and the body catches `CancelledError` and returns normally, its `ToolResult` is kept.
+If external `Task.cancel()`, timeout, or runtime sibling cancellation has already interrupted the
+executor, it only waits for body cleanup and propagates the original cancellation; a cleanup-time
+return cannot replace that interruption. Ordinary tool exceptions retain existing normalization.
+
+This cancellation bridge covers only the body. A pending request after `before_call` prevents body
+startup; once the body returns, `after_call`, artifact handling, and breaker accounting continue.
+Slow middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay
+exit. Thread cancellation ends only the async waiter; the worker may continue. Unresolved claims
+still settle as `OUTCOME_UNKNOWN`, including read-only calls, and late returns cannot change the
+durable result.
 
 The blocking I/O in `read_file`, `list_files`, and `grep_search` runs in worker threads; `write_file`
 and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A read returns an
