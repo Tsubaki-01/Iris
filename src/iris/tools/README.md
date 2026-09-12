@@ -299,6 +299,9 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 ## 权限、artifact、middleware、熔断
 
+`ToolRegistry.register_many(tools)` 在同一个 admission 中检查批内及已有 name/alias 冲突，
+全部通过才发布；冲突保持原 registry。`register(tool)` 复用这条路径，既有 view 保持可见。
+
 ### 权限
 
 - `PermissionEffect`: `ALLOW`、`DENY`、`REQUIRE_HUMAN` 三态权限裁决。

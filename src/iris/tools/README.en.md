@@ -234,6 +234,10 @@ Default permissions allow only locally trusted read-only MCP tools; policy finge
 
 ## Human tool, middleware, breaker, and discovery
 
+`ToolRegistry.register_many(tools)` checks names and aliases against both the batch and existing
+indexes before publishing. Conflicts leave the registry unchanged. `register(tool)` uses the same
+admission path, and existing views see the published tools.
+
 YAML name `human.ask` registers model-visible `ask_question`. `AskQuestionTool` converts validated
 input to `QuestionPrompt` and refuses direct `arun()`; runtime owns the interaction.
 

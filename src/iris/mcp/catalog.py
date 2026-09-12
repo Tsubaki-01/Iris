@@ -25,7 +25,9 @@ _DIALECT = "https://json-schema.org/draft/2020-12/schema"
 def _public_name(server_id: str, wire_name: str) -> str:
     """只在名称需要转换或截断时用原始身份摘要消除歧义。"""
     base = f"mcp__{server_id}__{wire_name}"
-    normalized = "".join(char if char.isalnum() or char == "_" else "_" for char in base)
+    normalized = "".join(
+        char if char.isascii() and (char.isalnum() or char == "_") else "_" for char in base
+    )
     if normalized == base and len(base) <= 64:
         return base
     identity = json.dumps([server_id, wire_name], ensure_ascii=False, separators=(",", ":"))

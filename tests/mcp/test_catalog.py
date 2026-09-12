@@ -28,6 +28,22 @@ def test_names_are_stable_and_original_schema_is_preserved(stdio_config: MCPReso
     assert catalog[0].definition.description == "MCP tool echo from fixture"
 
 
+def test_unicode_identity_gets_provider_compatible_public_name(
+    stdio_config: MCPResolvedServer,
+) -> None:
+    """中文配置身份不能使整个 provider 工具目录不可用。"""
+    catalog, diagnostics = build_catalog(
+        replace(stdio_config, server_id="中文服务"),
+        [
+            types.Tool(name="查询", input_schema={"type": "object"}),
+        ],
+    )
+    assert not diagnostics
+    descriptor = catalog[0]
+    assert descriptor.public_name.isascii() and len(descriptor.public_name) <= 64
+    assert (descriptor.server_id, descriptor.wire_name) == ("中文服务", "查询")
+
+
 @pytest.mark.parametrize(
     "schema",
     [

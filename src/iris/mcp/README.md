@@ -2,7 +2,7 @@
 
 # iris.mcp
 
-提供 MCP 外部文件导入、环境解析与官方 SDK 单服务连接。Agent YAML 与运行时装配将在后续阶段接入。
+提供 MCP 外部文件导入、官方 SDK 连接、多服务目录发布与工具适配。Agent YAML 与运行时装配将在后续阶段接入。
 
 ## 配置入口
 
@@ -39,9 +39,10 @@ STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。
 再用原始名称调用 `call_tool(name, arguments)`；最后 await `aclose()`。`protocol_version`
 返回实际协商结果。SDK 上下文由单个长期 task 开闭；调用直接 await session，每服务串行。
 调用 timeout 包含锁等待和最多八轮 state-only continuation，取消沿调用栈传入 SDK。
+SSE 连接的空闲等待不计入工具调用期限；准备和调用各自受外层期限约束。
 
 依赖锁定为 MCP SDK 2.2.0、httpx2 2.12.0。STDIO、Streamable HTTP 与 SSE 使用 SDK transport，
-协议由 auto 协商。真实测试已覆盖现代 STDIO（2026-07-28）与旧版 HTTP 握手（2025-11-25）；
+协议由 auto 协商。真实测试已覆盖现代 STDIO/SSE（2026-07-28）与旧版 HTTP 握手（2025-11-25）；
 其他组合在整体集成阶段验收。fixture 服务使用 SDK 2.2.0，旧版场景明确拒绝 discover。
 
 SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输出/MRTR 错误使用
@@ -50,9 +51,19 @@ SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输
 
 ## 实现与维护
 
+`manager.MCPManager(config, registry=registry, workspace_root=workspace)` 的 `prepare()` 按
+server id 顺序解析环境、连接和完整发现。每服务共享一个 startup 期限，全部成功候选通过
+`registry.register_many()` 一次发布，原有 ToolRegistryView 随即可见。required 失败不发布
+部分工具，optional 失败记录 diagnostic；合法空目录允许继续。
+
+`snapshot` 在成功准备后固定；并发/重复 prepare 不重复连接或发现。失败后 manager 关闭，
+需要新配置时构造新实例。`aclose()` 尝试关闭所有 owned connection，显式关闭错误报告 host。
+快照中的有效 env/header 仅供后续内存指纹计算，不应整体记录或持久化。
+
 `catalog.build_catalog(server, sdk_tools)` 按原始 wire 名过滤，编译 JSON Schema 2020-12
 输入 validator；本地 `$defs`/引用可用，不能解析的外部引用和其他 dialect 留诊断后排除。
-公开名使用 `mcp__...`，必要时按原始身份附稳定摘要。`tools.MCPTool(descriptor, connection)`
+公开名使用 ASCII 字母、数字和下划线组成的 `mcp__...`，必要时按原始身份附稳定摘要。
+`tools.MCPTool(descriptor, connection)`
 可直接注册到既有 ToolRegistry，参数、权限、执行与取消走普通工具链。
 
 默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
@@ -67,6 +78,7 @@ SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris �
 - `models.py`：外部声明模型，以及内部 config/resolved/diagnostic 数据。
 - `connection.py`：SDK transport owner、完整分页、调用与关闭。
 - `catalog.py` / `tools.py`：descriptor 与现有 BaseTool adapter。
+- `manager.py`：准备/关闭协调与唯一 catalog snapshot。
 - `../agents/config/mcp.py`：Iris 引用与策略模型。
 - `tests/mcp/test_config.py`、`test_environment.py`：复制配置、禁用、冲突与环境优先级。
 - `tests/mcp/test_connection.py`、`test_sdk_contract.py`：Iris 调度与真实 SDK 契约。

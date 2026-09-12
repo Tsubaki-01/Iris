@@ -2,8 +2,8 @@
 
 # iris.mcp
 
-Imports external MCP configuration, resolves its environment, and connects individual servers
-through the official SDK. Agent YAML integration and runtime assembly follow in later stages.
+Imports external MCP configuration and provides SDK connections, multi-server catalog publication,
+and tool adapters. Agent YAML integration and runtime assembly follow in later stages.
 
 ## Configuration APIs
 
@@ -43,9 +43,10 @@ Construct `connection.MCPConnection(resolved)` synchronously, then await `open()
 `aclose()`. `protocol_version` reports the negotiated version. One long-lived task enters and
 exits SDK contexts; callers await the session directly, serialized per server. The call timeout
 includes lock waiting and up to eight state-only continuation rounds. Cancellation reaches the SDK.
+SSE idle waiting does not spend the tool-call budget; preparation and calls retain outer deadlines.
 
 The lockfile selects MCP SDK 2.2.0 and httpx2 2.12.0. STDIO, Streamable HTTP, and SSE use SDK
-transports with auto negotiation. Real tests cover modern STDIO (2026-07-28) and legacy HTTP
+transports with auto negotiation. Real tests cover modern STDIO/SSE (2026-07-28) and legacy HTTP
 handshakes (2025-11-25); other combinations follow during integration. Fixture servers run SDK
 2.2.0 and explicitly reject discover for the legacy scenario.
 
@@ -56,9 +57,21 @@ Iris does not replay calls or reconnect automatically.
 
 ## Implementation and maintenance
 
+`manager.MCPManager(config, registry=registry, workspace_root=workspace).prepare()` resolves,
+connects, and fully discovers servers in server-id order. Each server shares one startup deadline.
+All candidates publish through `registry.register_many()` once, becoming visible to existing
+ToolRegistryViews. Required failures publish no partial MCP tools; optional failures produce
+diagnostics. Valid empty catalogs are allowed.
+
+The successful `snapshot` stays fixed, and concurrent/repeated prepare calls do not reconnect or
+rediscover. Failed managers close; create a new instance for new configuration. `aclose()` attempts
+every owned connection and reports explicit closure failures to the host. Effective env/header
+values in the snapshot are for in-memory fingerprinting and should not be logged or persisted.
+
 `catalog.build_catalog(server, sdk_tools)` filters original wire names and compiles JSON Schema
 2020-12 input validators. Local references work; unresolved external references and other dialects
-produce diagnostics and exclude the tool. Public names use `mcp__...`, adding a stable identity
+produce diagnostics and exclude the tool. Public names use ASCII letters, digits and underscores
+in `mcp__...`, adding a stable identity
 digest only when necessary. Register `tools.MCPTool(descriptor, connection)` in the existing
 ToolRegistry to use the ordinary input, permission, execution, and cancellation path.
 
@@ -76,6 +89,7 @@ current context.session_id, and error paths appear in the model-visible error.me
 - `models.py`: external declarations and internal config/resolved/diagnostic data.
 - `connection.py`: SDK transport ownership, complete pagination, calls, and closure.
 - `catalog.py` / `tools.py`: descriptors and the existing BaseTool adapter.
+- `manager.py`: prepare/close coordination and the single catalog snapshot.
 - `../agents/config/mcp.py`: Iris file reference and policy models.
 - `tests/mcp/test_config.py`, `test_environment.py`: copied configuration, disabling, conflicts,
   and environment precedence.

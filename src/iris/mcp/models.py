@@ -114,11 +114,30 @@ class MCPToolDescriptor:
     trusted_read_only: bool
 
 
+@dataclass(frozen=True, slots=True)
+class MCPServerSnapshot:
+    """成功 server 的有效配置、实际协议与已发布目录，不含活动资源。"""
+
+    config: MCPResolvedServer
+    protocol_version: str
+    tools: tuple[MCPToolDescriptor, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPCatalogSnapshot:
+    """一次成功准备的固定目录与诊断；有效配置只在内存中参与指纹。"""
+
+    servers: tuple[MCPServerSnapshot, ...]
+    diagnostics: tuple[MCPDiagnostic, ...]
+
+
 __all__ = [
+    "MCPCatalogSnapshot",
     "MCPConfig",
     "MCPDiagnostic",
     "MCPResolvedServer",
     "MCPServerConfig",
+    "MCPServerSnapshot",
     "MCPToolDescriptor",
     "MCPTransport",
 ]
