@@ -2,7 +2,7 @@
 
 # iris.mcp
 
-提供 MCP 外部文件导入与环境解析。当前阶段包含独立配置入口；Agent YAML 与运行时连接将在后续阶段接入。
+提供 MCP 外部文件导入、环境解析与官方 SDK 单服务连接。Agent YAML 与运行时装配将在后续阶段接入。
 
 ## 配置入口
 
@@ -33,12 +33,29 @@ STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。
 基于 MCP 文件目录，未配置 cwd 则使用 workspace_root。HTTP header 在展开后按小写名称合并，
 同名异值报错。HTTP、Streamable HTTP 别名及显式 SSE 都归一为内部 transport；URL 不推断 SSE。
 
+## 单服务连接
+
+`connection.MCPConnection(resolved)` 纯同步构造，依次 await `open()`、`list_tools()`，
+再用原始名称调用 `call_tool(name, arguments)`；最后 await `aclose()`。`protocol_version`
+返回实际协商结果。SDK 上下文由单个长期 task 开闭；调用直接 await session，每服务串行。
+调用 timeout 包含锁等待和最多八轮 state-only continuation，取消沿调用栈传入 SDK。
+
+依赖锁定为 MCP SDK 2.2.0、httpx2 2.12.0。STDIO、Streamable HTTP 与 SSE 使用 SDK transport，
+协议由 auto 协商。真实测试已覆盖现代 STDIO（2026-07-28）与旧版 HTTP 握手（2025-11-25）；
+其他组合在整体集成阶段验收。fixture 服务使用 SDK 2.2.0，旧版场景明确拒绝 discover。
+
+SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输出/MRTR 错误使用
+`IrisMCPToolError.code`。成功结果只由 SDK 校验 output schema；2.2.0 将 null 视为缺失，
+声明 output schema 时返回 `MCP_RESULT_INVALID`。不自动重放或重连。
+
 ## 实现与维护
 
 - `config.py`：来源字段归一和环境求值的唯一入口。
 - `models.py`：外部声明模型，以及内部 config/resolved/diagnostic 数据。
+- `connection.py`：SDK transport owner、完整分页、调用与关闭。
 - `../agents/config/mcp.py`：Iris 引用与策略模型。
 - `tests/mcp/test_config.py`、`test_environment.py`：复制配置、禁用、冲突与环境优先级。
+- `tests/mcp/test_connection.py`、`test_sdk_contract.py`：Iris 调度与真实 SDK 契约。
 
 在仓库根目录设置 `UV_CACHE_DIR` 后使用 `uv run pytest`、`uv run ruff check` 和
 `uv run mypy`，测试范围为 `tests/mcp`。客户端 inputs、命令替换、插件变量、remote executor、

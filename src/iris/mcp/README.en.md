@@ -2,8 +2,8 @@
 
 # iris.mcp
 
-Imports external MCP configuration and resolves its environment. This stage provides independent
-configuration APIs; Agent YAML integration and runtime connections follow in later stages.
+Imports external MCP configuration, resolves its environment, and connects individual servers
+through the official SDK. Agent YAML integration and runtime assembly follow in later stages.
 
 ## Configuration APIs
 
@@ -36,13 +36,33 @@ Relative cwd/envFile paths use the MCP file directory; omitted cwd uses workspac
 HTTP headers are merged by lowercase name after expansion; conflicting effective values fail.
 HTTP aliases and explicit SSE normalize into one internal transport field; URLs never imply SSE.
 
+## Single-server connections
+
+Construct `connection.MCPConnection(resolved)` synchronously, then await `open()` and
+`list_tools()`. Call `call_tool(name, arguments)` with original wire names and finish with
+`aclose()`. `protocol_version` reports the negotiated version. One long-lived task enters and
+exits SDK contexts; callers await the session directly, serialized per server. The call timeout
+includes lock waiting and up to eight state-only continuation rounds. Cancellation reaches the SDK.
+
+The lockfile selects MCP SDK 2.2.0 and httpx2 2.12.0. STDIO, Streamable HTTP, and SSE use SDK
+transports with auto negotiation. Real tests cover modern STDIO (2026-07-28) and legacy HTTP
+handshakes (2025-11-25); other combinations follow during integration. Fixture servers run SDK
+2.2.0 and explicitly reject discover for the legacy scenario.
+
+SDK MCPError becomes `IrisMCPCallError` without inferring whether the remote operation ran.
+Known output/MRTR failures use `IrisMCPToolError.code`. Only the SDK validates successful output
+schemas; 2.2.0 treats null as missing and reports `MCP_RESULT_INVALID` when a schema is declared.
+Iris does not replay calls or reconnect automatically.
+
 ## Implementation and maintenance
 
 - `config.py`: the single owner of source normalization and environment resolution.
 - `models.py`: external declarations and internal config/resolved/diagnostic data.
+- `connection.py`: SDK transport ownership, complete pagination, calls, and closure.
 - `../agents/config/mcp.py`: Iris file reference and policy models.
 - `tests/mcp/test_config.py`, `test_environment.py`: copied configuration, disabling, conflicts,
   and environment precedence.
+- `tests/mcp/test_connection.py`, `test_sdk_contract.py`: Iris scheduling and real SDK contracts.
 
 Set `UV_CACHE_DIR` at the repository root, then use `uv run pytest`, `uv run ruff check`, and
 `uv run mypy`, targeting `tests/mcp`. Client inputs, command substitutions, plugin variables,
