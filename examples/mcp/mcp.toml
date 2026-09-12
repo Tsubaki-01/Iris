@@ -1,0 +1,4 @@
+[mcp_servers.local]
+command = "python"
+args = ["server.py"]
+cwd = "."

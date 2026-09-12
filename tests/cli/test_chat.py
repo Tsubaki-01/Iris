@@ -51,6 +51,9 @@ class SequenceRunner:
     def __init__(self) -> None:
         self.start_calls: list[object] = []
 
+    async def aclose(self) -> None:
+        """满足 host 的显式资源关闭契约；该替身没有活动资源。"""
+
     def list_events(
         self,
         run_id: str,
@@ -64,6 +67,9 @@ class SequenceRunner:
 
 class ErrorRunner:
     """在 manager create admission 前抛出领域错误。"""
+
+    async def aclose(self) -> None:
+        """该替身没有自有资源。"""
 
     def list_events(
         self,

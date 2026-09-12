@@ -67,9 +67,7 @@ async def serve_http(scenario: ServerScenario, *, sse: bool = False) -> AsyncIte
 
             async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
                 async with transport.connect_sse(scope, receive, send) as streams:
-                    await scenario.server.run(
-                        *streams, scenario.server.create_initialization_options()
-                    )
+                    await scenario.run_stream(*streams)
 
         app = Starlette(
             routes=[
@@ -79,10 +77,21 @@ async def serve_http(scenario: ServerScenario, *, sse: bool = False) -> AsyncIte
         )
     else:
         app = scenario.server.streamable_http_app()
+
+    async def observed_app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            headers = dict(scope["headers"])
+            scenario.record(
+                event="http",
+                static=headers.get(b"x-fixture-static", b"").decode(),
+                env=headers.get(b"x-fixture-env", b"").decode(),
+            )
+        await app(scope, receive, send)
+
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-        server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+        server = uvicorn.Server(uvicorn.Config(observed_app, log_level="error"))
         task = asyncio.create_task(server.serve(sockets=[listener]))
         try:
             async with asyncio.timeout(5):

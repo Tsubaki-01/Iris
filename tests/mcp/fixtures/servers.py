@@ -12,6 +12,7 @@ from typing import Any
 from mcp import types
 from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel import Server
+from mcp.server.runner import serve_loop
 from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 
@@ -20,6 +21,7 @@ class ServerScenario:
     """可观察的工具调用与取消，不依赖真实外部服务。"""
 
     def __init__(self, *, legacy: bool = False, log_path: Path | None = None) -> None:
+        self.legacy = legacy
         self.log_path = log_path
         self.calls: list[dict[str, Any]] = []
         self.entered = asyncio.Event()
@@ -39,6 +41,16 @@ class ServerScenario:
         if self.log_path is not None:
             with self.log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(event) + "\n")
+
+    async def run_stream(self, read: Any, write: Any) -> None:
+        """旧服务使用 SDK handshake-only driver，现代服务使用默认双时代入口。"""
+        try:
+            if self.legacy:
+                await serve_loop(self.server, read, write, lifespan_state=None)
+            else:
+                await self.server.run(read, write, self.server.create_initialization_options())
+        finally:
+            self.record(event="closed")
 
     async def reject_discover(
         self, ctx: ServerRequestContext, params: types.RequestParams
@@ -132,11 +144,8 @@ async def serve_stdio(*, legacy: bool) -> None:
     """以真实 STDIO transport 服务至 client 关闭。"""
     log_path = os.environ.get("IRIS_MCP_TEST_LOG")
     scenario = ServerScenario(legacy=legacy, log_path=Path(log_path) if log_path else None)
-    try:
-        async with stdio_server() as (read, write):
-            await scenario.server.run(read, write, scenario.server.create_initialization_options())
-    finally:
-        scenario.record(event="closed")
+    async with stdio_server() as (read, write):
+        await scenario.run_stream(read, write)
 
 
 if __name__ == "__main__":

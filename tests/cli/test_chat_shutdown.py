@@ -15,6 +15,9 @@ from iris.message import ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import ToolCapability, ToolRegistry
 from tests.harness.fakes import StaticProvider, build_runtime, text_response, tool_response
+from tests.harness.test_runner_subagent import ChildProviders, _parent_provider
+from tests.harness.test_runner_subagent_mcp import configs
+from tests.mcp.fixtures.runtime import MCPPeer, mcp_agent
 
 
 @pytest.mark.parametrize("exit_kind", ["command", "eof", "interrupt"])
@@ -63,6 +66,106 @@ def test_waiting_follow_up_is_not_started_during_cli_exit(tmp_path: Path, exit_k
     assert len(provider.requests) == 1
     assert runner.get_run(current[0]).stop_reason is RunStopReason.CANCELLED
     assert store.load_session_lane("cli") is None
+
+
+@pytest.mark.parametrize("waiting_parent", [False, True])
+def test_mcp_shutdown_drains_original_calls_before_closing_background_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    waiting_parent: bool,
+) -> None:
+    peer = MCPPeer(monkeypatch)
+    peer.block_call = True
+    peer.release_cleanup.clear()
+    mcp_response = tool_response(ToolUseBlock(id="mcp-call", name="mcp__test__echo", input={}))
+    if waiting_parent:
+        runner = AgentRunner.from_config_path(
+            configs(tmp_path, root_mcp=True),
+            provider=_parent_provider(),
+            child_provider_factory=ChildProviders(
+                StaticProvider(
+                    tool_response(
+                        ToolUseBlock(id="ask", name="ask_question", input={"question": "Continue?"})
+                    ),
+                    mcp_response,
+                )
+            ),
+        )
+    else:
+        runner = AgentRunner.from_config(mcp_agent(tmp_path), provider=StaticProvider(mcp_response))
+    errors: list[str] = []
+    host = _ChatSessionHost(
+        runner=runner,
+        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
+        live_output=None,
+        output_func=lambda text: None,
+        error_func=errors.append,
+    )
+    host.start()
+    host.submit("start")
+
+    async def wait_for_prompt() -> None:
+        async with asyncio.timeout(2):
+            while host._pending_interaction is None:
+                await asyncio.sleep(0)
+
+    if waiting_parent:
+        host._call(wait_for_prompt())
+        host.submit("continue")
+    host._call(asyncio.wait_for(peer.called.wait(), 2))
+    closer = threading.Thread(target=host.close)
+    closer.start()
+    try:
+        host._call(asyncio.wait_for(peer.cleaning.wait(), 2))
+        assert closer.is_alive() and host._thread.is_alive()
+        assert peer.events.count("close") == int(waiting_parent)
+        active = runner.store.load_session_lane("cli")
+        assert active is not None
+    finally:
+        host._require_loop().call_soon_threadsafe(peer.release_cleanup.set)
+        closer.join(5)
+    assert not closer.is_alive() and not host._thread.is_alive()
+    assert peer.events.count("close") == peer.events.count("open") == 1 + 2 * int(waiting_parent)
+
+
+def test_mcp_close_failure_is_visible_after_two_reused_chat_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    peer = MCPPeer(monkeypatch)
+    peer.fail_close = True
+    runner = AgentRunner.from_config(
+        mcp_agent(tmp_path), provider=StaticProvider(text_response("one"), text_response("two"))
+    )
+    first = threading.Event()
+    second = threading.Event()
+    inputs = iter(["first", "second", "/exit"])
+    errors: list[str] = []
+
+    def read(prompt: str) -> str:
+        value = next(inputs)
+        if value == "second":
+            assert first.wait(2)
+        if value == "/exit":
+            assert second.wait(2)
+        return value
+
+    def output(text: str) -> None:
+        if text == "one":
+            first.set()
+        elif text == "two":
+            second.set()
+
+    code = run_chat_loop(
+        runner=runner,
+        options=ChatOptions(config_path=tmp_path / "agent.yaml"),
+        input_func=read,
+        output_func=output,
+        error_func=errors.append,
+    )
+    assert code == 1
+    assert any("MCP" in error for error in errors)
+    assert peer.events == ["open", "list", "close"]
 
 
 def test_plain_text_routes_while_previous_terminal_display_is_pending(

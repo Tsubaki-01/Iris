@@ -3,7 +3,11 @@
 # iris.mcp
 
 Imports external MCP configuration and provides SDK connections, multi-server catalog publication,
-and tool adapters, integrated with Agent YAML and root runners.
+and tool adapters, integrated with Agent YAML, root/child runners, and the CLI.
+
+See [examples/mcp](../../../examples/mcp/README.md) for a runnable local service and JSON/TOML
+configuration. Stable package exports are `MCPManager` and `load_mcp_config`; configuration models
+are exported from `iris.agents`.
 
 ## Configuration APIs
 
@@ -52,9 +56,17 @@ includes lock waiting and up to eight state-only continuation rounds. Cancellati
 SSE idle waiting does not spend the tool-call budget; preparation and calls retain outer deadlines.
 
 The lockfile selects MCP SDK 2.2.0 and httpx2 2.12.0. STDIO, Streamable HTTP, and SSE use SDK
-transports with auto negotiation. Real tests cover modern STDIO/SSE (2026-07-28) and legacy HTTP
-handshakes (2025-11-25); other combinations follow during integration. Fixture servers run SDK
-2.2.0 and explicitly reject discover for the legacy scenario.
+transports with auto negotiation. Real `AgentRunner → executor → SDK → server` tests cover:
+
+| Transport | Protocol | Local fixture |
+| --- | --- | --- |
+| STDIO / Streamable HTTP | 2026-07-28 | SDK 2.2.0 Server, modern discover |
+| STDIO / Streamable HTTP | 2025-11-25 | SDK handshake-only driver / legacy HTTP initialization |
+| Explicit SSE | 2025-11-25 | SDK handshake-only driver |
+
+The fixture is iris-test v1. A separate regression covers modern SSE idle reuse. HTTP tests verify
+static/env headers and client closure; STDIO tests verify process exit. No public MCP service or paid
+LLM invocation is required.
 
 SDK MCPError becomes `IrisMCPCallError` without inferring whether the remote operation ran.
 Known output/MRTR failures use `IrisMCPToolError.code`. Only the SDK validates successful output
@@ -85,6 +97,9 @@ Default permissions allow MCP tools only when local trust_annotations and readOn
 true. Other tools require confirmation. Uncertain SDK failures become ordinary errors or
 OUTCOME_UNKNOWN according to that policy; Iris interruption with an unsettled claim follows the
 existing unknown path even for trusted reads. MCP tools remain outside parallel windows.
+The existing executor cancels SDK requests and waits for cleanup before settlement; cancellation
+does not prove remote effects stopped. CLI shutdown waits for `manager.close(cancel_run=True)`,
+closes the runner, then finishes output and the background loop.
 
 Rich content, structuredContent, SDK-retained metadata, and oversized projections are saved as
 complete `.mcp.json` files. Models receive bounded text and a path. After-hook expansion preserves
@@ -94,6 +109,7 @@ current context.session_id, and error paths appear in the model-visible error.me
 - `config.py`: the single owner of source normalization and environment resolution.
 - `models.py`: external declarations and internal config/resolved/diagnostic data.
 - `connection.py`: SDK transport ownership, complete pagination, calls, and closure.
+- `tests/mcp/test_interoperability.py`: five complete protocol paths and new-run reuse after cancellation.
 - `catalog.py` / `tools.py`: descriptors and the existing BaseTool adapter.
 - `manager.py`: prepare/close coordination and the single catalog snapshot.
 - `../agents/config/mcp.py`: Iris file reference and policy models.
