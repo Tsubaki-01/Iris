@@ -798,11 +798,13 @@ dependencies = [
     { name = "httpx2" },
     { name = "jinja2" },
     { name = "json5" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "mcp" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "referencing" },
 ]
 
 [package.dev-dependencies]
@@ -819,11 +821,13 @@ requires-dist = [
     { name = "httpx2", specifier = ">=2.12.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "json5", specifier = ">=0.15.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "litellm", specifier = ">=1.90.2" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "pydantic-settings", specifier = ">=2.14.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "referencing", specifier = ">=0.37.0" },
 ]
 
 [package.metadata.requires-dev]

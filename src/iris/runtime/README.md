@@ -10,6 +10,10 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 完整运行请使用 `iris.harness.AgentRunner`。只有实现自定义 lifecycle owner 时才直接调用
 `AgentRuntime.execute()`。
 
+MCPTool 经普通工具链进入串行执行。`IrisMCPOutcomeUnknownError` 使用已有
+`_unknown_tool_outcome` 结算未确定的 claim，不新增 stop reason 或持久化协议；受信只读的
+SDK 错误仍是普通 ToolResult，遵守 ToolErrorPolicy。MCP 不另建取消 watcher。
+
 ## 依赖方向
 
 ```text

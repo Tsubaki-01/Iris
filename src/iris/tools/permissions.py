@@ -116,6 +116,8 @@ class DefaultPermissionPolicy(PermissionPolicy):
         del context
         if isinstance(tool, SubagentTool):
             return PermissionDecision(effect=PermissionEffect.ALLOW)
+        if ToolCapability.MCP in tool.definition.capabilities and tool.is_read_only(params):
+            return PermissionDecision(effect=PermissionEffect.ALLOW)
         if tool.definition.capabilities <= {ToolCapability.READ}:
             return PermissionDecision(effect=PermissionEffect.ALLOW)
         if tool.definition.capabilities <= {
@@ -140,7 +142,7 @@ class DefaultPermissionPolicy(PermissionPolicy):
         """返回默认权限策略影响工具执行的稳定状态。"""
         return {
             "type": "default",
-            "version": 1,
+            "version": 2,
             "write_mode": self.write_mode,
         }
 

@@ -10,6 +10,11 @@ It does not create logical runs, select stores, or own public cancellation/recov
 Use `iris.harness.AgentRunner` for complete runs. Call `AgentRuntime.execute()` directly only when
 implementing a custom lifecycle owner.
 
+MCPTool uses the ordinary serial tool path. `IrisMCPOutcomeUnknownError` reaches the existing
+`_unknown_tool_outcome` settlement without new stop reasons or persistence protocols. Trusted
+read-only SDK failures remain ordinary ToolResults governed by ToolErrorPolicy. MCP adds no
+separate cancellation watcher.
+
 ## Dependency direction
 
 ```text

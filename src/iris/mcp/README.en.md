@@ -56,9 +56,26 @@ Iris does not replay calls or reconnect automatically.
 
 ## Implementation and maintenance
 
+`catalog.build_catalog(server, sdk_tools)` filters original wire names and compiles JSON Schema
+2020-12 input validators. Local references work; unresolved external references and other dialects
+produce diagnostics and exclude the tool. Public names use `mcp__...`, adding a stable identity
+digest only when necessary. Register `tools.MCPTool(descriptor, connection)` in the existing
+ToolRegistry to use the ordinary input, permission, execution, and cancellation path.
+
+Default permissions allow MCP tools only when local trust_annotations and readOnlyHint are both
+true. Other tools require confirmation. Uncertain SDK failures become ordinary errors or
+OUTCOME_UNKNOWN according to that policy; Iris interruption with an unsettled claim follows the
+existing unknown path even for trusted reads. MCP tools remain outside parallel windows.
+
+Rich content, structuredContent, SDK-retained metadata, and oversized projections are saved as
+complete `.mcp.json` files. Models receive bounded text and a path. After-hook expansion preserves
+an existing JSON artifact; expanded plain text without one uses `.txt`. Files are scoped to the
+current context.session_id, and error paths appear in the model-visible error.message.
+
 - `config.py`: the single owner of source normalization and environment resolution.
 - `models.py`: external declarations and internal config/resolved/diagnostic data.
 - `connection.py`: SDK transport ownership, complete pagination, calls, and closure.
+- `catalog.py` / `tools.py`: descriptors and the existing BaseTool adapter.
 - `../agents/config/mcp.py`: Iris file reference and policy models.
 - `tests/mcp/test_config.py`, `test_environment.py`: copied configuration, disabling, conflicts,
   and environment precedence.

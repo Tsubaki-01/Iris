@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..exceptions import (
     IrisCancellationRequestedError,
+    IrisMCPOutcomeUnknownError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
     IrisToolValidationError,
@@ -34,11 +35,11 @@ from ..hitl.models import (
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
-from ._paths import safe_path_segment
 from ._read_state import ReadFileState
-from .artifacts import ToolArtifactStore
+from .artifacts import ToolArtifactStore, artifact_store_for
 from .base import (
     BaseTool,
+    ToolCapability,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolResult,
@@ -524,7 +525,7 @@ class ToolExecutor:
                 return middleware_error
             try:
                 result = await self._run_tool_body(tool, validated_input, context)
-            except IrisCancellationRequestedError:
+            except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
                 raise
             except Exception as exc:
                 handled = await self._run_on_error(tool, exc, context)
@@ -547,7 +548,7 @@ class ToolExecutor:
             )
             self._record_breaker_result(tool.name, final_result)
             return final_result
-        except IrisCancellationRequestedError:
+        except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
             raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
@@ -624,6 +625,7 @@ class ToolExecutor:
         return self._artifact_store(context).persist_if_large(
             normalized,
             max_chars=tool.definition.max_result_chars,
+            mcp_result=ToolCapability.MCP in tool.definition.capabilities,
         )
 
     def _error_result(
@@ -720,9 +722,7 @@ class ToolExecutor:
         Returns:
             ToolArtifactStore: 操作落盘工作的具象存取处理库。
         """
-        session_id = safe_path_segment(context.session_id)
-        root = context.workspace_root / ".iris" / "tool-results" / session_id
-        return ToolArtifactStore(root=root, preview_chars=self.artifact_preview_chars)
+        return artifact_store_for(context, preview_chars=self.artifact_preview_chars)
 
     async def _run_before_call(
         self,

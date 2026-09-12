@@ -14,6 +14,7 @@ from ..exceptions import (
     HITLCheckpointInvalidError,
     IrisCancellationRequestedError,
     IrisError,
+    IrisMCPOutcomeUnknownError,
     IrisProviderStreamError,
     IrisProviderStreamInterruptedError,
     IrisRunConflictError,
@@ -391,6 +392,8 @@ class AgentRuntime:
                         if timeout is not None
                         else await operation
                     )
+                except IrisMCPOutcomeUnknownError as error:
+                    return _unknown_tool_outcome(cursor, prepared, error.message)
                 except IrisCancellationRequestedError:
                     if guard.claim_for(prepared.tool_use.id) is not None:
                         return _unknown_tool_outcome(cursor, prepared, "工具 claim 后收到取消")

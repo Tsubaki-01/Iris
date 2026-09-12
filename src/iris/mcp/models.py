@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..exceptions import IrisConfigError
+
+if TYPE_CHECKING:
+    from jsonschema import Draft202012Validator
+    from mcp import types
+
+    from ..tools.base import ToolDefinition
 
 type MCPTransport = Literal["stdio", "streamable-http", "sse"]
 
@@ -95,4 +101,24 @@ class MCPConfig:
     diagnostics: tuple[MCPDiagnostic, ...] = ()
 
 
-__all__ = ["MCPConfig", "MCPDiagnostic", "MCPResolvedServer", "MCPServerConfig", "MCPTransport"]
+@dataclass(frozen=True, slots=True)
+class MCPToolDescriptor:
+    """保留原始身份、编译 validator 与唯一有效只读策略。"""
+
+    server_id: str
+    wire_name: str
+    public_name: str
+    sdk_tool: types.Tool
+    definition: ToolDefinition
+    input_validator: Draft202012Validator
+    trusted_read_only: bool
+
+
+__all__ = [
+    "MCPConfig",
+    "MCPDiagnostic",
+    "MCPResolvedServer",
+    "MCPServerConfig",
+    "MCPToolDescriptor",
+    "MCPTransport",
+]
