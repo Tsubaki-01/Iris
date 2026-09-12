@@ -8,6 +8,9 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
+`config/mcp.py` provides the independent `AgentMCPConfig` file reference and `MCPServerOverride`
+policy models. `AgentConfig` does not expose `mcp` yet; see [MCP configuration](../mcp/README.en.md).
+
 `tools.subagent: subagents.yaml` declares an optional internal Sub Agent catalog, disabled by
 default. The path is relative to the parent YAML. Catalog `default` must exactly match an
 `agents` kebab-case key; each entry supplies a catalog-relative `path` and nonblank `description`.

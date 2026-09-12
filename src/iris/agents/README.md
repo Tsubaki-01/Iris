@@ -8,6 +8,9 @@
 
 ## 架构
 
+`config/mcp.py` 提供独立的 `AgentMCPConfig` 文件引用与 `MCPServerOverride` 本地策略模型；
+当前阶段尚未向 AgentConfig 暴露 `mcp` 字段。外部配置导入见 [MCP 包说明](../mcp/README.md)。
+
 `tools.subagent: subagents.yaml` 可声明内部 Sub Agent catalog，默认不启用。
 路径相对 parent YAML；catalog 的 `default` 必须命中 `agents` 的 exact kebab-case key，
 每个 entry 包含相对 catalog 的 `path` 和非空 `description`。内部 loader 只读取 catalog、
