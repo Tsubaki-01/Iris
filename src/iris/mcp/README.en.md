@@ -32,6 +32,9 @@ all remaining fields. Servers are required by default: invalid required declarat
 Shared assembly reads declarations. Root `AgentRunner.aprepare()` prepares before execution and
 includes the complete catalog in its final fingerprint. Connections span runs; the host awaits every
 original execution call fully before awaiting `runner.aclose()`.
+Children use the same YAML configuration with independent connections, prepare before admission, and
+close at WAITING/completion. Recovery rediscovers and checks the ordinary fingerprint. Child closure
+does not affect root connections; the existing parent/child policy decides permissions.
 
 `resolve_server_config()` expands `${VAR}`, `${VAR:-default}`, and `${env:VAR}` exactly once.
 STDIO environment precedence is env_vars → envFile → env; the host environment stays unchanged.

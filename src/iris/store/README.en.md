@@ -155,7 +155,7 @@ claim as outcome unknown during terminal settlement or recovery; it is never rep
 Preflight failures and `CIRCUIT_OPEN` short-circuit results can commit directly from `PREPARED`
 without a claim event. Both stores use the same classification in `_tool_results.py`; actual tool
 execution still requires a claim first. Pre-admission subagent `SUBAGENT_CONFIG_ERROR` and
-`SUBAGENT_WORKSPACE_DISJOINT` also belong to this claimless classification.
+`SUBAGENT_WORKSPACE_DISJOINT`, plus `SUBAGENT_PREPARE_ERROR`, belong to this claimless classification.
 
 Terminal tool messages and Runtime commits share `ToolResult.to_msg()`, directly projecting
 already normalized metadata.

@@ -38,7 +38,13 @@ claim 与时间，沿普通指纹规则拒绝目录/配置/有效只读策略漂
 root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
 cancel 的 durable result 或观察超时不代表 body 清理、事件投递已经结束。active 时关闭会报错，
 重复关闭幂等；关闭后仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，
-使用它时先 `close(cancel_run=True)` 再关闭 runner。child MCP 生命周期在 Phase 06 接入。
+使用它时先 `close(cancel_run=True)` 再关闭 runner。
+
+child 的普通 YAML 可独立配置 MCP。fresh child 在 admission 前准备并计算指纹；准备失败返回
+`SUBAGENT_PREPARE_ERROR`，不创建 child run/link。每次 child WAITING/结束、恢复失败或提前返回
+均关闭本次资源；WAITING 只保留 durable link，下次 resume/recover 重建并按普通指纹比较。
+父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
+创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
 ## 会话历史分支
 

@@ -133,7 +133,8 @@ recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcom
 
 effect 前的预检失败与 `CIRCUIT_OPEN` 熔断结果允许直接从 `PREPARED` 提交，不产生 claim
 event；两个 store 使用 `_tool_results.py` 的同一分类规则。Subagent admission 前的
-`SUBAGENT_CONFIG_ERROR` / `SUBAGENT_WORKSPACE_DISJOINT` 也属此类；普通工具执行仍必须先 claim。
+`SUBAGENT_CONFIG_ERROR` / `SUBAGENT_WORKSPACE_DISJOINT` / `SUBAGENT_PREPARE_ERROR`
+也属此类；普通工具执行仍必须先 claim。
 
 终态工具消息与 Runtime 提交共用 `ToolResult.to_msg()`，直接投影已归一化元数据。
 

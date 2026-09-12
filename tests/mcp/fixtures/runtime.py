@@ -28,6 +28,10 @@ class MCPPeer:
         self.block_call = False
         self.return_on_cancel = False
         self.fail_open = False
+        self.fail_close = False
+        self.closing = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.release_close.set()
         self.protocol_version = "2026-07-28"
         self.tools = (
             types.Tool(
@@ -70,6 +74,10 @@ class MCPPeer:
 
             async def aclose(self) -> None:
                 peer.events.append("close")
+                peer.closing.set()
+                await peer.release_close.wait()
+                if peer.fail_close:
+                    raise IrisMCPError("fixture close failed")
 
         monkeypatch.setattr("iris.mcp.manager.MCPConnection", Connection)
 

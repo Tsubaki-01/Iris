@@ -43,7 +43,15 @@ Root connections span multiple runs. Stop new calls and await the original start
 fully before `aclose()`. A cancel result or observation timeout does not prove body cleanup or event
 delivery finished. Active closure raises; repeated closure is idempotent, and durable queries remain
 available. `SessionManager.close()` does not own runner resources: use `close(cancel_run=True)` before
-closing the runner. Child MCP lifecycle integration follows in Phase 06.
+closing the runner.
+
+Ordinary child YAML can configure MCP independently. Fresh children prepare and compute fingerprints
+before admission. Failure returns `SUBAGENT_PREPARE_ERROR` without a child run/link. Every child
+WAITING/completion, recovery failure, or early return closes its resources. WAITING retains only durable
+links; resume/recover rebuilds and checks the ordinary fingerprint. Parent and child connections remain
+independent, with the more restrictive combined permission policy. Live cancellation borrows the runner
+and waits for its original task; the creating scope closes resources. Closure failures are logged without
+replacing outcomes. Non-live cancellation persists its request before any required preparation.
 
 ## Session history branches
 

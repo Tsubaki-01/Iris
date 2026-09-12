@@ -25,6 +25,11 @@ def is_preflight_result(result: ToolResult) -> bool:
                 "CIRCUIT_OPEN",
             }
             or result.tool_name == "subagent"
-            and result.error.code in {"SUBAGENT_CONFIG_ERROR", "SUBAGENT_WORKSPACE_DISJOINT"}
+            and result.error.code
+            in {
+                "SUBAGENT_CONFIG_ERROR",
+                "SUBAGENT_WORKSPACE_DISJOINT",
+                "SUBAGENT_PREPARE_ERROR",
+            }
         )
     )
