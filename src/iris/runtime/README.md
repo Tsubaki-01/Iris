@@ -17,7 +17,8 @@ SDK 错误仍是普通 ToolResult，遵守 ToolErrorPolicy。MCP 不另建取消
 shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定到原 registry，构造时
 不连接。`RuntimeEnvironment.aprepare()` / `aclose()` 直接委托该 manager；低层调用者必须
 在 execute 前准备并在所有执行结束后关闭。环境不关闭外部注入的 provider、memory 或 store。
-root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 集成见下一阶段。
+root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 由 harness 在 admission
+前准备，并在 WAITING/结束后关闭独立资源，恢复时重建。
 
 ## 依赖方向
 

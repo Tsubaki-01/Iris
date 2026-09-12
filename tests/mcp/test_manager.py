@@ -16,6 +16,7 @@ from iris.message import ToolUseBlock
 from iris.tools import ToolExecutionContext, ToolExecutor, ToolRegistry
 
 from .fixtures.tools import AllowTools
+from .test_connection import ControlledClient
 
 
 @pytest.fixture
@@ -231,3 +232,58 @@ async def test_real_manager_discovers_publishes_calls_and_closes_stdio(
     events = [json.loads(line) for line in (tmp_path / "server.jsonl").read_text().splitlines()]
     assert [event["name"] for event in events if event["event"] == "call"] == ["echo"]
     assert events[-1]["event"] == "closed"
+
+
+@pytest.mark.asyncio
+async def test_repeated_prepare_cancel_waits_all_sdk_connection_owners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """第二次取消不能打断失败清理，提前丢失第一条已准备连接。"""
+    listing = asyncio.Event()
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    log: list[str] = []
+
+    class Client(ControlledClient):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+        async def list_tools(
+            self, *, params: types.PaginatedRequestParams | None
+        ) -> types.ListToolsResult:
+            if self.name == "b":
+                listing.set()
+                await asyncio.Event().wait()
+            return types.ListToolsResult(tools=[])
+
+        async def __aexit__(self, *args: Any) -> None:
+            log.append(f"closing:{self.name}")
+            if self.name == "b":
+                closing.set()
+                await release.wait()
+            await super().__aexit__(*args)
+            log.append(f"closed:{self.name}")
+
+    def client(target: Any, *, mode: str, cache: None) -> Client:
+        return Client(target.command)
+
+    monkeypatch.setattr("iris.mcp.connection.Client", client)
+    registry = ToolRegistry()
+    manager = manager_for(tmp_path, {"a": {"command": "a"}, "b": {"command": "b"}}, registry)
+    task = asyncio.create_task(manager.prepare())
+    await listing.wait()
+    task.cancel()
+    await closing.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    try:
+        assert not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert log == ["closing:b", "closed:b", "closing:a", "closed:a"]
+    assert manager.snapshot is None and not registry.view().active_tools

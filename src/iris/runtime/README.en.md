@@ -19,7 +19,8 @@ Shared assembly reads `AgentConfig.mcp` declarations and binds an `MCPManager` t
 registry without connecting. `RuntimeEnvironment.aprepare()` / `aclose()` delegate to that manager.
 Low-level callers prepare before execute and close after all execution finishes. The environment
 does not close injected providers, memory, or stores. Root runners prepare automatically and reuse
-one fixed catalog and connections across runs; child integration follows in the next phase.
+one fixed catalog and connections across runs. Harness prepares children before admission and closes
+their independent resources at WAITING/completion, rebuilding on recovery.
 
 ## Dependency direction
 

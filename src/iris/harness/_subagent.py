@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -12,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import (
     IrisConfigError,
+    IrisMCPError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunRecoveryError,
@@ -53,6 +57,8 @@ from ..tools.subagent import (
 if TYPE_CHECKING:
     from .runner import AgentRunner, Clock
 
+logger = logging.getLogger(__name__)
+
 
 class ChildProviderFactory(Protocol):
     """按选中 child 的普通配置构造独立 provider。"""
@@ -93,6 +99,7 @@ class HarnessSubagentController:
         """Fresh admission 或按 exact link 继续，返回 child WAITING/TERMINAL。"""
         parent_call = invocation.parent_call
         parent = self._load_run(parent_call.parent_run_id)
+        parent_activation_id = cast(str, parent.current_activation_id)
         link = self.store.load_subagent_link(
             parent_call.parent_run_id, parent_call.parent_tool_call_id
         )
@@ -110,42 +117,78 @@ class HarnessSubagentController:
                 else "SUBAGENT_CONFIG_ERROR"
             )
             return _error_result(route.selector, code, "Selected child configuration is invalid")
-        request = AgentRunRequest.model_construct(
-            input=invocation.call.prompt,
-            session_id=f"session_{uuid.uuid4().hex}",
-            run_id=f"run_{uuid.uuid4().hex}",
-            metadata={},
-        )
-        child_create, _ = runner._build_start_facts(request, options=AgentRunOptions())
-        tool = self.store.load_tool_call(parent.run_id, parent_call.parent_tool_call_id)
-        if tool is None:
-            raise IrisRunNotFoundError(
-                "parent tool call 不存在", tool_call_id=parent_call.parent_tool_call_id
+        async with self._owned_child_runner(runner):
+            try:
+                await runner.aprepare()
+            except (IrisConfigError, IrisMCPError):
+                return _error_result(
+                    route.selector,
+                    "SUBAGENT_PREPARE_ERROR",
+                    "Selected child MCP preparation failed",
+                )
+            request = AgentRunRequest.model_construct(
+                input=invocation.call.prompt,
+                session_id=f"session_{uuid.uuid4().hex}",
+                run_id=f"run_{uuid.uuid4().hex}",
+                metadata={},
             )
-        link = self.store.admit_child_run(
-            AdmitChildRun(
-                parent_run_id=parent.run_id,
-                expected_parent_run_revision=parent.revision,
-                parent_activation_id=cast(str, parent.current_activation_id),
-                parent_tool_call_id=tool.tool_call_id,
-                expected_parent_tool_version=tool.version,
-                child_create=child_create,
+            child_create, _ = runner._build_start_facts(request, options=AgentRunOptions())
+            # 准备新增了 await，admission 使用最新 parent revision 与取消事实。
+            parent = self._load_run(parent_call.parent_run_id)
+            tool = self.store.load_tool_call(parent.run_id, parent_call.parent_tool_call_id)
+            if tool is None:
+                raise IrisRunNotFoundError(
+                    "parent tool call 不存在", tool_call_id=parent_call.parent_tool_call_id
+                )
+            link = self.store.admit_child_run(
+                AdmitChildRun(
+                    parent_run_id=parent.run_id,
+                    expected_parent_run_revision=parent.revision,
+                    parent_activation_id=parent_activation_id,
+                    parent_tool_call_id=tool.tool_call_id,
+                    expected_parent_tool_version=tool.version,
+                    child_create=child_create,
+                )
             )
+            if link.child_run_id == child_create.request.run_id:
+                return await self._run_child(
+                    route,
+                    parent,
+                    self._load_run(link.child_run_id),
+                    parent_call.parent_tool_call_id,
+                    runner,
+                    lambda: runner._run_admitted_start(
+                        run_id=link.child_run_id, activation_id=child_create.start_activation_id
+                    ),
+                )
+        # admission 命中已有 child 时，先释放本次未使用的资源，再重建 continuation。
+        return await self._continue_linked(
+            route, parent, link.child_run_id, parent_call.parent_tool_call_id
         )
-        if link.child_run_id != child_create.request.run_id:
-            return await self._continue_linked(
-                route, parent, link.child_run_id, parent_call.parent_tool_call_id
-            )
-        return await self._run_child(
-            route,
-            parent,
-            self._load_run(link.child_run_id),
-            parent_call.parent_tool_call_id,
-            runner,
-            lambda: runner._run_admitted_start(
-                run_id=link.child_run_id, activation_id=child_create.start_activation_id
-            ),
-        )
+
+    @asynccontextmanager
+    async def _owned_child_runner(self, runner: AgentRunner) -> AsyncIterator[AgentRunner]:
+        """覆盖同步装配后的整个操作，保持原结果并完成不可中断的资源关闭。"""
+        try:
+            yield runner
+        finally:
+            body_failed = sys.exception() is not None
+            interrupted = False
+            cleanup = asyncio.create_task(runner.aclose())
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        interrupted = True
+                cleanup.result()
+            except Exception:
+                logger.exception(
+                    "child 资源关闭失败",
+                    extra={"child_agent": runner.runtime.environment.agent_config.name},
+                )
+            if interrupted and not body_failed:
+                raise asyncio.CancelledError
 
     def _assemble_child(self, route: SubagentRoute) -> AgentRunner:
         """只加载 selected ordinary config，直接消费 CHILD boundary 与独立 provider。"""
@@ -193,19 +236,19 @@ class HarnessSubagentController:
         child = self._load_run(link.child_run_id)
         if child.phase is RunPhase.WAITING:
             if child.pending_interaction_id == origin.child_interaction_id:
-                runner = self._assemble_child(route)
-                return await self._run_child(
-                    route,
-                    parent_run,
-                    child,
-                    proxy.tool_call_id,
-                    runner,
-                    lambda: runner.resume(
-                        child.run_id,
-                        interaction_id=origin.child_interaction_id,
-                        response=cast(HumanInteractionResponse, proxy.response),
-                    ),
-                )
+                async with self._owned_child_runner(self._assemble_child(route)) as runner:
+                    return await self._run_child(
+                        route,
+                        parent_run,
+                        child,
+                        proxy.tool_call_id,
+                        runner,
+                        lambda: runner.resume(
+                            child.run_id,
+                            interaction_id=origin.child_interaction_id,
+                            response=cast(HumanInteractionResponse, proxy.response),
+                        ),
+                    )
             previous = self.store.load_interaction(origin.child_interaction_id)
             if (
                 previous is None
@@ -221,17 +264,17 @@ class HarnessSubagentController:
         """ACTIVE 走普通 recover；WAITING 读取或按到期 owner 结算，TERMINAL 只读。"""
         child = self._load_run(child_run_id)
         if child.phase is RunPhase.ACTIVE:
-            runner = self._assemble_child(route)
-            return await self._run_child(
-                route,
-                parent,
-                child,
-                parent_tool_call_id,
-                runner,
-                lambda: runner.recover(
-                    child_run_id, expected_activation_id=child.current_activation_id
-                ),
-            )
+            async with self._owned_child_runner(self._assemble_child(route)) as runner:
+                return await self._run_child(
+                    route,
+                    parent,
+                    child,
+                    parent_tool_call_id,
+                    runner,
+                    lambda: runner.recover(
+                        child_run_id, expected_activation_id=child.current_activation_id
+                    ),
+                )
         else:
             result = self.store.load_result(child_run_id)
             if result is None:
@@ -330,12 +373,12 @@ class HarnessSubagentController:
             route = self.routes.routes[
                 cast(str, tool.arguments.get("agent") or self.routes.default)
             ]
-            runner = self._assemble_child(route)
-            cancelled = runner.request_cancel(child.run_id, reason=reason)
-            if cancelled.phase is RunPhase.ACTIVE:
-                await runner.recover(
-                    child.run_id, expected_activation_id=cancelled.current_activation_id
-                )
+            async with self._owned_child_runner(self._assemble_child(route)) as runner:
+                cancelled = runner.request_cancel(child.run_id, reason=reason)
+                if cancelled.phase is RunPhase.ACTIVE:
+                    await runner.recover(
+                        child.run_id, expected_activation_id=cancelled.current_activation_id
+                    )
 
     async def expire_proxy(self, *, parent_run: RunRecord, proxy: HumanInteraction) -> ToolResult:
         """消费 durable child-owned expiry；不伪造回答或改写 canonical owner。"""
@@ -371,10 +414,12 @@ class HarnessSubagentController:
         else:
             child = self._load_run(child_run_id)
             if child.phase is not RunPhase.TERMINAL:
-                runner = self._assemble_child(self.routes.routes[selector])
-                await runner.recover(
-                    child.run_id, expected_activation_id=child.current_activation_id
-                )
+                async with self._owned_child_runner(
+                    self._assemble_child(self.routes.routes[selector])
+                ) as runner:
+                    await runner.recover(
+                        child.run_id, expected_activation_id=child.current_activation_id
+                    )
         return _error_result(selector, "SUBAGENT_TIMEOUT", "Child agent timed out", child_run_id)
 
     def _load_run(self, run_id: str) -> RunRecord:

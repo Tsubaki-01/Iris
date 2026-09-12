@@ -61,7 +61,14 @@ class MCPManager:
                 self._snapshot = await self._prepare_catalog()
             except BaseException:
                 self._closed = True
-                await self._close_owned()
+                cleanup = asyncio.create_task(self._close_owned())
+                # 已开始的失败清理必须覆盖全部 owned connection；重复取消仍保留原异常。
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
                 raise
             return self._snapshot
 
