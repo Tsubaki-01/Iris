@@ -2,7 +2,10 @@
 
 # iris.mcp
 
-提供 MCP 外部文件导入、官方 SDK 连接、多服务目录发布与工具适配，已接入 Agent YAML 与 root runner。
+提供 MCP 外部文件导入、官方 SDK 连接、多服务目录发布与工具适配，已接入 Agent YAML、root/child runner 与 CLI。
+
+可运行的本地服务与 JSON/TOML 配置见 [examples/mcp](../../../examples/mcp/README.md)。
+稳定包级入口为 `MCPManager` 与 `load_mcp_config`；配置模型从 `iris.agents` 导出。
 
 ## 配置入口
 
@@ -46,8 +49,16 @@ STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。
 SSE 连接的空闲等待不计入工具调用期限；准备和调用各自受外层期限约束。
 
 依赖锁定为 MCP SDK 2.2.0、httpx2 2.12.0。STDIO、Streamable HTTP 与 SSE 使用 SDK transport，
-协议由 auto 协商。真实测试已覆盖现代 STDIO/SSE（2026-07-28）与旧版 HTTP 握手（2025-11-25）；
-其他组合在整体集成阶段验收。fixture 服务使用 SDK 2.2.0，旧版场景明确拒绝 discover。
+协议由 auto 协商。真实 `AgentRunner → executor → SDK → server` 测试覆盖以下组合：
+
+| transport | 协议 | 本地 fixture |
+| --- | --- | --- |
+| STDIO / Streamable HTTP | 2026-07-28 | SDK 2.2.0 Server，现代 discover |
+| STDIO / Streamable HTTP | 2025-11-25 | SDK handshake-only driver / 旧版 HTTP 初始化 |
+| 显式 SSE | 2025-11-25 | SDK handshake-only driver |
+
+fixture server 为 iris-test v1；另有现代 SSE 空闲复用回归。HTTP 验证实际静态/env header
+与 client 关闭，STDIO 验证进程退出；无公网 MCP 服务或真实 LLM 费用。
 
 SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输出/MRTR 错误使用
 `IrisMCPToolError.code`。成功结果只由 SDK 校验 output schema；2.2.0 将 null 视为缺失，
@@ -73,6 +84,8 @@ server id 顺序解析环境、连接和完整发现。每服务共享一个 sta
 默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
 SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时
 包括只读在内都沿现有 unknown 路径处理。MCP 工具首版不进入并行窗口。
+取消通过现有 executor 传入 SDK，请求清理结束后才结算；这不证明远端副作用已经终止。
+CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后收尾输出和后台 loop。
 
 富内容、structuredContent、SDK 保留的 metadata 或超长投影保存为完整 `.mcp.json`，模型只见
 有界文本与路径。after middleware 扩容保留已有 JSON；仅扩容后的纯文本沿用 `.txt`。
@@ -86,6 +99,7 @@ SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris �
 - `../agents/config/mcp.py`：Iris 引用与策略模型。
 - `tests/mcp/test_config.py`、`test_environment.py`：复制配置、禁用、冲突与环境优先级。
 - `tests/mcp/test_connection.py`、`test_sdk_contract.py`：Iris 调度与真实 SDK 契约。
+- `tests/mcp/test_interoperability.py`：五行完整互操作与公开取消后新 run 复用。
 
 在仓库根目录设置 `UV_CACHE_DIR` 后使用 `uv run pytest`、`uv run ruff check` 和
 `uv run mypy`，测试范围为 `tests/mcp`。客户端 inputs、命令替换、插件变量、remote executor、

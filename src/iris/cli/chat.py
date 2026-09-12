@@ -165,22 +165,25 @@ def run_chat_loop(
     )
     host.start()
     close_reason = "chat 结束"
+    exit_code = 0
     try:
         while True:
             try:
                 user_input = read_input("iris> ").strip()
             except KeyboardInterrupt:
                 close_reason = "用户中断"
-                return 130
+                exit_code = 130
+                break
             except EOFError:
                 close_reason = "输入已关闭"
-                return 0
+                break
 
             if host.exit_code is not None:
-                return host.exit_code
+                exit_code = host.exit_code
+                break
             if user_input in {"/exit", "/quit"}:
                 close_reason = "用户退出 chat"
-                return 0
+                break
             if user_input == "/help":
                 write_output("可用命令：")
                 write_output("/follow-up <消息>  排入下一轮")
@@ -205,9 +208,14 @@ def run_chat_loop(
             host.submit(user_input)
     except IrisError as exc:
         write_error(_format_iris_error(exc))
-        return 1
+        exit_code = 1
     finally:
-        host.close(reason=close_reason)
+        try:
+            host.close(reason=close_reason)
+        except IrisError as exc:
+            write_error(_format_iris_error(exc))
+            exit_code = 1
+    return exit_code
 
 
 class _ChatLiveOutput:
@@ -371,7 +379,7 @@ class _ChatSessionHost:
             self._ready.set()
 
     async def _serve(self) -> None:
-        """创建 manager，消费 mixed events，直到主线程请求关闭。"""
+        """在后台 loop 消费事件，原调用结束后依次关闭 runner 与输出。"""
         self._loop = asyncio.get_running_loop()
         self._stop = asyncio.Event()
         self._manager = SessionManager(
@@ -380,15 +388,33 @@ class _ChatSessionHost:
         )
         consumer = asyncio.create_task(self._consume_events())
         self._ready.set()
-        await self._stop.wait()
         try:
-            await self._manager.close(cancel_run=True, reason=self._close_reason)
+            await self._stop.wait()
         finally:
+            failure = sys.exception()
             try:
-                await consumer
+                # 三步依次完成；manager 等原调用结束后才允许关闭 root MCP 资源。
+                for operation in (
+                    self._manager.close(cancel_run=True, reason=self._close_reason),
+                    self._runner.aclose(),
+                    consumer,
+                ):
+                    try:
+                        await operation
+                    except BaseException as error:
+                        if failure is None:
+                            failure = error
+                        else:
+                            self._error_func(
+                                _format_iris_error(error)
+                                if isinstance(error, IrisError)
+                                else str(error)
+                            )
             finally:
                 if self._live_output is not None:
                     self._live_output.close()
+            if failure is not None:
+                raise failure
 
     async def _submit(
         self,

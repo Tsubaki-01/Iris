@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "local": {
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "."
+    }
+  }
+}

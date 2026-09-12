@@ -114,6 +114,9 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
+`AgentConfig.mcp` also defaults to `None`; `AgentMCPConfig` references a JSON/JSONC/TOML file
+and supplies local server overrides as described above.
+
 `AgentConfig.skills` is optional and defaults to `None`. `AgentSkillsConfig` has:
 
 - strict boolean `enabled`, defaulting to `false`; disabled configuration bypasses discovery;

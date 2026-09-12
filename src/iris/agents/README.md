@@ -119,6 +119,7 @@ model: openai/gpt-4o-mini
 - `system`: 简单模式的 system prompt，和 `context` 互斥。
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
+- `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
