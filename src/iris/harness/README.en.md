@@ -14,15 +14,36 @@ ownership from it.
 from iris.harness import AgentRunRequest, AgentRunner
 
 runner = AgentRunner.from_config_path("agent.yaml")
-result = await runner.start(
-    AgentRunRequest(input="Hello", session_id="default")
-)
-print(result.run.phase, result.assistant_message)
+try:
+    result = await runner.start(
+        AgentRunRequest(input="Hello", session_id="default")
+    )
+    print(result.run.phase, result.assistant_message)
+finally:
+    await runner.aclose()
 ```
 
 `from_config*()` resolves relative paths from the configuration directory. With an explicit
 `store=`, every durable read and write uses that exact object. Otherwise `session.backend: none`
 selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`.
+
+MCP construction does not connect. Call `aprepare()` to warm up, or let the execution entry prepare
+automatically. The complete catalog publishes before computing the final `environment_fingerprint`
+and creating a run. Reading it earlier raises `IrisRunStateError`. Required preparation or fingerprint
+failure closes resources without creating a run; construct a new runner after correcting configuration.
+Runners without MCP retain synchronous fingerprints.
+
+Resume/recover keep pure durable settlement first, preparing only for comparison/execution. They then
+reload state, checkpoints, claims, and time. Ordinary fingerprint checks reject catalog, configuration,
+or effective read-only-policy drift. Only the digest persists; effective env/header values do not.
+Terminal reads, ordinary waiting expiry, unresolved-CLAIMED unknown recovery, queries, history forks,
+and cancellation requests do not depend on MCP connections.
+
+Root connections span multiple runs. Stop new calls and await the original start/resume/recover calls
+fully before `aclose()`. A cancel result or observation timeout does not prove body cleanup or event
+delivery finished. Active closure raises; repeated closure is idempotent, and durable queries remain
+available. `SessionManager.close()` does not own runner resources: use `close(cancel_run=True)` before
+closing the runner. Child MCP lifecycle integration follows in Phase 06.
 
 ## Session history branches
 

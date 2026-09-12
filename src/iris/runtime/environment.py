@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
@@ -27,6 +27,10 @@ from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
+
+if TYPE_CHECKING:
+    from ..mcp.manager import MCPManager
+    from ..mcp.models import MCPCatalogSnapshot
 
 # endregion
 
@@ -111,6 +115,7 @@ class RuntimeEnvironment:
         memory_context_builder (MemoryContextBuilder): memory context 裁剪器。
         skill_registry (SkillRegistry | None): 启动发现的 Skill 内容版本快照。
         provider_fingerprint (dict[str, Any]): 有效 provider 配置或 host 显式版本，不含 API key。
+        mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
     """
 
     agent_config: AgentConfig
@@ -124,10 +129,22 @@ class RuntimeEnvironment:
     memory_context_builder: MemoryContextBuilder = field(default_factory=MemoryContextBuilder)
     skill_registry: SkillRegistry | None = None
     provider_fingerprint: dict[str, Any] = field(default_factory=dict)
+    mcp_manager: MCPManager | None = None
 
     def __post_init__(self) -> None:
         """归一化工具执行的 workspace 根路径。"""
         self.workspace_root = self.workspace_root.resolve()
+
+    async def aprepare(self) -> MCPCatalogSnapshot | None:
+        """准备并发布当前环境的 MCP 工具，直接委托唯一 manager。"""
+        if self.mcp_manager is not None:
+            return await self.mcp_manager.prepare()
+        return None
+
+    async def aclose(self) -> None:
+        """关闭自有 MCP 资源；注入的 provider、memory 和 store 由 host 管理。"""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.aclose()
 
 
 __all__ = [

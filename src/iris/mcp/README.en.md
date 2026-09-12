@@ -3,7 +3,7 @@
 # iris.mcp
 
 Imports external MCP configuration and provides SDK connections, multi-server catalog publication,
-and tool adapters. Agent YAML integration and runtime assembly follow in later stages.
+and tool adapters, integrated with Agent YAML and root runners.
 
 ## Configuration APIs
 
@@ -28,7 +28,10 @@ servers = [
 all remaining fields. Servers are required by default: invalid required declarations raise
 `IrisConfigError`; optional failures appear in `config.diagnostics`.
 `agents.config.mcp.MCPServerOverride` accepts required, trust_annotations, and the two timeouts.
-`AgentMCPConfig` declares the file reference and is not yet part of `AgentConfig`.
+`AgentConfig.mcp` uses `AgentMCPConfig`; `mcp.path` resolves relative to the agent YAML.
+Shared assembly reads declarations. Root `AgentRunner.aprepare()` prepares before execution and
+includes the complete catalog in its final fingerprint. Connections span runs; the host awaits every
+original execution call fully before awaiting `runner.aclose()`.
 
 `resolve_server_config()` expands `${VAR}`, `${VAR:-default}`, and `${env:VAR}` exactly once.
 STDIO environment precedence is env_vars → envFile → env; the host environment stays unchanged.

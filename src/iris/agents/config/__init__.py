@@ -11,13 +11,16 @@ from .base import (
     ToolsConfig,
     load_agent_config,
 )
+from .mcp import AgentMCPConfig, MCPServerOverride
 from .tools import build_tool_registry
 
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentMCPConfig",
     "AgentSkillsConfig",
     "ModelConfig",
+    "MCPServerOverride",
     "PermissionsConfig",
     "PythonToolsConfig",
     "SessionConfig",

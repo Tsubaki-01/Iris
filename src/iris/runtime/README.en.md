@@ -15,6 +15,12 @@ MCPTool uses the ordinary serial tool path. `IrisMCPOutcomeUnknownError` reaches
 read-only SDK failures remain ordinary ToolResults governed by ToolErrorPolicy. MCP adds no
 separate cancellation watcher.
 
+Shared assembly reads `AgentConfig.mcp` declarations and binds an `MCPManager` to the original
+registry without connecting. `RuntimeEnvironment.aprepare()` / `aclose()` delegate to that manager.
+Low-level callers prepare before execute and close after all execution finishes. The environment
+does not close injected providers, memory, or stores. Root runners prepare automatically and reuse
+one fixed catalog and connections across runs; child integration follows in the next phase.
+
 ## Dependency direction
 
 ```text

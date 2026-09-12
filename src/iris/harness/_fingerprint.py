@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_core import PydanticSerializationError
 
@@ -12,6 +12,46 @@ from ..exceptions import IrisConfigError, IrisContextError
 from ..lifecycle import validate_json_safe
 from ..runtime import AgentRuntime
 from ..tools import ToolDefinition
+
+if TYPE_CHECKING:
+    from ..mcp.models import MCPCatalogSnapshot
+
+
+def _mcp_payload(snapshot: MCPCatalogSnapshot) -> list[dict[str, Any]]:
+    """补充 ToolDefinition 未涵盖的 MCP 有效契约；调用方已经完成 prepare。"""
+    servers: list[dict[str, Any]] = []
+    for server in sorted(snapshot.servers, key=lambda item: item.config.server_id):
+        config = server.config
+        servers.append(
+            {
+                "server_id": config.server_id,
+                "transport": config.transport,
+                "protocol_version": server.protocol_version,
+                "command": config.command,
+                "args": list(config.args),
+                "cwd": str(config.cwd) if config.cwd is not None else None,
+                "env": config.env,
+                "url": config.url,
+                "headers": config.headers,
+                "required": config.required,
+                "trust_annotations": config.trust_annotations,
+                "startup_timeout_sec": config.startup_timeout_sec,
+                "tool_timeout_sec": config.tool_timeout_sec,
+                "enabled_tools": sorted(set(config.enabled_tools))
+                if config.enabled_tools is not None
+                else None,
+                "disabled_tools": sorted(set(config.disabled_tools)),
+                "tools": [
+                    {
+                        "wire_name": tool.wire_name,
+                        "output_schema": tool.sdk_tool.output_schema,
+                        "trusted_read_only": tool.trusted_read_only,
+                    }
+                    for tool in sorted(server.tools, key=lambda item: item.wire_name)
+                ],
+            }
+        )
+    return servers
 
 
 def _tool_payload(definition: ToolDefinition) -> dict[str, Any]:
@@ -55,6 +95,10 @@ def compute_environment_fingerprint(runtime: AgentRuntime) -> str:
             "workspace_root": str(environment.workspace_root.resolve()),
             "checkpoint_version": 1,
         }
+        if environment.mcp_manager is not None:
+            payload["mcp"] = _mcp_payload(
+                cast("MCPCatalogSnapshot", environment.mcp_manager.snapshot)
+            )
         validate_json_safe(payload, field_name="environment fingerprint payload")
         canonical = json.dumps(
             payload,

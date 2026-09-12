@@ -2,7 +2,7 @@
 
 # iris.mcp
 
-提供 MCP 外部文件导入、官方 SDK 连接、多服务目录发布与工具适配。Agent YAML 与运行时装配将在后续阶段接入。
+提供 MCP 外部文件导入、官方 SDK 连接、多服务目录发布与工具适配，已接入 Agent YAML 与 root runner。
 
 ## 配置入口
 
@@ -26,7 +26,9 @@ servers = [
 `load_mcp_config()` 只读文件并校验声明，不连接服务；禁用项跳过其余字段。
 required 默认为 true，无效声明抛 `IrisConfigError`；optional 项进入 `config.diagnostics`。
 `agents.config.mcp.MCPServerOverride` 支持 required、trust_annotations 和两个 timeout 覆盖项。
-`AgentMCPConfig` 提供文件引用模型，当前尚未挂到 `AgentConfig`。
+`AgentConfig.mcp` 使用 `AgentMCPConfig`；`mcp.path` 相对 agent YAML 解析。
+shared assembly 读取声明；root `AgentRunner.aprepare()` 在首次执行前准备，完整目录参与最终指纹。
+连接跨 run 复用，host 等所有原执行调用完整结束后 await `runner.aclose()`。
 
 `resolve_server_config()` 处理 `${VAR}`、`${VAR:-default}`、`${env:VAR}`，只展开一次。
 STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。相对 cwd/envFile

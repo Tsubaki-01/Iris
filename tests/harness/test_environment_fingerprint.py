@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from iris.exceptions import IrisContextError
 from iris.harness._fingerprint import compute_environment_fingerprint
 from iris.runtime import AgentRuntime, RuntimeFactory
 
-from .fakes import StaticProvider, build_runtime
+from .fakes import StaticProvider, build_runtime, text_response
 
 
 def _templated_runtime(workspace: Path, template: Path) -> AgentRuntime:
@@ -262,3 +263,161 @@ def test_injected_provider_version_is_explicit_and_ignores_unused_route(tmp_path
     assert compute_environment_fingerprint(original) == compute_environment_fingerprint(changed)
     changed.environment.provider_fingerprint = {"version": "new-model-route"}
     assert compute_environment_fingerprint(original) != compute_environment_fingerprint(changed)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "command",
+        "args",
+        "cwd",
+        "env",
+        "protocol",
+        "output_schema",
+        "tool_added",
+        "timeout",
+        "required",
+        "trust",
+        "filter",
+    ],
+)
+async def test_mcp_fingerprint_binds_effective_catalog_and_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    from mcp import types
+
+    from iris.harness import AgentRunner
+
+    from ..mcp.fixtures.runtime import MCPPeer, mcp_agent
+
+    peer = MCPPeer(monkeypatch)
+    config = mcp_agent(tmp_path)
+    first = AgentRunner.from_config(config, provider=StaticProvider())
+    await first.aprepare()
+    before = first.environment_fingerprint
+    server = {"command": "fixture"}
+    if change == "command":
+        server["command"] = "different"
+    elif change == "args":
+        server["args"] = ["a", "b"]
+    elif change == "cwd":
+        server["cwd"] = str(tmp_path / "subdir")
+    elif change == "env":
+        server["env"] = {"IRIS_TEST_VALUE": "changed"}
+    elif change == "protocol":
+        peer.protocol_version = "2025-11-25"
+    elif change == "output_schema":
+        peer.tools = (peer.tools[0].model_copy(update={"output_schema": {"type": "object"}}),)
+    elif change == "tool_added":
+        peer.tools += (types.Tool(name="other", input_schema={"type": "object"}),)
+    elif change == "timeout":
+        server["tool_timeout_sec"] = 31
+    elif change == "required":
+        server["required"] = False
+    elif change == "trust":
+        config = config.model_copy(update={"mcp": config.mcp.model_copy(update={"overrides": {}})})
+    else:
+        server["disabled_tools"] = ["not-published"]
+    config.mcp.path.write_text(json.dumps({"servers": {"test": server}}))
+    second = AgentRunner.from_config(config, provider=StaticProvider())
+    try:
+        await second.aprepare()
+        assert second.environment_fingerprint != before
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trust", [False, True])
+async def test_mcp_read_only_hint_only_binds_effective_local_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    trust: bool,
+) -> None:
+    from mcp import types
+
+    from iris.harness import AgentRunner
+
+    from ..mcp.fixtures.runtime import MCPPeer, mcp_agent
+
+    peer = MCPPeer(monkeypatch)
+    config = mcp_agent(tmp_path, trust=trust)
+    first = AgentRunner.from_config(config, provider=StaticProvider())
+    await first.aprepare()
+    peer.tools = (
+        peer.tools[0].model_copy(
+            update={"annotations": types.ToolAnnotations(read_only_hint=False)}
+        ),
+    )
+    second = AgentRunner.from_config(config, provider=StaticProvider())
+    await second.aprepare()
+    assert (first.environment_fingerprint != second.environment_fingerprint) is trust
+    await first.aclose()
+    await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_portable_sources_and_diagnostics_do_not_change_effective_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from iris.agents import AgentMCPConfig
+    from iris.harness import AgentRunner
+    from iris.lifecycle import AgentRunRequest
+    from iris.store import SQLiteStore
+
+    from ..mcp.fixtures.runtime import MCPPeer, mcp_agent
+
+    MCPPeer(monkeypatch)
+    config = mcp_agent(tmp_path)
+    secret = "synthetic-mcp-secret-512"
+    monkeypatch.setenv("IRIS_FINGERPRINT_TOKEN", secret)
+    config.mcp.path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "test": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        "headers": {"X-Test": "${IRIS_FINGERPRINT_TOKEN}"},
+                        "disabled_tools": ["x", "y", "x"],
+                    }
+                }
+            }
+        )
+    )
+    first = AgentRunner.from_config(config, provider=StaticProvider())
+    await first.aprepare()
+    toml = tmp_path / "equivalent.toml"
+    toml.write_text(
+        '[mcp_servers.test]\ntype="streamable-http"\nurl="https://example.invalid/mcp"\n'
+        'disabled_tools=["y","x"]\n[mcp_servers.test.http_headers]\nx-test="${env:IRIS_FINGERPRINT_TOKEN}"\n'
+        "[mcp_servers.optional]\nrequired=false\nunsupported=true\n"
+    )
+    equivalent = config.model_copy(
+        update={"mcp": AgentMCPConfig(path=toml, overrides=config.mcp.overrides)}
+    )
+    store_path = tmp_path / "fingerprint.db"
+    store = SQLiteStore(store_path)
+    second = AgentRunner.from_config(
+        equivalent, store=store, provider=StaticProvider(text_response())
+    )
+    try:
+        await second.start(AgentRunRequest(input="done", run_id="secret"))
+        assert second.environment_fingerprint == first.environment_fingerprint
+        assert secret not in caplog.text
+        assert secret.encode() not in store_path.read_bytes()
+        assert secret not in store.load_checkpoint("secret").model_dump_json()
+        monkeypatch.setenv("IRIS_FINGERPRINT_TOKEN", "different-token")
+        changed = AgentRunner.from_config(equivalent, provider=StaticProvider())
+        await changed.aprepare()
+        assert changed.environment_fingerprint != second.environment_fingerprint
+        await changed.aclose()
+    finally:
+        await first.aclose()
+        await second.aclose()

@@ -19,6 +19,7 @@ from pydantic import (
 
 from ...exceptions import IrisConfigError, IrisValidationError
 from ...providers import ModelRoute, parse_model_route
+from .mcp import AgentMCPConfig
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -226,6 +227,7 @@ class AgentConfig(BaseModel):
         system (str | None): 简单模式的 system prompt。
         context (AgentContextConfig | None): 结构化 context 配置声明。
         skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
+        mcp (AgentMCPConfig | None): 可选的外部 MCP 文件引用与本地策略。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         session (SessionConfig): 会话配置。
@@ -236,6 +238,7 @@ class AgentConfig(BaseModel):
     system: str | None = None
     context: AgentContextConfig | None = None
     skills: AgentSkillsConfig | None = None
+    mcp: AgentMCPConfig | None = None
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
