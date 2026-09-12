@@ -13,15 +13,32 @@ process-local admission facade，只组合 runner，不接管 durable ownership�
 from iris.harness import AgentRunRequest, AgentRunner
 
 runner = AgentRunner.from_config_path("agent.yaml")
-result = await runner.start(
-    AgentRunRequest(input="你好", session_id="default")
-)
-print(result.run.phase, result.assistant_message)
+try:
+    result = await runner.start(
+        AgentRunRequest(input="你好", session_id="default")
+    )
+    print(result.run.phase, result.assistant_message)
+finally:
+    await runner.aclose()
 ```
 
 `from_config*()` 使用配置文件目录解析相对路径。显式传入 `store=` 时，runner 的所有 durable
 reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
+
+配置 MCP 时构造不连接；`aprepare()` 可显式预热，也会由首次执行入口自动调用。完整目录发布
+后才计算唯一 `environment_fingerprint` 并创建 run；此前读取该属性会报 `IrisRunStateError`。
+required 准备或指纹计算失败会关闭资源且不创建 run，修正后需新建 runner。无 MCP 保持同步指纹。
+
+resume/recover 先保留纯 durable 结算，确需比较/执行才准备；准备后重新读取状态、checkpoint、
+claim 与时间，沿普通指纹规则拒绝目录/配置/有效只读策略漂移。只有最终 digest 进入 store；
+有效 env/header 不单独持久化。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
+恢复、查询、history fork 和取消申请不依赖 MCP 连接。
+
+root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
+cancel 的 durable result 或观察超时不代表 body 清理、事件投递已经结束。active 时关闭会报错，
+重复关闭幂等；关闭后仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，
+使用它时先 `close(cancel_run=True)` 再关闭 runner。child MCP 生命周期在 Phase 06 接入。
 
 ## 会话历史分支
 

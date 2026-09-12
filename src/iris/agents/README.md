@@ -8,8 +8,19 @@
 
 ## 架构
 
-`config/mcp.py` 提供独立的 `AgentMCPConfig` 文件引用与 `MCPServerOverride` 本地策略模型；
-当前阶段尚未向 AgentConfig 暴露 `mcp` 字段。外部配置导入见 [MCP 包说明](../mcp/README.md)。
+`AgentConfig.mcp` 使用 `AgentMCPConfig` 文件引用与 `MCPServerOverride` 本地策略模型，
+均从 `iris.agents` 导出。`mcp.path` 相对 agent YAML 解析；加载 YAML 不连接外部服务。
+shared assembly 读取 MCP 声明，runner 首次执行前准备并发布工具。外部格式见
+[MCP 包说明](../mcp/README.md)。例如：
+
+```yaml
+mcp:
+  path: mcp.json
+  overrides:
+    local-server:
+      required: true
+      trust_annotations: false
+```
 
 `tools.subagent: subagents.yaml` 可声明内部 Sub Agent catalog，默认不启用。
 路径相对 parent YAML；catalog 的 `default` 必须命中 `agents` 的 exact kebab-case key，

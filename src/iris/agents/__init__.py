@@ -3,7 +3,9 @@
 from .config import (
     AgentConfig,
     AgentContextConfig,
+    AgentMCPConfig,
     AgentSkillsConfig,
+    MCPServerOverride,
     ModelConfig,
     PermissionsConfig,
     PythonToolsConfig,
@@ -16,8 +18,10 @@ from .config import (
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentMCPConfig",
     "AgentSkillsConfig",
     "ModelConfig",
+    "MCPServerOverride",
     "PermissionsConfig",
     "PythonToolsConfig",
     "SessionConfig",

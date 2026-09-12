@@ -247,7 +247,12 @@ class AgentRunner:
         self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
-        self.environment_fingerprint = compute_environment_fingerprint(runtime)
+        self._environment_fingerprint = (
+            compute_environment_fingerprint(runtime)
+            if runtime.environment.mcp_manager is None
+            else None
+        )
+        self._closed = False
         self._live_publisher = live_publisher
         if live_publisher is None:
             self._stream_sink: RuntimeEventSink | None = None
@@ -257,6 +262,44 @@ class AgentRunner:
             self._stream_sink = _RuntimeLiveSink(_RunnerPublisherRelay(self))
         self._active: dict[str, ActiveActivation] = {}
         self._subagent_controller: HarnessSubagentController | None = None
+
+    @property
+    def environment_fingerprint(self) -> str:
+        """返回准备后的唯一指纹；未准备的 MCP 环境不能用于恢复比较。"""
+        if self._environment_fingerprint is None:
+            raise IrisRunStateError("MCP 环境尚未准备，请先 await runner.aprepare()")
+        return self._environment_fingerprint
+
+    async def aprepare(self) -> None:
+        """准备环境并固定最终指纹；失败后释放资源，必须新建 runner。"""
+        if self._closed:
+            raise IrisRunStateError("runner 已关闭")
+        if self._environment_fingerprint is not None:
+            return
+        try:
+            await self.runtime.environment.aprepare()
+            if self._environment_fingerprint is None:
+                self._environment_fingerprint = compute_environment_fingerprint(self.runtime)
+        except BaseException:
+            self._closed = True
+            try:
+                await self.runtime.environment.aclose()
+            except Exception:
+                logger.exception("MCP 准备失败后的资源关闭失败")
+            raise
+
+    async def aclose(self) -> None:
+        """host 等原 start/resume/recover 完整结束后关闭自有环境资源。
+
+        Raises:
+            IrisRunStateError: 当前仍有 active activation，不能提前关闭资源。
+        """
+        if self._closed:
+            return
+        if self._active:
+            raise IrisRunStateError("runner 仍有 active activation，不能关闭")
+        self._closed = True
+        await self.runtime.environment.aclose()
 
     @classmethod
     def from_config_path(
@@ -395,6 +438,7 @@ class AgentRunner:
         Raises:
             IrisRunConflictError: 当 create 返回的 initial checkpoint 与本地构造不一致时。
         """
+        await self.aprepare()
         command, cursor = self._build_start_facts(request, options=options)
         created = self.store.create_run(command)
         events = self._event_collector(durable_event_callback)
@@ -559,6 +603,7 @@ class AgentRunner:
             IrisRunRecoveryError: 当 waiting run 缺少 checkpoint 或 checkpoint 校验失败时。
         """
         # --- 1. 校验 run/interaction identity ---
+        needs_prepare = self._environment_fingerprint is None
         normalized_run_id = self._required_id(run_id)
         normalized_interaction_id = self._required_id(interaction_id)
         run = self.store.load_run(normalized_run_id)
@@ -594,6 +639,18 @@ class AgentRunner:
         )
         if settled is not None:
             return settled
+
+        await self.aprepare()
+        if needs_prepare:
+            # 首次准备可能跨越 expiry 或其他 owner 的提交；重走原分派，只发生一次。
+            return await self._resume_managed(
+                run_id,
+                interaction_id=interaction_id,
+                response=response,
+                steering=steering,
+                durable_event_callback=durable_event_callback,
+                activation_started=activation_started,
+            )
 
         # --- 3. 校验 checkpoint 并解决 interaction ---
         checkpoint = self.store.load_checkpoint(run.run_id)
@@ -1016,6 +1073,7 @@ class AgentRunner:
             IrisRunRecoveryError: 当 durable interaction/checkpoint 缺失或校验失败时。
         """
         # --- 1. 按 phase 分派 recovery 入口 ---
+        needs_prepare = self._environment_fingerprint is None
         normalized = self._required_id(run_id)
         run = self.store.load_run(normalized)
         if run is None:
@@ -1031,6 +1089,8 @@ class AgentRunner:
             settled = await self._settle_waiting_if_due(run, interaction, now=self._now())
             if settled is not None:
                 return settled
+            if needs_prepare and self._environment_fingerprint is not None:
+                return await self.recover(run_id, expected_activation_id=expected_activation_id)
             if (
                 interaction.status is InteractionStatus.RESOLVED
                 and interaction.request.tool_call.tool_name == "subagent"
@@ -1066,6 +1126,10 @@ class AgentRunner:
             disposition = RecoveryDisposition.OUTCOME_UNKNOWN
             recovered_cursor = None
         else:
+            await self.aprepare()
+            if needs_prepare:
+                # 保留调用方 fence，重新读取 phase、checkpoint 与可能新出现的 claim。
+                return await self.recover(run_id, expected_activation_id=expected_activation_id)
             recovered_cursor = self._validate_recovery_checkpoint(run, checkpoint)
             if (
                 checkpoint.resumability is CheckpointResumability.OUTCOME_READY
@@ -1378,6 +1442,29 @@ class AgentRunner:
             and run.cancellation_requested_at is None
             and (deadline is None or now < deadline)
         ):
+            needs_prepare = self._environment_fingerprint is None
+            await self.aprepare()
+            if needs_prepare:
+                current = cast(RunRecord, self.store.load_run(run.run_id))
+                if current.phase is RunPhase.TERMINAL:
+                    return self._require_result(run.run_id)
+                if (
+                    current.phase is not RunPhase.WAITING
+                    or current.pending_interaction_id != interaction.interaction_id
+                ):
+                    raise IrisRunConflictError("MCP 准备期间 waiting identity 已变化")
+                current_interaction = cast(
+                    HumanInteraction, self.store.load_interaction(interaction.interaction_id)
+                )
+                return await self._settle_waiting_if_due(
+                    current,
+                    current_interaction,
+                    now=self._now(),
+                    steering=steering,
+                    durable_event_callback=durable_event_callback,
+                    activation_started=activation_started,
+                    event_collector=event_collector,
+                )
             checkpoint = self.store.load_checkpoint(run.run_id)
             if checkpoint is None:
                 raise IrisRunRecoveryError("waiting run 缺少 durable checkpoint", run_id=run.run_id)

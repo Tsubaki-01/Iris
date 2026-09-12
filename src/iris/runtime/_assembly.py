@@ -136,6 +136,19 @@ def assemble_runtime(
             tool_registry.register(SubagentTool(routes=subagent.routes, port=subagent.port))
         except IrisToolValidationError as exc:
             raise IrisConfigError("subagent 与现有工具名称或别名冲突", tool="subagent") from exc
+    mcp_manager = None
+    if config.mcp is not None:
+        from ..mcp.config import load_mcp_config
+        from ..mcp.manager import MCPManager
+
+        mcp_manager = MCPManager(
+            load_mcp_config(
+                _resolve_relative_to_base(config.mcp.path, base_dir=base_dir),
+                overrides=config.mcp.overrides,
+            ),
+            registry=tool_registry,
+            workspace_root=workspace_root,
+        )
     tool_view = tool_registry.view()
     tool_executor = ToolExecutor(
         tool_registry,
@@ -173,6 +186,7 @@ def assemble_runtime(
         memory_service=memory_service,
         skill_registry=skill_registry,
         provider_fingerprint=provider_fingerprint,
+        mcp_manager=mcp_manager,
     )
     return AgentRuntime(environment)
 

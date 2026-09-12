@@ -14,6 +14,11 @@ MCPTool 经普通工具链进入串行执行。`IrisMCPOutcomeUnknownError` 使�
 `_unknown_tool_outcome` 结算未确定的 claim，不新增 stop reason 或持久化协议；受信只读的
 SDK 错误仍是普通 ToolResult，遵守 ToolErrorPolicy。MCP 不另建取消 watcher。
 
+shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定到原 registry，构造时
+不连接。`RuntimeEnvironment.aprepare()` / `aclose()` 直接委托该 manager；低层调用者必须
+在 execute 前准备并在所有执行结束后关闭。环境不关闭外部注入的 provider、memory 或 store。
+root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 集成见下一阶段。
+
 ## 依赖方向
 
 ```text

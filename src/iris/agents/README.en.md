@@ -8,8 +8,19 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
-`config/mcp.py` provides the independent `AgentMCPConfig` file reference and `MCPServerOverride`
-policy models. `AgentConfig` does not expose `mcp` yet; see [MCP configuration](../mcp/README.en.md).
+`AgentConfig.mcp` uses `AgentMCPConfig` and `MCPServerOverride`, both exported from `iris.agents`.
+`mcp.path` resolves relative to the agent YAML. Loading YAML does not connect; shared assembly
+reads declarations, and the runner prepares and publishes tools before execution. See
+[MCP configuration](../mcp/README.en.md). For example:
+
+```yaml
+mcp:
+  path: mcp.json
+  overrides:
+    local-server:
+      required: true
+      trust_annotations: false
+```
 
 `tools.subagent: subagents.yaml` declares an optional internal Sub Agent catalog, disabled by
 default. The path is relative to the parent YAML. Catalog `default` must exactly match an
