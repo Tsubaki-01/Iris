@@ -225,6 +225,13 @@ Default permissions do not
 directly allow writes; configure `DefaultPermissionPolicy(write_mode="allow")` or let runtime host
 the confirmation gate.
 
+`persist_json()` stores complete parsed MCP JSON; `artifact_store_for()` selects the store for
+the current context.session_id. Existing artifacts survive final truncation. For MCP, the executor
+passes `mcp_result=True` so error.message is also bounded and retains the artifact path.
+The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
+Default permissions allow only locally trusted read-only MCP tools; policy fingerprint version is 2.
+`IrisMCPOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.
+
 ## Human tool, middleware, breaker, and discovery
 
 YAML name `human.ask` registers model-visible `ask_question`. `AskQuestionTool` converts validated
@@ -248,8 +255,8 @@ registry/view, executor/preflight, permission/artifact/middleware/breaker types,
 deferred discovery, schema helpers, and `tool`. Protected `_impl()` hooks and executor private
 lifecycle methods are internal.
 
-The package does not run provider loops, persist ordinary session data, render host UI, or provide
-MCP implementations merely because `ToolCapability.MCP` exists.
+The package does not run provider loops, persist ordinary session data, or render host UI.
+MCP protocol integration lives in `iris.mcp` and uses this package's ordinary tool contracts.
 
 ## Maintenance
 

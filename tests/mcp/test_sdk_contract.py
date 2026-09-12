@@ -4,6 +4,7 @@ import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from mcp import Client
@@ -99,7 +100,7 @@ async def test_sdk_read_timeout_is_distinct_from_iris_deadline(
     stdio_config: MCPResolvedServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def short_sdk_timeout(target, *, mode: str, cache: None) -> Client:
+    def short_sdk_timeout(target: Any, *, mode: str, cache: None) -> Client:
         return Client(target, mode=mode, cache=cache, read_timeout_seconds=0.15)
 
     monkeypatch.setattr("iris.mcp.connection.Client", short_sdk_timeout)

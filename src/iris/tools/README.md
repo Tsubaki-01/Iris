@@ -314,7 +314,12 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 ### Artifact
 
-`ToolArtifactStore.persist_if_large(result, max_chars=...)` 只处理非错误结果。若 `result.model_content` 超过阈值，会写入本地文本 artifact，并把返回内容替换为预览、完整路径和 `.iris/` gitignore 提示。
+`ToolArtifactStore.persist_if_large(result, max_chars=...)` 默认只处理非错误结果。若正文超限且尚无 artifact，写入文本文件并返回预览和路径；已有 artifact 保留。executor 对 MCP 传入 `mcp_result=True`，使最终错误正文也有界并保留 error.message 中的路径。
+
+`persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
+取得 store。MCP adapter 见 [iris.mcp](../mcp/README.md)，复用现有 executor 与取消桥。
+默认策略仅允许本地受信只读 MCP，其余仍需确认；策略 fingerprint version 为 2。
+`IrisMCPOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
 
 会话与调用 ID 的文件名片段统一为 `id_` 加完整 UTF-8 字节的小写十六进制编码；空 ID
 编码为 `id_`。不同 ID 在大小写不敏感的文件系统上也保持不同路径，目录归属检查仍在落盘

@@ -11,12 +11,15 @@ Example:
 # region imports
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from ..exceptions import IrisToolExecutionError
 from ..message import TextBlock
 from ._paths import safe_path_segment
-from .base import ToolArtifact, ToolResult
+from .base import ToolArtifact, ToolExecutionContext, ToolResult
 
 # endregion
 
@@ -50,7 +53,49 @@ class ToolArtifactStore:
         self.root = root
         self.preview_chars = preview_chars
 
-    def persist_if_large(self, result: ToolResult, *, max_chars: int) -> ToolResult:
+    def persist_json(
+        self,
+        tool_use_id: str,
+        payload: Mapping[str, Any],
+        *,
+        preview: str,
+    ) -> ToolArtifact:
+        """严格序列化完整 MCP 结果；序列化或落盘失败统一报告 artifact 错误。"""
+        try:
+            content = json.dumps(dict(payload), ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise IrisToolExecutionError("ARTIFACT_ERROR: MCP 结果无法序列化") from exc
+        return self._persist_text(
+            tool_use_id, content, suffix=".mcp.json", mime_type="application/json", preview=preview
+        )
+
+    def _persist_text(
+        self,
+        tool_use_id: str,
+        content: str,
+        *,
+        suffix: str,
+        mime_type: str,
+        preview: str,
+    ) -> ToolArtifact:
+        """复用单一路径编码和写入边界。"""
+        try:
+            root = self.root.resolve(strict=False)
+            root.mkdir(parents=True, exist_ok=True)
+            path = (root / f"{safe_path_segment(tool_use_id)}{suffix}").resolve(strict=False)
+            path.relative_to(root)
+            size = path.write_bytes(content.encode("utf-8"))
+        except (OSError, ValueError) as exc:
+            raise IrisToolExecutionError("ARTIFACT_ERROR: 写入工具 artifact 失败") from exc
+        return ToolArtifact(path=path, mime_type=mime_type, size_bytes=size, preview=preview)
+
+    def persist_if_large(
+        self,
+        result: ToolResult,
+        *,
+        max_chars: int,
+        mcp_result: bool = False,
+    ) -> ToolResult:
         """必要时将工具结果落盘，并把模型内容替换为预览说明。
 
         为了防御异常长文本输出对代理内存产生的压垮效应，
@@ -77,38 +122,38 @@ class ToolArtifactStore:
         """
         # --- 1. Evaluate content length threshold ---
         content = result.model_content
-        if result.is_error or len(content) <= max_chars:
+        if (result.is_error and not mcp_result) or len(content) <= max_chars:
             return result
 
         # --- 2. Write artifact payload to disk ---
-        try:
-            root = self.root.resolve(strict=False)
-            root.mkdir(parents=True, exist_ok=True)
-            artifact_path = (root / f"{safe_path_segment(result.tool_use_id)}.txt").resolve(
-                strict=False
-            )
-            artifact_path.relative_to(root)
-            artifact_path.write_text(content, encoding="utf-8")
-        except (OSError, ValueError) as exc:
-            raise IrisToolExecutionError("ARTIFACT_ERROR: 写入工具 artifact 失败") from exc
-
-        # --- 3. Replace memory text with preview ---
         preview = content[: self.preview_chars]
-        stat = artifact_path.stat()
-        artifact = ToolArtifact(
-            path=artifact_path,
+        artifact = result.artifact or self._persist_text(
+            result.tool_use_id,
+            content,
+            suffix=".txt",
             mime_type="text/plain",
-            size_bytes=stat.st_size,
             preview=preview,
         )
-        message = (
-            f"{preview}\n\n"
-            f"[结果已截断，完整内容已写入 {artifact_path}，大小 {stat.st_size} bytes。"
+
+        # --- 3. Replace memory text with preview ---
+        suffix = (
+            f"\n\n[结果已截断，完整内容已写入 {artifact.path}，大小 {artifact.size_bytes} bytes。"
             " 可使用 read_file 读取该路径。建议将 .iris/ 加入 .gitignore。]"
         )
+        error = result.error
+        if mcp_result:
+            prefix_chars = len(f"Error[{error.code}]: ") if result.is_error and error else 0
+            body = error.message if result.is_error and error else content
+            preview = body[
+                : max(0, min(self.preview_chars, max_chars - len(suffix) - prefix_chars))
+            ]
+        message = f"{preview}{suffix}"
+        if mcp_result and result.is_error and error is not None:
+            error = error.model_copy(update={"message": message})
         return result.model_copy(
             update={
                 "content": [TextBlock(text=message)],
+                "error": error,
                 "artifact": artifact,
                 "metadata": {
                     **result.metadata,
@@ -116,3 +161,10 @@ class ToolArtifactStore:
                 },
             }
         )
+
+
+def artifact_store_for(context: ToolExecutionContext, *, preview_chars: int) -> ToolArtifactStore:
+    """按本次调用的 session 取得既有 artifact store，不绑定某个 root run。"""
+    session_id = safe_path_segment(context.session_id)
+    root = context.workspace_root / ".iris" / "tool-results" / session_id
+    return ToolArtifactStore(root=root, preview_chars=preview_chars)

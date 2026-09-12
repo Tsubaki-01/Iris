@@ -50,9 +50,23 @@ SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输
 
 ## 实现与维护
 
+`catalog.build_catalog(server, sdk_tools)` 按原始 wire 名过滤，编译 JSON Schema 2020-12
+输入 validator；本地 `$defs`/引用可用，不能解析的外部引用和其他 dialect 留诊断后排除。
+公开名使用 `mcp__...`，必要时按原始身份附稳定摘要。`tools.MCPTool(descriptor, connection)`
+可直接注册到既有 ToolRegistry，参数、权限、执行与取消走普通工具链。
+
+默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
+SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时
+包括只读在内都沿现有 unknown 路径处理。MCP 工具首版不进入并行窗口。
+
+富内容、structuredContent、SDK 保留的 metadata 或超长投影保存为完整 `.mcp.json`，模型只见
+有界文本与路径。after middleware 扩容保留已有 JSON；仅扩容后的纯文本沿用 `.txt`。
+文件按当前 context.session_id 分目录；错误的路径写入模型实际读取的 error.message。
+
 - `config.py`：来源字段归一和环境求值的唯一入口。
 - `models.py`：外部声明模型，以及内部 config/resolved/diagnostic 数据。
 - `connection.py`：SDK transport owner、完整分页、调用与关闭。
+- `catalog.py` / `tools.py`：descriptor 与现有 BaseTool adapter。
 - `../agents/config/mcp.py`：Iris 引用与策略模型。
 - `tests/mcp/test_config.py`、`test_environment.py`：复制配置、禁用、冲突与环境优先级。
 - `tests/mcp/test_connection.py`、`test_sdk_contract.py`：Iris 调度与真实 SDK 契约。
