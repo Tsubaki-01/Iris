@@ -11,7 +11,7 @@ Example:
 # region imports
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -81,12 +81,23 @@ class ToolRegistry:
         Raises:
             IrisToolValidationError: 当名称或别名产生冲突时。
         """
-        self._validate_available_name(tool.definition.name)
-        for alias in tool.definition.aliases:
-            self._validate_available_name(alias)
-        self._tools[tool.definition.name] = tool
-        for alias in tool.definition.aliases:
-            self._aliases[alias] = tool.definition.name
+        self.register_many((tool,))
+
+    def register_many(self, tools: Sequence[BaseTool]) -> None:
+        """一次检查批内与已有名称/alias；全部通过后才发布。
+
+        Raises:
+            IrisToolValidationError: 任意名称冲突，原 registry 保持不变。
+        """
+        pending: set[str] = set()
+        for tool in tools:
+            for name in (tool.definition.name, *tool.definition.aliases):
+                self._validate_available_name(name, pending)
+                pending.add(name)
+        for tool in tools:
+            self._tools[tool.definition.name] = tool
+            for alias in tool.definition.aliases:
+                self._aliases[alias] = tool.definition.name
         self._deferred_index = None
 
     def register_function(
@@ -265,7 +276,7 @@ class ToolRegistry:
         """
         return list(self._tools.values())
 
-    def _validate_available_name(self, name: str) -> None:
+    def _validate_available_name(self, name: str, pending: set[str]) -> None:
         """校验名称未与已注册名称或别名冲突。
 
         拦截任何会导致当前映射网络受损或死循环的更新。
@@ -276,7 +287,7 @@ class ToolRegistry:
         Raises:
             IrisToolValidationError: 当目标查重在本体或别名任何一面未通过时引爆。
         """
-        if name in self._tools or name in self._aliases:
+        if name in self._tools or name in self._aliases or name in pending:
             raise IrisToolValidationError("工具名称或别名重复", name=name)
 
     # endregion

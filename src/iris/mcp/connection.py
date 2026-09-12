@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -74,7 +75,8 @@ class MCPConnection:
                         config.url,
                         headers=config.headers,
                         timeout=config.startup_timeout_sec,
-                        sse_read_timeout=config.tool_timeout_sec,
+                        # SSE 流跨调用复用；空闲等待不消耗单次工具调用的期限。
+                        sse_read_timeout=math.inf,
                     )
                 self._client = await stack.enter_async_context(
                     Client(target, mode="auto", cache=None)

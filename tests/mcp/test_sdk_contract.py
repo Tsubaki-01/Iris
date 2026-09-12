@@ -112,3 +112,28 @@ async def test_sdk_read_timeout_is_distinct_from_iris_deadline(
             await connection.call_tool("slow", {})
     finally:
         await connection.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sse_idle_does_not_spend_tool_call_budget(
+    modern_sse: tuple[MCPResolvedServer, ServerScenario],
+) -> None:
+    """两次调用之间可等待，真实工具调用仍服从 Iris 的期限。"""
+    config, scenario = modern_sse
+    connection = MCPConnection(config)
+    try:
+        await connection.open()
+        await connection.list_tools()
+        await connection.call_tool("echo", {})
+        await asyncio.sleep(0.5)
+        result = await connection.call_tool("echo", {"value": 8})
+        assert result.structured_content == {"value": 8}
+        with pytest.raises(TimeoutError):
+            await connection.call_tool("slow", {})
+    finally:
+        await connection.aclose()
+    assert [event["name"] for event in scenario.calls if event["event"] == "call"] == [
+        "echo",
+        "echo",
+        "slow",
+    ]

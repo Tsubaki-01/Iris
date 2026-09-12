@@ -16,6 +16,46 @@ from iris.tools import (
 )
 
 
+@pytest.mark.parametrize(
+    "collision", ["batch_name", "batch_alias", "existing_name", "existing_alias"]
+)
+def test_register_many_conflicts_are_atomic(collision: str) -> None:
+    """批次中最后一个冲突也不能留下前面的部分工具。"""
+    registry = ToolRegistry()
+    existing = CallableTool(lambda: "old", name="old", description="old")
+    existing.definition.aliases = ("old_alias",)
+    registry.register(existing)
+    first = CallableTool(lambda: "first", name="first", description="first")
+    first.definition.aliases = ("first_alias",)
+    second = CallableTool(
+        lambda: "second",
+        name={
+            "batch_name": "first",
+            "existing_name": "old",
+            "existing_alias": "old_alias",
+        }.get(collision, "second"),
+        description="second",
+    )
+    if collision == "batch_alias":
+        second.definition.aliases = ("first_alias",)
+    view = registry.view()
+    with pytest.raises(IrisToolValidationError):
+        registry.register_many([first, second])
+    assert [tool.name for tool in view.active_tools] == ["old"]
+    assert registry.get("old_alias") is existing
+
+
+def test_register_many_is_visible_through_existing_view() -> None:
+    """发布到同一 registry，既有 view 随即看到新工具和 aliases。"""
+    registry = ToolRegistry()
+    view = registry.view()
+    tool = CallableTool(lambda: "new", name="new", description="new")
+    tool.definition.aliases = ("alias",)
+    registry.register_many([tool])
+    assert [item.name for item in view.active_tools] == ["new"]
+    assert registry.get("alias") is tool
+
+
 def test_tool_registers_function_in_explicit_registry() -> None:
     """传入 registry 时，decorator 立即注册并保留原函数引用。"""
     registry = ToolRegistry()
