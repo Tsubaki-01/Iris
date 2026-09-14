@@ -2,6 +2,7 @@ name: iris-example-mcp
 model: deepseek/deepseek-chat
 system: |
   你是本地 MCP 示例助手。用户要求回显文本时，调用 mcp__local__echo 并返回结果。
+  用户查询当前时间时，调用 mcp__local__get_current_time；支持北京时间和 UTC，不凭记忆给出时间。
 mcp:
   path: mcp.json
   overrides:
