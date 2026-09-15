@@ -45,7 +45,7 @@ graph TD
 1. 用 `CallableTool`、`ToolRegistry.register_function()` 或自定义 `BaseTool` 生成 `ToolDefinition`。
 2. `ToolRegistry` 管理工具名称、别名、分组、deferred 可见性，并导出 provider schema。
 3. `ToolExecutor` 接收 `iris.message.ToolUseBlock`，查找工具、校验输入、检查权限、执行工具、运行 middleware，并返回 `ToolResult`。
-4. 超过 `ToolDefinition.max_result_chars` 的非错误文本结果会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`，返回预览和 artifact 元数据。
+4. 超过 `ToolDefinition.max_result_chars` 的执行结果（含错误）会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`，返回预览和 artifact 元数据。预检短路错误只裁剪说明，不写入文件。
 
 ## 快速入门
 
@@ -317,7 +317,14 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 ### Artifact
 
-`ToolArtifactStore.persist_if_large(result, max_chars=...)` 默认只处理非错误结果。若正文超限且尚无 artifact，写入文本文件并返回预览和路径；已有 artifact 保留。executor 对 MCP 传入 `mcp_result=True`，使最终错误正文也有界并保留 error.message 中的路径。
+`ToolArtifactStore.persist_if_large(result, max_chars=...)` 统一处理成功和错误结果。正文超限且尚无
+artifact 时保存完整 model_content；已有 artifact 保留。最终预算计入错误前缀和完整取回提示，
+错误的预览与路径写入 error.message。若阈值连提示和错误前缀都放不下，只保留这两部分，正文
+预览为空；此时提示长度构成最小输出，优先保证模型仍可取得完整路径。
+
+预览长度唯一由 `ToolDefinition.preview_chars` 决定；`ToolExecutor` 不再接受
+`artifact_preview_chars`。工具异常与 middleware 错误也走相同的最终保存出口，落盘失败只返回
+错误而不重复尝试保存。预检拒绝和熔断等 effect 前短路只裁剪说明。
 
 `persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
 取得 store。MCP adapter 见 [iris.mcp](../mcp/README.md)，复用现有 executor 与取消桥。

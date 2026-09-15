@@ -94,7 +94,6 @@ class ToolArtifactStore:
         result: ToolResult,
         *,
         max_chars: int,
-        mcp_result: bool = False,
     ) -> ToolResult:
         """必要时将工具结果落盘，并把模型内容替换为预览说明。
 
@@ -122,7 +121,7 @@ class ToolArtifactStore:
         """
         # --- 1. Evaluate content length threshold ---
         content = result.model_content
-        if (result.is_error and not mcp_result) or len(content) <= max_chars:
+        if len(content) <= max_chars:
             return result
 
         # --- 2. Write artifact payload to disk ---
@@ -140,20 +139,11 @@ class ToolArtifactStore:
             f"\n\n[结果已截断，完整内容已写入 {artifact.path}，大小 {artifact.size_bytes} bytes。"
             " 可使用 read_file 读取该路径。建议将 .iris/ 加入 .gitignore。]"
         )
-        error = result.error
-        if mcp_result:
-            prefix_chars = len(f"Error[{error.code}]: ") if result.is_error and error else 0
-            body = error.message if result.is_error and error else content
-            preview = body[
-                : max(0, min(self.preview_chars, max_chars - len(suffix) - prefix_chars))
-            ]
-        message = f"{preview}{suffix}"
-        if mcp_result and result.is_error and error is not None:
-            error = error.model_copy(update={"message": message})
-        return result.model_copy(
+        limited = truncate_tool_result(
+            result, max_chars=max_chars, preview_chars=self.preview_chars, suffix=suffix
+        )
+        return limited.model_copy(
             update={
-                "content": [TextBlock(text=message)],
-                "error": error,
                 "artifact": artifact,
                 "metadata": {
                     **result.metadata,
@@ -161,6 +151,35 @@ class ToolArtifactStore:
                 },
             }
         )
+
+
+def truncate_tool_result(
+    result: ToolResult, *, max_chars: int, preview_chars: int, suffix: str
+) -> ToolResult:
+    """按最终正文预算裁剪，保留错误码和调用方提供的完整取回提示。
+
+    预算不足提示长度时仅保留提示及错误前缀，不创建文件。
+
+    Args:
+        result: 待裁剪的工具结果。
+        max_chars: 包含错误前缀和提示的目标字符预算。
+        preview_chars: 正文预览的最大字符数。
+        suffix: 必须保留的取回或截断说明。
+
+    Returns:
+        已同步正文与错误说明的工具结果。
+    """
+    error = result.error if result.is_error else None
+    prefix_chars = len(f"Error[{error.code}]: ") if error else 0
+    body = error.message if error else result.model_content
+    available = max(0, max_chars - len(suffix) - prefix_chars)
+    message = body[: min(preview_chars, available)] + suffix
+    return result.model_copy(
+        update={
+            "content": [TextBlock(text=message)],
+            "error": error.model_copy(update={"message": message}) if error else result.error,
+        }
+    )
 
 
 def artifact_store_for(context: ToolExecutionContext, *, preview_chars: int) -> ToolArtifactStore:

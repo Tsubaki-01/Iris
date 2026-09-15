@@ -36,10 +36,9 @@ from ..hitl.models import (
 )
 from ..message import ToolUseBlock
 from ._read_state import ReadFileState
-from .artifacts import ToolArtifactStore, artifact_store_for
+from .artifacts import artifact_store_for, truncate_tool_result
 from .base import (
     BaseTool,
-    ToolCapability,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolResult,
@@ -105,7 +104,6 @@ class ToolExecutor:
     Attributes:
         registry (ToolRegistry): 工具注册表，用以按名拾取工具。
         permission_policy (PermissionPolicy): 用于执行前权限风控检测卡控。
-        artifact_preview_chars (int): 输出结果持久化到硬盘时的预览摘要字数限制。
 
     Example:
         executor = ToolExecutor(registry)
@@ -121,7 +119,6 @@ class ToolExecutor:
         registry: ToolRegistry,
         *,
         permission_policy: PermissionPolicy | None = None,
-        artifact_preview_chars: int = 8000,
         middleware: Sequence[ToolMiddleware] | None = None,
         circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
@@ -132,13 +129,11 @@ class ToolExecutor:
         Args:
             registry (ToolRegistry): 配置好可用方法的当前状态总库。
             permission_policy (PermissionPolicy | None): 安全及交互式授权拦截规则处理器。
-            artifact_preview_chars (int): 若被启用硬盘持久化，保留前置内容的字符数。
             middleware (Sequence[ToolMiddleware] | None): 工具调用生命周期钩子。
             circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
         """
         self.registry = registry
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
-        self.artifact_preview_chars = artifact_preview_chars
         self.middleware = list(middleware or [])
         self.circuit_breaker = circuit_breaker
 
@@ -265,11 +260,11 @@ class ToolExecutor:
         if isinstance(outcome, ChildWaiting):
             return outcome
         # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
-        return self._normalize_subagent_result(
+        return self._finalize_result(
             tool_use=current.tool_use, tool=tool, result=outcome, context=context
         )
 
-    def _normalize_subagent_result(
+    def _finalize_result(
         self,
         *,
         tool_use: ToolUseBlock,
@@ -277,7 +272,7 @@ class ToolExecutor:
         result: ToolResult,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """ACTIVE 与 WAITING 共用最终归一化及 artifact 失败投影。"""
+        """普通工具与 child 共用最终归一化及 artifact 失败投影。"""
         try:
             return self._normalize_result_identity_and_artifact(
                 tool_use=tool_use,
@@ -287,7 +282,9 @@ class ToolExecutor:
             )
         except IrisToolExecutionError as exc:
             code, message = _tool_error_code_and_message(exc.message, allow_structured=True)
-            return self._error_result(tool_use, code, message)
+            return self._error_result(
+                tool_use, code, message, max_chars=tool.definition.max_result_chars
+            )
 
     async def _execute_current(
         self,
@@ -354,13 +351,23 @@ class ToolExecutor:
             return PreparedToolCall(
                 tool_use=tool_use,
                 tool=tool,
-                preflight_result=self._error_result(tool_use, "VALIDATION_ERROR", str(exc)),
+                preflight_result=self._error_result(
+                    tool_use,
+                    "VALIDATION_ERROR",
+                    str(exc),
+                    max_chars=tool.definition.max_result_chars if tool else None,
+                ),
             )
         except Exception as exc:
             return PreparedToolCall(
                 tool_use=tool_use,
                 tool=tool,
-                preflight_result=self._error_result(tool_use, "PERMISSION_ERROR", str(exc)),
+                preflight_result=self._error_result(
+                    tool_use,
+                    "PERMISSION_ERROR",
+                    str(exc),
+                    max_chars=tool.definition.max_result_chars if tool else None,
+                ),
             )
 
     def _refresh_permission(
@@ -407,6 +414,7 @@ class ToolExecutor:
                     prepared.tool_use,
                     "PERMISSION_ERROR",
                     str(exc),
+                    max_chars=tool.definition.max_result_chars,
                 ),
             )
 
@@ -422,6 +430,7 @@ class ToolExecutor:
                 tool_use,
                 "PERMISSION_ERROR",
                 decision.reason,
+                max_chars=tool.definition.max_result_chars,
                 details={
                     "require_confirmation": False,
                     "effect": decision.effect.value,
@@ -433,6 +442,7 @@ class ToolExecutor:
                 tool_use,
                 "PERMISSION_ERROR",
                 "human interaction tool 不能同时要求额外人工授权",
+                max_chars=tool.definition.max_result_chars,
                 details={
                     "require_confirmation": True,
                     "effect": decision.effect.value,
@@ -451,11 +461,13 @@ class ToolExecutor:
         if prepared.preflight_result is not None:
             return prepared.preflight_result
         decision = prepared.permission
+        max_chars = prepared.tool.definition.max_result_chars if prepared.tool else None
         if decision is not None and decision.effect is PermissionEffect.DENY:
             return self._error_result(
                 prepared.tool_use,
                 "PERMISSION_ERROR",
                 decision.reason,
+                max_chars=max_chars,
                 details={
                     "require_confirmation": False,
                     "effect": decision.effect.value,
@@ -470,6 +482,7 @@ class ToolExecutor:
                 prepared.tool_use,
                 "HITL_REQUIRED",
                 "human interaction 必须由 runtime 处理",
+                max_chars=max_chars,
             )
         if (
             decision is not None
@@ -480,6 +493,7 @@ class ToolExecutor:
                 prepared.tool_use,
                 "PERMISSION_ERROR",
                 decision.reason,
+                max_chars=max_chars,
                 details={
                     "require_confirmation": True,
                     "effect": decision.effect.value,
@@ -511,6 +525,7 @@ class ToolExecutor:
                     str(exc.context.get("code", "CIRCUIT_OPEN")),
                     exc.message,
                     details=exc.context,
+                    max_chars=tool.definition.max_result_chars,
                 )
         if context.cancellation is not None:
             context.cancellation.raise_if_requested()
@@ -521,39 +536,28 @@ class ToolExecutor:
         try:
             middleware_error = await self._run_before_call(tool, arguments, context)
             if middleware_error is not None:
-                self._record_breaker_result(tool.name, middleware_error)
-                return middleware_error
-            try:
-                result = await self._run_tool_body(tool, validated_input, context)
-            except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
-                raise
-            except Exception as exc:
-                handled = await self._run_on_error(tool, exc, context)
-                if handled is None:
+                result = middleware_error
+            else:
+                try:
+                    result = await self._run_tool_body(tool, validated_input, context)
+                except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
                     raise
-                result = handled
-            normalized = result.model_copy(
-                update={
-                    "tool_use_id": result.tool_use_id or tool_use.id,
-                    "tool_name": result.tool_name or tool_use.name,
-                }
-            )
-            final_result = await self._run_after_call(tool, normalized, context)
-            # Hook 可以改写正文，长度限制必须作用于最终交付给模型的结果。
-            final_result = self._normalize_result_identity_and_artifact(
-                tool_use=tool_use,
-                tool=tool,
-                result=final_result,
-                context=context,
-            )
-            self._record_breaker_result(tool.name, final_result)
-            return final_result
+                except Exception as exc:
+                    handled = await self._run_on_error(tool, exc, context)
+                    if handled is None:
+                        raise
+                    result = handled
+                normalized = result.model_copy(
+                    update={
+                        "tool_use_id": result.tool_use_id or tool_use.id,
+                        "tool_name": result.tool_name or tool_use.name,
+                    }
+                )
+                result = await self._run_after_call(tool, normalized, context)
         except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
             raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
-            self._record_breaker_result(tool.name, result)
-            return result
         except IrisToolExecutionError as exc:
             allow_structured = tool.definition.group == "file" or exc.message.startswith(
                 "ARTIFACT_ERROR:"
@@ -563,12 +567,13 @@ class ToolExecutor:
                 allow_structured=allow_structured,
             )
             result = self._error_result(tool_use, code, message)
-            self._record_breaker_result(tool.name, result)
-            return result
         except Exception as exc:
             result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
-            self._record_breaker_result(tool.name, result)
-            return result
+
+        # 所有 effect 后的结果在同一出口保存；落盘失败只返回错误，不重复尝试写入。
+        result = self._finalize_result(tool_use=tool_use, tool=tool, result=result, context=context)
+        self._record_breaker_result(tool.name, result)
+        return result
 
     async def _run_tool_body(
         self,
@@ -622,10 +627,11 @@ class ToolExecutor:
                 "tool_name": result.tool_name or tool_use.name,
             }
         )
-        return self._artifact_store(context).persist_if_large(
+        return artifact_store_for(
+            context, preview_chars=tool.definition.preview_chars
+        ).persist_if_large(
             normalized,
             max_chars=tool.definition.max_result_chars,
-            mcp_result=ToolCapability.MCP in tool.definition.capabilities,
         )
 
     def _error_result(
@@ -635,6 +641,7 @@ class ToolExecutor:
         message: str,
         *,
         details: dict[str, object] | None = None,
+        max_chars: int | None = None,
     ) -> ToolResult:
         """构造错误工具结果。
 
@@ -645,16 +652,25 @@ class ToolExecutor:
             code (str): 大写带下划线的标准类型标记。
             message (str): 描述异常情形的详细反馈体。
             details (dict[str, object] | None): 附加可能存在的部分详细风控上下文。
+            max_chars: 预检短路的正文预算；省略时由 effect 后的最终处理保存完整错误。
 
         Returns:
             ToolResult: is_error 生效情况下的专供结构体。
         """
-        return ToolResult(
+        result = ToolResult(
             tool_use_id=tool_use.id,
             tool_name=tool_use.name,
             is_error=True,
             error=ToolErrorInfo(code=code, message=message, details=details or {}),
         )
+        if max_chars is not None and len(result.model_content) > max_chars:
+            return truncate_tool_result(
+                result,
+                max_chars=max_chars,
+                preview_chars=max_chars,
+                suffix="\n[错误说明已截断]",
+            )
+        return result
 
     async def _execute_read_batch(
         self,
@@ -710,19 +726,6 @@ class ToolExecutor:
             ) and prepared.tool.is_concurrency_safe(prepared.arguments)
         except Exception:
             return False
-
-    def _artifact_store(self, context: ToolExecutionContext) -> ToolArtifactStore:
-        """为当前上下文创建 artifact store。
-
-        获取指向缓存存盘对应工作目内配置的实例，管理超大尺寸响应信息。
-
-        Args:
-            context (ToolExecutionContext): 提供执行标识路径信息的宿主。
-
-        Returns:
-            ToolArtifactStore: 操作落盘工作的具象存取处理库。
-        """
-        return artifact_store_for(context, preview_chars=self.artifact_preview_chars)
 
     async def _run_before_call(
         self,

@@ -225,7 +225,7 @@ class ToolBridge:
             metadata=metadata,
             cancellation=None,
         )
-        return self.tool_executor._normalize_subagent_result(
+        return self.tool_executor._finalize_result(
             tool_use=tool_use,
             tool=self.tool_view.get(tool_use.name),
             result=result,

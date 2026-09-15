@@ -76,6 +76,7 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 
 工具路径通过 `ToolBridge.preflight()` 形成计划，再调用带执行守卫的 `execute_prepared()`；
 工具结果统一经 `ToolResult.to_msg()` 投影为 history 消息。
+普通工具与 child 续接复用 executor 的最终结果处理，统一保留完整输出引用并裁剪模型正文。
 
 ## 可选 live streaming
 

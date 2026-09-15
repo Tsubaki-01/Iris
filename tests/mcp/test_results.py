@@ -25,6 +25,44 @@ from .fixtures.tools import make_tool
 
 
 @pytest.mark.asyncio
+async def test_middleware_receives_full_mcp_text_before_final_limit(
+    stdio_config: MCPResolvedServer, tmp_path: Path
+) -> None:
+    """MCP 的完整正文先交给 hook，最终预览遵守同一个工具配置。"""
+    text = "source" * 1000
+    observed: list[str] = []
+
+    class Observe(ToolMiddleware):
+        """观察 executor 最终裁剪之前的文本。"""
+
+        async def after_call(
+            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
+        ) -> ToolResult:
+            """保留原结果并记录完整正文。"""
+            observed.append(result.model_content)
+            return result
+
+    tool, _ = make_tool(
+        stdio_config, result=types.CallToolResult(content=[types.TextContent(text=text)])
+    )
+    tool.definition.max_result_chars = 1000
+    tool.definition.preview_chars = 12
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = await ToolExecutor(registry, middleware=[Observe()]).execute_one(
+        ToolUseBlock(id="full-mcp", name=tool.name, input={}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert observed[0].startswith(text)
+    assert result.model_content.startswith(text[:12] + "\n\n[")
+    assert len(result.model_content) <= 1000
+    assert result.artifact is not None
+    assert (
+        json.loads(result.artifact.path.read_text(encoding="utf-8"))["content"][0]["text"] == text
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rich", [False, True])
 async def test_middleware_expansion_preserves_original_json_when_present(
     stdio_config: MCPResolvedServer,

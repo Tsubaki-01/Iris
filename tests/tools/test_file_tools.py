@@ -507,10 +507,9 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
         read_state=ReadFileState(),
     )
 
-    result = await ToolExecutor(
-        register_file_tools(max_result_chars=120),
-        artifact_preview_chars=80,
-    ).execute_one(
+    registry = register_file_tools(max_result_chars=120)
+    registry.get("grep_search").definition.preview_chars = 80
+    result = await ToolExecutor(registry).execute_one(
         ToolUseBlock(id="grep_1", name="grep_search", input={"pattern": "needle"}),
         context,
     )

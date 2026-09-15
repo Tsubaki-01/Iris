@@ -103,7 +103,9 @@ closes the runner, then finishes output and the background loop.
 
 Rich content, structuredContent, SDK-retained metadata, and oversized projections are saved as
 complete `.mcp.json` files. Models receive bounded text and a path. After-hook expansion preserves
-an existing JSON artifact; expanded plain text without one uses `.txt`. Files are scoped to the
+an existing JSON artifact; expanded plain text without one uses `.txt`. The adapter preserves full
+text for middleware; the executor alone applies the final limit using ToolDefinition.preview_chars.
+Direct MCPTool.arun calls return results before this final limit. Files are scoped to the
 current context.session_id, and error paths appear in the model-visible error.message.
 
 - `config.py`: the single owner of source normalization and environment resolution.

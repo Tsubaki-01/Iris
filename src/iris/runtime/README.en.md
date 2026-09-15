@@ -75,6 +75,8 @@ execute; if it changes to DENY, approval produces a permission error. User rejec
 
 Tool execution uses `ToolBridge.preflight()` to produce a plan, then guarded
 `execute_prepared()`. Tool results share the `ToolResult.to_msg()` projection into history.
+Ordinary tools and child continuations share the executor's final output handling, retaining the
+complete artifact reference while limiting model-visible text.
 
 ## Optional live streaming
 

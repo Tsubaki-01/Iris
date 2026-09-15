@@ -226,8 +226,14 @@ directly allow writes; configure `DefaultPermissionPolicy(write_mode="allow")` o
 the confirmation gate.
 
 `persist_json()` stores complete parsed MCP JSON; `artifact_store_for()` selects the store for
-the current context.session_id. Existing artifacts survive final truncation. For MCP, the executor
-passes `mcp_result=True` so error.message is also bounded and retains the artifact path.
+the current context.session_id. Existing artifacts survive final truncation. Successes, returned
+errors, raised tool exceptions, and middleware errors share the final output handling. The budget
+includes the error prefix and retrieval notice; error.message retains the preview and path. If the
+notice and prefix alone exceed the budget, they remain intact with no body preview. Their length
+is the minimum output needed to preserve retrieval. Preflight errors are clipped without writing files.
+
+`ToolDefinition.preview_chars` is the sole preview setting; `ToolExecutor` no longer accepts
+`artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
 Default permissions allow only locally trusted read-only MCP tools; policy fingerprint version is 2.
 `IrisMCPOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.

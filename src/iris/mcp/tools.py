@@ -135,9 +135,7 @@ class MCPTool(BaseTool):
             projected.content = [TextBlock(text=message)]
             if projected.error is not None:
                 projected.error = projected.error.model_copy(update={"message": message})
-        return store.persist_if_large(
-            projected, max_chars=self.definition.max_result_chars, mcp_result=True
-        )
+        return projected
 
 
 __all__ = ["MCPTool"]

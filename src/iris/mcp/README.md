@@ -90,6 +90,8 @@ CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后
 富内容、structuredContent、SDK 保留的 metadata 或超长投影保存为完整 `.mcp.json`，模型只见
 有界文本与路径。after middleware 扩容保留已有 JSON；仅扩容后的纯文本沿用 `.txt`。
 文件按当前 context.session_id 分目录；错误的路径写入模型实际读取的 error.message。
+adapter 保留完整文本供 middleware 消费，最终裁剪统一由 executor 完成；预览长度取当前
+ToolDefinition.preview_chars。直接调用 MCPTool.arun 得到的是尚未经过 executor 限长的结果。
 
 - `config.py`：来源字段归一和环境求值的唯一入口。
 - `models.py`：外部声明模型，以及内部 config/resolved/diagnostic 数据。
