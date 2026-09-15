@@ -175,7 +175,8 @@ immutable `ReadFileRecord` observation that the event loop merges only after a s
 `WorkspaceFileService.read_text_observed()` supplies complete text and a file observation from one
 open file for Skill content-version checks, sharing the workspace and regular-file boundaries.
 It does not update shared read state; callers merge after a successful await. Ordinary
-`read_file_observed()` still reads only the requested page.
+`read_file_observed(..., max_chars=...)` reads only the budgeted page plus one lookahead character.
+Skipping preceding lines and columns is also chunked, without loading an entire long line.
 
 `ToolExecutor` provides classification, permission refresh, and per-call execution primitives only. The
 lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
@@ -201,11 +202,12 @@ flowchart LR
     Service --> Boundary["WorkspacePolicy / ReadFileState / filesystem"]
 ```
 
-- reads may include `L0001 |` line numbers and update `ReadFileState` through loop-side observation
-  merge;
+- reads preserve decoded newlines, may include `L0001 |` line numbers, and update `ReadFileState`
+  through loop-side observation merge;
 - list uses streaming `os.scandir` discovery order and does not guarantee global lexicographic
   order; list patterns retain `Path.rglob()` recursion semantics, including `**` matching zero or
-  more directory segments; grep reads UTF-8 files line by line and skips `.iris` before descent;
+  more directory segments; grep reads UTF-8 files line by line and skips `.iris` before descent
+  unless the explicitly requested path is inside `.iris`;
 - list/grep stop as soon as the global `max_results` limit is reached, and `max_results=0` performs
   no path resolution, walk, stat, or open;
 - with `max_results > 0`, a missing list/grep root raises `FILE_NOT_FOUND`;
@@ -215,7 +217,23 @@ flowchart LR
 - resolved parent/symlink escapes are rejected;
 - successful paths use workspace-relative `/` separators.
 
-Large non-error output is stored at
+`ReadFileInput` uses zero-based line `offset` and Unicode character `column` within that line.
+`limit` defaults to 1000 lines and accepts 0..1000. The tool budgets source text, optional line
+numbers, and a model-visible footer together:
+
+```text
+[read_file: offset=0, column=0; next_offset=0, next_column=800; has_more=true]
+```
+
+When has_more is true, pass next_offset/next_column as the next request's offset/column with the
+same file path. False means EOF. Coordinates count source characters, excluding line-number
+prefixes; consuming a newline advances offset and resets column. Long lines are split without
+creating another artifact during ordinary paging. Page text retains trailing newlines. limit=0
+only reports remaining content without consuming source text; no total-line scan is performed.
+An invalid starting column returns COLUMN_OUT_OF_RANGE. An insufficient page budget returns
+READ_BUDGET_TOO_SMALL. Direct service read_file/read_file_observed calls require max_chars.
+
+Large execution output, including errors, is stored at
 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`, and the result becomes a preview
 plus artifact metadata. Each ID segment is `id_` followed by its complete UTF-8 bytes encoded as
 lowercase hexadecimal; an empty ID becomes `id_`. Distinct IDs retain distinct paths even on

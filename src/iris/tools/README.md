@@ -201,7 +201,8 @@ INLINE 阻塞仍可能延迟退出。线程取消只结束 async waiter，worker
 
 `WorkspaceFileService.read_text_observed()` 为 Skill 内容版本检查提供同一次打开的完整文本与
 文件观测，复用文件读取的 workspace 和普通文件边界。它不更新共享读取状态；调用方在 await
-成功后合并。常规 `read_file_observed()` 仍只读取请求的分页范围。
+成功后合并。常规 `read_file_observed(..., max_chars=...)` 只读取预算内的分页范围，额外观察一个
+字符判断是否还有内容；跳过前置行和列时也按块读取，不把超长行整体载入内存。
 
 `ToolExecutor` 只提供分类、permission refresh 和单调用执行原语；lifecycle active path 由 runtime 在它之上
 使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
@@ -233,7 +234,7 @@ executor = ToolExecutor(
 
 | 工具名 | 输入模型 | 能力 | 行为 |
 | --- | --- | --- | --- |
-| `read_file` | `ReadFileInput` | `READ` | 读取 workspace 内文本文件，默认返回原文；`with_line_numbers=true` 时返回 `L0001 |` 行号视图；并记录 `ReadFileState` |
+| `read_file` | `ReadFileInput` | `READ` | 返回保留换行的文本片段及继续位置；可选 `L0001 |` 行号，并记录 `ReadFileState` |
 | `list_files` | `ListFilesInput` | `READ` | 按 `os.scandir` 发现顺序流式列出 workspace 内普通文件；不保证全局词典序，达到 `max_results` 后立即停止 |
 | `grep_search` | `GrepSearchInput` | `READ` | 流式逐行执行 Python 正则搜索，下降前跳过 `.iris`，达到全局 `max_results` 后立即停止 |
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
@@ -272,18 +273,35 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 输入约束：
 
-- `ReadFileInput(file_path, offset=None, limit=None)`: `offset`/`limit` 非负，`limit <= 1000`。
+- `ReadFileInput(file_path, offset=None, column=0, limit=None)`: `offset` 为零基行偏移，`column` 为
+  起始行内的 Unicode 字符偏移；两者非负。`limit` 默认 1000，范围为 `0..1000`。
 - `ListFilesInput(path=".", pattern=None, max_results=200)`: `max_results` 范围为 `0..1000`；
   `pattern` 保持 `Path.rglob()` 的递归语义，`**` 可匹配零个或多个目录段。
 - `GrepSearchInput(pattern, path=".", max_results=200)`: `max_results` 范围为 `0..1000`；无效正则会校验失败。
 - `WriteFileInput(file_path, content)`。
 - `EditFileInput(file_path, old_string, new_string)`: `old_string` 不能为空，且必须唯一匹配。
 
+`read_file` 的最终正文包含文本、可选行号和以下继续提示，全部计入该工具的
+`max_result_chars`。长行可分成多个片段，正常分页不再生成新的 artifact。提示中的坐标按
+源文本计数，行号前缀不占用 column；换行被消费后，行偏移加一且 column 归零。
+
+```text
+[read_file: offset=0, column=0; next_offset=0, next_column=800; has_more=true]
+```
+
+`has_more=true` 时将 next_offset/next_column 分别作为下次调用的 offset/column，沿用原文件
+路径；false 表示文件末尾，不需要再尝试读一页。limit=0 不消费正文，只报告当前位置的剩余
+状态。正文保留文本流解码后的换行（含页尾换行）；这是当前唯一返回合同。无需统计总行数。
+column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和提示报
+`READ_BUDGET_TOO_SMALL`。直接调用文件服务的 read_file/read_file_observed 须显式传 max_chars。
+
 `WorkspacePolicy.resolve_path()` 会拒绝 workspace 外路径，包括父目录逃逸和解析后逃逸的符号链接。`WorkspaceFileService` 用 `ReadFileState` 记录文件的 `mtime_ns` 和 `size_bytes`，写入或编辑已有文件前会检查 `FILE_NOT_READ` 和 `STALE_FILE_STATE`。
 
 `list_files` 与 `grep_search` 的 `max_results=0` 会在路径解析、walk、stat 或 open 前直接返回空结果。
 当 `max_results > 0` 时，缺失搜索根统一返回 `FILE_NOT_FOUND`。流式遍历以低开销早停为契约，
 因此 `list_files` 不再提供旧实现的全局排序保证；需要稳定排序的调用方应对返回的有限结果自行排序。
+
+默认 workspace grep 在下降前排除 `.iris`；显式将 path 指向 `.iris` 内文件或目录时正常搜索。
 
 文件写入成功返回的 workspace 相对路径统一使用 `/` 分隔，避免不同操作系统返回不同格式。
 

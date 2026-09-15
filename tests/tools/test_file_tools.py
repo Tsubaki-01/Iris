@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,6 +15,7 @@ from iris.tools import (
     DefaultPermissionPolicy,
     GrepSearchInput,
     ListFilesInput,
+    ReadFileInput,
     ReadFileRecord,
     ReadFileState,
     ToolExecutionContext,
@@ -102,8 +104,13 @@ async def test_read_file_observation_runs_in_worker_and_merges_on_loop(
     worker_thread_ids: list[int] = []
 
     class ObservedService(WorkspaceFileService):
-        def read_file_observed(self, params, context):
-            del params, context
+        """保持当前读取签名并观察线程边界。"""
+
+        def read_file_observed(
+            self, params: ReadFileInput, context: ToolExecutionContext, *, max_chars: int
+        ) -> tuple[str, ReadFileRecord]:
+            """在 worker 中返回文件观测，由调用方在 loop 合并。"""
+            del params, context, max_chars
             worker_thread_ids.append(threading.get_ident())
             started.set()
             release.wait(timeout=2)
@@ -119,7 +126,9 @@ async def test_read_file_observation_runs_in_worker_and_merges_on_loop(
 
     context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
     tool = register_file_tools(file_service=ObservedService()).get("read_file")
-    execution = asyncio.create_task(tool.arun({"file_path": "notes.txt"}, context))
+    execution = asyncio.create_task(
+        tool.arun(tool.validate_input({"file_path": "notes.txt"}), context)
+    )
 
     try:
         assert await asyncio.to_thread(started.wait, 1)
@@ -280,7 +289,7 @@ async def test_read_file_inside_workspace_updates_read_state(tmp_path: Path) -> 
 
     resolved = path.resolve()
     assert result.is_error is False
-    assert result.model_content == "alpha\nbeta"
+    assert _read_page(result.model_content) == ("alpha\nbeta\n", 2, 0, False)
     assert "1: alpha" not in result.model_content
     assert "L0001 | alpha" not in result.model_content
     assert str(resolved) in context.read_state.files
@@ -579,3 +588,179 @@ def test_workspace_policy_resolves_inside_paths_and_rejects_outside(
 
     with pytest.raises(Exception, match="PATH_OUTSIDE_WORKSPACE"):
         policy.resolve_path("../outside.txt", workspace_root=tmp_path)
+
+
+def _read_page(content: str) -> tuple[str, int, int, bool]:
+    """从模型实际收到的正文解析文件片段和继续位置。"""
+    match = re.search(
+        r"\n\n\[read_file: offset=\d+, column=\d+; "
+        r"next_offset=(\d+), next_column=(\d+); has_more=(true|false)\]$",
+        content,
+    )
+    assert match is not None, content
+    return (
+        content[: match.start()],
+        int(match[1]),
+        int(match[2]),
+        match[3] == "true",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["", "alpha", "alpha\n", "\n", "\n\n", "a\nb\n"])
+@pytest.mark.parametrize("limit", [0, 1, 2])
+async def test_read_file_reports_page_end_and_remaining_content(
+    tmp_path: Path, source: str, limit: int
+) -> None:
+    """空文件、空白行和恰好一页都明确反馈结束状态，保留源文本换行。"""
+    (tmp_path / "page.txt").write_text(source, encoding="utf-8")
+    result = await _file_executor().execute_one(
+        ToolUseBlock(id="page", name="read_file", input={"file_path": "page.txt", "limit": limit}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert not result.is_error
+    body, offset, column, has_more = _read_page(result.model_content)
+    expected = "".join(source.splitlines(keepends=True)[:limit])
+    assert body == expected
+    assert offset == expected.count("\n")
+    assert column == len(expected.rsplit("\n", 1)[-1])
+    assert has_more is (len(expected) < len(source))
+
+
+@pytest.mark.asyncio
+async def test_read_file_reaches_long_json_tail_without_new_artifacts(tmp_path: Path) -> None:
+    """超长 Unicode 单行可按模型看到的游标完整续读，读取页不再外置。"""
+    source = '{"text":"' + "甲🙂" * 30000 + 'TARGET_AT_END"}'
+    target = tmp_path / ".iris" / "tool-results" / "long.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    executor = ToolExecutor(register_file_tools(max_result_chars=1000))
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    offset = column = 0
+    pieces: list[str] = []
+    for page_index in range(100):
+        result = await executor.execute_one(
+            ToolUseBlock(
+                id=f"page-{page_index}",
+                name="read_file",
+                input={"file_path": str(target), "offset": offset, "column": column, "limit": 1},
+            ),
+            context,
+        )
+        assert not result.is_error
+        assert result.artifact is None
+        assert len(result.model_content) <= 1000
+        body, next_offset, next_column, has_more = _read_page(result.model_content)
+        pieces.append(body)
+        assert next_offset == 0
+        assert next_column == column + len(body)
+        if not has_more:
+            break
+        assert next_column > column
+        offset, column = next_offset, next_column
+    else:
+        pytest.fail("读取没有在有界页数内到达末尾")
+    assert "".join(pieces) == source
+    assert list(target.parent.rglob("*")) == [target]
+
+
+@pytest.mark.asyncio
+async def test_read_file_continues_across_long_line_and_newline(tmp_path: Path) -> None:
+    """行内续读跨过换行后切换行号，且按当前输出预算分页。"""
+    source = "x" * 500 + "\nshort\n" + "y" * 300
+    (tmp_path / "lines.txt").write_text(source, encoding="utf-8")
+    executor = ToolExecutor(register_file_tools(max_result_chars=300))
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    offset = column = 0
+    pieces: list[str] = []
+    for index in range(10):
+        result = await executor.execute_one(
+            ToolUseBlock(
+                id=f"read-{index}",
+                name="read_file",
+                input={"file_path": "lines.txt", "offset": offset, "column": column},
+            ),
+            context,
+        )
+        assert not result.is_error and result.artifact is None
+        assert len(result.model_content) <= 300
+        body, offset, column, has_more = _read_page(result.model_content)
+        pieces.append(body)
+        if not has_more:
+            break
+    assert "".join(pieces) == source
+    assert (offset, column) == (2, 300)
+
+
+@pytest.mark.asyncio
+async def test_read_file_line_numbers_do_not_change_source_cursor(tmp_path: Path) -> None:
+    """行号只用于显示，继续位置仍按源文件字符计数。"""
+    (tmp_path / "numbered.txt").write_text("skipped\n" + "x" * 1000, encoding="utf-8")
+    result = await ToolExecutor(register_file_tools(max_result_chars=200)).execute_one(
+        ToolUseBlock(
+            id="numbered",
+            name="read_file",
+            input={
+                "file_path": "numbered.txt",
+                "offset": 1,
+                "column": 10,
+                "with_line_numbers": True,
+            },
+        ),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert not result.is_error and result.artifact is None
+    assert len(result.model_content) <= 200
+    body, offset, column, has_more = _read_page(result.model_content)
+    assert body.startswith("L0002 | ")
+    assert (offset, column) == (1, 10 + len(body.removeprefix("L0002 | ")))
+    assert has_more
+
+
+@pytest.mark.asyncio
+async def test_read_file_skips_long_line_to_requested_offset(tmp_path: Path) -> None:
+    """跳过超长首行后按请求读取后面的短行。"""
+    (tmp_path / "skip.txt").write_text("x" * 60000 + "\ntail\n", encoding="utf-8")
+    result = await _file_executor().execute_one(
+        ToolUseBlock(id="skip", name="read_file", input={"file_path": "skip.txt", "offset": 1}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert _read_page(result.model_content) == ("tail\n", 2, 0, False)
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_column_past_starting_line(tmp_path: Path) -> None:
+    """行内偏移不能越过换行而静默读取另一行。"""
+    (tmp_path / "column.txt").write_text("abc\nnext", encoding="utf-8")
+    result = await _file_executor().execute_one(
+        ToolUseBlock(id="column", name="read_file", input={"file_path": "column.txt", "column": 5}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert result.error is not None and result.error.code == "COLUMN_OUT_OF_RANGE"
+
+
+@pytest.mark.asyncio
+async def test_read_file_reports_unusable_page_budget(tmp_path: Path) -> None:
+    """预算放不下提示时返回明确错误，不交付无法前进的正常页。"""
+    (tmp_path / "budget.txt").write_text("content", encoding="utf-8")
+    result = await ToolExecutor(register_file_tools(max_result_chars=50)).execute_one(
+        ToolUseBlock(id="budget", name="read_file", input={"file_path": "budget.txt"}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert result.error is not None and result.error.code == "READ_BUDGET_TOO_SMALL"
+
+
+@pytest.mark.parametrize("target_directory", [False, True])
+def test_grep_searches_explicit_artifact_target(tmp_path: Path, target_directory: bool) -> None:
+    """显式给出 .iris 内文件或目录时按请求搜索，默认 workspace 搜索仍排除。"""
+    target = tmp_path / ".iris" / "tool-results" / "saved.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("needle result\n", encoding="utf-8")
+    service = WorkspaceFileService()
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    assert service.grep_search(GrepSearchInput(pattern="needle"), context) == ""
+    found = service.grep_search(
+        GrepSearchInput(pattern="needle", path=str(target.parent if target_directory else target)),
+        context,
+    )
+    assert found.endswith("saved.txt:1: needle result")

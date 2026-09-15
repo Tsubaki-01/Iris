@@ -18,7 +18,6 @@ from abc import abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
-from itertools import islice
 from pathlib import Path
 from typing import Any, ClassVar, Generic, TextIO, TypeVar, cast
 
@@ -37,6 +36,7 @@ from ..base import (
 from ..permissions import WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
+from ._file_read import read_text_page
 
 # endregion
 
@@ -93,12 +93,14 @@ class ReadFileInput(BaseModel):
     Attributes:
         file_path (str): 相对 workspace 根目录的文本文件路径。
         offset (int | None): 起始行偏移量，从 0 开始。默认为 None。
+        column (int): 起始行内的 Unicode 字符偏移，从 0 开始，用于续读超长行。
         limit (int | None): 最多读取的行数，最大 1000。默认为 None。
         with_line_numbers (bool): 是否返回带 `L0001 |` 前缀的行号视图。
     """
 
     file_path: str
     offset: int | None = Field(default=None, ge=0)
+    column: int = Field(default=0, ge=0)
     limit: int | None = Field(default=None, ge=0, le=1000)
     with_line_numbers: bool = False
 
@@ -348,18 +350,21 @@ class WorkspaceFileService:
         self,
         params: ReadFileInput,
         context: ToolExecutionContext,
+        *,
+        max_chars: int,
     ) -> tuple[str, ReadFileRecord]:
         """读取文件片段并返回与已打开文件绑定的不可变观测。
 
         Args:
             params (ReadFileInput): 读取路径、分页和行号参数。
             context (ToolExecutionContext): 只提供 workspace 等不可变执行事实的 worker context。
+            max_chars: 包含行号和续读提示的结果字符预算。
 
         Returns:
-            tuple[str, ReadFileRecord]: 文本片段及同一已打开文件的 mtime/size 观测。
+            tuple[str, ReadFileRecord]: 文本页和续读提示，以及同一已打开文件的 mtime/size 观测。
 
         Raises:
-            IrisToolExecutionError: 路径不存在或不是普通文件。
+            IrisToolExecutionError: 文件不存在、不是普通文件，或列偏移/页预算无法读取。
             IrisToolValidationError: 路径越出 workspace。
             OSError: 打开、读取或观测文件失败。
             UnicodeDecodeError: 文件不是有效 UTF-8 文本。
@@ -367,14 +372,15 @@ class WorkspaceFileService:
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
         with self._open_text(params.file_path, context) as (path, handle):
-            selected = [line.rstrip("\n") for line in islice(handle, offset, offset + limit)]
-            stat = os.fstat(handle.fileno())
-        if params.with_line_numbers:
-            content = "\n".join(
-                f"L{index:04d} | {line}" for index, line in enumerate(selected, start=offset + 1)
+            content = read_text_page(
+                handle,
+                offset=offset,
+                column=params.column,
+                limit=limit,
+                with_line_numbers=params.with_line_numbers,
+                max_chars=max_chars,
             )
-        else:
-            content = "\n".join(selected)
+            stat = os.fstat(handle.fileno())
         return (
             content,
             ReadFileRecord(
@@ -428,20 +434,23 @@ class WorkspaceFileService:
         with path.open("r", encoding="utf-8") as handle:
             yield path, handle
 
-    def read_file(self, params: ReadFileInput, context: ToolExecutionContext) -> str:
+    def read_file(
+        self, params: ReadFileInput, context: ToolExecutionContext, *, max_chars: int
+    ) -> str:
         """读取文件片段并更新读取状态。
 
         Args:
             params (ReadFileInput): 读取路径和分页参数。
             context (ToolExecutionContext): 当前工具执行上下文。
+            max_chars: 包含继续位置的结果字符预算。
 
         Returns:
-            str: 默认返回原始文本片段；请求行号时返回带 `L0001 |` 前缀的文本内容。
+            str: 保留换行的文本片段及继续位置；可选 `L0001 |` 行号前缀。
 
         Raises:
             IrisToolExecutionError: 当路径不存在或不是普通文件时。
         """
-        content, record = self.read_file_observed(params, context)
+        content, record = self.read_file_observed(params, context, max_chars=max_chars)
         self.ensure_read_state(context).merge(record)
         return content
 
@@ -502,12 +511,13 @@ class WorkspaceFileService:
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []
         workspace_root = context.workspace_root.resolve()
-        if ".iris" in root.relative_to(workspace_root).parts:
-            return ""
+        explicit_artifact_target = ".iris" in root.relative_to(workspace_root).parts
         for path in self.iter_files(
             root,
             context,
-            ignore_directory=lambda directory: directory.name == ".iris",
+            ignore_directory=(
+                None if explicit_artifact_target else lambda directory: directory.name == ".iris"
+            ),
         ):
             with path.open("r", encoding="utf-8") as handle:
                 try:
@@ -708,7 +718,11 @@ class ReadFileTool(FileTool[ReadFileInput]):
     """读取 workspace 文本文件的工具。"""
 
     name: ClassVar[str] = "read_file"
-    description: ClassVar[str] = "读取 workspace 内文本文件；需要定位或编辑时可请求行号"
+    description: ClassVar[str] = (
+        "读取 workspace 内文本文件，offset 为零基行偏移，column 为行内字符偏移。"
+        "返回实际 next_offset、next_column 和 has_more；继续时将 next 值作为 offset、column。"
+        "需要定位或编辑时可请求行号。"
+    )
     input_type: type[ReadFileInput] = ReadFileInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
 
@@ -723,6 +737,7 @@ class ReadFileTool(FileTool[ReadFileInput]):
             self.file_service.read_file_observed,
             params,
             worker_context,
+            max_chars=self.definition.max_result_chars,
         )
         self.file_service.ensure_read_state(context).merge(record)
         return self._text_result(content)
