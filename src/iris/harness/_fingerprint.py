@@ -78,7 +78,9 @@ def compute_environment_fingerprint(runtime: AgentRuntime) -> str:
                 "request_options": model.to_llm_request_options(),
             },
             "provider": environment.provider_fingerprint,
-            "compaction": environment.agent_config.compaction.model_dump(mode="json"),
+            "compaction": environment.agent_config.compaction.model_dump(
+                mode="json", exclude={"prompt"}
+            ),
             "context": environment.context_builder.fingerprint_payload(environment.context_input),
             "skills": (
                 {name: skills.get(name).content_version for name in skills.names()}

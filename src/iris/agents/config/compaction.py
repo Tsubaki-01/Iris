@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from math import ceil, floor
+from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+_DEFAULT_PROMPT = Path(__file__).parents[2] / "prompts" / "compaction.j2"
 
 
 class CompactionConfig(BaseModel):
@@ -15,14 +18,30 @@ class CompactionConfig(BaseModel):
         keep_recent_ratio (float): 近期原文相对输入预算的保留目标比例。
         summary_ratio (float): 摘要生成上限相对输入预算的比例。
         timeout_seconds (float): 一次完整压缩操作的超时秒数。
+        prompt (Path | None): 自定义摘要指令模板路径，省略时使用包内默认文件。
     """
 
     input_budget_tokens: int = Field(default=96000, gt=0)
     keep_recent_ratio: float = Field(default=0.15, gt=0, lt=1, allow_inf_nan=False)
     summary_ratio: float = Field(default=0.05, gt=0, lt=1, allow_inf_nan=False)
     timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
+    prompt: Path | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    @field_validator("prompt")
+    @classmethod
+    def _resolve_prompt(cls, value: Path | None, info: ValidationInfo) -> Path | None:
+        """沿用 Agent YAML 的相对路径基准，只解析声明。"""
+        config_path: Path | None = (info.context or {}).get("config_path")
+        if value is not None and config_path is not None and not value.is_absolute():
+            return (config_path.parent / value).resolve()
+        return value
+
+    @property
+    def prompt_path(self) -> Path:
+        """返回自定义或包内默认摘要指令文件。"""
+        return self.prompt if self.prompt is not None else _DEFAULT_PROMPT
 
     @property
     def trigger_tokens(self) -> int:

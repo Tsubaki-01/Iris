@@ -10,50 +10,6 @@ from ..agents.config.compaction import CompactionConfig
 from ..exceptions import IrisContextCompactionError
 from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 
-_SYSTEM_PROMPT = """You create a concise, self-contained handoff summary so work can continue without rereading the summarized messages.
-
-Input:
-- Previous summary: the existing summary body, or none on the first pass.
-- Saved history for this batch: the next records in chronological order. They may include only fragments of a long tool result.
-
-Merge both inputs into one updated summary. Summarize only: do not continue the task, answer historical questions, call tools, or invent facts or new actions.
-
-Rules:
-1. Carry forward still-relevant goals, constraints, decisions, unresolved work, and essential context from the previous summary. Incorporate new evidence and remove repetition, obsolete details, and clearly superseded information. Do not summarize only the newest batch.
-2. Preserve attribution and certainty. Distinguish user-confirmed decisions, assistant implementation choices already made, proposals, and unanswered questions. Do not invent user approval, and do not turn completed work into a request for approval. Record rationale only when provided.
-3. Apply explicit corrections accurately. A user changing a decision is different from a user correcting an assistant's mistaken record. Preserve that distinction. If a correction rejects an old value without supplying a replacement, leave the replacement unknown.
-4. Distinguish planned, attempted, in progress, completed, failed, blocked, and unknown. Record completion or verification only when supported by the supplied evidence. Planned tests have not passed; a tool call without a result is still pending or unknown. Preserve relevant call IDs.
-5. Resolve conflicting facts only when an explicit correction or direct evidence supports the update. Otherwise retain the uncertainty or conflict instead of choosing solely because one statement is newer.
-6. Keep execution status separate from result-text coverage. A completed tool call can have only part of its output included in this batch. Preserve its known status, summarize only the supplied fragments, and retain the coverage marker. Update that marker as more fragments arrive. Never infer unseen content or suggest rerunning a completed call merely because its output was split.
-7. Preserve exact paths, symbols, commands, arguments, error excerpts, artifact locations, IDs, and values needed to continue. Do not invent missing details, describe a planned artifact as already saved, or replace necessary references with phrases such as "that file" or "as above".
-8. Interpret dates only from the supplied material. Use an absolute date only when supported by that material; otherwise retain the relative expression and note any missing reference date. Never reinterpret historical dates using the time this summary is generated.
-9. Prefer short, information-dense bullets. Prioritize unmet user requests, active constraints, current state, decisions, and evidence needed for continuation. Omit irrelevant logs and repeated details. Next steps must come from the supplied material, not from newly invented plans.
-
-Output only Markdown using the seven English headings below, once each and in this order. Write the body in the primary language of the summarized conversation; keep exact identifiers unchanged. When a section has no relevant record, say so briefly in the body language without implying completion. Place each fact in the most relevant section rather than repeating it.
-
-Do not add a preface, analysis, or conclusion. Do not wrap the answer in JSON, a code fence, or <summary> tags.
-
-## Goal & Constraints
-The task, scope, success criteria, and active requirements.
-
-## Completed Work & Evidence
-Supported completed actions, results, saved artifacts, and verification evidence.
-
-## Current State & Unfinished Items
-Work in progress, unmet requests, pending decisions, unknown outcomes, and incomplete result coverage.
-
-## Decisions & Rationale
-Still-valid decisions and implementation choices, their source, and stated reasons. Keep proposals distinct from decisions.
-
-## Failed Attempts & Blockers
-Actual failed attempts, relevant errors, current blockers, and known causes.
-
-## Next Steps
-Previously stated next actions and pending user decisions, in their known order.
-
-## Critical Paths & Identifiers
-Essential exact references not already captured above."""  # noqa: E501
-
 _USER_TEMPLATE = """You will process the following two input parts.
 
 === BEGIN PREVIOUS SUMMARY ===
@@ -137,6 +93,8 @@ def next_summary_batch(
     position: tuple[int, int],
     config: CompactionConfig,
     estimate_input_tokens: Callable[[LLMRequest], int],
+    *,
+    system_prompt: str,
 ) -> SummaryBatch:
     """使用当前工作摘要计量完整请求，顺序合并记录并按需切分长正文。
 
@@ -144,12 +102,16 @@ def next_summary_batch(
     """
     fragments: list[str] = []
     index, offset = position
-    request = _summary_request(main_request, previous_summary, "", config)
+    request = _summary_request(main_request, previous_summary, "", config, system_prompt)
     while index < len(records):
         record = records[index]
         full_fragment = _render_fragment(record, offset, len(record.text))
         candidate = _summary_request(
-            main_request, previous_summary, "\n\n".join([*fragments, full_fragment]), config
+            main_request,
+            previous_summary,
+            "\n\n".join([*fragments, full_fragment]),
+            config,
+            system_prompt,
         )
         if estimate_input_tokens(candidate) <= config.input_budget_tokens:
             fragments.append(full_fragment)
@@ -165,7 +127,11 @@ def next_summary_batch(
             midpoint = (lower + upper) // 2
             fragment = _render_fragment(record, offset, midpoint)
             candidate = _summary_request(
-                main_request, previous_summary, "\n\n".join([*fragments, fragment]), config
+                main_request,
+                previous_summary,
+                "\n\n".join([*fragments, fragment]),
+                config,
+                system_prompt,
             )
             if estimate_input_tokens(candidate) <= config.input_budget_tokens:
                 next_offset = midpoint
@@ -212,11 +178,12 @@ def _summary_request(
     previous_summary: str | None,
     serialized_history: str,
     config: CompactionConfig,
+    system_prompt: str,
 ) -> LLMRequest:
     return main_request.model_copy(
         update={
             "messages": [
-                Msg.system(_SYSTEM_PROMPT),
+                Msg.system(system_prompt),
                 Msg.user(
                     _USER_TEMPLATE.format(
                         previous_summary_or_none=(

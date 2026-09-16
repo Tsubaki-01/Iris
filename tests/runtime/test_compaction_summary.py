@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from iris.agents.config.compaction import CompactionConfig
+from iris.context import ContextTemplateRenderer
 from iris.exceptions import IrisContextCompactionError
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.runtime._compaction_summary import (
@@ -12,6 +13,8 @@ from iris.runtime._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+
+_DEFAULT_PROMPT = ContextTemplateRenderer().render_file(CompactionConfig().prompt_path, {})
 
 
 def _estimate(request: LLMRequest) -> int:
@@ -84,7 +87,9 @@ def test_summary_request_uses_canonical_seven_headings_and_final_request_options
     config = CompactionConfig()
     records = serialize_history([Msg.user("已保存的任务")], start_index=0)
 
-    batch = next_summary_batch(main, None, records, (0, 0), config, _estimate)
+    batch = next_summary_batch(
+        main, None, records, (0, 0), config, _estimate, system_prompt=_DEFAULT_PROMPT
+    )
     request = batch.request
 
     assert request.model == main.model
@@ -128,7 +133,15 @@ def test_long_completed_result_is_covered_once_in_order_with_call_identity() -> 
     count = 0
 
     while position[0] < len(records):
-        batch = next_summary_batch(_main_request(), previous, records, position, config, _estimate)
+        batch = next_summary_batch(
+            _main_request(),
+            previous,
+            records,
+            position,
+            config,
+            _estimate,
+            system_prompt=_DEFAULT_PROMPT,
+        )
         user = batch.request.messages[1].text
         end = len(records[0].text) if batch.next_position[0] else batch.next_position[1]
         expected_fragment = records[0].text[position[1] : end]
@@ -152,10 +165,18 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
     records = serialize_history([Msg.user("A" * 20000)], start_index=0)
     config = CompactionConfig(input_budget_tokens=6500)
     main = _main_request()
-    first = next_summary_batch(main, None, records, (0, 0), config, _estimate)
+    first = next_summary_batch(
+        main, None, records, (0, 0), config, _estimate, system_prompt=_DEFAULT_PROMPT
+    )
     larger_summary = "仍有效的旧约束。" * 60
     second = next_summary_batch(
-        main, larger_summary, records, first.next_position, config, _estimate
+        main,
+        larger_summary,
+        records,
+        first.next_position,
+        config,
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
     )
 
     first_length = first.next_position[1]
@@ -171,7 +192,13 @@ def test_records_are_merged_in_order_including_empty_content() -> None:
         start_index=11,
     )
     batch = next_summary_batch(
-        _main_request(), "有效的旧摘要", records, (0, 0), CompactionConfig(), _estimate
+        _main_request(),
+        "有效的旧摘要",
+        records,
+        (0, 0),
+        CompactionConfig(),
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
     )
     user = batch.request.messages[1].text
 
@@ -192,6 +219,7 @@ def test_minimum_fragment_failure_does_not_drop_the_previous_summary() -> None:
             (0, 0),
             CompactionConfig(input_budget_tokens=6500),
             _estimate,
+            system_prompt=_DEFAULT_PROMPT,
         )
 
     assert error.value.runtime_code == "CONTEXT_COMPACTION_UNAVAILABLE"

@@ -24,6 +24,7 @@ def test_compaction_defaults_and_derived_budgets() -> None:
         "keep_recent_ratio": 0.15,
         "summary_ratio": 0.05,
         "timeout_seconds": 300,
+        "prompt": None,
     }
     assert config.compaction.trigger_tokens == 76800
     assert config.compaction.keep_recent_tokens == 14400
@@ -113,3 +114,15 @@ def test_yaml_invalid_compaction_is_wrapped_as_config_error(tmp_path: Path) -> N
         load_agent_config(path)
 
     assert "compaction.summary_ratio" in caught.value.context["error"]
+
+
+def test_prompt_path_resolves_from_agent_yaml_without_reading_file(tmp_path: Path) -> None:
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        "name: agent\nmodel: openai/test\nsystem: instructions\n"
+        "compaction:\n  prompt: prompts/summary.j2\n",
+        encoding="utf-8",
+    )
+    config = load_agent_config(path)
+    assert config.compaction.prompt == (tmp_path / "prompts" / "summary.j2").resolve()
+    assert not config.compaction.prompt.exists()

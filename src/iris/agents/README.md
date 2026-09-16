@@ -120,7 +120,7 @@ model: openai/gpt-4o-mini
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
-- `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算与超时。
+- `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
@@ -149,6 +149,22 @@ compaction:
 触发和压缩后验收额度固定为预算的 80%（向下取整）；近期原文目标与摘要输出上限分别为
 预算乘以对应比例（向上取整）。近期原文只是软目标，不要求两个比例之和小于 80%。
 输入预算与超时必须为正数，两个比例必须位于 0 与 1 之间。
+
+可用独立 Jinja2 文件自定义摘要指令和输出格式：
+
+```yaml
+compaction:
+  prompt: ./prompts/summary.j2
+```
+
+`prompt` 相对 `agent.yaml` 所在目录解析；省略或设为 `null` 时使用包内的
+[默认七栏 prompt](../prompts/compaction.j2)。文件内容作为摘要请求的 system 消息，
+旧摘要与本批历史由框架作为 user 消息提供，无需在模板里插入数据变量。自定义文件可以
+改变栏目和措辞；摘要正文仍由框架统一包裹 `<summary>` 后注入主请求。
+
+模板沿用 `iris.context` 的 Jinja2 渲染器，支持静态 include，首次读取后使用缓存；修改文件
+后创建新的 runtime 生效。配置加载只解析路径，首次压缩时读取文件。直接使用 Python SDK
+时，相对路径以 `config_path` 所在目录为基准，未提供时以当前工作目录为基准。
 
 配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过
 `RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。每次主模型调用前，
@@ -277,7 +293,7 @@ runner = AgentRunner.from_config_path("agent.yaml")
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | `agent.yaml` 加载与相对 context 路径 | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
-| 压缩预算配置 | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py` |
+| 压缩预算与摘要指令配置 | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py`, `tests/runtime/test_compaction_prompt.py` |
 | Skill 配置与 factory 集成 | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
 

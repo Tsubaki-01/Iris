@@ -72,8 +72,13 @@ engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recov
 
 `_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
-当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。英文 prompt 要求固定七栏 Markdown，
-正文跟随对话主要语言；没有标题 parser 或格式修复循环。
+当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。
+
+摘要指令来自独立 Jinja2 文件，默认使用 [`prompts/compaction.j2`](../prompts/compaction.j2)，
+要求七栏 Markdown、正文跟随对话主要语言。`compaction.prompt` 可以替换指令与输出格式；
+旧摘要与本批历史仍由框架提供。每次压缩操作通过既有模板渲染器取得一次指令，供全部分块
+计量和请求共用；文件首次读取后使用缓存，修改后需创建新 runtime。没有标题 parser 或
+格式修复循环。路径配置见 [agents 说明](../agents/README.md#compactionconfig)。
 
 摘要请求复用有效主模型选项，覆盖为非流式、无工具/response schema、输出上限 S，并设置
 `num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空

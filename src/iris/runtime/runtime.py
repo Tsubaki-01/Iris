@@ -1179,6 +1179,9 @@ class AgentRuntime:
             )
         completed = False
         try:
+            system_prompt = self.environment.context_builder.template_renderer.render_file(
+                config.prompt_path, {}
+            )
             previous = snapshot.compaction
             summary = previous.summary if previous is not None else None
             start = previous.covered_message_count if previous is not None else 0
@@ -1186,7 +1189,13 @@ class AgentRuntime:
             position = (0, 0)
             while position[0] < len(records):
                 batch = next_summary_batch(
-                    request, summary, records, position, config, provider.estimate_input_tokens
+                    request,
+                    summary,
+                    records,
+                    position,
+                    config,
+                    provider.estimate_input_tokens,
+                    system_prompt=system_prompt,
                 )
                 for attempt in range(2):
                     stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)

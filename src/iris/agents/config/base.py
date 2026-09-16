@@ -229,7 +229,7 @@ class AgentConfig(BaseModel):
         context (AgentContextConfig | None): 结构化 context 配置声明。
         skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
         mcp (AgentMCPConfig | None): 可选的外部 MCP 文件引用与本地策略。
-        compaction (CompactionConfig): 自动上下文压缩的预算配置。
+        compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         session (SessionConfig): 会话配置。

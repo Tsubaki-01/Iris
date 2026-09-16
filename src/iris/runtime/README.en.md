@@ -85,8 +85,13 @@ run are eligible too.
 `_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.
 Each batch is measured with the current working summary; unprocessed fragments are never dropped.
-The English prompt requests seven Markdown headings with body text in the conversation's primary
-language. There is no heading parser or format-repair loop.
+Summary instructions come from a separate Jinja2 file. The bundled
+[`prompts/compaction.j2`](../prompts/compaction.j2) requests seven Markdown headings with body text in
+the conversation's primary language. `compaction.prompt` can replace the instructions and output
+format; Iris still supplies the previous summary and current history batch. Each compaction obtains
+instructions once through the existing renderer and reuses them for all batch estimates and requests.
+Files are cached after the first read; create a new runtime to pick up edits. There is no heading
+parser or format-repair loop. See [agents](../agents/README.en.md) for path configuration.
 
 Summary requests reuse effective main-model options but override streaming, tools, response schema,
 output cap S, and `num_retries=0`. Candidates stay in memory until all batches finish and the caller

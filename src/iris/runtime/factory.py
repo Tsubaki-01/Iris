@@ -76,7 +76,7 @@ class RuntimeFactory:
 
         Args:
             config (AgentConfig): 已校验的 Agent 配置。
-            config_path (Path | None): 配置文件路径；存在时相对它解析 workspace/context。
+            config_path (Path | None): 配置文件路径；相对它解析 workspace、context 和摘要 prompt。
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。

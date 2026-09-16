@@ -131,6 +131,24 @@ down. Recent-text retention and summary output limits multiply the budget by the
 ratios, rounded up. Recent-text retention is a soft target, so the two ratios need not sum to less
 than 80%. The input budget and timeout must be positive; both ratios must be between 0 and 1.
 
+To customize summary instructions and output format, provide a separate Jinja2 file:
+
+```yaml
+compaction:
+  prompt: ./prompts/summary.j2
+```
+
+`prompt` resolves relative to `agent.yaml`. Omitting it or using `null` selects the bundled
+[default seven-heading prompt](../prompts/compaction.j2). The file supplies the summary request's
+system message. Iris provides the previous summary and current history batch in the user message;
+the template needs no data variables. Custom instructions may change the headings and wording.
+Iris still wraps the summary body in `<summary>` when adding it to the main request.
+
+Files use the existing `iris.context` Jinja2 renderer, including static includes and caching after
+the first read. Create a new runtime to pick up edits. Config loading resolves only the path; the
+first compaction reads the file. With the Python SDK, relative paths use the directory of
+`config_path`, or the current working directory when it is omitted.
+
 `load_agent_config()` and `AgentConfig` validate these values without calling a model or tokenizer.
 The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. Before each
 main model call, runtime automatically summarizes old history when the full input reaches 80%,
@@ -176,7 +194,7 @@ database, or an ORM.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | `agent.yaml` loading and relative context paths | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
-| Compaction budgets | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py` |
+| Compaction budgets and summary instructions | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py`, `tests/runtime/test_compaction_prompt.py` |
 | Skill config and factory integration | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
 

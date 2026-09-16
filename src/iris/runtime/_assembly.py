@@ -115,6 +115,18 @@ def assemble_runtime(
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine，不加载 catalog 或创建 store。"""
     base_dir = _base_dir(config_path)
+    if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
+        config = config.model_copy(
+            update={
+                "compaction": config.compaction.model_copy(
+                    update={
+                        "prompt": _resolve_relative_to_base(
+                            config.compaction.prompt, base_dir=base_dir
+                        )
+                    }
+                )
+            }
+        )
     workspace_root = boundary.workspace_root
     context_input = _build_context_input(config, base_dir=base_dir)
     tool_registry = build_tool_registry(config.tools)
