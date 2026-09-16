@@ -11,6 +11,7 @@ from .exceptions import (
     IrisCancellationRequestedError,
     # Core / Config
     IrisConfigError,
+    IrisContextCompactionError,
     IrisContextError,
     IrisError,
     IrisHITLError,
@@ -57,6 +58,7 @@ __all__ = [
     "IrisCancellationRequestedError",
     "IrisConfigError",
     "IrisContextError",
+    "IrisContextCompactionError",
     "IrisSkillError",
     "IrisSkillFormatError",
     "IrisSkillPathError",

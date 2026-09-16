@@ -70,7 +70,28 @@ model response. Resume and recovery retain these anchors without appending the i
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
 projection against the session revision used to select its range. It advances session/checkpoint
 revisions while preserving raw messages, the cursor, and the pending main-model reservation.
-Summary generation and automatic triggering are not yet connected to the model loop.
+Automatic triggering is not yet connected to the model loop.
+
+### History projection and summary construction
+
+Internal `compaction.py` locates the current run's original input, latest archived steer, and injected
+BCI in complete raw history. Projection orders the summary, covered anchors, and uncovered raw suffix.
+The assembler still positions system, memory, and unarchived BCI/input. A single `<summary>` wrapper
+is added only in the projection; summaries never append to raw history. Cuts keep each assistant tool
+batch and its results together. Recent retention is a soft target: an oversized group can be summarized
+while retaining smaller recent groups, or leaving an empty suffix. Completed steps within the current
+run are eligible too.
+
+`_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
+reference in order. Large blocks carry character coverage markers separately from execution status.
+Each batch is measured with the current working summary; unprocessed fragments are never dropped.
+The English prompt requests seven Markdown headings with body text in the conversation's primary
+language. There is no heading parser or format-repair loop.
+
+Summary requests reuse effective main-model options but override streaming, tools, response schema,
+output cap S, and `num_retries=0`. Candidates stay in memory until all batches finish and the caller
+commits them. Only complete nonempty text is accepted. `IrisContextCompactionError` uses the existing
+`context` source with `CONTEXT_COMPACTION_*` codes.
 
 Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provider response without
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim

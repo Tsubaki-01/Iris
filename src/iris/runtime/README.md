@@ -60,7 +60,24 @@ engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recov
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
 后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
-摘要生成与自动触发尚未接入模型循环。
+自动触发尚未接入模型循环。
+
+### 历史投影与摘要构造
+
+内部 `compaction.py` 在完整原文上定位本 run 的原始输入、最新已归档 steer 与已注入 BCI。
+历史投影依次放入摘要消息、已覆盖锚点、未覆盖原文；assembler 仍拥有 system、memory 和
+尚未归档 BCI/input 的固定位置。摘要只在投影时包装一层 `<summary>`，不追加回原文。
+切点保持 assistant 的整批 tool calls/results 完整，近期原文是软目标，大组放不下时可以仅留
+较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
+
+`_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
+序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
+当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。英文 prompt 要求固定七栏 Markdown，
+正文跟随对话主要语言；没有标题 parser 或格式修复循环。
+
+摘要请求复用有效主模型选项，覆盖为非流式、无工具/response schema、输出上限 S，并设置
+`num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空
+文本；`IrisContextCompactionError` 使用 `context` 来源及 `CONTEXT_COMPACTION_*` 错误码。
 
 cursor 位置只有：
 
