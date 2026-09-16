@@ -97,7 +97,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 ## Public models and APIs
 
-`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `ModelConfig`,
+`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ModelConfig`,
 `PermissionsConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
@@ -113,6 +113,28 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 - `PermissionsConfig` defaults to workspace `.` and writes `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
+
+`AgentConfig.compaction` defaults to `CompactionConfig`, exported from both `iris.agents` and
+`iris.agents.config`:
+
+```yaml
+compaction:
+  input_budget_tokens: 96000
+  keep_recent_ratio: 0.15
+  summary_ratio: 0.05
+  timeout_seconds: 300
+```
+
+The input budget already excludes output reservation; Iris does not subtract `model.max_tokens`
+again. The trigger and post-compaction acceptance limit are fixed at 80% of this budget, rounded
+down. Recent-text retention and summary output limits multiply the budget by their respective
+ratios, rounded up. Recent-text retention is a soft target, so the two ratios need not sum to less
+than 80%. The input budget and timeout must be positive; both ratios must be between 0 and 1.
+
+`load_agent_config()` and `AgentConfig` validate these values without calling a model or tokenizer.
+The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. This stage
+provides configuration and input estimation only; automatic summary execution is not yet wired.
+See [providers](../providers/README.en.md) for estimation limits.
 
 `AgentConfig.mcp` also defaults to `None`; `AgentMCPConfig` references a JSON/JSONC/TOML file
 and supplies local server overrides as described above.
@@ -148,6 +170,7 @@ database, or an ORM.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | `agent.yaml` loading and relative context paths | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| Compaction budgets | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py` |
 | Skill config and factory integration | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
 

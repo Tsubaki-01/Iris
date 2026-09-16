@@ -24,6 +24,12 @@ their independent resources at WAITING/completion, rebuilding on recovery.
 
 ## Dependency direction
 
+`RuntimeProvider` must implement both `complete()` and synchronous `estimate_input_tokens(request)`.
+The latter estimates the complete request after model options and tool schemas are applied. Custom
+providers and test doubles use the same contract. Compaction configuration is carried by
+`RuntimeEnvironment.agent_config.compaction`; no separate environment field is needed. Configuration
+and estimation do not yet trigger automatic summarization in the model loop.
+
 ```text
 AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
      |                                  |

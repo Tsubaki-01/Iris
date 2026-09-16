@@ -112,6 +112,12 @@ Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
 Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2 的
 `model_dump()` 对象形态；不再调用 Pydantic v1 `.dict()` 兼容接口。
 
+`estimate_input_tokens(request)` 同步复用发送 mapper 和 LiteLLM token counter，计入消息、
+工具调用/结果、工具定义、tool_choice，并单独补计 response_format。它只移除明确的外层
+provider 前缀，保留内层模型命名空间；不调用生成 API，不扣缓存命中的输入。返回值是窗口
+估算，不是精确账单或绝不超窗的保证。`provider_options["num_retries"]` 显式透传，包含 0；
+未设置时保留 LiteLLM 原有重试行为。
+
 `stream(request)`：
 
 - 要求 `request.stream=True`，并向 LiteLLM 请求 usage tail；

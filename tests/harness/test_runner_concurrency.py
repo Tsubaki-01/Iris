@@ -52,6 +52,10 @@ async def test_different_sessions_can_own_live_activations_concurrently(
             self.both_started = asyncio.Event()
             self.release = asyncio.Event()
 
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: LLMRequest) -> LLMResponse:
             self.requests.append(request)
             if len(self.requests) == 2:

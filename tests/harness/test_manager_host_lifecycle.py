@@ -112,6 +112,10 @@ async def test_resume_admission_returns_before_provider_and_can_be_interrupted(
 
         first = True
 
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: LLMRequest) -> LLMResponse:
             """恢复后的 provider 保持运行以验证即时回执。"""
             if self.first:

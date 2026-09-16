@@ -80,6 +80,11 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 
 ## 可选 live streaming
 
+`RuntimeProvider` 必须同时实现 `complete()` 和同步 `estimate_input_tokens(request)`；后者
+计量应用模型选项及工具 schema 后的完整请求。自定义 provider 与测试替身直接满足同一契约。
+`RuntimeEnvironment.agent_config.compaction` 携带压缩配置，无需独立环境字段。
+当前配置和计量能力尚未在模型循环中触发自动摘要。
+
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
 `RuntimeProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。
 传入同步 `RuntimeEventSink` 时，

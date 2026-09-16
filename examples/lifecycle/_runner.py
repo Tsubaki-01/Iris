@@ -27,6 +27,10 @@ class NonExecutingProvider:
         >>> provider = NonExecutingProvider()
     """
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """满足 runtime 计量契约；只读示例不实际生成请求。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """拒绝只读 lifecycle 示例发起的 provider 请求。
 

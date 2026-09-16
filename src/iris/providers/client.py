@@ -14,6 +14,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 from uuid import uuid4
@@ -63,6 +64,36 @@ class ProviderClient(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """使用实际 Chat 消息和工具定义估算完整输入，不发起生成请求。
+
+        Args:
+            request: 已应用模型选项和工具 schema 的最终请求。
+
+        Returns:
+            输入 token 估算值，包含 response_format 的序列化文本。
+
+        Raises:
+            IrisProviderError: 请求风格无效或底层计量失败。
+        """
+        self._validate_api_style(request)
+        model = request.model.removeprefix(f"{self.litellm_provider or self.provider}/")
+        try:
+            count = litellm.token_counter(
+                model=model,
+                messages=OpenAIChatMapper().format_messages(request.messages),
+                tools=request.tools,
+                tool_choice=request.tool_choice,
+            )
+            if request.response_format is not None:
+                count += litellm.token_counter(
+                    model=model,
+                    text=json.dumps(request.response_format, ensure_ascii=False),
+                )
+            return count
+        except Exception as exc:
+            raise self._map_litellm_error(exc) from exc
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """发送非流式 Chat Completion 请求并返回标准响应。
@@ -183,8 +214,9 @@ class ProviderClient(BaseModel):
         if timeout is not None:
             kwargs["timeout"] = timeout
 
-        if "reasoning_effort" in request.provider_options:
-            kwargs["reasoning_effort"] = request.provider_options["reasoning_effort"]
+        for name in ("reasoning_effort", "num_retries"):
+            if name in request.provider_options:
+                kwargs[name] = request.provider_options[name]
         return kwargs
 
     def _litellm_model(self, model: str) -> str:

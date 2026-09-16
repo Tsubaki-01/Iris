@@ -248,6 +248,10 @@ async def test_runner_maps_structured_engine_failure_to_durable_terminal(
     """受控 provider 失败应作为结果返回，而不是逃逸异常。"""
 
     class FailingProvider:
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: LLMRequest) -> LLMResponse:
             del request
             raise IrisProviderError("provider 不可用", provider="fake")

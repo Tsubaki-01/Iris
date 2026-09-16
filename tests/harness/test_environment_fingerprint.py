@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 import iris.config as config_module
-from iris.agents import AgentConfig, AgentContextConfig, ModelConfig, SessionConfig
+from iris.agents import (
+    AgentConfig,
+    AgentContextConfig,
+    CompactionConfig,
+    ModelConfig,
+    SessionConfig,
+)
 from iris.config import Config, ProviderConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisContextError
@@ -38,6 +44,28 @@ def test_fingerprint_ignores_session_storage_configuration(tmp_path: Path) -> No
         update={"session": SessionConfig(backend="sqlite", path="another/session.db")}
     )
     assert compute_environment_fingerprint(first) == compute_environment_fingerprint(second)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"input_budget_tokens": 32000},
+        {"keep_recent_ratio": 0.2},
+        {"summary_ratio": 0.1},
+        {"timeout_seconds": 60},
+    ],
+)
+def test_fingerprint_binds_compaction_configuration(
+    tmp_path: Path, override: dict[str, float]
+) -> None:
+    """压缩配置影响运行语义，纳入既有恢复指纹。"""
+    first = build_runtime(tmp_path)
+    second = build_runtime(tmp_path)
+    second.environment.agent_config = second.environment.agent_config.model_copy(
+        update={"compaction": CompactionConfig.model_validate(override)}
+    )
+
+    assert compute_environment_fingerprint(first) != compute_environment_fingerprint(second)
 
 
 def test_fingerprint_ignores_template_location_but_binds_content(tmp_path: Path) -> None:

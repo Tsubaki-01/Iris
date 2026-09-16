@@ -17,6 +17,10 @@ class _NoNetworkProvider:
     def __init__(self) -> None:
         self.called = False
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """若测试意外触发 provider，则立即失败。"""
         self.called = True

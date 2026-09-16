@@ -89,6 +89,10 @@ class ErrorRunner:
 class FailingProvider:
     """始终返回 provider 领域错误。"""
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         del request
         raise IrisProviderError("调用失败", provider="fake")

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from fakes import FakeProvider
 
-from iris.agents import AgentConfig
+from iris.agents import AgentConfig, CompactionConfig
 from iris.exceptions import IrisConfigError
 from iris.message import LLMResponse, TextBlock
 from iris.runtime import AgentRuntime, RuntimeFactory
@@ -13,6 +13,24 @@ from iris.runtime import AgentRuntime, RuntimeFactory
 
 def _response() -> LLMResponse:
     return LLMResponse(provider="fake", content=[TextBlock(text="完成")])
+
+
+def test_factory_preserves_compaction_in_agent_config() -> None:
+    config = AgentConfig.model_validate(
+        {
+            "name": "agent",
+            "model": "openai/test",
+            "system": "instructions",
+            "compaction": {"input_budget_tokens": 32000, "summary_ratio": 0.1},
+        }
+    )
+
+    runtime = RuntimeFactory.from_config(config, provider=FakeProvider([]))
+
+    assert runtime.environment.agent_config is config
+    assert runtime.environment.agent_config.compaction == CompactionConfig(
+        input_budget_tokens=32000, summary_ratio=0.1
+    )
 
 
 def test_from_config_path_loads_relative_context_without_creating_store(

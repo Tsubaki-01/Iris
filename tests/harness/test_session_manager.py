@@ -22,7 +22,7 @@ from iris.lifecycle import (
     RunEventKind,
     RunStopReason,
 )
-from iris.message import ToolUseBlock
+from iris.message import LLMRequest, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import ToolCapability, ToolRegistry
 
@@ -440,6 +440,10 @@ async def test_stale_task_settlement_cannot_replace_new_current_owner(tmp_path: 
             self.calls = 0
             self.started = asyncio.Event()
             self.release = asyncio.Event()
+
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
 
         async def complete(self, request: object):
             del request

@@ -11,6 +11,7 @@ from .base import (
     ToolsConfig,
     load_agent_config,
 )
+from .compaction import CompactionConfig
 from .mcp import AgentMCPConfig, MCPServerOverride
 from .tools import build_tool_registry
 
@@ -19,6 +20,7 @@ __all__ = [
     "AgentContextConfig",
     "AgentMCPConfig",
     "AgentSkillsConfig",
+    "CompactionConfig",
     "ModelConfig",
     "MCPServerOverride",
     "PermissionsConfig",

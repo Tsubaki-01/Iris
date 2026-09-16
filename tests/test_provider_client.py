@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -9,7 +10,7 @@ from iris.exceptions import (
     IrisProviderError,
     IrisRateLimitExceededError,
 )
-from iris.message import LLMRequest, Msg
+from iris.message import LLMRequest, Msg, ToolUseBlock
 from iris.providers import ProviderClient
 
 
@@ -222,3 +223,97 @@ async def test_provider_rejects_non_chat_request_before_network_io(
             await anext(client.stream(request))
         else:
             await client.complete(request)
+
+
+@pytest.mark.parametrize(
+    ("model", "provider", "expected"),
+    [
+        ("gpt-4o", "openai", "gpt-4o"),
+        ("openai/gpt-4o", "openai", "gpt-4o"),
+        ("anthropic/claude-3.5-sonnet", "openrouter", "anthropic/claude-3.5-sonnet"),
+        ("openrouter/anthropic/claude-3.5-sonnet", "openrouter", "anthropic/claude-3.5-sonnet"),
+    ],
+)
+def test_input_estimate_uses_complete_wire_messages_and_preserves_inner_route(
+    monkeypatch: pytest.MonkeyPatch, model: str, provider: str, expected: str
+) -> None:
+    import iris.providers.client as provider_client
+
+    calls: list[dict[str, Any]] = []
+
+    def count(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 10 if "messages" in kwargs else 3
+
+    async def unexpected_generation(**kwargs: Any) -> None:
+        pytest.fail("input estimation must not generate a response")
+
+    monkeypatch.setattr(provider_client.litellm, "token_counter", count)
+    monkeypatch.setattr(provider_client.litellm, "acompletion", unexpected_generation)
+    request = LLMRequest(
+        model=model,
+        messages=[
+            Msg.system("规则"),
+            Msg.user("<summary>旧摘要</summary>", sender="context"),
+            Msg.assistant(content=[ToolUseBlock(id="c1", name="lookup", input={"q": "值"})]),
+            Msg.tool_result(tool_use_id="c1", content="结果正文"),
+        ],
+        tools=[{"type": "function", "function": {"name": "lookup"}}],
+        tool_choice="auto",
+        response_format={"type": "json_schema", "json_schema": {"name": "答案"}},
+        timeout=123,
+    )
+    client = ProviderClient(provider="gateway", litellm_provider=provider, api_key="test")
+
+    assert client.estimate_input_tokens(request) == 13
+    assert calls[0] == {
+        "model": expected,
+        "messages": client._to_litellm_kwargs(request)["messages"],
+        "tools": request.tools,
+        "tool_choice": "auto",
+    }
+    assert calls[0]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": "结果正文"}
+    assert len(calls) == 2
+    assert calls[1]["model"] == expected
+    assert json.loads(calls[1]["text"]) == request.response_format
+
+
+def test_input_estimate_without_response_schema_counts_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import iris.providers.client as provider_client
+
+    calls: list[dict[str, Any]] = []
+
+    def count(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        return 7
+
+    monkeypatch.setattr(provider_client.litellm, "token_counter", count)
+    client = ProviderClient(provider="openai", api_key="test")
+    assert client.estimate_input_tokens(LLMRequest(model="gpt-4o")) == 7
+    assert len(calls) == 1
+
+
+def test_input_estimate_maps_counter_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    import iris.providers.client as provider_client
+
+    def count(**kwargs: Any) -> int:
+        raise RuntimeError("tokenizer unavailable")
+
+    monkeypatch.setattr(provider_client.litellm, "token_counter", count)
+    with pytest.raises(IrisProviderError, match="tokenizer unavailable"):
+        ProviderClient(provider="openai", api_key="test").estimate_input_tokens(
+            LLMRequest(model="gpt-4o")
+        )
+
+
+def test_request_retry_override_preserves_zero_without_changing_default() -> None:
+    client = ProviderClient(provider="openai", api_key="test")
+    assert "num_retries" not in client._to_litellm_kwargs(LLMRequest(model="gpt-4o"))
+    assert (
+        client._to_litellm_kwargs(LLMRequest(model="gpt-4o", provider_options={"num_retries": 0}))[
+            "num_retries"
+        ]
+        == 0
+    )

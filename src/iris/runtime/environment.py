@@ -45,6 +45,9 @@ class RuntimeProvider(Protocol):
         response = await provider.complete(request)
     """
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """估算应用模型选项和工具 schema 后的完整输入 token 数。"""
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """执行一次非流式 LLM 请求。
 

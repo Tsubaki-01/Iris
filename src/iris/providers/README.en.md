@@ -102,6 +102,13 @@ iterator is closed in `finally`; no background producer or intermediate queue is
 The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
 `model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.
 
+`estimate_input_tokens(request)` synchronously reuses the sending mapper and LiteLLM token counter
+for messages, tool calls/results, tool definitions, and tool_choice, adding serialized response_format
+once. It strips only the known outer provider prefix and preserves inner model namespaces. It makes
+no generation call and does not subtract cached input. This is a window estimate, not exact billing
+or a guarantee against overflow. `provider_options["num_retries"]` is forwarded explicitly, including
+zero; omission preserves LiteLLM's default retry behavior.
+
 ```python
 from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg
 

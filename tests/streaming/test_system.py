@@ -130,6 +130,10 @@ class _RecordingStreamingProvider:
         self.complete_requests: list[LLMRequest] = []
         self.stream_requests: list[LLMRequest] = []
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """记录意外 complete 调用并使系统测试立即失败。"""
         self.complete_requests.append(request)

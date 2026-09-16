@@ -39,7 +39,7 @@ from iris.memory import (
     MemoryWriteInput,
     SQLiteMemoryStore,
 )
-from iris.message import LLMResponse, Msg, Role, TextBlock, ToolUseBlock
+from iris.message import LLMRequest, LLMResponse, Msg, Role, TextBlock, ToolUseBlock
 from iris.runtime import (
     AgentRuntime,
     RuntimeActivationOutcome,
@@ -2140,6 +2140,10 @@ async def test_execute_provider_timeout_without_run_deadline_is_provider_failure
     tmp_path: Path,
 ) -> None:
     class TimeoutProvider:
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: object) -> LLMResponse:
             del request
             raise TimeoutError("provider operation timeout")
@@ -2170,6 +2174,10 @@ async def test_provider_operation_is_capped_by_exhausted_run_deadline(
     tmp_path: Path,
 ) -> None:
     class SlowProvider:
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: object) -> LLMResponse:
             del request
             await asyncio.sleep(1)

@@ -120,6 +120,7 @@ model: openai/gpt-4o-mini
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
+- `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算与超时。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
@@ -131,6 +132,27 @@ model: openai/gpt-4o-mini
 - `path`: 独立 `context.yaml` 文件路径。相对路径按 `agent.yaml` 所在目录解析。
 
 `AgentContextConfig` 只保存路径声明，不读取 context 文件。
+
+### `CompactionConfig`
+
+`CompactionConfig` 从 `iris.agents` 和 `iris.agents.config` 导出，所有 agent 默认使用：
+
+```yaml
+compaction:
+  input_budget_tokens: 96000
+  keep_recent_ratio: 0.15
+  summary_ratio: 0.05
+  timeout_seconds: 300
+```
+
+`input_budget_tokens` 是已扣除输出预留的可用输入预算，不再自动减去 `model.max_tokens`。
+触发和压缩后验收额度固定为预算的 80%（向下取整）；近期原文目标与摘要输出上限分别为
+预算乘以对应比例（向上取整）。近期原文只是软目标，不要求两个比例之和小于 80%。
+输入预算与超时必须为正数，两个比例必须位于 0 与 1 之间。
+
+配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过
+`RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。当前仅提供配置和
+输入估算契约，尚未接入自动摘要执行；provider 估算边界见 [providers 说明](../providers/README.md)。
 
 ### `ModelConfig`
 
@@ -251,6 +273,7 @@ runner = AgentRunner.from_config_path("agent.yaml")
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | `agent.yaml` 加载与相对 context 路径 | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
+| 压缩预算配置 | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py` |
 | Skill 配置与 factory 集成 | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
 

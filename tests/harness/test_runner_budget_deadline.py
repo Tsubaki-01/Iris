@@ -147,6 +147,10 @@ async def test_deadline_during_provider_wait_returns_deadline_terminal(
         def __init__(self) -> None:
             self.requests: list[LLMRequest] = []
 
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: LLMRequest) -> LLMResponse:
             self.requests.append(request)
             await asyncio.sleep(10)
@@ -179,6 +183,10 @@ async def test_provider_cleanup_error_preserves_deadline_cause(
 
     class CleanupErrorProvider:
         """提供合法 complete 接口，模拟网络资源清理失败。"""
+
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
 
         async def complete(self, request: LLMRequest) -> LLMResponse:
             """按测试时序在请求阶段或取消清理阶段抛出 provider 错误。"""
@@ -228,6 +236,10 @@ async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
 
     class EventFailureProvider:
         """通过事件同步合法 complete 异常与 typed stream terminal。"""
+
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
 
         async def complete(self, request: LLMRequest) -> LLMResponse:
             """在控制端推进时间后返回普通 provider 失败。"""
@@ -356,6 +368,10 @@ async def test_provider_timeout_without_expired_deadline_remains_failure(
     """operation 自身 TimeoutError 不能仅因存在未过期 run deadline 就改写。"""
 
     class TimeoutProvider:
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """为非计量测试返回固定输入估算。"""
+            return 1
+
         async def complete(self, request: LLMRequest) -> LLMResponse:
             del request
             raise TimeoutError("provider operation timeout")

@@ -18,6 +18,10 @@ class DelayedProvider:
         self.delay = delay
         self.requests: list[LLMRequest] = []
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """记录请求，并按调用序号返回不同文本。"""
         self.requests.append(request)

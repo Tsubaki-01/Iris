@@ -46,6 +46,10 @@ class StaticProvider:
         self.responses = list(responses)
         self.requests: list[LLMRequest] = []
 
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """记录请求并返回下一条固定响应。"""
         self.requests.append(request)
@@ -60,6 +64,10 @@ class BlockingProvider:
         self.requests: list[LLMRequest] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        """为非计量测试返回固定输入估算。"""
+        return 1
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """暴露已进入 provider effect 的同步点。"""
