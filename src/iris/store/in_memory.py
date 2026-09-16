@@ -55,6 +55,7 @@ from ..lifecycle.models import (
 from ..lifecycle.store import (
     AdmitChildRun,
     ClaimToolCall,
+    CommitCompaction,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
@@ -62,6 +63,7 @@ from ..lifecycle.store import (
     FinishRun,
     ForkSession,
     RebindSubagentProxy,
+    RecordCompactionUsage,
     RecoverActiveRun,
     RequestCancellation,
     ReserveModelStep,
@@ -81,6 +83,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._compaction import add_compaction_usage, validate_compaction_commit
 from ._replay import ReplayRecord, replay_key
 from ._session_history import (
     build_fork_point_page,
@@ -390,10 +393,12 @@ class InMemoryLifecycleStore:
                     session_id=command.request.session_id,
                     agent_id=command.agent_id,
                     request=command.request,
+                    initial_session_message_count=len(session.messages),
                     options=command.options,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.DEADLINE_EXCEEDED,
                     terminal_session_message_count=len(session.messages),
+                    terminal_compaction=session.compaction,
                     revision=1,
                     current_activation_id=None,
                     pending_interaction_id=None,
@@ -428,6 +433,7 @@ class InMemoryLifecycleStore:
                 session_id=command.request.session_id,
                 agent_id=command.agent_id,
                 request=command.request,
+                initial_session_message_count=len(session.messages),
                 options=command.options,
                 phase=RunPhase.ACTIVE,
                 revision=1,
@@ -588,6 +594,90 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             self._checkpoints[run.run_id] = deepcopy(checkpoint)
             self._events[run.run_id].append(deepcopy(event))
+            return self._store_replay(key, commit)
+
+    def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit:
+        """独立记录摘要 response 用量，不推进主步骤或事件序号。"""
+        command = deepcopy(command)
+        with self._lock:
+            key = replay_key("record_compaction_usage", command)
+            replay = self._load_replay(key)
+            if replay is not None:
+                return replay
+            run = self._require_active(command)
+            updated = self._replace_run(
+                run,
+                usage=add_compaction_usage(run.usage, command.usage),
+                revision=run.revision + 1,
+                updated_at=command.now,
+            )
+            self._runs[run.run_id] = updated
+            return self._store_replay(
+                key, RunCommit(run=updated, checkpoint=self._checkpoints[run.run_id])
+            )
+
+    def commit_compaction(self, command: CommitCompaction) -> RunCommit:
+        """原子替换摘要投影、版本与 checkpoint，保留全量原文。"""
+        command = deepcopy(command)
+        with self._lock:
+            key = replay_key("commit_compaction", command)
+            replay = self._load_replay(key)
+            if replay is not None:
+                return replay
+            run = self._require_active(command)
+            session = self._require_history_preconditions(run, command.expected_session_revision)
+            current_checkpoint = self._require_checkpoint(run.run_id)
+            validate_compaction_commit(
+                run,
+                current_checkpoint,
+                command,
+                session_message_count=len(session.messages),
+                previous_compaction=session.compaction,
+            )
+            self._validate_checkpoint_replacement(
+                run,
+                current_checkpoint,
+                command.checkpoint,
+                command.activation_id,
+                session.revision + 1,
+                run.usage,
+            )
+            next_session = session.model_copy(
+                update={
+                    "compaction": command.compaction,
+                    "revision": session.revision + 1,
+                }
+            )
+            sequence = run.last_event_sequence + 1
+            updated = self._replace_run(
+                run,
+                revision=run.revision + 1,
+                checkpoint_sequence=command.checkpoint.sequence,
+                last_event_sequence=sequence,
+                updated_at=command.now,
+            )
+            event = self._event(
+                updated,
+                RunEventKind.CONTEXT_COMPACTED,
+                command.now,
+                sequence=sequence,
+                activation_id=command.activation_id,
+                payload={
+                    "covered_message_count": command.compaction.covered_message_count,
+                    "before_input_tokens": command.before_input_tokens,
+                    "after_input_tokens": command.after_input_tokens,
+                },
+            )
+            commit = RunCommit(
+                run=updated,
+                session_revision=next_session.revision,
+                checkpoint=command.checkpoint,
+                events=(event,),
+            )
+            self._runs[run.run_id] = updated
+            self._sessions[run.session_id] = next_session
+            self._checkpoints[run.run_id] = command.checkpoint
+            self._events[run.run_id].append(event)
             return self._store_replay(key, commit)
 
     def commit_model_step(self, command: CommitModelStep) -> RunCommit:
@@ -1026,6 +1116,7 @@ class InMemoryLifecycleStore:
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.CANCELLED,
                     terminal_session_message_count=len(appended_session.messages),
+                    terminal_compaction=appended_session.compaction,
                     revision=run.revision + 1,
                     pending_interaction_id=None,
                     cancellation_requested_at=command.now,
@@ -1154,6 +1245,7 @@ class InMemoryLifecycleStore:
                 phase=RunPhase.TERMINAL,
                 stop_reason=command.stop_reason,
                 terminal_session_message_count=len(updated_session.messages),
+                terminal_compaction=updated_session.compaction,
                 revision=run.revision + 1,
                 current_activation_id=None,
                 pending_interaction_id=None,
@@ -1293,6 +1385,7 @@ class InMemoryLifecycleStore:
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.OUTCOME_UNKNOWN,
                     terminal_session_message_count=terminal_message_count,
+                    terminal_compaction=self._sessions[run.session_id].compaction,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     error=RunErrorInfo(
@@ -1356,6 +1449,7 @@ class InMemoryLifecycleStore:
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.COMPLETED,
                     terminal_session_message_count=terminal_message_count,
+                    terminal_compaction=self._sessions[run.session_id].compaction,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     last_event_sequence=terminal_sequence,
@@ -1541,6 +1635,7 @@ class InMemoryLifecycleStore:
                 revision=0,
                 messages=deepcopy(self._sessions[run.session_id].messages[: point.message_count]),
                 forked_from_run_id=run.run_id,
+                compaction=run.terminal_compaction,
             )
             self._sessions[branch.session_id] = branch
             return deepcopy(branch)
@@ -1923,6 +2018,7 @@ class InMemoryLifecycleStore:
             phase=RunPhase.TERMINAL,
             stop_reason=RunStopReason.BUDGET_EXHAUSTED,
             terminal_session_message_count=len(self._sessions[run.session_id].messages),
+            terminal_compaction=self._sessions[run.session_id].compaction,
             revision=run.revision + 1,
             current_activation_id=None,
             last_event_sequence=sequence,

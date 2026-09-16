@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v5 schema 与 session history 的持久化契约测试。"""
+"""Lifecycle SQLite v6 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
@@ -36,7 +36,14 @@ _TABLES = {
 _COLUMNS = {
     "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
     "lifecycle_schema": ["component", "version"],
-    "sessions": ["session_id", "revision", "message_count", "updated_at", "forked_from_run_id"],
+    "sessions": [
+        "session_id",
+        "revision",
+        "message_count",
+        "updated_at",
+        "forked_from_run_id",
+        "compaction_json",
+    ],
     "session_messages": ["session_id", "ordinal", "message_json"],
     "agent_runs": [
         "run_id",
@@ -63,6 +70,8 @@ _COLUMNS = {
         "updated_at",
         "finished_at",
         "terminal_session_message_count",
+        "initial_session_message_count",
+        "terminal_compaction_json",
     ],
     "session_run_lanes": ["session_id", "run_id", "revision", "acquired_at"],
     "run_activations": [
@@ -141,7 +150,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v5_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v6_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -182,7 +191,7 @@ def test_empty_database_creates_exact_v5_schema_and_reopens(tmp_path: Path) -> N
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 5)]
+    assert identity == [("agent_lifecycle", 6)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
@@ -201,7 +210,9 @@ def test_empty_database_creates_exact_v5_schema_and_reopens(tmp_path: Path) -> N
     }
 
 
-@pytest.mark.parametrize("kind", ["legacy", "v3", "v4", "extra", "missing", "unknown_version"])
+@pytest.mark.parametrize(
+    "kind", ["legacy", "v3", "v4", "v5", "extra", "missing", "unknown_version"]
+)
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
     kind: str,
@@ -231,6 +242,8 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("UPDATE lifecycle_schema SET version = 3")
             elif kind == "v4":
                 connection.execute("UPDATE lifecycle_schema SET version = 4")
+            elif kind == "v5":
+                connection.execute("UPDATE lifecycle_schema SET version = 5")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()
@@ -412,3 +425,22 @@ def test_preview_and_fork_only_decode_selected_prefix(tmp_path: Path) -> None:
         store.load_session("main")
     with pytest.raises(IrisRunPersistenceError):
         store.load_session_at_run("r2")
+
+
+@pytest.mark.parametrize(
+    "compaction_json",
+    ["not-json", '{"summary":"old", "covered_message_count":3}'],
+)
+def test_invalid_compaction_row_is_a_persistence_error(
+    tmp_path: Path, compaction_json: str
+) -> None:
+    """完整读取会话时解析摘要并验证其原文覆盖边界。"""
+    store = SQLiteStore(tmp_path / "compaction-corrupt.db")
+    _complete_history_turn(store, run_id="first", session_id="main")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE sessions SET compaction_json = ? WHERE session_id = 'main'",
+            (compaction_json,),
+        )
+    with pytest.raises(IrisRunPersistenceError):
+        SQLiteStore(store.path).load_session("main")

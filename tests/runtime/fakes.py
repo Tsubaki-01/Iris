@@ -12,7 +12,13 @@ from iris.hitl import (
     QuestionPrompt,
 )
 from iris.hitl.models import HumanInteractionRequest, SubagentProxyOrigin, ToolCallSnapshot
-from iris.lifecycle import CheckpointResumability, RuntimeExecutionOptions, SessionSnapshot
+from iris.lifecycle import (
+    CheckpointResumability,
+    RuntimeExecutionOptions,
+    SessionCompaction,
+    SessionSnapshot,
+    TokenUsage,
+)
 from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
@@ -21,6 +27,7 @@ from iris.runtime import (
     ModelStepReservation,
     RuntimeActivationInput,
     RuntimeApprovedToolCall,
+    RuntimeCompactionCommit,
     RuntimeCursor,
     RuntimeEnvironment,
     RuntimeMessageAssembler,
@@ -119,6 +126,9 @@ class FakeRuntimeCommitPort:
         self.fail_at = fail_at
         self.events: list[str] = []
         self.model_commits: list[RuntimeModelStepCommit] = []
+        self.compaction: SessionCompaction | None = None
+        self.compaction_usages: list[TokenUsage] = []
+        self.compaction_commits: list[RuntimeCompactionCommit] = []
         self.tool_commits: list[RuntimeToolResultCommit] = []
         self.suspensions: list[RuntimeSuspension] = []
         self.claims: dict[str, tuple[RuntimeToolCall, ToolCallClaim]] = {}
@@ -138,6 +148,7 @@ class FakeRuntimeCommitPort:
             session_id=self.activation.session_id,
             revision=self._revision,
             messages=list(self.messages),
+            compaction=self.compaction,
         )
 
     def reserve_model_step(self, cursor: RuntimeCursor) -> ModelStepReservation:
@@ -168,6 +179,22 @@ class FakeRuntimeCommitPort:
         self.cursor = commit.cursor_after
         self._revision += 1
         self.model_commits.append(commit)
+        return self.cursor
+
+    def record_compaction_usage(self, usage: TokenUsage) -> None:
+        """记录每个摘要响应独立提交的用量。"""
+        self._record("record_compaction_usage")
+        self.compaction_usages.append(usage)
+
+    def commit_compaction(self, commit: RuntimeCompactionCommit) -> RuntimeCursor:
+        """更新摘要与 session revision，保持 pending reservation。"""
+        self._record("commit_compaction")
+        self._require_cursor(commit.cursor_before)
+        if commit.expected_session_revision != self._revision:
+            raise IrisRunConflictError("fake port 摘要快照 revision 不匹配")
+        self.compaction = commit.compaction
+        self._revision += 1
+        self.compaction_commits.append(commit)
         return self.cursor
 
     def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
@@ -526,6 +553,7 @@ def start_activation(
     run_id: str = "run-1",
     activation_id: str = "activation-1",
     session_id: str = "session-1",
+    initial_session_message_count: int = 0,
     options: RuntimeExecutionOptions | None = None,
 ) -> RuntimeActivationInput:
     """构造从 step 0 开始的 start activation。"""
@@ -534,7 +562,8 @@ def start_activation(
         activation_id=activation_id,
         session_id=session_id,
         kind="start",
-        input=input,
+        run_input=input,
+        initial_session_message_count=initial_session_message_count,
         cursor=RuntimeCursor(position="before_model", step_index=0),
         options=options or RuntimeExecutionOptions(),
     )
@@ -546,6 +575,8 @@ def resume_activation(
     run_id: str = "run-1",
     activation_id: str = "activation-2",
     session_id: str = "session-1",
+    run_input: str = "当前问题",
+    initial_session_message_count: int = 0,
     options: RuntimeExecutionOptions | None = None,
     kind: str = "resume",
     interaction_projection: ToolResult | RuntimeApprovedToolCall | None = None,
@@ -556,7 +587,8 @@ def resume_activation(
         activation_id=activation_id,
         session_id=session_id,
         kind=kind,
-        input=None,
+        run_input=run_input,
+        initial_session_message_count=initial_session_message_count,
         cursor=cursor,
         options=options or RuntimeExecutionOptions(),
         interaction_projection=interaction_projection,

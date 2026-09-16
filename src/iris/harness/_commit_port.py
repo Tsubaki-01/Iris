@@ -20,9 +20,11 @@ from ..hitl.models import HumanInteractionRequest, SubagentProxyOrigin, ToolCall
 from ..lifecycle import (
     CheckpointResumability,
     ClaimToolCall,
+    CommitCompaction,
     CommitModelStep,
     CommitToolResult,
     LifecycleStore,
+    RecordCompactionUsage,
     ReserveModelStep,
     RunCheckpoint,
     RunCommit,
@@ -35,6 +37,7 @@ from ..lifecycle import (
     RunUsage,
     SessionSnapshot,
     SuspendRun,
+    TokenUsage,
     ToolCallPhase,
     snapshot_run,
 )
@@ -43,6 +46,7 @@ from ..lifecycle.store import FinalizeSubagentResult, RebindSubagentProxy
 from ..runtime import (
     ModelStepReservation,
     RuntimeCommitPort,
+    RuntimeCompactionCommit,
     RuntimeCursor,
     RuntimeModelStepCommit,
     RuntimeSuspension,
@@ -168,7 +172,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         checkpoint = self._next_checkpoint(
             cursor=commit.cursor_after,
             usage=usage,
-            message_count=len(commit.message_delta),
+            session_revision=self._session_revision + bool(commit.message_delta),
             resumability=commit.resumability,
         )
         stored = self._store.commit_model_step(
@@ -189,6 +193,44 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             )
         )
         return self._accept_checkpoint(stored, checkpoint, commit.cursor_after)
+
+    def record_compaction_usage(self, usage: TokenUsage) -> None:
+        """独立记录摘要用量并接受没有 event 的 run revision 推进。"""
+        self._require_writable()
+        stored = self._store.record_compaction_usage(
+            RecordCompactionUsage(
+                run_id=self._run.run_id,
+                expected_run_revision=self._run.revision,
+                activation_id=self._activation_id,
+                usage=usage,
+                now=self._clock(),
+            )
+        )
+        self._accept(stored)
+
+    def commit_compaction(self, commit: RuntimeCompactionCommit) -> RuntimeCursor:
+        """安装选中快照的摘要，不消费或重新开放模型步 reservation。"""
+        self._require_writable()
+        self._require_cursor(commit.cursor_before)
+        checkpoint = self._next_checkpoint(
+            cursor=commit.cursor_before,
+            usage=self._run.usage,
+            session_revision=commit.expected_session_revision + 1,
+        )
+        stored = self._store.commit_compaction(
+            CommitCompaction(
+                run_id=self._run.run_id,
+                expected_run_revision=self._run.revision,
+                activation_id=self._activation_id,
+                expected_session_revision=commit.expected_session_revision,
+                compaction=commit.compaction,
+                checkpoint=checkpoint,
+                before_input_tokens=commit.before_input_tokens,
+                after_input_tokens=commit.after_input_tokens,
+                now=self._clock(),
+            )
+        )
+        return self._accept_checkpoint(stored, checkpoint, commit.cursor_before)
 
     def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
         """验证 exact prepared subject 并在 effect 前 durable claim。"""
@@ -247,7 +289,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         checkpoint = self._next_checkpoint(
             cursor=commit.cursor_after,
             usage=self._run.usage,
-            message_count=len(commit.message_delta),
+            session_revision=self._session_revision + bool(commit.message_delta),
         )
         stored = self._store.commit_tool_result(
             CommitToolResult(
@@ -274,7 +316,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         checkpoint = self._next_checkpoint(
             cursor=suspension.cursor,
             usage=usage,
-            message_count=len(suspension.message_delta),
+            session_revision=self._session_revision + bool(suspension.message_delta),
             resumability=suspension.resumability,
         )
         interaction = self._pending_interaction(
@@ -502,7 +544,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         *,
         cursor: RuntimeCursor,
         usage: RunUsage,
-        message_count: int,
+        session_revision: int,
         resumability: CheckpointResumability | None = None,
     ) -> RunCheckpoint:
         return RunCheckpoint(
@@ -510,7 +552,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             sequence=self._checkpoint.sequence + 1,
             activation_id=self._activation_id,
             engine_cursor=cursor.model_dump(mode="json"),
-            session_revision=self._session_revision + (1 if message_count else 0),
+            session_revision=session_revision,
             model_steps_reserved=usage.model_steps_reserved,
             model_steps_committed=usage.model_steps_committed,
             environment_fingerprint=self._run.environment_fingerprint,
@@ -541,6 +583,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             input_tokens=usage.input_tokens + commit.input_tokens,
             output_tokens=usage.output_tokens + commit.output_tokens,
             total_tokens=usage.total_tokens + commit.total_tokens,
+            compaction=usage.compaction,
         )
 
     def _new_prepared_records(

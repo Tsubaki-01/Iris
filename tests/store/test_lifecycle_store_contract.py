@@ -35,6 +35,7 @@ from iris.lifecycle import (
     AgentRunRequest,
     CheckpointResumability,
     ClaimToolCall,
+    CommitCompaction,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
@@ -44,6 +45,7 @@ from iris.lifecycle import (
     ForkSession,
     LifecycleStore,
     RebindSubagentProxy,
+    RecordCompactionUsage,
     RecoverActiveRun,
     RecoveryDisposition,
     RequestCancellation,
@@ -58,9 +60,11 @@ from iris.lifecycle import (
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SessionCompaction,
     SessionSnapshot,
     SubagentRunLink,
     SuspendRun,
+    TokenUsage,
 )
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
@@ -102,7 +106,7 @@ def _checkpoint(
         run_id=run_id,
         sequence=sequence,
         activation_id=activation_id,
-        engine_cursor={"step_index": committed},
+        engine_cursor={"position": "before_model", "step_index": committed},
         session_revision=session_revision,
         model_steps_reserved=reserved,
         model_steps_committed=committed,
@@ -143,6 +147,545 @@ def _create_command(
 
 def _create(store: LifecycleStore, **kwargs: object) -> RunCommit:
     return store.create_run(_create_command(**kwargs))
+
+
+def _compaction_ready(store: LifecycleStore) -> RunCommit:
+    """同一个 run 先提交原文，再保留下一次主请求的 reservation。"""
+    created = _create(store, max_model_steps=2)
+    reserved = store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=created.run.revision,
+            activation_id="activation-1",
+            now=_T1,
+        )
+    )
+    committed = store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=reserved.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=0,
+            message_delta=[Msg.user("start"), Msg.assistant("working")],
+            usage=RunUsage(
+                model_steps_reserved=1,
+                model_steps_committed=1,
+                input_tokens=24000,
+                output_tokens=2000,
+                total_tokens=26000,
+            ),
+            checkpoint=_checkpoint(
+                run_id="run-1",
+                sequence=2,
+                activation_id="activation-1",
+                session_revision=1,
+                reserved=1,
+                committed=1,
+            ),
+            now=_T1,
+        )
+    )
+    return store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-1",
+            expected_run_revision=committed.run.revision,
+            activation_id="activation-1",
+            now=_T2,
+        )
+    )
+
+
+def _compaction_command(current: RunCommit, *, count: int = 2) -> CommitCompaction:
+    """基于当前快照构造只改变 session revision 的投影提交。"""
+    checkpoint = cast(RunCheckpoint, current.checkpoint)
+    return CommitCompaction(
+        run_id=current.run.run_id,
+        expected_run_revision=current.run.revision,
+        activation_id=cast(str, current.run.current_activation_id),
+        expected_session_revision=checkpoint.session_revision,
+        compaction=SessionCompaction(summary=f"摘要 {count}", covered_message_count=count),
+        checkpoint=checkpoint.model_copy(
+            update={
+                "sequence": checkpoint.sequence + 1,
+                "session_revision": checkpoint.session_revision + 1,
+            }
+        ),
+        before_input_tokens=80000,
+        after_input_tokens=20000,
+        now=_T3,
+    )
+
+
+def test_compaction_usage_only_replays_without_events_or_checkpoint_changes(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """分块摘要费用独立累加，exact replay 不重复收费。"""
+    ready = _compaction_ready(lifecycle_store)
+    before_session = lifecycle_store.load_session("session-1")
+    before_events = lifecycle_store.list_events("run-1")
+    command = RecordCompactionUsage(
+        run_id="run-1",
+        expected_run_revision=ready.run.revision,
+        activation_id="activation-1",
+        usage=TokenUsage(input_tokens=10000, output_tokens=1000, total_tokens=11000),
+        now=_T3,
+    )
+    first = lifecycle_store.record_compaction_usage(command)
+    assert lifecycle_store.record_compaction_usage(command).run == first.run
+    second = lifecycle_store.record_compaction_usage(
+        replace(
+            command,
+            expected_run_revision=first.run.revision,
+        )
+    )
+    assert second.run.usage.compaction == TokenUsage(
+        input_tokens=20000,
+        output_tokens=2000,
+        total_tokens=22000,
+    )
+    assert second.run.usage.total_tokens == 26000
+    assert second.run.usage.total_tokens + second.run.usage.compaction.total_tokens == 48000
+    assert second.run.revision == ready.run.revision + 2
+    assert second.run.updated_at == _T3
+    assert first.events == second.events == ()
+    assert first.session_revision is second.session_revision is None
+    assert lifecycle_store.load_checkpoint("run-1") == ready.checkpoint
+    assert lifecycle_store.load_session("session-1") == before_session
+    assert lifecycle_store.list_events("run-1") == before_events
+
+
+def test_compaction_projection_is_atomic_and_preserves_pending_step(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """投影只替换摘要和版本，不改动原文、cursor、reservation 或 usage。"""
+    ready = _compaction_ready(lifecycle_store)
+    session = lifecycle_store.load_session("session-1")
+    command = _compaction_command(ready)
+    committed = lifecycle_store.commit_compaction(command)
+    saved = lifecycle_store.load_session("session-1")
+    assert saved.compaction == command.compaction
+    assert saved.messages == session.messages
+    assert saved.revision == session.revision + 1
+    assert committed.run.usage == ready.run.usage
+    assert committed.run.initial_session_message_count == 0
+    assert committed.run.revision == ready.run.revision + 1
+    assert committed.checkpoint == command.checkpoint
+    assert committed.checkpoint.engine_cursor == ready.checkpoint.engine_cursor
+    assert committed.run.checkpoint_sequence == ready.run.checkpoint_sequence + 1
+    assert committed.run.last_event_sequence == ready.run.last_event_sequence + 1
+    assert committed.events[0].kind.value == "context.compacted"
+    assert committed.events[0].payload == {
+        "covered_message_count": 2,
+        "before_input_tokens": 80000,
+        "after_input_tokens": 20000,
+    }
+    replay = lifecycle_store.commit_compaction(command)
+    assert replay.events == ()
+    assert replay.run == committed.run
+    assert lifecycle_store.load_session("session-1") == saved
+    recovered = lifecycle_store.recover_active_run(
+        RecoverActiveRun(
+            run_id="run-1",
+            expected_run_revision=committed.run.revision,
+            expected_activation_id="activation-1",
+            expected_checkpoint_sequence=committed.checkpoint.sequence,
+            recovery_disposition=RecoveryDisposition.RESUME,
+            new_activation_id="recovered",
+            now=_T3,
+        )
+    )
+    assert recovered.run.usage == committed.run.usage
+    assert recovered.checkpoint.engine_cursor == committed.checkpoint.engine_cursor
+    assert recovered.checkpoint.session_revision == saved.revision
+    assert lifecycle_store.load_session("session-1").compaction == command.compaction
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "run_revision",
+        "session_revision",
+        "activation",
+        "no_pending",
+        "not_safe",
+        "not_before_model",
+        "cursor_changed",
+        "resumability_changed",
+        "coverage",
+        "cancelled",
+        "checkpoint_sequence",
+        "checkpoint_revision",
+        "checkpoint_counters",
+    ],
+)
+def test_compaction_rejects_invalid_boundary_without_partial_changes(
+    lifecycle_store: LifecycleStore,
+    invalid: str,
+) -> None:
+    """提交边界拒绝失效快照、错误执行位置或越界覆盖，并保留原文。"""
+    ready = _compaction_ready(lifecycle_store)
+    if invalid in {"no_pending", "not_safe", "not_before_model"}:
+        checkpoint = cast(RunCheckpoint, ready.checkpoint)
+        cursor = {
+            "position": "tool_batch" if invalid == "not_before_model" else "before_model",
+            "step_index": 2,
+        }
+        usage = ready.run.usage.model_copy(update={"model_steps_committed": 2})
+        committed = lifecycle_store.commit_model_step(
+            CommitModelStep(
+                run_id="run-1",
+                expected_run_revision=ready.run.revision,
+                activation_id="activation-1",
+                expected_session_revision=1,
+                usage=usage,
+                checkpoint=checkpoint.model_copy(
+                    update={
+                        "sequence": checkpoint.sequence + 1,
+                        "model_steps_committed": 2,
+                        "engine_cursor": cursor,
+                        "resumability": CheckpointResumability.OUTCOME_READY
+                        if invalid == "not_safe"
+                        else CheckpointResumability.SAFE,
+                    }
+                ),
+                now=_T3,
+            )
+        )
+        ready = committed
+    if invalid == "cancelled":
+        ready = lifecycle_store.record_compaction_usage(
+            RecordCompactionUsage(
+                run_id="run-1",
+                expected_run_revision=ready.run.revision,
+                activation_id="activation-1",
+                usage=TokenUsage(total_tokens=100),
+                now=_T3,
+            )
+        )
+        ready = lifecycle_store.request_cancellation(
+            RequestCancellation(
+                run_id="run-1",
+                expected_run_revision=ready.run.revision,
+                activation_id="activation-1",
+                reason="stop",
+                now=_T3,
+            )
+        )
+    command = _compaction_command(ready, count=3 if invalid == "coverage" else 2)
+    if invalid == "run_revision":
+        command = replace(command, expected_run_revision=ready.run.revision - 1)
+    elif invalid == "session_revision":
+        command = replace(command, expected_session_revision=0)
+    elif invalid == "activation":
+        command = replace(command, activation_id="old-activation")
+    elif invalid == "cursor_changed":
+        command = replace(
+            command,
+            checkpoint=command.checkpoint.model_copy(
+                update={
+                    "engine_cursor": {"position": "before_model", "step_index": 99},
+                }
+            ),
+        )
+    elif invalid == "resumability_changed":
+        command = replace(
+            command,
+            checkpoint=command.checkpoint.model_copy(
+                update={
+                    "resumability": CheckpointResumability.OUTCOME_READY,
+                }
+            ),
+        )
+    elif invalid.startswith("checkpoint_"):
+        change = {
+            "checkpoint_sequence": {"sequence": command.checkpoint.sequence + 1},
+            "checkpoint_revision": {"session_revision": command.checkpoint.session_revision + 1},
+            "checkpoint_counters": {
+                "model_steps_reserved": command.checkpoint.model_steps_reserved + 1
+            },
+        }[invalid]
+        command = replace(command, checkpoint=command.checkpoint.model_copy(update=change))
+    session = lifecycle_store.load_session("session-1")
+    events = lifecycle_store.list_events("run-1")
+    with pytest.raises((IrisRunStateError, IrisRunConflictError)):
+        lifecycle_store.commit_compaction(command)
+    assert lifecycle_store.load_run("run-1") == ready.run
+    assert lifecycle_store.load_session("session-1") == session
+    assert lifecycle_store.load_checkpoint("run-1") == ready.checkpoint
+    assert lifecycle_store.list_events("run-1") == events
+
+
+def test_compaction_coverage_must_advance(lifecycle_store: LifecycleStore) -> None:
+    """不能把已覆盖前缀作为新的成功投影重复提交。"""
+    first = lifecycle_store.commit_compaction(
+        _compaction_command(_compaction_ready(lifecycle_store))
+    )
+    with pytest.raises(IrisRunStateError):
+        lifecycle_store.commit_compaction(_compaction_command(first))
+
+
+def test_compaction_usage_requires_current_activation(lifecycle_store: LifecycleStore) -> None:
+    """旧 activation 的迟到用量不能绕过恢复后的 fence。"""
+    ready = _compaction_ready(lifecycle_store)
+    recovered = lifecycle_store.recover_active_run(
+        RecoverActiveRun(
+            run_id="run-1",
+            expected_run_revision=ready.run.revision,
+            expected_activation_id="activation-1",
+            expected_checkpoint_sequence=ready.checkpoint.sequence,
+            recovery_disposition=RecoveryDisposition.RESUME,
+            new_activation_id="recovered",
+            now=_T3,
+        )
+    )
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.record_compaction_usage(
+            RecordCompactionUsage(
+                run_id="run-1",
+                expected_run_revision=recovered.run.revision,
+                activation_id="activation-1",
+                usage=TokenUsage(total_tokens=100),
+                now=_T3,
+            )
+        )
+    assert lifecycle_store.load_run("run-1") == recovered.run
+
+
+@pytest.mark.parametrize(
+    "path", ["finish", "budget", "waiting_cancel", "unknown", "finalize", "deadline"]
+)
+def test_compaction_terminal_snapshot_covers_every_settlement_path(
+    lifecycle_store: LifecycleStore,
+    path: str,
+) -> None:
+    """所有终态与同事务原文截点冻结相同摘要，后续重放保持快照。"""
+    ready = _compaction_ready(lifecycle_store)
+    used = lifecycle_store.record_compaction_usage(
+        RecordCompactionUsage(
+            run_id="run-1",
+            expected_run_revision=ready.run.revision,
+            activation_id="activation-1",
+            usage=TokenUsage(input_tokens=20000, output_tokens=2000, total_tokens=22000),
+            now=_T3,
+        )
+    )
+    compacted = lifecycle_store.commit_compaction(_compaction_command(used))
+    summary = lifecycle_store.load_session("session-1").compaction
+    has_tool = path in {"waiting_cancel", "unknown"}
+    assistant = Msg.assistant(
+        [ToolUseBlock(id="call-question", name="ask_question", input={"question": "继续吗？"})]
+        if has_tool
+        else "done"
+    )
+    prepared = (
+        [
+            RunToolCallRecord(
+                run_id="run-1",
+                step_index=1,
+                ordinal=1,
+                tool_call_id="call-question",
+                tool_name="ask_question",
+                arguments={"question": "继续吗？"},
+                fingerprint=_TOOL_FINGERPRINT,
+                phase="prepared",
+                version=1,
+                created_at=_T3,
+                updated_at=_T3,
+            )
+        ]
+        if has_tool
+        else []
+    )
+    checkpoint = cast(RunCheckpoint, compacted.checkpoint)
+    committed = lifecycle_store.commit_model_step(
+        CommitModelStep(
+            run_id="run-1",
+            expected_run_revision=compacted.run.revision,
+            activation_id="activation-1",
+            expected_session_revision=checkpoint.session_revision,
+            message_delta=[assistant],
+            prepared_tool_calls=prepared,
+            usage=compacted.run.usage.model_copy(
+                update={
+                    "model_steps_committed": 2,
+                    "input_tokens": 26000,
+                    "output_tokens": 3000,
+                    "total_tokens": 29000,
+                }
+            ),
+            checkpoint=checkpoint.model_copy(
+                update={
+                    "sequence": checkpoint.sequence + 1,
+                    "session_revision": checkpoint.session_revision + 1,
+                    "model_steps_committed": 2,
+                    "engine_cursor": {
+                        "position": "tool_batch" if has_tool else "outcome_ready",
+                        "step_index": 2,
+                    },
+                    "resumability": CheckpointResumability.OUTCOME_READY
+                    if path == "finalize"
+                    else CheckpointResumability.SAFE,
+                }
+            ),
+            assistant_message=assistant,
+            now=_T3,
+        )
+    )
+    assert committed.run.usage.total_tokens == 29000
+    assert committed.run.usage.compaction.total_tokens == 22000
+    assert lifecycle_store.load_session("session-1").compaction == summary
+    if path == "waiting_cancel":
+        waiting = lifecycle_store.suspend_run(
+            SuspendRun(
+                run_id="run-1",
+                expected_run_revision=committed.run.revision,
+                activation_id="activation-1",
+                expected_session_revision=committed.checkpoint.session_revision,
+                checkpoint=committed.checkpoint.model_copy(
+                    update={"sequence": committed.checkpoint.sequence + 1}
+                ),
+                pending_interaction=_interaction().model_copy(update={"step_index": 1}),
+                usage=committed.run.usage,
+                now=_T3,
+            )
+        )
+        assert waiting.run.usage.compaction.total_tokens == 22000
+        terminal = lifecycle_store.request_cancellation(
+            RequestCancellation(
+                run_id="run-1",
+                expected_run_revision=waiting.run.revision,
+                reason="stop",
+                settle_waiting=True,
+                now=_T3,
+            )
+        )
+    elif path in {"unknown", "finalize"}:
+        if path == "unknown":
+            committed = lifecycle_store.claim_tool_call(
+                ClaimToolCall(
+                    run_id="run-1",
+                    expected_run_revision=committed.run.revision,
+                    activation_id="activation-1",
+                    tool_call_id="call-question",
+                    fingerprint=_TOOL_FINGERPRINT,
+                    expected_tool_version=1,
+                    now=_T3,
+                )
+            )
+        recovery = RecoverActiveRun(
+            run_id="run-1",
+            expected_run_revision=committed.run.revision,
+            expected_activation_id="activation-1",
+            expected_checkpoint_sequence=committed.checkpoint.sequence,
+            recovery_disposition=RecoveryDisposition.OUTCOME_UNKNOWN
+            if path == "unknown"
+            else RecoveryDisposition.FINALIZE,
+            now=_T3,
+        )
+        terminal = lifecycle_store.recover_active_run(recovery)
+        assert lifecycle_store.recover_active_run(recovery).run == terminal.run
+    elif path == "budget":
+        terminal = lifecycle_store.reserve_model_step(
+            ReserveModelStep(
+                run_id="run-1",
+                expected_run_revision=committed.run.revision,
+                activation_id="activation-1",
+                now=_T3,
+            )
+        )
+    else:
+        finish = FinishRun(
+            run_id="run-1",
+            expected_run_revision=committed.run.revision,
+            activation_id="activation-1",
+            stop_reason=RunStopReason.COMPLETED,
+            now=_T3,
+        )
+        terminal = lifecycle_store.finish_run(finish)
+        assert lifecycle_store.finish_run(finish).run == terminal.run
+        if path == "deadline":
+            command = _create_command(
+                run_id="expired",
+                activation_id="expired-activation",
+                session_revision=lifecycle_store.load_session("session-1").revision,
+            )
+            terminal = lifecycle_store.create_run(
+                replace(
+                    command,
+                    options=AgentRunOptions(
+                        limits=RunLimits(deadline_at=_NOW),
+                    ),
+                )
+            )
+            assert terminal.run.initial_session_message_count == 3
+    assert terminal.run.terminal_compaction == summary
+    session = lifecycle_store.load_session("session-1")
+    assert session.compaction == summary
+    assert terminal.run.terminal_session_message_count == len(session.messages)
+    assert lifecycle_store.load_run(terminal.run.run_id) == terminal.run
+    if isinstance(lifecycle_store, SQLiteStore):
+        reopened = SQLiteStore(lifecycle_store.path)
+        assert reopened.load_run(terminal.run.run_id).terminal_compaction == summary
+        assert reopened.load_session("session-1").compaction == summary
+
+
+def test_fork_uses_frozen_compaction_when_source_compacts_again(
+    lifecycle_store: LifecycleStore,
+) -> None:
+    """新 run 起点使用原文长度，fork 继承旧 run 的摘要而非源会话最新摘要。"""
+    first = lifecycle_store.commit_compaction(
+        _compaction_command(_compaction_ready(lifecycle_store), count=1)
+    )
+    finish = FinishRun(
+        run_id="run-1",
+        expected_run_revision=first.run.revision,
+        activation_id="activation-1",
+        stop_reason=RunStopReason.COMPLETED,
+        now=_T3,
+    )
+    old = lifecycle_store.finish_run(finish).run
+    next_run = _create(
+        lifecycle_store,
+        run_id="run-2",
+        activation_id="activation-2",
+        session_revision=lifecycle_store.load_session("session-1").revision,
+    )
+    assert next_run.run.initial_session_message_count == 2
+    reserved = lifecycle_store.reserve_model_step(
+        ReserveModelStep(
+            run_id="run-2",
+            expected_run_revision=next_run.run.revision,
+            activation_id="activation-2",
+            now=_T3,
+        )
+    )
+    lifecycle_store.commit_compaction(_compaction_command(reserved))
+    assert lifecycle_store.load_session("session-1").compaction.covered_message_count == 2
+    assert lifecycle_store.finish_run(finish).run.terminal_compaction == old.terminal_compaction
+    fork = lifecycle_store.fork_session(
+        ForkSession(
+            source_run_id="run-1",
+            target_session_id="branch",
+            now=_T3,
+        )
+    )
+    assert fork.revision == 0
+    assert fork.compaction == old.terminal_compaction
+    assert fork.compaction.covered_message_count == 1
+    branch_run = _create(
+        lifecycle_store, run_id="branch-run", session_id="branch", activation_id="branch-activation"
+    )
+    assert branch_run.run.initial_session_message_count == 2
+    branch_reserved = lifecycle_store.reserve_model_step(
+        ReserveModelStep(
+            run_id="branch-run",
+            expected_run_revision=branch_run.run.revision,
+            activation_id="branch-activation",
+            now=_T3,
+        )
+    )
+    lifecycle_store.commit_compaction(_compaction_command(branch_reserved))
+    assert lifecycle_store.load_run("run-1").terminal_compaction == old.terminal_compaction
 
 
 def _complete_history_turn(store: LifecycleStore, *, run_id: str, session_id: str) -> RunRecord:
@@ -1129,6 +1672,15 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
 ) -> None:
     """工具 effect 必须存在 durable claim，result 提交推进 tool/session/checkpoint。"""
     prepared = _prepare_tool(lifecycle_store)
+    prepared = lifecycle_store.record_compaction_usage(
+        RecordCompactionUsage(
+            run_id="run-1",
+            expected_run_revision=prepared.run.revision,
+            activation_id="activation-1",
+            usage=TokenUsage(total_tokens=22000),
+            now=_T2,
+        )
+    )
     claim = ClaimToolCall(
         run_id="run-1",
         expected_run_revision=prepared.run.revision,
@@ -1175,6 +1727,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
         )
     )
     assert committed.run.usage.tool_calls_committed == 1
+    assert committed.run.usage.compaction.total_tokens == 22000
     assert lifecycle_store.list_tool_calls("run-1")[0].result == result
     assert lifecycle_store.load_session("session-1").revision == 2
 

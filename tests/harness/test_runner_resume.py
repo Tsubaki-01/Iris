@@ -26,7 +26,14 @@ from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import AskQuestionTool, ToolCapability, ToolRegistry
 
-from .fakes import BlockingProvider, StaticProvider, build_runtime, text_response, tool_response
+from .fakes import (
+    BlockingProvider,
+    CountingAgentRuntime,
+    StaticProvider,
+    build_runtime,
+    text_response,
+    tool_response,
+)
 
 
 @pytest.mark.asyncio
@@ -58,8 +65,9 @@ async def test_managed_resume_signals_after_begin_and_relays_live_events(
     assert waiting.pending_interaction is not None
     before_sequence = waiting.run.last_event_sequence
     provider = BlockingProvider(text_response("完成"))
+    runtime = CountingAgentRuntime(build_runtime(tmp_path, registry=registry, provider=provider))
     runner = AgentRunner(
-        runtime=build_runtime(tmp_path, registry=registry, provider=provider),
+        runtime=runtime,
         store=store,
     )
     activation_started = asyncio.Event()
@@ -89,6 +97,9 @@ async def test_managed_resume_signals_after_begin_and_relays_live_events(
     assert relayed == store.list_events("run-managed-resume", before_sequence)
     assert RunEventKind.INTERACTION_RESOLVED in {event.kind for event in relayed}
     assert RunEventKind.ACTIVATION_STARTED in {event.kind for event in relayed}
+    assert runtime.activations[0].run_input == "写入"
+    assert runtime.activations[0].initial_session_message_count == 0
+    assert sum(message.text == "写入" for message in store.load_session("default").messages) == 1
 
 
 @pytest.mark.asyncio

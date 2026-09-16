@@ -54,9 +54,13 @@ result = await runtime.execute(
 固定的 `RuntimeExecutionOptions` 和 JSON-safe cursor。`RuntimeActivationResult` 只返回 engine
 事实；调用方必须从 durable store 重载最终 `RunResult`。
 
-`start` 与 `before_model / step 0` 的初始 `recover` activation 携带当前用户 input；`resume` 和
-非初始 `recover` 不携带。engine 只在该字段存在时将其注入 provider request 一次，后续恢复依赖
-committed session history。
+所有 activation 都携带原始 `run_input` 与创建 run 时的 `initial_session_message_count`。
+engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recover 保留锚点，不重复追加原文。
+
+`RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
+`commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
+后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
+摘要生成与自动触发尚未接入模型循环。
 
 cursor 位置只有：
 

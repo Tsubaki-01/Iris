@@ -62,9 +62,15 @@ result = await runtime.execute(
 frozen `RuntimeExecutionOptions`, and a JSON-safe cursor. `RuntimeActivationResult` is an engine
 fact only; the owner must reload the final `RunResult` from durable storage.
 
-`start` and initial `recover` activations at `before_model / step 0` carry the current user input;
-`resume` and later `recover` activations do not. The engine injects that field into the provider
-request exactly once when present, while later recovery relies on committed session history.
+Every activation carries the original `run_input` and `initial_session_message_count` captured
+when the run was created. The engine injects input only at `step 0` and archives it with the first
+model response. Resume and recovery retain these anchors without appending the input again.
+
+`RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
+response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
+projection against the session revision used to select its range. It advances session/checkpoint
+revisions while preserving raw messages, the cursor, and the pending main-model reservation.
+Summary generation and automatic triggering are not yet connected to the model loop.
 
 Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provider response without
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim

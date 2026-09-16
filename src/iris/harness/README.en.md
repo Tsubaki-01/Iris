@@ -97,8 +97,10 @@ older cutoff can be forked while the source session runs a later turn. The retur
 at `revision=0`, records its direct source in `forked_from_run_id`, and preserves that source on
 later appends. Target IDs use the `session_` prefix and a UUID; `fork()` accepts no target ID argument.
 
-Fork itself neither calls a provider nor creates a run; it copies conversation messages and the
-direct source. The next `start()` uses the host-selected runner's current system, tools, Skills,
+Fork itself neither calls a provider nor creates a run; it copies the terminal raw-message prefix,
+the summary projection frozen at that terminal point, and the direct source. Later compaction in
+the source session does not change that branch summary. The next `start()` uses the host-selected
+runner's current system, tools, Skills,
 memory, and workspace configuration, without restoring an old checkpoint or copying the old
 execution environment. Artifact references in messages remain unchanged, and files are not copied.
 A host can also construct `SessionManager(runner, branch.session_id)` directly and call
@@ -420,9 +422,16 @@ because run options may activate it later, while an empty before-input section i
 fingerprint does not render context; `StrictUndefined` and character limits remain rendering-time
 checks. See [`iris.context`](../context/README.en.md).
 
-Initial recovery at `before_model / step 0` reconstructs the uncommitted current-turn input from the
-durable `AgentRunRequest.input`. At later checkpoints, that input is already in session history from
-the provider commit and is not injected again.
+Start, resume, subagent parent resume, and recovery pass `run_input` and
+`initial_session_message_count` from the durable run. `before_model / step 0` reconstructs input
+that has not yet been archived; later steps do not append it again. Recovery after a projection
+commit but before the main response uses the new session revision and the same pending model step.
+
+`RunUsage` input/output/total fields count only the main model. Summary calls accumulate under
+`usage.compaction`; add the corresponding fields for combined consumption. A summary usage-only
+commit advances the run revision without a durable event. The commit port accepts that revision
+immediately so later cancellation reads remain valid. Projection commits independently emit
+`context.compacted` while retaining raw history.
 
 ## Public API
 

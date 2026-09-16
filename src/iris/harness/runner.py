@@ -547,7 +547,8 @@ class AgentRunner:
             activation_id=activation_id,
             session_id=run.session_id,
             kind="start",
-            input=run.request.input,
+            run_input=run.request.input,
+            initial_session_message_count=run.initial_session_message_count,
             cursor=cursor,
             options=run.options.runtime,
         )
@@ -742,7 +743,8 @@ class AgentRunner:
             activation_id=activation_id,
             session_id=run.session_id,
             kind="resume",
-            input=None,
+            run_input=run.request.input,
+            initial_session_message_count=run.initial_session_message_count,
             cursor=cursor,
             options=run.options.runtime,
             interaction_projection=runtime_projection,
@@ -881,7 +883,8 @@ class AgentRunner:
             activation_id=resumed.activation_id,
             session_id=parent_run.session_id,
             kind="resume",
-            input=None,
+            run_input=parent_run.request.input,
+            initial_session_message_count=parent_run.initial_session_message_count,
             cursor=resumed.cursor,
             options=parent_run.options.runtime,
         )
@@ -1201,13 +1204,8 @@ class AgentRunner:
             interaction_projection=self._stored_interaction_projection(
                 recovered.run, recovered_cursor
             ),
-            # 只有 before_model/step 0 的输入尚未随 provider commit 进入 session history，
-            # 需要从 durable request 重建；后续 checkpoint 再注入会造成重复输入。
-            input=(
-                run.request.input
-                if recovered_cursor.position == "before_model" and recovered_cursor.step_index == 0
-                else None
-            ),
+            run_input=run.request.input,
+            initial_session_message_count=run.initial_session_message_count,
             cursor=recovered_cursor,
             options=run.options.runtime,
         )

@@ -60,6 +60,7 @@ from iris.tools.subagent import ChildWaiting, SubagentExecutionOutcome
 
 from .fakes import (
     BlockingProvider,
+    CountingAgentRuntime,
     FrozenClock,
     RecordingPublisher,
     StaticProvider,
@@ -105,6 +106,8 @@ async def test_documented_subagent_configs_run_through_public_runner(
             )
         ),
     )
+    runtime = CountingAgentRuntime(runner.runtime)
+    runner.runtime = runtime
     waiting = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
     result = await runner.resume(
         "parent",
@@ -113,6 +116,9 @@ async def test_documented_subagent_configs_run_through_public_runner(
     )
     assert result.assistant_message.text == "Parent complete"
     assert runner.store.load_tool_call("parent", "delegate").result.model_content == "Child done"
+    assert [activation.kind for activation in runtime.activations] == ["start", "resume"]
+    assert all(activation.run_input == "Start" for activation in runtime.activations)
+    assert all(activation.initial_session_message_count == 0 for activation in runtime.activations)
 
 
 class RecordingInMemoryLifecycleStore(InMemoryLifecycleStore):

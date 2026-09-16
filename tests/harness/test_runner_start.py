@@ -37,6 +37,7 @@ from iris.tools import (
 
 from .fakes import (
     BlockingProvider,
+    CountingAgentRuntime,
     StaticProvider,
     build_runtime,
     text_response,
@@ -120,6 +121,23 @@ async def test_runner_start_returns_reloaded_terminal_result(tmp_path: Path) -> 
     ]
     assert runner.get_run("run-1") == result.run
     assert runner.get_result("run-1") == result
+
+
+@pytest.mark.asyncio
+async def test_start_activation_records_existing_raw_history_boundary(tmp_path: Path) -> None:
+    """后续 run 的原始输入和历史起点取自创建事务。"""
+    runtime = CountingAgentRuntime(
+        build_runtime(tmp_path, provider=StaticProvider(text_response(), text_response()))
+    )
+    runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
+    await runner.start(AgentRunRequest(input="第一轮"))
+    await runner.start(AgentRunRequest(input="第二轮"))
+
+    assert [activation.run_input for activation in runtime.activations] == ["第一轮", "第二轮"]
+    assert [activation.initial_session_message_count for activation in runtime.activations] == [
+        0,
+        2,
+    ]
 
 
 @pytest.mark.asyncio

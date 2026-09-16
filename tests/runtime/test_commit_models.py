@@ -8,9 +8,11 @@ from types import FrameType
 import pytest
 from pydantic import ValidationError
 
+from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import (
     ModelStepReservation,
+    RuntimeActivationInput,
     RuntimeCursor,
     RuntimeModelStepCommit,
     RuntimeToolCall,
@@ -78,3 +80,20 @@ def test_cursor_raw_recovery_still_rejects_duplicate_call_identity() -> None:
                 "tool_calls": [{"id": "same", "name": "echo"}, {"id": "same", "name": "echo"}],
             }
         )
+
+
+@pytest.mark.parametrize("kind", ["start", "resume", "recover"])
+def test_all_activation_kinds_carry_original_input_and_history_start(kind: str) -> None:
+    """每次 activation 保留原 run 锚点，是否归档由 step 0 决定。"""
+    activation = RuntimeActivationInput(
+        run_id="run",
+        activation_id="activation",
+        session_id="session",
+        kind=kind,
+        run_input="原始请求",
+        initial_session_message_count=4,
+        cursor=RuntimeCursor(position="before_model", step_index=0),
+        options=RuntimeExecutionOptions(),
+    )
+    assert activation.run_input == "原始请求"
+    assert activation.initial_session_message_count == 4

@@ -15,6 +15,8 @@ from iris.exceptions import (
     IrisRunStateError,
 )
 from iris.harness import AgentRunner
+from iris.harness._commit_port import StoreRuntimeCommitPort
+from iris.harness._events import _RunEventCollector
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -24,10 +26,13 @@ from iris.lifecycle import (
     RunEventKind,
     RunLimits,
     RunStopReason,
+    SessionCompaction,
+    TokenUsage,
     ToolCallPhase,
 )
 from iris.message import ToolUseBlock
 from iris.providers.openai import OpenAIChatMapper
+from iris.runtime import RuntimeCompactionCommit, RuntimeCursor
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
 
@@ -48,6 +53,10 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
 ) -> None:
     provider = BlockingProvider()
     store = InMemoryLifecycleStore()
+    await AgentRunner(
+        runtime=build_runtime(tmp_path, provider=StaticProvider(text_response("前一轮"))),
+        store=store,
+    ).start(AgentRunRequest(input="已有历史"))
     first = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
     running = asyncio.create_task(
         first.start(AgentRunRequest(input="恢复", run_id="run-safe-recover"))
@@ -58,6 +67,29 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
         await running
     crashed = store.load_run("run-safe-recover")
     assert crashed is not None and crashed.current_activation_id is not None
+    checkpoint = store.load_checkpoint(crashed.run_id)
+    assert checkpoint is not None
+    port = StoreRuntimeCommitPort(
+        store=store,
+        run=crashed,
+        activation_id=crashed.current_activation_id,
+        cursor=RuntimeCursor.model_validate(checkpoint.engine_cursor),
+        clock=first._now,
+        event_collector=_RunEventCollector(),
+        workspace_root=tmp_path,
+    )
+    session = port.load_session()
+    summary = SessionCompaction(summary="前一轮已完成", covered_message_count=2)
+    port.record_compaction_usage(TokenUsage(total_tokens=22_000))
+    port.commit_compaction(
+        RuntimeCompactionCommit(
+            cursor_before=port.cursor,
+            expected_session_revision=session.revision,
+            compaction=summary,
+            before_input_tokens=80_000,
+            after_input_tokens=20_000,
+        )
+    )
 
     runtime = CountingAgentRuntime(
         build_runtime(tmp_path, provider=StaticProvider(text_response("已恢复")))
@@ -70,6 +102,12 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
 
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert runtime.execute_calls == 1
+    assert runtime.activations[0].run_input == "恢复"
+    assert runtime.activations[0].initial_session_message_count == 2
+    assert result.run.usage.compaction.total_tokens == 22_000
+    recovered_session = store.load_session("default")
+    assert recovered_session.compaction == summary
+    assert sum(message.text == "恢复" for message in recovered_session.messages) == 1
     events = store.list_events("run-safe-recover")
     assert [event.kind for event in events].count(RunEventKind.MODEL_STEP_RESERVED) == 1
     assert [event.kind for event in events].count(RunEventKind.ACTIVATION_ABANDONED) == 1

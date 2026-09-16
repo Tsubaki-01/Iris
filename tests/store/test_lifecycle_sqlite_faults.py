@@ -21,6 +21,7 @@ from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
     ClaimToolCall,
+    CommitCompaction,
     CommitModelStep,
     CreateRun,
     ForkSession,
@@ -31,12 +32,18 @@ from iris.lifecycle import (
     RunCommit,
     RunToolCallRecord,
     RunUsage,
+    SessionCompaction,
     SuspendRun,
 )
 from iris.message import Msg, ToolUseBlock
 from iris.store import SQLiteStore
 
-from .test_lifecycle_store_contract import _complete_history_turn
+from .test_lifecycle_store_contract import (
+    _complete_history_turn,
+)
+from .test_lifecycle_store_contract import (
+    _create_command as _create_history_command,
+)
 
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _TOOL_FINGERPRINT = "a" * 64
@@ -348,6 +355,102 @@ def test_fork_second_message_failure_rolls_back_session_and_history(
     assert store.load_session("main") == source_before
     assert store.load_run("source") == run_before
     assert store.list_events("source") == events_before
+
+
+def test_compaction_write_failures_roll_back_projection_checkpoint_and_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """摘要事务每个写入点失败均保留旧投影、原文及 pending 主步骤。"""
+    original = sqlite_module._execute
+    statement_count = 0
+
+    def prepare(path: Path) -> tuple[SQLiteStore, CommitCompaction]:
+        store = SQLiteStore(path)
+        _complete_history_turn(store, run_id="previous", session_id="main")
+        session = store.load_session("main")
+        created = store.create_run(
+            _create_history_command(
+                run_id="current",
+                session_id="main",
+                activation_id="current-act",
+                session_revision=session.revision,
+            )
+        )
+        reserved = store.reserve_model_step(
+            ReserveModelStep(
+                run_id="current",
+                expected_run_revision=created.run.revision,
+                activation_id="current-act",
+                now=_NOW,
+            )
+        )
+        checkpoint = reserved.checkpoint
+        assert checkpoint is not None
+        command = CommitCompaction(
+            run_id="current",
+            expected_run_revision=reserved.run.revision,
+            activation_id="current-act",
+            expected_session_revision=session.revision,
+            compaction=SessionCompaction(summary="之前已完成", covered_message_count=2),
+            checkpoint=checkpoint.model_copy(
+                update={
+                    "sequence": checkpoint.sequence + 1,
+                    "session_revision": session.revision + 1,
+                }
+            ),
+            before_input_tokens=90_000,
+            after_input_tokens=50_000,
+            now=_NOW,
+        )
+        return store, command
+
+    def count_statements(
+        connection: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()
+    ) -> sqlite3.Cursor:
+        nonlocal statement_count
+        statement_count += 1
+        return original(connection, sql, params)
+
+    count_store, count_command = prepare(tmp_path / "compaction-count.db")
+    with monkeypatch.context() as patcher:
+        patcher.setattr(sqlite_module, "_execute", count_statements)
+        count_store.commit_compaction(count_command)
+
+    for fail_at in range(1, statement_count + 1):
+        store, command = prepare(tmp_path / f"compaction-failure-{fail_at}.db")
+        before_run = store.load_run("current")
+        before_session = store.load_session("main")
+        before_checkpoint = store.load_checkpoint("current")
+        before_events = store.list_events("current")
+        calls = 0
+
+        def fail_statement(
+            connection: sqlite3.Connection,
+            sql: str,
+            params: tuple[object, ...] = (),
+            failure_point: int = fail_at,
+        ) -> sqlite3.Cursor:
+            nonlocal calls
+            calls += 1
+            if calls == failure_point:
+                raise sqlite3.OperationalError("injected compaction failure")
+            return original(connection, sql, params)
+
+        with monkeypatch.context() as patcher:
+            patcher.setattr(sqlite_module, "_execute", fail_statement)
+            with pytest.raises(IrisRunPersistenceError):
+                store.commit_compaction(command)
+
+        reopened = SQLiteStore(store.path)
+        assert reopened.load_run("current") == before_run
+        assert reopened.load_session("main") == before_session
+        assert reopened.load_checkpoint("current") == before_checkpoint
+        assert reopened.list_events("current") == before_events
+
+        # 失败提交不能进入 process-local replay cache，原命令可重新成功提交。
+        committed = store.commit_compaction(command)
+        assert committed.session_revision == before_session.revision + 1
+        assert store.load_session("main").compaction == command.compaction
 
 
 def _create_command() -> CreateRun:

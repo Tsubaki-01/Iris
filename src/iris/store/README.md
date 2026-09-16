@@ -20,7 +20,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v5 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v6 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，调用方需要替换后重新创建；
 constructor 不重置或修改原文件。
@@ -58,14 +58,16 @@ rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
 load/recovery 边界；replay key 与 durable command 的 JSON 投影共用同一个 store 私有 serializer。
-schema v5 的 `sessions` 保存 revision、message count、更新时间和可空的 `forked_from_run_id`；
-后续追加保留直接来源。消息按连续 ordinal 追加到
+schema v6 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
+及 `compaction_json` 摘要投影；后续追加保留直接来源和摘要。消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
 CAS 推进 metadata；完整 `SessionSnapshot` 读取仍按 ordinal 重建并校验 `1..message_count`。
 Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生成回执重读完整 history。
 
-首次 terminal settlement 在 `RunRecord.terminal_session_message_count` 记录 session 累计消息数，
-包括本次工具闭合消息；后续 replay 不改写截点。创建时 deadline、预算耗尽、waiting 取消、普通
+创建 run 在同一事务内记录 `initial_session_message_count`。首次 terminal settlement 在
+`RunRecord.terminal_session_message_count` 记录 session 累计消息数，包括本次工具闭合消息，
+并在 `terminal_compaction` 冻结当时的摘要；没有摘要时为 `None`。后续 replay 不改写快照。
+创建时 deadline、预算耗尽、waiting 取消、普通
 finish、`OUTCOME_UNKNOWN` recovery 和 `FINALIZE` recovery 均写入该字段。没有 checkpoint 或
 没有 closer 时也记录实际消息数，0 合法。SQLite 使用已读取的 session metadata 计数，无需加载完整历史。
 
@@ -74,10 +76,10 @@ finish、`OUTCOME_UNKNOWN` recovery 和 `FINALIZE` recovery 均写入该字段�
 原有进程内有效期，没有 TTL/LRU 淘汰；完整 command key 仍会随提交数量增长。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
-时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v5，
+时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v6，
 不迁移或读取旧 schema。
 
-schema v5 包含：
+schema v6 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
@@ -90,7 +92,7 @@ schema v5 包含：
 非负；`sessions.forked_from_run_id` 可空并引用来源 `agent_runs.run_id`。
 
 `session_messages` 的 `(session_id, ordinal)` composite primary key 已覆盖有序读取，不额外增加
-index。session revision 表示非空 delta 的提交次数，不等于 message count。
+index。session revision 随非空原文 delta 或摘要投影提交推进，不等于 message count。
 
 SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` context 的
 `IrisRunPersistenceError`；预期 facts 已变化或数据库约束竞争使用 lifecycle conflict/state
@@ -98,10 +100,28 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 
 ## 公开接口
 
+### 摘要用量与历史投影
+
+`record_compaction_usage(RecordCompactionUsage)` 在当前 activation fence 和 run CAS 下累加
+`RunUsage.compaction`，只推进 run revision 和更新时间。主调用 token 字段、主步骤预算、session、
+checkpoint 和 event sequence 不变，回执 `events=()`。两组 token 消耗按字段相加即可取得总量；
+child run 的用量不复制到 parent。
+
+`commit_compaction(CommitCompaction)` 在 `SAFE/before_model` 且已有一个 pending 主步骤时，
+原子替换 `SessionSnapshot.compaction`、推进 session/run revision 和 checkpoint sequence，
+追加一个 `context.compacted` 事件。原文、cursor、主步骤 reservation 和 usage 保持不变。
+它检查选区时的 session revision、activation fence、取消事实及覆盖范围前移，工具切点和
+token 额度由 runtime 负责。事件只含覆盖条数和前后输入估算，不含摘要正文。
+
+摘要已提交、主响应尚未提交时，恢复仍使用该摘要与原 pending reservation。两条 mutation
+复用现有进程内 exact replay；它不承诺跨进程外部模型调用只计费一次。
+
+### Store 与查询
+
 `iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：只接受 schema v5 的持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v6 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -110,7 +130,7 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-额外索引或连接池，schema identity 为 lifecycle v5。
+额外索引或连接池，schema identity 为 lifecycle v6。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
 
@@ -149,7 +169,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v5、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v6、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
@@ -180,15 +200,16 @@ SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_
 其 `ForkPoint.input` 仍保留原始请求。
 
 `ForkSession` command 携带 `source_run_id`、全新的 `target_session_id` 和 `now`。
-新 session 从 `revision=0` 开始，`forked_from_run_id` 记录直接来源；后续非空追加从 1 开始且
-保留来源。消息的 ID、内容块、
+新 session 从 `revision=0` 开始，`forked_from_run_id` 记录直接来源；后续追加或摘要提交推进 revision，
+并保留来源。摘要来自来源 run 冻结的 `terminal_compaction`，不会取来源 session 后来的摘要；
+预览仍返回原文前缀。消息的 ID、内容块、
 工具引用与 metadata 原样保留，返回值与 store 内部消息隔离。Fork 不执行 provider 或工具，
 不复制运行控制事实，也不占用 lane；来源 session 忙于后续 run 时仍可复制旧截点。
 
 `_session_history.py` 共享来源检查与结果投影。内存实现持同一 `RLock` 复制前缀并一次写入目标。
 SQLite 在 `BEGIN IMMEDIATE` 事务内检查来源、创建带来源字段的 session、通过 `INSERT ... SELECT`
 复制消息，再完整读回目标并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
-source 当前 session revision 或空闲 lane。当前 schema v5 的无迁移规则保持不变。
+source 当前 session revision 或空闲 lane。当前 schema v6 的无迁移规则保持不变。
 
 来源不存在时，预览和 fork 抛 `IrisRunNotFoundError`；来源非 terminal 或为 child，以及
 非正数 list limit，使用 `IrisRunStateError`。目标已存在（包括空 session）抛

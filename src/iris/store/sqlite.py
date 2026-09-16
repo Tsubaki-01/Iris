@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v5 的同步 SQLite store。"""
+"""精确 lifecycle schema v6 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -50,6 +50,7 @@ from ..lifecycle.models import (
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SessionCompaction,
     SessionSnapshot,
     SubagentRunLink,
     ToolCallPhase,
@@ -58,6 +59,7 @@ from ..lifecycle.models import (
 from ..lifecycle.store import (
     AdmitChildRun,
     ClaimToolCall,
+    CommitCompaction,
     CommitModelStep,
     CommitToolResult,
     CreateRun,
@@ -65,6 +67,7 @@ from ..lifecycle.store import (
     FinishRun,
     ForkSession,
     RebindSubagentProxy,
+    RecordCompactionUsage,
     RecoverActiveRun,
     RequestCancellation,
     ReserveModelStep,
@@ -84,6 +87,7 @@ from ..lifecycle.transitions import (
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
+from ._compaction import add_compaction_usage, validate_compaction_commit
 from ._replay import ReplayRecord, replay_key
 from ._serialization import jsonable as _jsonable
 from ._session_history import build_fork_point_page, project_fork_point, validate_fork_source
@@ -122,6 +126,7 @@ class _SessionMetadata(BaseModel):
     message_count: int = Field(ge=0, strict=True)
     updated_at: datetime | None
     forked_from_run_id: str | None = None
+    compaction: SessionCompaction | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -508,6 +513,14 @@ class SQLiteStore:
             self._commit_model_step,
         )
 
+    def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit:
+        """只累加已返回摘要响应的用量与 run revision。"""
+        return self._mutate("record_compaction_usage", command, self._record_compaction_usage)
+
+    def commit_compaction(self, command: CommitCompaction) -> RunCommit:
+        """原子替换摘要投影、checkpoint 与对应事件。"""
+        return self._mutate("commit_compaction", command, self._commit_compaction)
+
     def claim_tool_call(self, command: ClaimToolCall) -> RunCommit:
         return self._mutate(
             "claim_tool_call",
@@ -672,13 +685,18 @@ class SQLiteStore:
                             connection,
                             """INSERT INTO sessions(
                                 session_id, revision, message_count, updated_at,
-                                forked_from_run_id
-                            ) VALUES (?, 0, ?, ?, ?)""",
+                                forked_from_run_id, compaction_json
+                            ) VALUES (?, 0, ?, ?, ?, ?)""",
                             (
                                 command.target_session_id,
                                 point.message_count,
                                 command.now.isoformat(),
                                 run.run_id,
+                                (
+                                    _dump_json(run.terminal_compaction)
+                                    if run.terminal_compaction is not None
+                                    else None
+                                ),
                             ),
                         )
                     except sqlite3.IntegrityError as exc:
@@ -1270,6 +1288,7 @@ class SQLiteStore:
                 updated_at=command.now,
                 finished_at=command.now,
                 terminal_session_message_count=session_metadata.message_count,
+                terminal_compaction=session_metadata.compaction,
             )
             event = _make_event(
                 updated,
@@ -1328,6 +1347,96 @@ class SQLiteStore:
         return RunCommit(
             run=updated,
             checkpoint=updated_checkpoint,
+            events=(event,),
+        )
+
+    def _record_compaction_usage(
+        self,
+        connection: sqlite3.Connection,
+        command: RecordCompactionUsage,
+    ) -> RunCommit:
+        """保留主调用计数、会话与 checkpoint，只累加摘要用量。"""
+        operation = "record_compaction_usage"
+        run = self._require_active(connection, command, operation=operation)
+        checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
+        updated = _replace_run(
+            run,
+            revision=run.revision + 1,
+            usage=add_compaction_usage(run.usage, command.usage),
+            updated_at=command.now,
+        )
+        self._update_run(connection, run, updated, checkpoint.session_revision)
+        return RunCommit(run=updated, checkpoint=checkpoint, events=())
+
+    def _commit_compaction(
+        self,
+        connection: sqlite3.Connection,
+        command: CommitCompaction,
+    ) -> RunCommit:
+        """在已预留主步骤的模型边界提交完整摘要投影。"""
+        operation = "commit_compaction"
+        run = self._require_active(connection, command, operation=operation)
+        session = self._require_history_preconditions(
+            connection, run, command.expected_session_revision, operation=operation
+        )
+        current_checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
+        validate_compaction_commit(
+            run,
+            current_checkpoint,
+            command,
+            session_message_count=session.message_count,
+            previous_compaction=session.compaction,
+        )
+        next_revision = session.revision + 1
+        _validate_checkpoint_replacement(
+            run,
+            current_checkpoint,
+            command.checkpoint,
+            command.activation_id,
+            next_revision,
+            run.usage,
+        )
+        sequence = run.last_event_sequence + 1
+        updated = _replace_run(
+            run,
+            revision=run.revision + 1,
+            checkpoint_sequence=command.checkpoint.sequence,
+            last_event_sequence=sequence,
+            updated_at=command.now,
+        )
+        event = _make_event(
+            updated,
+            RunEventKind.CONTEXT_COMPACTED,
+            command.now,
+            sequence=sequence,
+            activation_id=command.activation_id,
+            payload={
+                "covered_message_count": command.compaction.covered_message_count,
+                "before_input_tokens": command.before_input_tokens,
+                "after_input_tokens": command.after_input_tokens,
+            },
+        )
+        cursor = _execute(
+            connection,
+            """UPDATE sessions SET revision = ?, compaction_json = ?, updated_at = ?
+            WHERE session_id = ? AND revision = ?""",
+            (
+                next_revision,
+                _dump_json(command.compaction),
+                command.now.isoformat(),
+                session.session_id,
+                session.revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise IrisRunConflictError("session revision 已变化", session_id=session.session_id)
+        self._update_run(connection, run, updated, next_revision)
+        self._update_checkpoint(connection, current_checkpoint, command.checkpoint, command.now)
+        self._insert_event(connection, event)
+        return RunCommit(
+            run=updated,
+            session_revision=next_revision,
+            checkpoint=command.checkpoint,
             events=(event,),
         )
 
@@ -1995,6 +2104,7 @@ class SQLiteStore:
                 terminal_session_message_count=(
                     session_metadata.message_count + len(closure_messages)
                 ),
+                terminal_compaction=session_metadata.compaction,
             )
             events.append(
                 _make_event(
@@ -2158,6 +2268,7 @@ class SQLiteStore:
             updated_at=command.now,
             finished_at=command.now,
             terminal_session_message_count=session_metadata.message_count + len(closure_messages),
+            terminal_compaction=session_metadata.compaction,
         )
         unknown_events = tuple(
             _make_event(
@@ -2280,6 +2391,7 @@ class SQLiteStore:
         session_metadata: _SessionMetadata | None = None
         updated_session_revision: int | None = None
         terminal_session_message_count: int | None = None
+        terminal_compaction: SessionCompaction | None = None
         terminal_checkpoint = checkpoint
         if command.recovery_disposition in {
             RecoveryDisposition.OUTCOME_UNKNOWN,
@@ -2298,6 +2410,7 @@ class SQLiteStore:
                     updated_at=None,
                 )
             terminal_session_message_count = session_metadata.message_count + len(closure_messages)
+            terminal_compaction = session_metadata.compaction
             if closure_messages:
                 terminal_checkpoint = checkpoint.model_copy(
                     deep=True,
@@ -2335,6 +2448,7 @@ class SQLiteStore:
                 updated_at=command.now,
                 finished_at=command.now,
                 terminal_session_message_count=terminal_session_message_count,
+                terminal_compaction=terminal_compaction,
             )
             unknown_events = tuple(
                 _make_event(
@@ -2381,6 +2495,7 @@ class SQLiteStore:
                 updated_at=command.now,
                 finished_at=command.now,
                 terminal_session_message_count=terminal_session_message_count,
+                terminal_compaction=terminal_compaction,
             )
             terminal_event = _make_event(
                 updated,
@@ -2605,6 +2720,7 @@ class SQLiteStore:
                 agent_id=command.agent_id,
                 request=command.request,
                 options=command.options,
+                initial_session_message_count=session.message_count,
                 phase=RunPhase.TERMINAL,
                 stop_reason=RunStopReason.DEADLINE_EXCEEDED,
                 revision=1,
@@ -2619,6 +2735,7 @@ class SQLiteStore:
                 updated_at=command.now,
                 finished_at=command.now,
                 terminal_session_message_count=session.message_count,
+                terminal_compaction=session.compaction,
             )
             event = _make_event(
                 run,
@@ -2649,6 +2766,7 @@ class SQLiteStore:
             agent_id=command.agent_id,
             request=command.request,
             options=command.options,
+            initial_session_message_count=session.message_count,
             phase=RunPhase.ACTIVE,
             revision=1,
             current_activation_id=command.start_activation_id,
@@ -2701,13 +2819,14 @@ class SQLiteStore:
             _execute(
                 connection,
                 """INSERT INTO sessions(
-                    session_id, revision, message_count, updated_at
-                ) VALUES (?, ?, ?, ?)""",
+                    session_id, revision, message_count, updated_at, compaction_json
+                ) VALUES (?, ?, ?, ?, ?)""",
                 (
                     session.session_id,
                     session.revision,
                     session.message_count,
                     updated_at.isoformat(),
+                    _dump_json(session.compaction) if session.compaction is not None else None,
                 ),
             )
             return
@@ -3130,6 +3249,7 @@ class SQLiteStore:
                     operation=operation,
                 ),
                 forked_from_run_id=metadata.forked_from_run_id,
+                compaction=metadata.compaction,
             )
         except (
             ValidationError,
@@ -3155,7 +3275,8 @@ class SQLiteStore:
     ) -> _SessionMetadata | None:
         """只读取 session CAS metadata、更新时间与直接来源。"""
         row = connection.execute(
-            """SELECT session_id, revision, message_count, updated_at, forked_from_run_id
+            """SELECT session_id, revision, message_count, updated_at, forked_from_run_id,
+                compaction_json
             FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -3305,6 +3426,11 @@ def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:
         message_count=row["message_count"],
         updated_at=row["updated_at"],
         forked_from_run_id=row["forked_from_run_id"],
+        compaction=(
+            SessionCompaction.model_validate(_load_json(row["compaction_json"]))
+            if row["compaction_json"] is not None
+            else None
+        ),
     )
 
 
@@ -3324,6 +3450,7 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         agent_id=row["agent_id"],
         request=AgentRunRequest.model_validate(_load_json(row["request_json"])),
         options=AgentRunOptions.model_validate(_load_json(row["options_json"])),
+        initial_session_message_count=row["initial_session_message_count"],
         phase=row["phase"],
         stop_reason=row["stop_reason"],
         revision=row["run_revision"],
@@ -3346,6 +3473,11 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         updated_at=row["updated_at"],
         finished_at=row["finished_at"],
         terminal_session_message_count=row["terminal_session_message_count"],
+        terminal_compaction=(
+            SessionCompaction.model_validate(_load_json(row["terminal_compaction_json"]))
+            if row["terminal_compaction_json"] is not None
+            else None
+        ),
     )
 
 
@@ -3461,8 +3593,9 @@ _INSERT_RUN = """INSERT INTO agent_runs(
     pending_interaction_id, cancellation_requested_at, cancellation_reason,
     usage_json,
     assistant_message_json, error_json, checkpoint_sequence, last_event_sequence,
-    created_at, started_at, updated_at, finished_at, terminal_session_message_count
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    created_at, started_at, updated_at, finished_at, terminal_session_message_count,
+    initial_session_message_count, terminal_compaction_json
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _UPDATE_RUN = """UPDATE agent_runs SET
     session_id = ?, agent_id = ?, phase = ?, stop_reason = ?, request_json = ?,
@@ -3471,7 +3604,8 @@ _UPDATE_RUN = """UPDATE agent_runs SET
     cancellation_requested_at = ?, cancellation_reason = ?,
     usage_json = ?, assistant_message_json = ?, error_json = ?, checkpoint_sequence = ?,
     last_event_sequence = ?, created_at = ?, started_at = ?, updated_at = ?, finished_at = ?,
-    terminal_session_message_count = ?
+    terminal_session_message_count = ?, initial_session_message_count = ?,
+    terminal_compaction_json = ?
 WHERE run_id = ? AND run_revision = ?"""
 
 _INSERT_TOOL_CALL = """INSERT INTO run_tool_calls(
@@ -3519,6 +3653,8 @@ def _run_values(run: RunRecord, session_revision: int) -> tuple[object, ...]:
         run.updated_at.isoformat(),
         _iso(run.finished_at),
         run.terminal_session_message_count,
+        run.initial_session_message_count,
+        _dump_json(run.terminal_compaction) if run.terminal_compaction is not None else None,
     )
 
 

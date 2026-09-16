@@ -83,6 +83,7 @@ class CountingAgentRuntime(AgentRuntime):
     def __init__(self, runtime: AgentRuntime) -> None:
         super().__init__(runtime.environment)
         self.execute_calls = 0
+        self.activations: list[RuntimeActivationInput] = []
         self.stream_sinks: list[RuntimeEventSink | None] = []
 
     async def execute(
@@ -96,6 +97,7 @@ class CountingAgentRuntime(AgentRuntime):
     ) -> RuntimeActivationResult:
         """记录调用后委托给真实 inner engine。"""
         self.execute_calls += 1
+        self.activations.append(activation)
         self.stream_sinks.append(stream_sink)
         return await super().execute(
             activation,

@@ -127,6 +127,7 @@ class RunEventKind(StrEnum):
     ACTIVATION_STARTED = "activation.started"
     MODEL_STEP_RESERVED = "model_step.reserved"
     MODEL_STEP_COMMITTED = "model_step.committed"
+    CONTEXT_COMPACTED = "context.compacted"
     TOOL_CALL_CLAIMED = "tool_call.claimed"
     TOOL_CALL_COMMITTED = "tool_call.committed"
     TOOL_CALL_OUTCOME_UNKNOWN = "tool_call.outcome_unknown"
@@ -279,6 +280,21 @@ class AgentRunOptions(_FrozenModel):
     runtime: RuntimeExecutionOptions = Field(default_factory=RuntimeExecutionOptions)
 
 
+class TokenUsage(_FrozenModel):
+    """Provider 返回的一组独立 token 计数。"""
+
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+
+
+class SessionCompaction(_FrozenModel):
+    """覆盖原文前缀的完整摘要正文。"""
+
+    summary: str = Field(pattern=r"\S")
+    covered_message_count: int = Field(gt=0)
+
+
 class RunUsage(_FrozenModel):
     """Logical run 已持久化的预算和 token 计数。"""
 
@@ -288,6 +304,7 @@ class RunUsage(_FrozenModel):
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
+    compaction: TokenUsage = Field(default_factory=TokenUsage)
 
     @model_validator(mode="after")
     def _validate_counters(self) -> RunUsage:
@@ -423,9 +440,11 @@ class RunRecord(_FrozenModel):
     agent_id: str
     request: AgentRunRequest
     options: AgentRunOptions
+    initial_session_message_count: int = Field(ge=0)
     phase: RunPhase
     stop_reason: RunStopReason | None = None
     terminal_session_message_count: int | None = Field(default=None, ge=0)
+    terminal_compaction: SessionCompaction | None = None
     revision: int = Field(ge=1)
     current_activation_id: str | None = None
     pending_interaction_id: str | None = None
@@ -476,6 +495,11 @@ class RunRecord(_FrozenModel):
         )
         if (self.phase is RunPhase.TERMINAL) != (self.terminal_session_message_count is not None):
             raise ValueError("terminal run 必须包含消息截点，非 terminal 必须为空")
+        if self.terminal_compaction is not None and (
+            self.terminal_session_message_count is None
+            or self.terminal_compaction.covered_message_count > self.terminal_session_message_count
+        ):
+            raise ValueError("terminal 摘要覆盖范围不能超过终态消息截点")
         if (self.cancellation_requested_at is None) != (self.cancellation_reason is None):
             raise ValueError("cancellation time 与 reason 必须同时存在")
         if self.usage.model_steps_reserved > self.options.limits.max_model_steps:
@@ -533,6 +557,7 @@ class SessionSnapshot(_FrozenModel):
     session_id: str
     revision: int = Field(default=0, ge=0)
     messages: list[Msg] = Field(default_factory=list)
+    compaction: SessionCompaction | None = None
     forked_from_run_id: str | None = None
 
     @field_validator("session_id")
@@ -544,6 +569,14 @@ class SessionSnapshot(_FrozenModel):
     @classmethod
     def _validate_forked_from_run_id(cls, value: str | None) -> str | None:
         return None if value is None else _trim_required(value, field_name="forked_from_run_id")
+
+    @model_validator(mode="after")
+    def _validate_compaction(self) -> SessionSnapshot:
+        if self.compaction is not None and self.compaction.covered_message_count > len(
+            self.messages
+        ):
+            raise ValueError("摘要覆盖范围不能超过原文消息数")
+        return self
 
 
 class ActivationRecord(_FrozenModel):
@@ -784,6 +817,8 @@ __all__ = [
     "RunUsage",
     "RuntimeExecutionOptions",
     "SessionSnapshot",
+    "SessionCompaction",
+    "TokenUsage",
     "ToolCallPhase",
     "ToolErrorPolicy",
     "project_result",

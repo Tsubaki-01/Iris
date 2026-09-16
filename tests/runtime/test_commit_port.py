@@ -26,11 +26,19 @@ from iris.lifecycle import (
     RunPhase,
     RunRecord,
     RunToolCallRecord,
+    SessionCompaction,
+    TokenUsage,
 )
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import RuntimeCursor
-from iris.runtime.commit import RuntimeModelStepCommit, RuntimeToolCall
+from iris.runtime.commit import (
+    RuntimeCompactionCommit,
+    RuntimeModelStepCommit,
+    RuntimeToolCall,
+    RuntimeToolResultCommit,
+)
 from iris.store import InMemoryLifecycleStore, SQLiteStore
+from iris.tools import ToolResult
 
 NOW = datetime(2026, 7, 29, tzinfo=UTC)
 FINGERPRINT = "a" * 64
@@ -407,3 +415,139 @@ def test_store_commit_port_maps_same_activation_cancel_claim_race(
     assert store.list_tool_calls("run_1")[0].phase == "prepared"
     assert relayed == collector.events
     assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)
+
+
+def test_compaction_usage_refreshes_control_without_events_and_survives_model_commit() -> None:
+    """无 event 的自身 revision 推进不能误判为外来 mutation。"""
+    store, port, call = _store_commit_port()
+    checkpoint = port.checkpoint
+    session = port.load_session()
+    before = port.run
+    usage = TokenUsage(input_tokens=20_000, output_tokens=2_000, total_tokens=22_000)
+
+    port.record_compaction_usage(usage)
+    port.record_compaction_usage(usage)
+
+    assert not port.cancellation_requested()
+    assert port.run.revision == before.revision + 2
+    assert port.run.last_event_sequence == before.last_event_sequence
+    assert port.checkpoint == checkpoint
+    assert port.load_session() == session
+    assert port.run.usage.compaction.total_tokens == 44_000
+    claim = port.claim_tool_call(call)
+    result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
+    cursor = RuntimeCursor(position="before_model", step_index=1)
+    port.commit_tool_result(
+        RuntimeToolResultCommit(
+            tool_call=call,
+            claim=claim,
+            result=result,
+            message_delta=(result.to_msg(),),
+            cursor_after=cursor,
+        )
+    )
+    assert port.reserve_model_step(cursor).granted
+    assistant = Msg.assistant("done")
+    port.commit_model_step(
+        RuntimeModelStepCommit(
+            cursor_before=cursor,
+            assistant_message=assistant,
+            message_delta=(assistant,),
+            cursor_after=RuntimeCursor(
+                position="outcome_ready", step_index=1, assistant_message=assistant
+            ),
+            input_tokens=25_000,
+            output_tokens=1_000,
+            total_tokens=26_000,
+        )
+    )
+    assert port.run.usage.total_tokens == 26_000
+    assert port.run.usage.compaction.total_tokens == 44_000
+    assert store.load_run(port.run.run_id) == port.run
+
+
+def _reserved_compaction_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort]:
+    """完成一组工具后预留下一模型步。"""
+    store, port, call = _store_commit_port()
+    claim = port.claim_tool_call(call)
+    result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
+    cursor = RuntimeCursor(position="before_model", step_index=1)
+    port.commit_tool_result(
+        RuntimeToolResultCommit(
+            tool_call=call,
+            claim=claim,
+            result=result,
+            message_delta=(result.to_msg(),),
+            cursor_after=cursor,
+        )
+    )
+    assert port.reserve_model_step(cursor).granted
+    return store, port
+
+
+def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
+    """摘要提交推进 checkpoint，重建 port 后仅复用原 pending reservation。"""
+    store, port = _reserved_compaction_port()
+    before = port.load_session()
+    cursor = port.cursor
+    sequence = port.checkpoint.sequence
+    usage = port.run.usage
+    compaction = SessionCompaction(summary="已完成工具调用", covered_message_count=3)
+
+    assert (
+        port.commit_compaction(
+            RuntimeCompactionCommit(
+                cursor_before=cursor,
+                expected_session_revision=before.revision,
+                compaction=compaction,
+                before_input_tokens=80_000,
+                after_input_tokens=20_000,
+            )
+        )
+        == cursor
+    )
+
+    after = port.load_session()
+    assert after.messages == before.messages
+    assert after.compaction == compaction
+    assert after.revision == before.revision + 1
+    assert port.checkpoint.sequence == sequence + 1
+    assert port.checkpoint.session_revision == after.revision
+    assert port.run.usage == usage
+    # 同一进程提交摘要后不能把已消费的复用标记重新打开。
+    assert port._reusable_model_reservation is False
+
+    resumed = StoreRuntimeCommitPort(
+        store=store,
+        run=port.run,
+        activation_id="activation_1",
+        cursor=cursor,
+        clock=lambda: NOW,
+        event_collector=_RunEventCollector(),
+        workspace_root=Path("workspace"),
+    )
+    revision = resumed.run.revision
+    assert resumed.reserve_model_step(cursor).granted
+    assert resumed.run.revision == revision
+    assert resumed.run.usage == usage
+
+
+def test_compaction_usage_accepts_later_cancellation_and_rejects_projection() -> None:
+    """摘要费用记录后仍能观察取消，取消后不能安装候选摘要。"""
+    store, port = _reserved_compaction_port()
+    session = port.load_session()
+    port.record_compaction_usage(TokenUsage(total_tokens=22_000))
+    _request_cancel(store)
+    assert port.cancellation_requested()
+    with pytest.raises(IrisRunStateError):
+        port.commit_compaction(
+            RuntimeCompactionCommit(
+                cursor_before=port.cursor,
+                expected_session_revision=session.revision,
+                compaction=SessionCompaction(summary="摘要", covered_message_count=3),
+                before_input_tokens=80_000,
+                after_input_tokens=20_000,
+            )
+        )
+    assert port.load_session() == session
+    assert port.run.usage.compaction.total_tokens == 22_000

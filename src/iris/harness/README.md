@@ -88,7 +88,8 @@ result = await runner.start(
 返回的新 session 从 `revision=0` 开始，`forked_from_run_id` 保存直接来源，后续追加保留来源。
 目标 ID 使用 `session_` 前缀与 UUID，`fork()` 不接收目标 ID 参数。
 
-Fork 本身不调用 provider 或创建 run，仅复制对话消息和直接来源。下一次 `start()` 使用 host
+Fork 本身不调用 provider 或创建 run，复制终态原文截点、当时冻结的摘要投影和直接来源。
+来源 session 后续压缩不改变旧 run 的分支摘要。下一次 `start()` 使用 host
 选定 runner 的当前 system、工具、Skill、memory 与 workspace 配置，不恢复旧 checkpoint 或
 复制旧运行环境。消息中的 artifact 引用保持原值，文件不会随 fork 复制。Host 也可直接构造
 `SessionManager(runner, branch.session_id)` 并调用 `await manager.submit("Try another approach.")`，
@@ -368,9 +369,13 @@ Factory 创建内置 `ProviderClient` 时，把合并全局配置后的 provider
 段仍跳过。指纹不渲染 context，`StrictUndefined` 和字符上限保留到实际渲染。详见
 [`iris.context`](../context/README.md)。
 
-`before_model / step 0` 的初始 recovery 会从 durable `AgentRunRequest.input` 重建尚未提交的
-当前轮次输入。后续 checkpoint 的输入已经随 provider commit 进入 session history，因此不会再次
-注入。
+start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
+`initial_session_message_count`。`before_model / step 0` 重建尚未归档的输入；后续步骤不再追加。
+摘要投影提交后、主响应提交前的恢复使用更新后的 session revision 和同一 pending 模型步。
+
+`RunUsage` 的 input/output/total 只统计主模型；摘要调用累计在 `usage.compaction`，总消耗由两者
+逐字段相加。摘要 usage-only 提交只推进 run revision，不产生 durable event；commit port 立即
+接受新 revision，使后续取消读取保持有效。投影提交独立产生 `context.compacted`，原文历史保留。
 
 ## 公开接口
 

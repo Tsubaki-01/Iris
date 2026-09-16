@@ -30,7 +30,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v5
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v6
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported and must be replaced before creating a new store; the
@@ -67,18 +67,19 @@ history precondition checks only the session revision. Both stores share lifecyc
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
 load/recovery boundaries such as SQLite row decoding, while one private store serializer projects
-replay keys and durable commands to JSON values. Schema v5 keeps revision,
-message count, update time, and nullable `forked_from_run_id` in `sessions`; later appends preserve
-the direct source. Messages append under contiguous ordinals in
+replay keys and durable commands to JSON values. Schema v6 keeps revision,
+message count, update time, nullable `forked_from_run_id`, and the `compaction_json` projection in
+`sessions`; later appends preserve the direct source and summary. Messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
 metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and
 validate exact ordinals `1..message_count`.
 Mutation `RunCommit` receipts carry only a changed `session_revision`; generating a receipt does not
 reread full history.
 
-The first terminal settlement records the cumulative session message count in
-`RunRecord.terminal_session_message_count`, including tool closers from that settlement. Later
-replays preserve the cutoff. Creation-time deadlines, budget exhaustion, waiting cancellation,
+Run creation records `initial_session_message_count` within its transaction. The first terminal
+settlement records the cumulative session message count in `RunRecord.terminal_session_message_count`,
+including tool closers, and freezes the current summary in `terminal_compaction` (`None` without a
+summary). Later replays preserve this snapshot. Creation-time deadlines, budget exhaustion, waiting cancellation,
 ordinary finish, `OUTCOME_UNKNOWN` recovery, and `FINALIZE` recovery all record it. Runs without a
 checkpoint or closer still record the actual count, including zero. SQLite uses already loaded
 session metadata instead of loading full history to count messages.
@@ -90,9 +91,9 @@ without TTL/LRU eviction; complete command keys still grow with the number of mu
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v5; older schemas are not migrated or read.
+when rows are first loaded. The current database is schema v6; older schemas are not migrated or read.
 
-Schema v5 contains:
+Schema v6 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
@@ -105,7 +106,8 @@ exactly when the run is terminal. Nullable `sessions.forked_from_run_id` referen
 `agent_runs.run_id`.
 
 The `(session_id, ordinal)` composite primary key already supports ordered message reads, so no
-extra index is added. Session revision counts non-empty delta commits; it is not the message count.
+extra index is added. Session revision advances for a non-empty raw-message delta or a summary
+projection commit; it is not the message count.
 
 Connection, serialization, and corrupt-row failures map to `IrisRunPersistenceError` with `path`
 and `operation` context. Stale expected facts and database constraint races use lifecycle
@@ -113,10 +115,31 @@ conflict/state errors.
 
 ## Public API
 
+### Summary usage and history projection
+
+`record_compaction_usage(RecordCompactionUsage)` adds to `RunUsage.compaction` under the current
+activation fence and run CAS, advancing only the run revision and update time. Main token counters,
+model-step budget, session, checkpoint, and event sequence stay unchanged; the receipt has
+`events=()`. Add the two token categories field by field for combined usage. Child usage stays on
+the child run.
+
+`commit_compaction(CommitCompaction)` requires `SAFE/before_model` and one pending model-step
+reservation. It atomically replaces `SessionSnapshot.compaction`, advances session/run revisions
+and checkpoint sequence, and appends one `context.compacted` event. Raw messages, cursor,
+reservation, and usage stay unchanged. The store checks the selection snapshot's session revision,
+activation fence, cancellation, and advancing coverage. Runtime owns tool-group boundaries and
+token limits. The event contains only the covered count and before/after input estimates.
+
+Recovery after a projection commit but before a main response uses the committed summary and the
+same pending reservation. Both mutations use the existing process-local exact replay mechanism;
+it does not promise exactly-once external model billing across process restarts.
+
+### Stores and queries
+
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v5-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v6-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -127,7 +150,7 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v5.
+schema identity is lifecycle v6.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
 exact tool-call read.
@@ -173,7 +196,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v5, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v6, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
@@ -208,7 +231,9 @@ empty preview; its `ForkPoint.input` still retains the original request.
 
 The `ForkSession` command carries `source_run_id`, a new `target_session_id`, and `now`.
 The new session starts at `revision=0`, with its direct source in `forked_from_run_id`; later
-non-empty appends start at 1 and preserve the source.
+appends or summary commits advance the revision while preserving the source. Its summary comes
+from the source run's frozen `terminal_compaction`, never the source session's later projection.
+History previews continue to return the raw message prefix.
 Message IDs, content blocks, tool references, and metadata remain unchanged, and returned objects
 are isolated from stored messages. Fork does not call providers or tools, copy execution-control
 facts, or occupy a lane. The source session may be running a later turn while an older cutoff is
@@ -219,7 +244,7 @@ prefix and inserts the target once under the same `RLock`. SQLite checks the sou
 target session with its source field, copies messages through `INSERT ... SELECT`, reads the target,
 and commits within one `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
 empty target or partial messages. This operation requires neither the source's current session
-revision nor a free lane. The current schema v5 policy still provides no migration.
+revision nor a free lane. The current schema v6 policy still provides no migration.
 
 Preview and fork raise `IrisRunNotFoundError` for an absent source. A non-terminal or child source,
 or a nonpositive list limit, raises `IrisRunStateError`. An existing target, including an empty

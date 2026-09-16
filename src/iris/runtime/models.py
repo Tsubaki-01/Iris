@@ -104,7 +104,8 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
     activation_id: str
     session_id: str
     kind: Literal["start", "resume", "recover"]
-    input: str | None
+    run_input: str
+    initial_session_message_count: int = Field(ge=0)
     cursor: RuntimeCursor
     options: RuntimeExecutionOptions
     interaction_projection: ToolResult | RuntimeApprovedToolCall | None = None
@@ -120,20 +121,10 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
     @model_validator(mode="after")
     def _validate_activation_shape(self) -> RuntimeActivationInput:
         if self.kind == "start":
-            if self.input is None or not self.input.strip():
-                raise ValueError("start activation 必须包含非空 input")
             if self.cursor.position != "before_model" or self.cursor.step_index != 0:
                 raise ValueError("start activation 必须从 step 0 before_model 开始")
             if self.interaction_projection is not None:
                 raise ValueError("start activation 不能携带 interaction projection")
-        elif self.kind == "resume":
-            if self.input is not None:
-                raise ValueError("resume activation 不能携带用户 input")
-        elif self.cursor.position == "before_model" and self.cursor.step_index == 0:
-            if self.input is None or not self.input.strip():
-                raise ValueError("初始 recover activation 必须包含非空 input")
-        elif self.input is not None:
-            raise ValueError("非初始 recover activation 不能重复携带用户 input")
         if self.interaction_projection is not None and self.cursor.position != "tool_batch":
             raise ValueError("interaction projection 必须绑定 tool_batch cursor")
         return self

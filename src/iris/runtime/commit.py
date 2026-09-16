@@ -14,7 +14,7 @@ from typing import Protocol
 
 from ..exceptions import IrisRunConflictError, IrisRunStateError
 from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerprint
-from ..lifecycle import CheckpointResumability, SessionSnapshot
+from ..lifecycle import CheckpointResumability, SessionCompaction, SessionSnapshot, TokenUsage
 from ..lifecycle.models import SubagentRunLink
 from ..message import Msg
 from ..tools import PreparedToolCall, ToolEffectGuard, ToolResult
@@ -60,6 +60,17 @@ class ToolCallClaim:
     tool_name: str
     fingerprint: str
     tool_version: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeCompactionCommit:
+    """替换历史投影并保持当前模型步 reservation 的提交事实。"""
+
+    cursor_before: RuntimeCursor
+    expected_session_revision: int
+    compaction: SessionCompaction
+    before_input_tokens: int
+    after_input_tokens: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -124,6 +135,12 @@ class RuntimeCommitPort(Protocol):
 
     def commit_model_step(self, commit: RuntimeModelStepCommit) -> RuntimeCursor:
         """提交 provider response、history、tool intents 与 cursor。"""
+
+    def record_compaction_usage(self, usage: TokenUsage) -> None:
+        """记录一份已返回的摘要响应用量。"""
+
+    def commit_compaction(self, commit: RuntimeCompactionCommit) -> RuntimeCursor:
+        """原子提交摘要投影，返回保持不变的执行 cursor。"""
 
     def claim_tool_call(self, call: RuntimeToolCall) -> ToolCallClaim:
         """在工具 effect 前 durable claim 精确调用。"""
@@ -277,6 +294,7 @@ __all__ = [
     "CommitPortToolEffectGuard",
     "ModelStepReservation",
     "RuntimeCommitPort",
+    "RuntimeCompactionCommit",
     "RuntimeModelStepCommit",
     "RuntimeSuspension",
     "RuntimeSuspensionResult",

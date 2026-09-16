@@ -31,8 +31,10 @@ from .models import (
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SessionCompaction,
     SessionSnapshot,
     SubagentRunLink,
+    TokenUsage,
 )
 
 
@@ -134,6 +136,32 @@ class ReserveModelStep:
     run_id: str
     expected_run_revision: int
     activation_id: str
+    now: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RecordCompactionUsage:
+    """保存一份已返回的摘要响应用量，不推进主步骤或历史。"""
+
+    run_id: str
+    expected_run_revision: int
+    activation_id: str
+    usage: TokenUsage
+    now: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CommitCompaction:
+    """原子替换摘要投影并保存同一执行位置的 checkpoint。"""
+
+    run_id: str
+    expected_run_revision: int
+    activation_id: str
+    expected_session_revision: int
+    compaction: SessionCompaction
+    checkpoint: RunCheckpoint
+    before_input_tokens: int
+    after_input_tokens: int
     now: datetime
 
 
@@ -289,6 +317,10 @@ class LifecycleStore(Protocol):
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit: ...
 
+    def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit: ...
+
+    def commit_compaction(self, command: CommitCompaction) -> RunCommit: ...
+
     def commit_model_step(self, command: CommitModelStep) -> RunCommit: ...
 
     def claim_tool_call(self, command: ClaimToolCall) -> RunCommit: ...
@@ -362,6 +394,8 @@ __all__ = [
     "ResumeWaitingRun",
     "ClaimToolCall",
     "CommitModelStep",
+    "CommitCompaction",
+    "RecordCompactionUsage",
     "CommitToolResult",
     "CreateRun",
     "FinishRun",

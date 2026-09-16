@@ -250,7 +250,8 @@ def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> 
         activation_id="activation_1",
         session_id="session_1",
         kind="resume",
-        input=None,
+        run_input="当前问题",
+        initial_session_message_count=0,
         cursor=cursor,
         options=RuntimeExecutionOptions(),
     )

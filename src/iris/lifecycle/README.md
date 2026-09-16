@@ -55,16 +55,35 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
-`RunCommit.session_revision` 只在 mutation 改变 history 时返回提交后的 revision，不携带完整
+`RunCommit.session_revision` 只在 mutation 改变原文或摘要投影时返回提交后的 revision，不携带完整
 `SessionSnapshot`；需要 history 时显式调用 `load_session()`。精确重试返回当前事实与空 events，
 而不是第一次提交的旧快照。
 Run 状态 mutation 按各自契约携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
 checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。
-`SessionSnapshot` 公开 `session_id`、CAS `revision`、完整 `messages` 和可空的直接来源
+`SessionSnapshot` 公开 `session_id`、CAS `revision`、完整 `messages`、可空 `compaction` 和直接来源
 `forked_from_run_id`；后续追加保留来源。revision 每次非空 message delta 只推进一次，与消息条数
 无关。终态截点记录在 `RunRecord`，不能用 session revision 替代；持久化 ordinal 不进入公共模型。
+
+### 摘要状态与用量
+
+`SessionCompaction(summary, covered_message_count)` 保存完整 Markdown 正文和覆盖的原文前缀
+长度 `[0,c)`；消息原文继续保留。`RunRecord.initial_session_message_count` 在创建事务内记录
+当前 run 的起点，首次终态同时冻结 `terminal_compaction` 与消息截点，之后的 session 压缩不改变它。
+`RunCheckpoint` 不复制摘要，恢复通过 session revision 绑定该投影。
+
+`RunUsage.compaction: TokenUsage` 独立保存摘要的 input/output/total；原有 token 字段仅记主模型。
+全部用量逐字段相加推导，child 消耗仍属于 child。Provider 的 total 值原样保存，不假定它必然等于
+input+output。
+
+- `RecordCompactionUsage` / `record_compaction_usage()`：每份 response 返回后保存用量；只推进
+  run revision 和更新时间，返回空 events，不改变 checkpoint、session 或主步骤。
+- `CommitCompaction` / `commit_compaction()`：在 SAFE/before_model 且已有一个 pending 主步骤时，
+  原子替换摘要、推进 session/run revision 和 checkpoint sequence，并追加 `context.compacted`。
+  Cursor、原文、主 reservation 与 usage 保持不变。事件仅含覆盖长度和前后输入估算。
+
+两者沿用 active fence、CAS 和现有精确重试；不承诺跨进程外部模型调用的 exactly-once 计费。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
 `load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
 `list_tool_calls(run_id, step_index=...)` 将有序工具读取限定为一个模型步，省略时返回整 run；
@@ -97,7 +116,8 @@ fork，截点不随新消息增长。来源资格、分页参数与目标 identi
 `ForkSession` 是从 `iris.lifecycle` 导出的 keyword-only frozen slots command，携带
 `source_run_id`、`target_session_id` 和 `now`。
 新 session 的 `revision=0`，`forked_from_run_id` 指向直接来源；继承消息不占用新 revision，
-后续非空追加从 1 开始且保留来源。Fork 只复制消息历史，不创建 run、activation、checkpoint、
+后续非空追加从 1 开始且保留来源。Fork 同时继承来源 run 冻结的 `terminal_compaction`，
+不读取来源 session 的最新摘要。Fork 不创建 run、activation、checkpoint、
 tool execution fact、interaction、event 或 lane，也不恢复源执行位置。
 
 ## 公开接口

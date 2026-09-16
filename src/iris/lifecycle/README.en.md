@@ -57,7 +57,7 @@ provider clients, tasks, locks, signals, or callbacks.
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
-`RunCommit.session_revision` returns the committed revision only when a mutation changes history;
+`RunCommit.session_revision` returns the committed revision when raw history or its summary changes;
 it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
 needed. Exact retries return current facts with empty events, rather than the original snapshot.
 Run-state mutations carry the expected revision/fence facts required by their contracts; stale
@@ -66,10 +66,33 @@ Stores validate only the phase, counters, identity, and fence affected by the mu
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
 SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and
 encoders retain JSON-safe guarantees.
-`SessionSnapshot` exposes `session_id`, CAS `revision`, complete `messages`, and the nullable direct
+`SessionSnapshot` exposes `session_id`, CAS `revision`, complete `messages`, nullable `compaction`, and direct
 source `forked_from_run_id`; later appends preserve that source. Revision advances once per non-empty
 message delta regardless of its message count. The terminal cutoff lives in `RunRecord` and cannot
 be replaced by the session revision. Persistence ordinals do not enter public models.
+
+### Summary state and usage
+
+`SessionCompaction(summary, covered_message_count)` stores the complete Markdown body and the raw
+prefix `[0,c)` it covers. Raw messages remain available. `RunRecord.initial_session_message_count`
+records the run's starting point inside creation. Its first terminal settlement freezes
+`terminal_compaction` alongside the message cutoff; later session compaction cannot alter it.
+Checkpoints do not duplicate summaries; their session revision binds the current projection.
+
+`RunUsage.compaction: TokenUsage` stores summary input/output/total separately. Existing token fields
+still count only main calls; combined usage is derived by adding the two groups. Child usage stays
+with the child. Provider totals are preserved without assuming total equals input plus output.
+
+- `RecordCompactionUsage` / `record_compaction_usage()` stores each returned response's usage. It
+  changes only run revision and update time, returns no events, and leaves the checkpoint, session,
+  and main-step counters unchanged.
+- `CommitCompaction` / `commit_compaction()` requires SAFE/before_model with one pending main step.
+  It atomically replaces the summary, advances session/run revisions and checkpoint sequence, and
+  appends `context.compacted`. Cursor, raw messages, reservation, and usage remain unchanged. The
+  event contains only coverage and before/after input estimates.
+
+Both reuse the active fence, CAS, and existing exact replay. Neither promises cross-process
+exactly-once billing for external model calls.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
 `load_tool_call(run_id, tool_call_id)` reads one exact composite identity.
@@ -108,7 +131,8 @@ The store owns source eligibility, pagination parameter checks, and target ident
 `source_run_id`, `target_session_id`, and `now`.
 The new session starts at `revision=0`, and `forked_from_run_id` records its direct source.
 Inherited messages do not consume revisions; later non-empty appends start at 1 and preserve the
-source. Fork copies message history without creating a run, activation, checkpoint, tool execution
+source. Fork inherits the source run's frozen `terminal_compaction`, not the source session's latest
+summary, without creating a run, activation, checkpoint, tool execution
 fact, interaction, event, or lane, and does not restore the source execution position.
 
 ## Public API
