@@ -132,9 +132,15 @@ ratios, rounded up. Recent-text retention is a soft target, so the two ratios ne
 than 80%. The input budget and timeout must be positive; both ratios must be between 0 and 1.
 
 `load_agent_config()` and `AgentConfig` validate these values without calling a model or tokenizer.
-The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. This stage
-provides configuration and input estimation only; automatic summary execution is not yet wired.
-See [providers](../providers/README.en.md) for estimation limits.
+The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. Before each
+main model call, runtime automatically summarizes old history when the full input reaches 80%,
+including committed steps in the current run while preserving task anchors and recent text.
+Summaries use the current model; `summary_ratio` caps generation output and may include reasoning.
+The resulting full request must be no larger than 80% and strictly smaller than before. Once started,
+a failed compaction ends the current run while preserving raw history and the last committed summary.
+Main usage and `RunUsage.compaction` accumulate separately. See
+[providers](../providers/README.en.md) for estimation limits and [runtime](../runtime/README.en.md)
+for execution and recovery.
 
 `AgentConfig.mcp` also defaults to `None`; `AgentMCPConfig` references a JSON/JSONC/TOML file
 and supplies local server overrides as described above.

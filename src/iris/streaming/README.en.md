@@ -67,6 +67,13 @@ subscription offer path triggers this slow-consumer transition, producing one ga
 
 ## Gateway and commands
 
+Automatic compaction publishes `context.compaction.started`, `context.compaction.completed`, and
+`context.compaction.failed` through the existing live plane, carrying the existing
+run/session/activation identity and `step_index`. They are critical statuses. Neither summary text
+nor summary model deltas enter live payloads. Completion follows the durable `context.compacted`
+commit and precedes the main `model.step.started`; the final run result explains failures. The CLI
+prints only the short live statuses and ignores durable events to avoid duplicate completion output.
+
 `StreamingGateway` binds the exact runner, manager, broker, and session supplied at construction.
 A session scope must match the bound session. For run scopes and durable cursors, the runner must
 confirm that the run belongs to that session. The gateway never calls `SessionManager.events()`

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from iris.harness import AgentRunner, SessionManager, SubmissionEvent
-from iris.harness.streaming import SessionSubmissionEvent
+from iris.harness.streaming import SessionSubmissionEvent, _RuntimeLiveSink
 from iris.lifecycle import AgentRunRequest, RunEvent, RunPhase
 from iris.message import ToolUseBlock
 from iris.runtime import (
@@ -92,6 +92,26 @@ class RecordingObserver:
     async def on_event(self, event: RunEvent) -> None:
         """记录一条 durable event。"""
         self.events.append(event)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["context.compaction.started", "context.compaction.completed", "context.compaction.failed"],
+)
+def test_runtime_sink_forwards_compaction_status_unchanged(kind: str) -> None:
+    """摘要短状态沿现有 typed sink 原样传递，不添加正文或新 payload。"""
+    publisher = RecordingPublisher()
+    event = RuntimeStreamEvent(
+        kind=kind,
+        run_id="run-compact",
+        session_id="session-compact",
+        activation_id="act-compact",
+        step_index=3,
+    )
+    _RuntimeLiveSink(publisher).emit(event)
+    assert publisher.facts == [event]
+    assert publisher.facts[0] is event
+    assert event.model_event is None
 
 
 async def _next_submission(

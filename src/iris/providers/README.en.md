@@ -109,6 +109,12 @@ no generation call and does not subtract cached input. This is a window estimate
 or a guarantee against overflow. `provider_options["num_retries"]` is forwarded explicitly, including
 zero; omission preserves LiteLLM's default retry behavior.
 
+Automatic summarization uses the current provider's `complete()` even when the main call uses
+`stream()`. Summary requests omit tools and response schemas and set `num_retries=0` to disable
+internal retries in the current LiteLLM async Chat/SDK path. Runtime retries only the failed summary
+batch once for connection, timeout, or rate-limit errors; successful batches are reused. Main
+requests keep their existing retry options, and lifecycle records summary usage separately.
+
 ```python
 from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg
 

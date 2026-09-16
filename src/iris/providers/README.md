@@ -118,6 +118,11 @@ provider 前缀，保留内层模型命名空间；不调用生成 API，不扣�
 估算，不是精确账单或绝不超窗的保证。`provider_options["num_retries"]` 显式透传，包含 0；
 未设置时保留 LiteLLM 原有重试行为。
 
+自动摘要复用当前 provider 的 `complete()`，即使主请求使用 `stream()`；摘要调用不带工具或
+response schema，并设置 `num_retries=0` 关闭当前 LiteLLM async Chat/SDK 内部重试。
+runtime 只对当前失败摘要分块的连接、超时或限流错误额外重试一次，成功分块不重跑。
+主请求保留原来的重试选项；摘要 usage 由 lifecycle 单独累计。
+
 `stream(request)`：
 
 - 要求 `request.stream=True`，并向 LiteLLM 请求 usage tail；

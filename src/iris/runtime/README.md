@@ -60,7 +60,7 @@ engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recov
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
 后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
-自动触发尚未接入模型循环。
+每次 `before_model` 在主步骤 reservation 获准后检查完整输入，压缩不额外消耗主步骤预算。
 
 ### 历史投影与摘要构造
 
@@ -78,6 +78,19 @@ engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recov
 摘要请求复用有效主模型选项，覆盖为非流式、无工具/response schema、输出上限 S，并设置
 `num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空
 文本；`IrisContextCompactionError` 使用 `context` 来源及 `CONTEXT_COMPACTION_*` 错误码。
+
+完整输入达到可用预算 B 的 80% 时选择新增前缀；没有新增前缀且输入不超过 B 时直接继续。
+有新增前缀时，先保存每份返回响应的 `RunUsage.compaction`，再检查摘要是否完整有效。
+全部分块完成后，完整主请求须不超过 80% 且比压缩前更小，才能原子提交投影。摘要不进入主
+response 的 message delta，也不增加主步骤 reservation。
+
+整次操作共用默认 300 秒额度，分块与重试不重置时钟；每次请求同时受剩余 run deadline 和
+更短的 request timeout 限制。只对当前失败分块的连接、超时或限流错误重试一次。压缩后重新
+读取 run 剩余时间，不延长原始 deadline。取消沿用原语义，排队 steer 留到既有主响应/工具边界。
+
+压缩一旦开始，失败就结束当前 run；保留原文、上次已提交摘要和已经记录的摘要用量。
+摘要投影已提交但主响应尚未提交时，恢复使用新摘要与同一个 pending reservation；WAITING
+先继续原工具流程，`outcome_ready` 只结算。主 provider 实际超窗不会触发额外压缩重试。
 
 cursor 位置只有：
 
@@ -104,7 +117,12 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 `RuntimeProvider` 必须同时实现 `complete()` 和同步 `estimate_input_tokens(request)`；后者
 计量应用模型选项及工具 schema 后的完整请求。自定义 provider 与测试替身直接满足同一契约。
 `RuntimeEnvironment.agent_config.compaction` 携带压缩配置，无需独立环境字段。
-当前配置和计量能力尚未在模型循环中触发自动摘要。
+摘要始终直接使用 `complete()`，不会向 host 发布摘要正文或摘要模型 stream 事件。
+
+真实处理新前缀时发布 `context.compaction.started`；投影提交成功后发布
+`context.compaction.completed`，然后才发布主 `model.step.started`。未完成则发布
+`context.compaction.failed`，具体错误仍由最终 run 结果解释。三种状态复用现有 identity，
+没有独立 payload 模型；durable `context.compacted` 保留在事件历史中。
 
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
 `RuntimeProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。

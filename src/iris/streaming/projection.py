@@ -142,7 +142,12 @@ def _project_submission_event(event: SessionSubmissionEvent) -> _ProjectedLiveFa
 
 def _project_runtime_event(event: RuntimeStreamEvent) -> _ProjectedLiveFact:
     """投影 runtime model/tool live event。"""
-    if event.kind == "model.step.started":
+    if event.kind in {
+        "model.step.started",
+        "context.compaction.started",
+        "context.compaction.completed",
+        "context.compaction.failed",
+    }:
         return _runtime_projection(
             event,
             kind=event.kind,

@@ -19,6 +19,7 @@ import pytest
 
 from iris.cli.chat import ChatOptions, _ChatLiveOutput, run_chat_loop
 from iris.harness import AgentRunner
+from iris.lifecycle import RunEvent, RunEventKind
 from iris.message import (
     LLMRequest,
     ModelBlockCompleted,
@@ -33,11 +34,51 @@ from iris.message import (
     ModelStreamScope,
     ProviderStreamError,
 )
+from iris.runtime import RuntimeStreamEvent
 from iris.store import InMemoryLifecycleStore
 from tests.harness.fakes import build_runtime, text_response
 from tests.runtime.fakes import FakeStreamingProvider
 
 # endregion
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("context.compaction.started", "正在压缩上下文\n"),
+        ("context.compaction.completed", "上下文压缩完成\n"),
+        ("context.compaction.failed", "上下文压缩未完成\n"),
+    ],
+)
+def test_chat_compaction_only_displays_short_live_status(kind: str, expected: str) -> None:
+    """摘要状态仅输出短句，durable 完成事件不会重复通知。"""
+    output: list[str] = []
+    live = _ChatLiveOutput(output.append)
+    live.publish(
+        RuntimeStreamEvent(
+            kind=kind,
+            run_id="run-compact",
+            session_id="session-compact",
+            activation_id="act-compact",
+            step_index=0,
+        )
+    )
+    live.publish(
+        RunEvent(
+            run_id="run-compact",
+            session_id="session-compact",
+            sequence=5,
+            kind=RunEventKind.CONTEXT_COMPACTED,
+            occurred_at=datetime.now(UTC),
+            payload={
+                "covered_message_count": 2,
+                "before_input_tokens": 90_000,
+                "after_input_tokens": 50_000,
+            },
+        )
+    )
+    assert output == [expected]
+    assert live.finish_run("run-compact") is False
 
 
 def _text_stream() -> list[ModelStreamEvent]:

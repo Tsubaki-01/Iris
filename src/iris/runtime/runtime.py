@@ -5,18 +5,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from ..exceptions import (
     HITLCheckpointInvalidError,
+    IrisAPIConnectionError,
     IrisCancellationRequestedError,
+    IrisContextCompactionError,
     IrisError,
     IrisMCPOutcomeUnknownError,
     IrisProviderStreamError,
     IrisProviderStreamInterruptedError,
+    IrisRateLimitExceededError,
     IrisRunConflictError,
 )
 from ..hitl import (
@@ -24,7 +27,14 @@ from ..hitl import (
     PermissionPrompt,
     QuestionPrompt,
 )
-from ..lifecycle import CheckpointResumability, RunErrorInfo, ToolErrorPolicy
+from ..lifecycle import (
+    CheckpointResumability,
+    RunErrorInfo,
+    SessionCompaction,
+    SessionSnapshot,
+    TokenUsage,
+    ToolErrorPolicy,
+)
 from ..message import (
     LLMRequest,
     LLMResponse,
@@ -43,9 +53,15 @@ from ..tools import (
     ToolResult,
 )
 from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentTool
+from ._compaction_summary import (
+    consume_summary_response,
+    next_summary_batch,
+    serialize_history,
+)
 from .commit import (
     CommitPortToolEffectGuard,
     RuntimeCommitPort,
+    RuntimeCompactionCommit,
     RuntimeModelStepCommit,
     RuntimeSuspension,
     RuntimeSuspensionResult,
@@ -54,6 +70,7 @@ from .commit import (
     ToolCallClaim,
     build_runtime_tool_call,
 )
+from .compaction import project_history, protected_message_indices, select_compaction_end
 from .environment import RuntimeEnvironment, streaming_provider_for
 from .memory_context import prepare_activation_memory_context_input
 from .models import (
@@ -841,10 +858,15 @@ class AgentRuntime:
                 context_output=context_output,
                 current_input=current_input,
             )
+            protected_indices = protected_message_indices(
+                list(snapshot.messages), activation.initial_session_message_count
+            )
             request = self.environment.assembler.build_request(
                 agent_config=self.environment.agent_config,
                 context_output=context_output,
-                history=list(snapshot.messages),
+                history=project_history(
+                    list(snapshot.messages), snapshot.compaction, protected_indices
+                ),
                 current_input=current_input,
             )
             request = _apply_request_options(request, activation.options.request_options)
@@ -854,6 +876,15 @@ class AgentRuntime:
                 tool_view=self.environment.tool_bridge.tool_view,
                 provider=self.environment.agent_config.model.provider,
             )
+
+            def build_request(history: list[Msg]) -> LLMRequest:
+                messages = self.environment.assembler.build_conversation(
+                    context_output=context_output,
+                    history=history,
+                    current_input=current_input,
+                ).messages
+                return request.model_copy(update={"messages": messages})
+
         except Exception as exc:
             return _failed_activation(cursor, exc)
 
@@ -880,6 +911,34 @@ class AgentRuntime:
             return RuntimeActivationResult(
                 outcome=RuntimeActivationOutcome.CANCELLED,
                 cursor=cursor,
+            )
+
+        try:
+            compacted = await self._compact_request(
+                request=request,
+                build_request=build_request,
+                snapshot=snapshot,
+                protected_indices=protected_indices,
+                activation=activation,
+                cursor=cursor,
+                commits=commits,
+                cancellation=cancellation,
+                stream_sink=stream_sink,
+            )
+        except Exception as exc:
+            return _failed_activation(cursor, exc)
+        if isinstance(compacted, RuntimeActivationResult):
+            return compacted
+        request = compacted
+        # 摘要与重试已消耗原 run 的绝对 deadline，不沿用 reservation 的旧剩余额度。
+        remaining = commits.remaining_deadline_seconds()
+        if remaining is not None and remaining <= 0:
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+            )
+        if _activation_cancelled(commits, cancellation):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
             )
 
         if stream_sink is not None:
@@ -1070,6 +1129,170 @@ class AgentRuntime:
         if committed != cursor_after:
             raise IrisRunConflictError("model-step commit 返回了意外 cursor")
         return _ModelStepAdvance(cursor=committed, plan=plan)
+
+    async def _compact_request(
+        self,
+        *,
+        request: LLMRequest,
+        build_request: Callable[[list[Msg]], LLMRequest],
+        snapshot: SessionSnapshot,
+        protected_indices: tuple[int, ...],
+        activation: RuntimeActivationInput,
+        cursor: RuntimeCursor,
+        commits: RuntimeCommitPort,
+        cancellation: CancellationSignal,
+        stream_sink: RuntimeEventSink | None,
+    ) -> LLMRequest | RuntimeActivationResult:
+        """在同一模型步 reservation 内生成并原子安装完整摘要投影。"""
+        config = self.environment.agent_config.compaction
+        provider = self.environment.provider
+        before = provider.estimate_input_tokens(request)
+        if before < config.trigger_tokens:
+            return request
+        messages = list(snapshot.messages)
+        end = select_compaction_end(
+            messages=messages,
+            previous_compaction=snapshot.compaction,
+            protected_indices=protected_indices,
+            config=config,
+            build_request=build_request,
+            estimate_input_tokens=provider.estimate_input_tokens,
+        )
+        if end is None:
+            if before <= config.input_budget_tokens:
+                return request
+            raise IrisContextCompactionError(
+                "输入超过预算且没有新增可压缩历史", code="CONTEXT_COMPACTION_UNAVAILABLE"
+            )
+
+        loop = asyncio.get_running_loop()
+        operation_deadline = loop.time() + config.timeout_seconds
+        if stream_sink is not None:
+            stream_sink.emit(
+                _runtime_stream_event(
+                    "context.compaction.started",
+                    run_id=activation.run_id,
+                    session_id=activation.session_id,
+                    activation_id=activation.activation_id,
+                    step_index=cursor.step_index,
+                )
+            )
+        completed = False
+        try:
+            previous = snapshot.compaction
+            summary = previous.summary if previous is not None else None
+            start = previous.covered_message_count if previous is not None else 0
+            records = serialize_history(messages[start:end], start)
+            position = (0, 0)
+            while position[0] < len(records):
+                batch = next_summary_batch(
+                    request, summary, records, position, config, provider.estimate_input_tokens
+                )
+                for attempt in range(2):
+                    stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
+                    if stopped is not None:
+                        return stopped
+                    timeout = operation_deadline - loop.time()
+                    run_remaining = commits.remaining_deadline_seconds()
+                    if run_remaining is not None:
+                        timeout = min(timeout, run_remaining)
+                    if batch.request.timeout is not None:
+                        timeout = min(timeout, batch.request.timeout)
+                    summary_request = batch.request.model_copy(update={"timeout": timeout})
+                    try:
+                        response = await asyncio.wait_for(
+                            provider.complete(summary_request), timeout=timeout
+                        )
+                    except (IrisAPIConnectionError, IrisRateLimitExceededError, TimeoutError):
+                        stopped = _compaction_stop(
+                            cursor, commits, cancellation, operation_deadline
+                        )
+                        if stopped is not None:
+                            return stopped
+                        if attempt == 1:
+                            raise
+                        continue
+                    break
+                # 所有已返回响应（包括无效摘要）先计费；owner/fence 由提交端口裁决。
+                commits.record_compaction_usage(
+                    TokenUsage.model_construct(
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        total_tokens=response.total_tokens,
+                    )
+                )
+                stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
+                if stopped is not None:
+                    return stopped
+                summary = consume_summary_response(response)
+                position = batch.next_position
+
+            compaction = SessionCompaction.model_construct(
+                summary=summary, covered_message_count=end
+            )
+            candidate = build_request(project_history(messages, compaction, protected_indices))
+            after = provider.estimate_input_tokens(candidate)
+            stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
+            if stopped is not None:
+                return stopped
+            if after > config.trigger_tokens or after >= before:
+                raise IrisContextCompactionError(
+                    "摘要后的完整请求未缩小或仍超过自动摘要额度",
+                    code="CONTEXT_COMPACTION_FAILED",
+                )
+            commits.commit_compaction(
+                RuntimeCompactionCommit(
+                    cursor_before=cursor,
+                    expected_session_revision=snapshot.revision,
+                    compaction=compaction,
+                    before_input_tokens=before,
+                    after_input_tokens=after,
+                )
+            )
+            completed = True
+        except IrisCancellationRequestedError:
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+            )
+        except Exception as exc:
+            error = (
+                RunErrorInfo(
+                    code="PROVIDER_TIMEOUT",
+                    message=str(exc) or "摘要 provider 请求超时",
+                    source="provider",
+                )
+                if isinstance(exc, TimeoutError)
+                else _normalize_run_error(exc)
+            )
+            if error.source == "provider":
+                error = error.model_copy(
+                    update={"details": {**error.details, "operation": "compaction"}}
+                )
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.FAILED, cursor=cursor, error=error
+            )
+        finally:
+            if not completed and stream_sink is not None:
+                stream_sink.emit(
+                    _runtime_stream_event(
+                        "context.compaction.failed",
+                        run_id=activation.run_id,
+                        session_id=activation.session_id,
+                        activation_id=activation.activation_id,
+                        step_index=cursor.step_index,
+                    )
+                )
+        if stream_sink is not None:
+            stream_sink.emit(
+                _runtime_stream_event(
+                    "context.compaction.completed",
+                    run_id=activation.run_id,
+                    session_id=activation.session_id,
+                    activation_id=activation.activation_id,
+                    step_index=cursor.step_index,
+                )
+            )
+        return candidate
 
     async def _execute_provider_request(
         self,
@@ -1334,6 +1557,27 @@ def _deadline_expired(commits: RuntimeCommitPort) -> bool:
     """判断 lifecycle owner 提供的 deadline 是否已经耗尽。"""
     remaining = commits.remaining_deadline_seconds()
     return remaining is not None and remaining <= 0
+
+
+def _compaction_stop(
+    cursor: RuntimeCursor,
+    commits: RuntimeCommitPort,
+    cancellation: CancellationSignal,
+    operation_deadline: float,
+) -> RuntimeActivationResult | None:
+    """在摘要副作用边界检查取消和共享截止时间，保留 run 控制流语义。"""
+    if _activation_cancelled(commits, cancellation):
+        return RuntimeActivationResult(outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor)
+    if _deadline_expired(commits):
+        return RuntimeActivationResult(
+            outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+        )
+    if asyncio.get_running_loop().time() >= operation_deadline:
+        return _failed_activation(
+            cursor,
+            IrisContextCompactionError("自动摘要操作超时", code="CONTEXT_COMPACTION_TIMEOUT"),
+        )
+    return None
 
 
 def _tool_timeout_seconds(

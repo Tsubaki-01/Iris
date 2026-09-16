@@ -60,6 +60,7 @@ from iris.tools import (
     ToolRegistry,
     ToolResult,
 )
+from tests.harness.fakes import text_response
 from tests.runtime.fakes import build_runtime
 
 
@@ -125,8 +126,9 @@ class _FakeChatBackend:
 class _RecordingStreamingProvider:
     """记录 typed 请求并委托真实 ProviderClient streaming contract。"""
 
-    def __init__(self) -> None:
+    def __init__(self, summary_responses: Sequence[LLMResponse] = ()) -> None:
         self._client = ProviderClient(provider="openai", api_key="test-key")
+        self._summary_responses = list(summary_responses)
         self.complete_requests: list[LLMRequest] = []
         self.stream_requests: list[LLMRequest] = []
 
@@ -135,9 +137,14 @@ class _RecordingStreamingProvider:
         return 1
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
-        """记录意外 complete 调用并使系统测试立即失败。"""
+        """仅接受摘要 complete；主流式请求仍禁止回退。"""
         self.complete_requests.append(request)
-        raise AssertionError("live publisher 路径不得回退到 complete()")
+        assert request.stream is False
+        assert request.tools == [] and request.tool_choice is None
+        assert request.response_format is None
+        assert request.provider_options.get("num_retries") == 0
+        assert self._summary_responses, "live publisher 主调用不得回退到 complete()"
+        return self._summary_responses.pop(0)
 
     def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
         """记录请求并返回真实 ProviderClient typed stream。"""
@@ -649,6 +656,11 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
     prepared = runner.list_tool_calls(receipt.run_id)
     assert len(prepared) == 1 and prepared[0].phase.value == "prepared"
 
+    # Durable waiting 已可见，但发起 resume 前需等待当前 managed continuation 收尾。
+    current_task = manager._current_task
+    if current_task is not None:
+        await asyncio.wait_for(asyncio.shield(current_task), timeout=1)
+
     command_result = await gateway.handle(
         ResumeCommand(
             request_id="resume-tool",
@@ -1059,7 +1071,7 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
             )
         }
         dump = "\n".join(connection.iterdump())
-    assert identity == [("agent_lifecycle", 3)]
+    assert identity == [("agent_lifecycle", 6)]
     expected_tables = {
         "agent_runs",
         "lifecycle_schema",
@@ -1071,9 +1083,11 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
         "session_messages",
         "session_run_lanes",
         "sessions",
+        "subagent_run_links",
     }
     assert objects == {("table", table) for table in expected_tables} | {
-        ("index", "one_open_interaction_per_run")
+        ("index", "one_open_interaction_per_run"),
+        ("index", "terminal_runs_by_session"),
     }
     assert "sqlite-failure-live-only" not in dump
     assert "model.block.delta" not in dump
@@ -1085,3 +1099,69 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
     await subscription.aclose()
     await restarted_manager.close()
     restarted_broker.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_uses_complete_then_streams_main_without_exposing_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实 runner/broker 链路先持久化摘要，只流式发布后续主响应。"""
+    old_text = "历史细节" * 20_000
+    summary_body = "摘要内部内容_不应输出"
+    backend = _FakeChatBackend(
+        [
+            _ControlledRawStream(_text_chunks(old_text)),
+            _ControlledRawStream(_text_chunks("继续完成")),
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", backend)
+
+    class CompactionStreamingProvider(_RecordingStreamingProvider):
+        """以字符计量稳定触发历史压缩，主响应仍经过真实 provider stream。"""
+
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            """按完整消息文本字符数提供确定性的输入估算。"""
+            return sum(len(message.text) for message in request.messages)
+
+    provider = CompactionStreamingProvider([text_response(summary_body)])
+    runner, manager, broker, gateway, store = _build_system(tmp_path, provider)
+    first = await runner.start(
+        AgentRunRequest(input="保存历史", run_id="before-compaction", session_id="session-system")
+    )
+    assert first.run.stop_reason is RunStopReason.COMPLETED
+    subscription = gateway.subscribe(
+        SubscribeCommand(request_id="compaction-live", scope="session", scope_id="session-system")
+    )
+    result = await runner.start(
+        AgentRunRequest(input="继续原任务", run_id="compact-stream", session_id="session-system")
+    )
+    items = await _take_until(
+        subscription,
+        lambda item: (
+            isinstance(item, LiveEnvelope)
+            and item.kind == "run.terminal"
+            and item.run_id == "compact-stream"
+        ),
+    )
+    envelopes = [item for item in _live_envelopes(items) if item.run_id == "compact-stream"]
+    kinds = [item.kind for item in envelopes]
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert len(provider.complete_requests) == 1
+    assert len(provider.stream_requests) == 2
+    assert kinds.index("context.compaction.started") < kinds.index("context.compacted")
+    assert kinds.index("context.compacted") < kinds.index("context.compaction.completed")
+    assert kinds.index("context.compaction.completed") < kinds.index("model.step.started")
+    assert kinds.count("model.step.started") == 1
+    assert kinds.count("model.response.started") == 1
+    assert "context.compaction.failed" not in kinds
+    assert all(summary_body not in item.model_dump_json() for item in envelopes)
+    session = store.load_session("session-system")
+    assert session.compaction is not None and session.compaction.summary == summary_body
+    assert any(message.text == old_text for message in session.messages)
+    assert result.run.usage.compaction.total_tokens == 5
+    assert result.run.usage.total_tokens == 10
+    assert result.run.usage.model_steps_reserved == 1
+    assert any(summary_body in message.text for message in provider.stream_requests[-1].messages)
+    await subscription.aclose()
+    await manager.close()
+    broker.close()

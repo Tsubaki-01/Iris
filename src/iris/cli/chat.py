@@ -228,8 +228,16 @@ class _ChatLiveOutput:
         self._completed_runs: set[str] = set()
 
     def publish(self, fact: LiveFact) -> None:
-        """消费模型文本事件；durable 与 submission 事实由 manager 处理。"""
+        """显示摘要短状态与模型文本；durable 与 submission 由 manager 处理。"""
         if not isinstance(fact, RuntimeStreamEvent):
+            return
+        compaction_status = {
+            "context.compaction.started": "正在压缩上下文",
+            "context.compaction.completed": "上下文压缩完成",
+            "context.compaction.failed": "上下文压缩未完成",
+        }.get(fact.kind)
+        if compaction_status is not None:
+            self._write(compaction_status + "\n")
             return
         event = fact.model_event
         if isinstance(event, ModelResponseStarted):

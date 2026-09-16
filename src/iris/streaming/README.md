@@ -63,6 +63,12 @@ subscription 的 offer 路径进入，并只产生一组 gap/terminal。
 
 ## Gateway 与命令
 
+自动压缩沿现有 live plane 发布 `context.compaction.started`、
+`context.compaction.completed` 和 `context.compaction.failed`，携带原有 run/session/activation
+identity 与 `step_index`。三者是 critical 状态，摘要正文和摘要模型增量不会进入 live payload。
+完成状态晚于 durable `context.compacted` 提交、早于主 `model.step.started`；失败状态的具体
+原因由最终 run 结果说明。CLI 只显示 live 短状态，忽略 durable event，避免重复完成通知。
+
 `StreamingGateway` 绑定构造时的 exact runner、manager、broker 和 session。Session scope 必须
 等于 bound session；run scope 和 durable cursor 中的 run 必须由 runner 证明属于该 session。
 Gateway 从不调用 `SessionManager.events()`，也不直接使用 store mutation 或 recovery。

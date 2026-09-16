@@ -151,8 +151,12 @@ compaction:
 输入预算与超时必须为正数，两个比例必须位于 0 与 1 之间。
 
 配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过
-`RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。当前仅提供配置和
-输入估算契约，尚未接入自动摘要执行；provider 估算边界见 [providers 说明](../providers/README.md)。
+`RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。每次主模型调用前，
+runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run 已提交的步骤，并保留当前任务
+锚点与近期原文。摘要使用当前模型；`summary_ratio` 是生成输出上限，可能包含模型 reasoning。
+压缩后的完整请求必须不超过 80% 且严格缩小。已开始的压缩失败会结束当前 run，原文与上次
+已提交摘要保留。主调用 usage 与 `RunUsage.compaction` 分开累计；provider 估算边界见
+[providers 说明](../providers/README.md)，执行与恢复见 [runtime](../runtime/README.md)。
 
 ### `ModelConfig`
 

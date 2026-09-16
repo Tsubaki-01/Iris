@@ -25,6 +25,9 @@ from .models import RuntimeActivationInput
 # endregion
 
 _RuntimeStreamEventKind = Literal[
+    "context.compaction.started",
+    "context.compaction.completed",
+    "context.compaction.failed",
     "model.step.started",
     "model.event",
     "tool.preparing",

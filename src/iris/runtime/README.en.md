@@ -27,8 +27,7 @@ their independent resources at WAITING/completion, rebuilding on recovery.
 `RuntimeProvider` must implement both `complete()` and synchronous `estimate_input_tokens(request)`.
 The latter estimates the complete request after model options and tool schemas are applied. Custom
 providers and test doubles use the same contract. Compaction configuration is carried by
-`RuntimeEnvironment.agent_config.compaction`; no separate environment field is needed. Configuration
-and estimation do not yet trigger automatic summarization in the model loop.
+`RuntimeEnvironment.agent_config.compaction`; no separate environment field is needed.
 
 ```text
 AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
@@ -70,7 +69,8 @@ model response. Resume and recovery retain these anchors without appending the i
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
 projection against the session revision used to select its range. It advances session/checkpoint
 revisions while preserving raw messages, the cursor, and the pending main-model reservation.
-Automatic triggering is not yet connected to the model loop.
+Every `before_model` checks the full input after receiving its main-step reservation; compaction
+does not consume an additional model-step budget slot.
 
 ### History projection and summary construction
 
@@ -93,6 +93,23 @@ output cap S, and `num_retries=0`. Candidates stay in memory until all batches f
 commits them. Only complete nonempty text is accepted. `IrisContextCompactionError` uses the existing
 `context` source with `CONTEXT_COMPACTION_*` codes.
 
+At 80% of usable input budget B, runtime selects a new prefix. With no new prefix, an input no larger
+than B continues directly. When summarization starts, each returned response's
+`RunUsage.compaction` is recorded before its body is checked. After all batches complete, the full
+main request must fit within 80% and be strictly smaller than before to commit the projection.
+Summaries never enter the main response's message delta or consume another reservation.
+
+One operation deadline, 300 seconds by default, covers every batch and retry. Each request also
+honors the remaining run deadline and any shorter request timeout. Only the failed batch gets one
+retry for connection, timeout, or rate-limit errors. Runtime refreshes the remaining run deadline
+before the main call; it never extends the original deadline. Cancellation keeps its existing
+meaning, and queued steering waits for the existing main-response/tool boundary.
+
+Once compaction starts, failure ends the current run while preserving raw history, the last
+committed summary, and recorded summary usage. Recovery after the projection but before a main
+response uses the new summary and the same pending reservation. WAITING first resumes its tool
+flow; `outcome_ready` only settles. Actual main-provider overflow has no extra compact-and-retry path.
+
 Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provider response without
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
@@ -112,6 +129,13 @@ Ordinary tools and child continuations share the executor's final output handlin
 complete artifact reference while limiting model-visible text.
 
 ## Optional live streaming
+
+Summaries always call `complete()` directly and expose neither summary text nor summary model
+stream events to the host. Runtime emits `context.compaction.started` only for a new prefix,
+`context.compaction.completed` after the projection commits, and then the main `model.step.started`.
+An unfinished operation emits `context.compaction.failed`; the terminal run result explains the
+cause. These statuses reuse existing identity fields without a separate payload model. Durable
+`context.compacted` remains in event history.
 
 `stream_sink=None` preserves the complete-only path exactly: runtime continues to call
 `RuntimeProvider.complete()` with `stream=False`, overriding `request_options`. With a synchronous
