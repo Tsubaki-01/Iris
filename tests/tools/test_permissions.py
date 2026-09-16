@@ -24,7 +24,6 @@ class FixedPolicy:
         self.name = name
         self.effect = effect
         self.calls: list[tuple[str, dict[str, Any], Path]] = []
-        self.fingerprint_calls = 0
 
     def check(
         self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
@@ -33,10 +32,6 @@ class FixedPolicy:
         return PermissionDecision(
             effect=self.effect, reason=self.name, metadata={"label": self.name}
         )
-
-    def fingerprint_payload(self) -> dict[str, object]:
-        self.fingerprint_calls += 1
-        return {"type": self.name, "effect": self.effect.value}
 
 
 def test_default_allow_is_specific_to_concrete_subagent_tool(tmp_path: Path) -> None:
@@ -101,9 +96,3 @@ def test_composite_preserves_strictest_decision_and_checks_actual_tool(
     assert (
         parent_policy.calls == child_policy.calls == [("child_only", {"value": "x"}, tmp_path)] * 2
     )
-    assert policy.fingerprint_payload() == {
-        "type": "most_restrictive",
-        "parent": {"type": "parent", "effect": parent},
-        "child": {"type": "child", "effect": child},
-    }
-    assert parent_policy.fingerprint_calls == child_policy.fingerprint_calls == 1

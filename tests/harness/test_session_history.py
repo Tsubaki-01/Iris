@@ -136,7 +136,6 @@ async def test_branch_uses_new_runner_environment_and_fresh_execution_state(
         assert current.run_id != "r1"
         assert current.phase is RunPhase.ACTIVE
         assert current.agent_id == "branch-agent"
-        assert current.environment_fingerprint != source.environment_fingerprint
         assert current.usage.model_steps_reserved == 1
         assert current.usage.model_steps_committed == 0
         assert current.usage.tool_calls_committed == 0

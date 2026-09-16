@@ -17,7 +17,6 @@ from iris.agents import (
 )
 from iris.context import ContextBuilder, ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisConfigError, IrisContextError
-from iris.harness._fingerprint import compute_environment_fingerprint
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import RuntimeFactory
 from iris.runtime._assembly import _prepare_skills
@@ -192,7 +191,7 @@ async def test_catalog_and_loader_share_snapshot_and_execute_without_file_builti
     assert context.read_state.get(skill_file.resolve()) is not None
 
 
-def test_same_tree_has_stable_fingerprint_and_description_change_changes_it(
+def test_skill_description_changes_only_affect_new_runtime_catalog(
     tmp_path: Path,
 ) -> None:
     skill_file = _write_skill(tmp_path, "example-skill", description="First")
@@ -200,9 +199,15 @@ def test_same_tree_has_stable_fingerprint_and_description_change_changes_it(
 
     first = RuntimeFactory.from_config(config, provider=_provider())
     second = RuntimeFactory.from_config(config, provider=_provider())
-    first_fingerprint = compute_environment_fingerprint(first)
+    first_text = first.environment.context_builder.build(
+        first.environment.context_input
+    ).system.text
 
-    assert compute_environment_fingerprint(second) == first_fingerprint
+    assert (
+        second.environment.context_builder.build(second.environment.context_input).system.text
+        == first_text
+    )
+    assert "First" in first_text
 
     text = skill_file.read_text(encoding="utf-8").replace(
         "description: First",
@@ -211,7 +216,13 @@ def test_same_tree_has_stable_fingerprint_and_description_change_changes_it(
     skill_file.write_text(text, encoding="utf-8")
     changed = RuntimeFactory.from_config(config, provider=_provider())
 
-    assert compute_environment_fingerprint(changed) != first_fingerprint
+    assert (
+        first.environment.context_builder.build(first.environment.context_input).system.text
+        == first_text
+    )
+    changed_context = changed.environment.context_builder.build(changed.environment.context_input)
+    assert "Changed" in changed_context.system.text
+    assert "First" not in changed_context.system.text
 
 
 def test_user_python_tool_named_load_skill_is_config_conflict(

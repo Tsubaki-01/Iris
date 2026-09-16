@@ -58,7 +58,6 @@ def test_terminal_compaction_is_bounded_by_frozen_message_count() -> None:
         terminal_session_message_count=2,
         terminal_compaction=SessionCompaction(summary="摘要", covered_message_count=2),
         revision=1,
-        environment_fingerprint="env",
         checkpoint_sequence=0,
         last_event_sequence=1,
         created_at=now,

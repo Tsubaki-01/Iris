@@ -13,7 +13,6 @@ from iris.exceptions import (
     IrisMCPError,
     IrisRunConflictError,
     IrisRunPersistenceError,
-    IrisRunRecoveryError,
 )
 from iris.harness import AgentRunner, SessionManager
 from iris.hitl import PermissionInteractionResponse, QuestionInteractionResponse
@@ -104,7 +103,6 @@ async def test_fresh_child_prepares_and_closes_without_overwriting_outcome(
     else:
         assert link is not None
         child = runner.store.load_run(link.child_run_id)
-        assert child.environment_fingerprint
         assert child.phase is (RunPhase.WAITING if outcome == "waiting" else RunPhase.TERMINAL)
         assert result.run.phase is child.phase
     if close_failure:
@@ -136,7 +134,7 @@ async def test_admission_exception_closes_child_before_propagating(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", [False, True])
-async def test_waiting_child_rebuilds_and_uses_ordinary_fingerprint(
+async def test_waiting_child_rebuilds_with_current_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     drift: bool,
@@ -157,21 +155,13 @@ async def test_waiting_child_rebuilds_and_uses_ordinary_fingerprint(
     if drift:
         peer.protocol_version = "2025-11-25"
     proxy = waiting.pending_interaction
-    if drift:
-        with pytest.raises(IrisRunRecoveryError):
-            await runner.resume(
-                "parent",
-                interaction_id=proxy.interaction_id,
-                response=PermissionInteractionResponse(decision="approve"),
-            )
-    else:
-        result = await runner.resume(
-            "parent",
-            interaction_id=proxy.interaction_id,
-            response=PermissionInteractionResponse(decision="approve"),
-        )
-        assert result.run.stop_reason is RunStopReason.COMPLETED
-        assert peer.events.count("call:echo") == 1
+    result = await runner.resume(
+        "parent",
+        interaction_id=proxy.interaction_id,
+        response=PermissionInteractionResponse(decision="approve"),
+    )
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert peer.events.count("call:echo") == 1
     assert peer.events.count("open") == peer.events.count("close") == 2
 
 
@@ -471,9 +461,6 @@ async def test_child_trusted_read_does_not_override_parent_permission_policy(
                 return PermissionDecision(effect=PermissionEffect.DENY)
             return super().check(tool, params, context)
 
-        def fingerprint_payload(self) -> dict[str, object]:
-            return {"policy": "deny-mcp-echo"}
-
     peer = MCPPeer(monkeypatch)
     runner = AgentRunner.from_config_path(
         configs(tmp_path),
@@ -555,21 +542,17 @@ async def test_parent_child_owned_expiry_prepares_then_redispatches_fresh_state(
     finally:
         peer.release_open.set()
     try:
-        if change == "drift":
-            with pytest.raises(IrisRunRecoveryError):
-                await task
-            assert store.load_run(child_id).phase is RunPhase.WAITING
-        else:
-            result = await task
-            assert (
-                result.run.stop_reason
-                is {
-                    "none": RunStopReason.COMPLETED,
-                    "cancel": RunStopReason.CANCELLED,
-                    "deadline": RunStopReason.DEADLINE_EXCEEDED,
-                }[change]
-            )
-            assert store.load_run(child_id).phase is RunPhase.TERMINAL
+        result = await task
+        assert (
+            result.run.stop_reason
+            is {
+                "none": RunStopReason.COMPLETED,
+                "cancel": RunStopReason.CANCELLED,
+                "deadline": RunStopReason.DEADLINE_EXCEEDED,
+                "drift": RunStopReason.COMPLETED,
+            }[change]
+        )
+        assert store.load_run(child_id).phase is RunPhase.TERMINAL
         assert peer.events == ["open", "list"]
         assert store.load_interaction(waiting.pending_interaction.interaction_id).response is None
     finally:

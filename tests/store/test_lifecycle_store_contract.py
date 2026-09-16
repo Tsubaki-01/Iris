@@ -74,7 +74,6 @@ _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _T1 = _NOW + timedelta(seconds=1)
 _T2 = _NOW + timedelta(seconds=2)
 _T3 = _NOW + timedelta(seconds=3)
-_ENVIRONMENT_FINGERPRINT = "environment-v1"
 _TOOL_FINGERPRINT = "a" * 64
 
 
@@ -110,7 +109,6 @@ def _checkpoint(
         session_revision=session_revision,
         model_steps_reserved=reserved,
         model_steps_committed=committed,
-        environment_fingerprint=_ENVIRONMENT_FINGERPRINT,
         resumability="safe",
     )
 
@@ -133,7 +131,6 @@ def _create_command(
         ),
         options=AgentRunOptions(limits=RunLimits(max_model_steps=max_model_steps)),
         agent_id="agent-1",
-        environment_fingerprint=_ENVIRONMENT_FINGERPRINT,
         start_activation_id=activation_id,
         initial_checkpoint=_checkpoint(
             run_id=run_id,

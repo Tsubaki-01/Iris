@@ -244,20 +244,13 @@ runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
 Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配置由 harness composition
 解释；直接调用 Factory 时该字段不会产生持久化副作用。
 
-Factory 创建 `ProviderClient` 时，将合并全局配置后的有效 provider、LiteLLM provider、endpoint
-和 headers 投影到 `RuntimeEnvironment.provider_fingerprint`，供 harness 比较恢复环境；API key
-不参与。显式注入的 provider 由 host 负责声明版本：在创建 runner 前设置
-`runtime.environment.provider_fingerprint = {"version": "my-provider-v2"}`。默认空字典不推断
-自定义 provider 的内部实现，未实际使用的原始路由配置也不计入指纹。
-
 Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户声明的工具。若
 `skills.enabled: true`，它以该 workspace 做一次项目级发现快照：非空结果会追加
 `available_skills` system slot，并在创建 `ToolRegistryView` / `ToolExecutor` 前注册共享同一
 registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过 catalog 和 loader，不改变
 原有 context/tool 形状；每个 factory/runtime 实例内不自动刷新快照。
 
-`RuntimeEnvironment.skill_registry` 保存这个共享 registry，供 harness 将启动发现的 Skill
-内容版本纳入恢复指纹；不再次读取 Skill 文件。`load_skill` 完整读取时会核对发现版本，文件
+`RuntimeEnvironment.skill_registry` 保存这个共享 registry。`load_skill` 完整读取时会核对发现版本，文件
 变化后返回 `SKILL_VERSION_CHANGED`，需要重新创建 runtime 并开始新 run。
 
 `skills.root` 越出 workspace、`skills.require` 缺失，或 `load_skill` 与用户工具名称/别名冲突，

@@ -17,7 +17,7 @@ its terminal `ToolResult` contract.
 The default policy allows only the concrete builtin `SubagentTool`; other AGENT tools still need
 human approval. Internal `MostRestrictivePermissionPolicy` evaluates both policies against each
 actual child tool and selects the original decision by DENY > REQUIRE_HUMAN > ALLOW. Ties retain
-the parent's reason/metadata. Both payloads participate in the existing environment fingerprint.
+the parent's reason/metadata.
 
 The dedicated `ToolExecutor` Sub Agent path preserves raw input parsing, fresh permission refresh,
 and final identity/artifact normalization. Linked continuation skips outer permission. ChildWaiting
@@ -127,10 +127,7 @@ repeat registry lookup, schema validation, or a typed-model-to-dict round trip. 
 only for the exact tool-call ID and optionally accepts a `ToolEffectGuard`. Historical approval
 never overrides current deny, workspace, or stale-read checks.
 
-`PermissionPolicy.fingerprint_payload()` is the lifecycle resumability contract for permission
-state. It must return deterministic JSON-safe data; custom policies must implement it explicitly
-rather than relying on object representations. `DefaultPermissionPolicy` includes its policy type,
-payload version, and `write_mode`.
+Custom permission policies implement `PermissionPolicy.check(tool, params, context)`.
 
 Preflight precedence is: deny returns `PERMISSION_ERROR`; a human tool under allow creates its own
 question; a human tool under require-human fails closed to prevent nested gates; only an ordinary
@@ -253,7 +250,7 @@ is the minimum output needed to preserve retrieval. Preflight errors are clipped
 `ToolDefinition.preview_chars` is the sole preview setting; `ToolExecutor` no longer accepts
 `artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
-Default permissions allow only locally trusted read-only MCP tools; policy fingerprint version is 2.
+Default permissions allow only locally trusted read-only MCP tools.
 `IrisMCPOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.
 
 ## Human tool, middleware, breaker, and discovery

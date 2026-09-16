@@ -55,7 +55,6 @@ def _store_commit_port(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
             options=AgentRunOptions(),
             agent_id="agent_1",
-            environment_fingerprint=FINGERPRINT,
             start_activation_id="activation_1",
             initial_checkpoint=RunCheckpoint(
                 run_id="run_1",
@@ -65,7 +64,6 @@ def _store_commit_port(
                 session_revision=0,
                 model_steps_reserved=0,
                 model_steps_committed=0,
-                environment_fingerprint=FINGERPRINT,
             ),
             now=NOW,
         )
@@ -257,7 +255,6 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
             options=AgentRunOptions(),
             agent_id="agent_1",
-            environment_fingerprint=FINGERPRINT,
             start_activation_id="activation_1",
             initial_checkpoint=RunCheckpoint(
                 run_id="run_1",
@@ -267,7 +264,6 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
                 session_revision=0,
                 model_steps_reserved=0,
                 model_steps_committed=0,
-                environment_fingerprint=FINGERPRINT,
             ),
             now=NOW,
         )

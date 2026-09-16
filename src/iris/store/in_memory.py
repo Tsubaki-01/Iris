@@ -403,7 +403,6 @@ class InMemoryLifecycleStore:
                     current_activation_id=None,
                     pending_interaction_id=None,
                     usage=RunUsage(),
-                    environment_fingerprint=command.environment_fingerprint,
                     checkpoint_sequence=0,
                     last_event_sequence=1,
                     created_at=command.now,
@@ -439,7 +438,6 @@ class InMemoryLifecycleStore:
                 revision=1,
                 current_activation_id=command.start_activation_id,
                 usage=RunUsage(),
-                environment_fingerprint=command.environment_fingerprint,
                 checkpoint_sequence=1,
                 last_event_sequence=2,
                 created_at=command.now,
@@ -1851,8 +1849,6 @@ class InMemoryLifecycleStore:
             raise IrisRunConflictError("checkpoint activation fence 不匹配")
         if replacement.session_revision != session_revision:
             raise IrisRunConflictError("checkpoint session revision 不匹配")
-        if replacement.environment_fingerprint != run.environment_fingerprint:
-            raise IrisRunConflictError("checkpoint environment fingerprint 不匹配")
         if replacement.model_steps_reserved != usage.model_steps_reserved:
             raise IrisRunConflictError("checkpoint reserved counter 不匹配")
         if replacement.model_steps_committed != usage.model_steps_committed:

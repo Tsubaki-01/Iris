@@ -11,7 +11,6 @@ import pytest
 from iris.exceptions import (
     IrisRunConflictError,
     IrisRunPersistenceError,
-    IrisRunRecoveryError,
     IrisRunStateError,
 )
 from iris.harness import AgentRunner
@@ -403,7 +402,7 @@ async def test_concurrent_recovery_allows_only_one_activation_takeover(
 
 
 @pytest.mark.asyncio
-async def test_recovery_rejects_environment_fingerprint_drift_without_mutation(
+async def test_recovery_uses_current_system_configuration(
     tmp_path: Path,
 ) -> None:
     provider = BlockingProvider()
@@ -413,27 +412,26 @@ async def test_recovery_rejects_environment_fingerprint_drift_without_mutation(
         store=store,
     )
     running = asyncio.create_task(
-        first.start(AgentRunRequest(input="恢复", run_id="run-fingerprint-drift"))
+        first.start(AgentRunRequest(input="恢复", run_id="run-config-change"))
     )
     await provider.started.wait()
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
-    before_run = store.load_run("run-fingerprint-drift")
-    before_checkpoint = store.load_checkpoint("run-fingerprint-drift")
-    before_events = store.list_events("run-fingerprint-drift")
+    before_run = store.load_run("run-config-change")
     assert before_run is not None and before_run.current_activation_id is not None
 
-    drifted = AgentRunner(
-        runtime=build_runtime(tmp_path, system_text="已变更配置"),
+    current_provider = StaticProvider(text_response())
+    current = AgentRunner(
+        runtime=build_runtime(tmp_path, system_text="已变更配置", provider=current_provider),
         store=store,
     )
-    with pytest.raises(IrisRunRecoveryError, match="fingerprint"):
-        await drifted.recover(
-            "run-fingerprint-drift",
-            expected_activation_id=before_run.current_activation_id,
-        )
+    result = await current.recover(
+        "run-config-change",
+        expected_activation_id=before_run.current_activation_id,
+    )
 
-    assert store.load_run("run-fingerprint-drift") == before_run
-    assert store.load_checkpoint("run-fingerprint-drift") == before_checkpoint
-    assert store.list_events("run-fingerprint-drift") == before_events
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert len(current_provider.requests) == 1
+    assert "已变更配置" in current_provider.requests[0].messages[0].text
+    assert "原始配置" not in current_provider.requests[0].messages[0].text

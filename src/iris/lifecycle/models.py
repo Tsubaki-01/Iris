@@ -349,7 +349,6 @@ class RunSnapshot(_FrozenModel):
     cancellation_reason: str | None = None
     limits: RunLimits
     usage: RunUsage
-    environment_fingerprint: str
     checkpoint_sequence: int = Field(ge=0)
     last_event_sequence: int = Field(ge=1)
     created_at: datetime
@@ -357,7 +356,7 @@ class RunSnapshot(_FrozenModel):
     updated_at: datetime
     finished_at: datetime | None = None
 
-    @field_validator("run_id", "session_id", "agent_id", "environment_fingerprint")
+    @field_validator("run_id", "session_id", "agent_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -451,7 +450,6 @@ class RunRecord(_FrozenModel):
     cancellation_requested_at: datetime | None = None
     cancellation_reason: str | None = None
     usage: RunUsage = Field(default_factory=RunUsage)
-    environment_fingerprint: str
     assistant_message: Msg | None = None
     error: RunErrorInfo | None = None
     checkpoint_sequence: int = Field(ge=0)
@@ -461,7 +459,7 @@ class RunRecord(_FrozenModel):
     updated_at: datetime
     finished_at: datetime | None = None
 
-    @field_validator("run_id", "session_id", "agent_id", "environment_fingerprint")
+    @field_validator("run_id", "session_id", "agent_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -622,10 +620,9 @@ class RunCheckpoint(_FrozenModel):
     session_revision: int = Field(ge=0)
     model_steps_reserved: int = Field(ge=0)
     model_steps_committed: int = Field(ge=0)
-    environment_fingerprint: str
     resumability: CheckpointResumability = CheckpointResumability.SAFE
 
-    @field_validator("run_id", "activation_id", "environment_fingerprint")
+    @field_validator("run_id", "activation_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))
@@ -763,7 +760,6 @@ def snapshot_run(record: RunRecord) -> RunSnapshot:
         cancellation_reason=record.cancellation_reason,
         limits=record.options.limits,
         usage=record.usage,
-        environment_fingerprint=record.environment_fingerprint,
         checkpoint_sequence=record.checkpoint_sequence,
         last_event_sequence=record.last_event_sequence,
         created_at=record.created_at,

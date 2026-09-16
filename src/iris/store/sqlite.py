@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v6 的同步 SQLite store。"""
+"""精确 lifecycle schema v7 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -2727,7 +2727,6 @@ class SQLiteStore:
                 current_activation_id=None,
                 pending_interaction_id=None,
                 usage=RunUsage(),
-                environment_fingerprint=command.environment_fingerprint,
                 checkpoint_sequence=0,
                 last_event_sequence=1,
                 created_at=command.now,
@@ -2771,7 +2770,6 @@ class SQLiteStore:
             revision=1,
             current_activation_id=command.start_activation_id,
             usage=RunUsage(),
-            environment_fingerprint=command.environment_fingerprint,
             checkpoint_sequence=1,
             last_event_sequence=2,
             created_at=command.now,
@@ -2996,8 +2994,8 @@ class SQLiteStore:
             """INSERT INTO run_checkpoints(
                 run_id, sequence, activation_id, checkpoint_version, cursor_json,
                 session_revision, model_steps_reserved, model_steps_committed,
-                environment_fingerprint, resumability, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                resumability, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 checkpoint.run_id,
                 checkpoint.sequence,
@@ -3007,7 +3005,6 @@ class SQLiteStore:
                 checkpoint.session_revision,
                 checkpoint.model_steps_reserved,
                 checkpoint.model_steps_committed,
-                checkpoint.environment_fingerprint,
                 checkpoint.resumability.value,
                 updated_at.isoformat(),
             ),
@@ -3026,7 +3023,7 @@ class SQLiteStore:
             """UPDATE run_checkpoints SET
                 sequence = ?, activation_id = ?, checkpoint_version = ?, cursor_json = ?,
                 session_revision = ?, model_steps_reserved = ?, model_steps_committed = ?,
-                environment_fingerprint = ?, resumability = ?, updated_at = ?
+                resumability = ?, updated_at = ?
             WHERE run_id = ? AND sequence = ?""",
             (
                 updated.sequence,
@@ -3036,7 +3033,6 @@ class SQLiteStore:
                 updated.session_revision,
                 updated.model_steps_reserved,
                 updated.model_steps_committed,
-                updated.environment_fingerprint,
                 updated.resumability.value,
                 updated_at.isoformat(),
                 current.run_id,
@@ -3459,7 +3455,6 @@ def _row_to_run(row: sqlite3.Row) -> RunRecord:
         cancellation_requested_at=row["cancellation_requested_at"],
         cancellation_reason=row["cancellation_reason"],
         usage=RunUsage.model_validate(_load_json(row["usage_json"])),
-        environment_fingerprint=row["environment_fingerprint"],
         assistant_message=_load_message(row["assistant_message_json"]),
         error=(
             RunErrorInfo.model_validate(_load_json(row["error_json"]))
@@ -3519,7 +3514,6 @@ def _row_to_checkpoint(row: sqlite3.Row) -> RunCheckpoint:
         session_revision=row["session_revision"],
         model_steps_reserved=row["model_steps_reserved"],
         model_steps_committed=row["model_steps_committed"],
-        environment_fingerprint=row["environment_fingerprint"],
         resumability=row["resumability"],
     )
 
@@ -3589,17 +3583,17 @@ def _row_to_event(row: sqlite3.Row) -> RunEvent:
 
 _INSERT_RUN = """INSERT INTO agent_runs(
     run_id, session_id, agent_id, phase, stop_reason, request_json, options_json,
-    environment_fingerprint, session_revision, run_revision, current_activation_id,
+    session_revision, run_revision, current_activation_id,
     pending_interaction_id, cancellation_requested_at, cancellation_reason,
     usage_json,
     assistant_message_json, error_json, checkpoint_sequence, last_event_sequence,
     created_at, started_at, updated_at, finished_at, terminal_session_message_count,
     initial_session_message_count, terminal_compaction_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
 _UPDATE_RUN = """UPDATE agent_runs SET
     session_id = ?, agent_id = ?, phase = ?, stop_reason = ?, request_json = ?,
-    options_json = ?, environment_fingerprint = ?, session_revision = ?,
+    options_json = ?, session_revision = ?,
     run_revision = ?, current_activation_id = ?, pending_interaction_id = ?,
     cancellation_requested_at = ?, cancellation_reason = ?,
     usage_json = ?, assistant_message_json = ?, error_json = ?, checkpoint_sequence = ?,
@@ -3636,7 +3630,6 @@ def _run_values(run: RunRecord, session_revision: int) -> tuple[object, ...]:
         run.stop_reason.value if run.stop_reason is not None else None,
         _dump_json(run.request),
         _dump_json(run.options),
-        run.environment_fingerprint,
         session_revision,
         run.revision,
         run.current_activation_id,
@@ -3759,8 +3752,6 @@ def _validate_checkpoint_replacement(
         raise IrisRunConflictError("checkpoint activation fence 不匹配")
     if replacement.session_revision != session_revision:
         raise IrisRunConflictError("checkpoint session revision 不匹配")
-    if replacement.environment_fingerprint != run.environment_fingerprint:
-        raise IrisRunConflictError("checkpoint environment fingerprint 不匹配")
     if replacement.model_steps_reserved != usage.model_steps_reserved:
         raise IrisRunConflictError("checkpoint reserved counter 不匹配")
     if replacement.model_steps_committed != usage.model_steps_committed:

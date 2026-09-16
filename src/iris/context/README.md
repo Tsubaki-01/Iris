@@ -272,20 +272,17 @@ class ContextBuildOutput(BaseModel):
 模板渲染使用数据副本；模板 renderer 对传入上下文的修改不会改变原 section
 或 slot。
 
-同一个 `ContextTemplateRenderer` 在首次 `render_file()` 或 `content_version()` 时读取入口与
+同一个 `ContextTemplateRenderer` 在首次 `render_file()` 时读取入口与
 静态 `include` / `import` / `extends` 依赖，随后复用来源快照、Jinja Environment 与编译模板。
 修改文件、增加之前缺失的可选文件只影响新 renderer；无需扫描模板目录。嵌套依赖、静态文件名
 列表备用与 `ignore missing` 均保留首次快照中的存在性和内容。
 
 依赖文件名必须是静态字符串或静态字符串列表。动态数据与条件分支仍可使用；把
 `{% include selected %}` 改为在每个条件分支分别引用固定文件名。动态文件名表达式会抛出带有
-该修正指引的 `IrisContextError`，因为启动时无法确定它的来源版本。
+该修正指引的 `IrisContextError`，因为首次读取时无法确定完整的依赖来源。
 
-`ContextBuilder.fingerprint_payload()` 返回启用并排序后的 slot、字符上限与模板内容版本，
-不渲染完整 context。Harness 构造 runner 时调用它：`system`、有启用 slot 的前置段，以及配置了
-模板或字符上限的 `memory` 均纳入恢复指纹。空 memory 可能由 run options 注入 slots，因此其
-已配置模板也在此时冻结；默认空 memory、禁用 slot 和空前置段被跳过。独立 `build()` 仍对空
-可选段直接返回 `None`。`StrictUndefined` 与 `max_chars` 只在实际渲染时生效。
+`build()` 对没有启用 slot 的可选段直接返回 `None`，不会读取该段的模板。
+`StrictUndefined` 与 `max_chars` 只在实际渲染时生效。
 
 ## 渲染后字符上限
 
@@ -349,9 +346,6 @@ class ContextBuilder:
 
     def build(self, input_data: ContextBuildInput) -> ContextBuildOutput: ...
 
-    def fingerprint_payload(self, input_data: ContextBuildInput) -> dict[str, Any]: ...
-
-
 class ContextXmlRenderer:
     def render_section(
         self,
@@ -363,8 +357,6 @@ class ContextXmlRenderer:
 
 
 class ContextTemplateRenderer:
-    def content_version(self, template_path: Path) -> str: ...
-
     def render_file(
         self,
         template_path: Path,
@@ -404,7 +396,7 @@ class ContextTemplateRenderer:
 | --- | --- | --- |
 | slot/section 约束、顺序、角色、字符上限与 XML 渲染 | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML、模板路径与 Jinja2 渲染 | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
-| 模板来源快照与恢复输入 | `builder.py`, `renderer.py` | `tests/context/test_template_snapshot.py`, `tests/harness/test_environment_fingerprint.py` |
+| 模板来源快照 | `renderer.py` | `tests/context/test_template_snapshot.py` |
 
 ```bash
 uv run pytest tests/context

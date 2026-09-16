@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from ..exceptions import IrisConfigError, IrisToolValidationError
+from ..exceptions import IrisToolValidationError
 from .base import BaseTool, ToolCapability, ToolExecutionContext
 from .subagent import SubagentTool
 
@@ -85,13 +85,6 @@ class PermissionPolicy:
         """返回工具调用权限裁决。"""
         raise NotImplementedError
 
-    def fingerprint_payload(self) -> dict[str, object]:
-        """返回决定恢复兼容性的确定性 JSON-safe 策略状态。"""
-        raise IrisConfigError(
-            "自定义权限策略必须实现 fingerprint_payload()",
-            policy_type=type(self).__qualname__,
-        )
-
 
 class DefaultPermissionPolicy(PermissionPolicy):
     """保守默认权限策略。"""
@@ -138,14 +131,6 @@ class DefaultPermissionPolicy(PermissionPolicy):
             metadata={"tool": tool.name, "params": params},
         )
 
-    def fingerprint_payload(self) -> dict[str, object]:
-        """返回默认权限策略影响工具执行的稳定状态。"""
-        return {
-            "type": "default",
-            "version": 2,
-            "write_mode": self.write_mode,
-        }
-
 
 class MostRestrictivePermissionPolicy(PermissionPolicy):
     """对实际 child 工具分别裁决，两侧同级时保留 parent 决策。"""
@@ -166,11 +151,3 @@ class MostRestrictivePermissionPolicy(PermissionPolicy):
             PermissionEffect.DENY: 2,
         }
         return child if priority[child.effect] > priority[parent.effect] else parent
-
-    def fingerprint_payload(self) -> dict[str, object]:
-        """将两侧策略状态交给既有 environment fingerprint owner。"""
-        return {
-            "type": "most_restrictive",
-            "parent": self.parent.fingerprint_payload(),
-            "child": self.child.fingerprint_payload(),
-        }

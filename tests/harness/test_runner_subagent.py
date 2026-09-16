@@ -12,7 +12,6 @@ from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
 from iris.exceptions import (
     IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
-    IrisRunRecoveryError,
     IrisRunStateError,
 )
 from iris.harness import AgentRunner, ChildProviderFactory, SessionManager
@@ -1010,11 +1009,6 @@ async def test_recover_resolved_proxy_uses_stored_response_and_same_child(
         store=SQLiteStore(db),
         child_provider_factory=factory,
     )
-    if drift:
-        with pytest.raises(IrisRunRecoveryError):
-            await restarted.recover("parent")
-        assert factory.configs == []
-        return
     completed = await restarted.recover("parent")
     assert factory.configs[0][1] == tmp_path / ("broken.yaml" if nondefault else "child.yaml")
     assert completed.assistant_message.text == "Parent recovered"
@@ -1095,12 +1089,13 @@ async def test_recover_proxy_after_child_closes_saved_interaction(
 
 
 @pytest.mark.asyncio
-async def test_child_fingerprint_rejection_keeps_parent_recoverable(
+async def test_parent_recovery_uses_current_child_system_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = _write_configs(tmp_path)
     db = tmp_path / "state.db"
-    factory = ChildProviders(StaticProvider(text_response("Child recovered")))
+    child_provider = StaticProvider(text_response("Child recovered"))
+    factory = ChildProviders(child_provider)
     runner = AgentRunner.from_config_path(
         path, provider=StaticProvider(), store=SQLiteStore(db), child_provider_factory=factory
     )
@@ -1125,18 +1120,13 @@ async def test_child_fingerprint_rejection_keeps_parent_recoverable(
         store=SQLiteStore(db),
         child_provider_factory=factory,
     )
-    with pytest.raises(IrisRunRecoveryError):
-        await restarted.recover(
-            "parent",
-            expected_activation_id=restarted.store.load_run("parent").current_activation_id,
-        )
-    assert restarted.store.load_run("parent").phase == RunPhase.ACTIVE
-    assert restarted.store.load_run(child_id).phase == RunPhase.ACTIVE
-    child_path.write_text(original_yaml, encoding="utf-8")
     result = await restarted.recover(
         "parent", expected_activation_id=restarted.store.load_run("parent").current_activation_id
     )
     assert result.run.stop_reason == RunStopReason.COMPLETED
+    assert restarted.store.load_run(child_id).phase == RunPhase.TERMINAL
+    assert "Changed instructions" in child_provider.requests[0].messages[0].text
+    assert "Child instructions" not in child_provider.requests[0].messages[0].text
 
 
 class RecordingPermissionPolicy(DefaultPermissionPolicy):
@@ -1153,9 +1143,6 @@ class RecordingPermissionPolicy(DefaultPermissionPolicy):
             effect=self.effect if tool.name == self.gated_tool else PermissionEffect.ALLOW,
             reason="Confirm selected tool",
         )
-
-    def fingerprint_payload(self) -> dict[str, object]:
-        return {"type": "recording", "gated_tool": self.gated_tool}
 
 
 @pytest.mark.asyncio
@@ -1281,7 +1268,7 @@ async def test_parent_active_recovery_reuses_linked_child(
     assert runner.store.load_run(link.child_run_id).phase.value == child_phase
     policy = RecordingPermissionPolicy("subagent")
     policy.effect = PermissionEffect.DENY
-    # 保持原 policy fingerprint，运行时裁决可收紧但 linked call 不再次询问 outer。
+    # 运行时裁决可收紧，但 linked call 不再次询问 outer。
     restarted = AgentRunner.from_config_path(
         path,
         provider=StaticProvider(text_response("Parent recovered")),
@@ -1723,7 +1710,6 @@ def _admit_durable_child(runner: AgentRunner) -> str:
         request=AgentRunRequest(input="Child task", session_id="child-session", run_id="child"),
         options=AgentRunOptions(),
         agent_id="researcher",
-        environment_fingerprint="child-env",
         start_activation_id="child-a",
         initial_checkpoint=RunCheckpoint(
             run_id="child",
@@ -1733,7 +1719,6 @@ def _admit_durable_child(runner: AgentRunner) -> str:
             session_revision=0,
             model_steps_reserved=0,
             model_steps_committed=0,
-            environment_fingerprint="child-env",
         ),
         now=runner.clock.now(),
     )
@@ -1791,14 +1776,15 @@ async def test_linked_terminal_projection_is_nonretryable_and_run_local(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", [False, True])
-async def test_restart_recovers_original_active_child_with_ordinary_fingerprint(
+async def test_restart_recovers_original_active_child_with_current_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     drift: bool,
 ) -> None:
     path = _write_configs(tmp_path)
     db = tmp_path / "state.db"
-    factory = ChildProviders(StaticProvider(text_response("Recovered child")))
+    child_provider = StaticProvider(text_response("Recovered child"))
+    factory = ChildProviders(child_provider)
     runner = AgentRunner.from_config_path(
         path, provider=StaticProvider(), store=SQLiteStore(db), child_provider_factory=factory
     )
@@ -1835,14 +1821,12 @@ async def test_restart_recovers_original_active_child_with_ordinary_fingerprint(
         permission_mode="default",
         metadata=None,
     )
-    if drift:
-        with pytest.raises(IrisRunRecoveryError):
-            await _dispatch(restarted, rebuilt, linked=True)
-    else:
-        result = await _dispatch(restarted, rebuilt, linked=True)
-        assert result.model_content == "Recovered child"
-        assert result.metadata["child_run_id"] == child_id
-        assert restarted.store.load_run(child_id).phase == RunPhase.TERMINAL
+    result = await _dispatch(restarted, rebuilt, linked=True)
+    assert result.model_content == "Recovered child"
+    assert result.metadata["child_run_id"] == child_id
+    assert restarted.store.load_run(child_id).phase == RunPhase.TERMINAL
+    expected_system = "Changed instructions" if drift else "Child instructions"
+    assert expected_system in child_provider.requests[0].messages[0].text
     assert restarted.store.load_subagent_link("parent", "delegate").child_run_id == child_id
     assert (
         len(
@@ -1876,9 +1860,6 @@ async def test_runner_injected_parent_policy_applies_to_child_only_tool(tmp_path
                     effect=PermissionEffect.DENY, reason="parent denies reading"
                 )
             return PermissionDecision(effect=PermissionEffect.ALLOW)
-
-        def fingerprint_payload(self) -> dict[str, object]:
-            return {"type": "parent_read_denial"}
 
     provider = StaticProvider(
         tool_response(

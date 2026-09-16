@@ -555,7 +555,6 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             session_revision=session_revision,
             model_steps_reserved=usage.model_steps_reserved,
             model_steps_committed=usage.model_steps_committed,
-            environment_fingerprint=self._run.environment_fingerprint,
             resumability=resumability or self._checkpoint.resumability,
         )
 

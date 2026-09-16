@@ -120,7 +120,7 @@ async def test_resume_refreshes_changed_permission_without_losing_subject(
     """等待期间的动态裁决变化不改变 durable subject，也不能被历史批准越过。"""
 
     class MutablePolicy(DefaultPermissionPolicy):
-        """模拟外部权限状态变化，配置 fingerprint 保持稳定。"""
+        """模拟已有批准后外部权限状态收紧。"""
 
         effect: PermissionEffect = PermissionEffect.REQUIRE_HUMAN
 

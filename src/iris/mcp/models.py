@@ -125,7 +125,7 @@ class MCPServerSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class MCPCatalogSnapshot:
-    """一次成功准备的固定目录与诊断；有效配置只在内存中参与指纹。"""
+    """一次成功准备的固定目录与诊断；有效配置保留在内存中。"""
 
     servers: tuple[MCPServerSnapshot, ...]
     diagnostics: tuple[MCPDiagnostic, ...]

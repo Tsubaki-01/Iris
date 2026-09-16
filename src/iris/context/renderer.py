@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
@@ -59,14 +56,6 @@ class ContextXmlRenderer:
         return f"<{slot.name}{attributes}>{inner}</{slot.name}>"
 
 
-@dataclass(frozen=True, slots=True)
-class _TemplateSnapshot:
-    """一次来源读取对应的编译模板与恢复版本。"""
-
-    template: Template
-    content_version: str
-
-
 class ContextTemplateRenderer:
     """从首次读取的来源快照渲染 XML Jinja2 模板。
 
@@ -75,21 +64,7 @@ class ContextTemplateRenderer:
 
     def __init__(self) -> None:
         """为当前 renderer 保留按模板入口索引的来源快照。"""
-        self._snapshots: dict[Path, _TemplateSnapshot] = {}
-
-    def content_version(self, template_path: Path) -> str:
-        """读取模板及其静态依赖的内容版本，不执行模板。
-
-        Args:
-            template_path (Path): 模板入口文件路径。
-
-        Returns:
-            str: 不包含入口文件位置的来源版本。
-
-        Raises:
-            IrisContextError: 模板无法读取、解析或包含动态文件名引用。
-        """
-        return self._snapshot(template_path).content_version
+        self._snapshots: dict[Path, Template] = {}
 
     def render_file(
         self,
@@ -108,7 +83,7 @@ class ContextTemplateRenderer:
         Raises:
             IrisContextError: 来源无法冻结或模板执行失败。
         """
-        template = self._snapshot(template_path).template
+        template = self._snapshot(template_path)
         try:
             return template.render(**context).strip()
         except Exception as exc:
@@ -118,8 +93,8 @@ class ContextTemplateRenderer:
                 error=str(exc),
             ) from exc
 
-    def _snapshot(self, template_path: Path) -> _TemplateSnapshot:
-        """冻结入口和依赖，后续指纹与渲染复用同一来源。"""
+    def _snapshot(self, template_path: Path) -> Template:
+        """冻结入口和依赖，后续渲染复用同一来源。"""
         template_path = template_path.resolve()
         cached = self._snapshots.get(template_path)
         if cached is not None:
@@ -147,23 +122,8 @@ class ContextTemplateRenderer:
                 path=str(template_path),
                 error=str(exc),
             ) from exc
-        canonical = json.dumps(
-            {
-                "source": sources[template_path.name],
-                "dependencies": {
-                    name: source for name, source in sources.items() if name != template_path.name
-                },
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        snapshot = _TemplateSnapshot(
-            template=template,
-            content_version=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-        )
-        self._snapshots[template_path] = snapshot
-        return snapshot
+        self._snapshots[template_path] = template
+        return template
 
 
 def _read_template_sources(

@@ -34,10 +34,10 @@ all remaining fields. Servers are required by default: invalid required declarat
 `agents.config.mcp.MCPServerOverride` accepts required, trust_annotations, and the two timeouts.
 `AgentConfig.mcp` uses `AgentMCPConfig`; `mcp.path` resolves relative to the agent YAML.
 Shared assembly reads declarations. Root `AgentRunner.aprepare()` prepares before execution and
-includes the complete catalog in its final fingerprint. Connections span runs; the host awaits every
+publishes the complete catalog. Connections span runs; the host awaits every
 original execution call fully before awaiting `runner.aclose()`.
 Children use the same YAML configuration with independent connections, prepare before admission, and
-close at WAITING/completion. Recovery rediscovers and checks the ordinary fingerprint. Child closure
+close at WAITING/completion. Recovery rediscovers tools using current configuration. Child closure
 does not affect root connections; the existing parent/child policy decides permissions.
 
 `resolve_server_config()` expands `${VAR}`, `${VAR:-default}`, and `${env:VAR}` exactly once.
@@ -84,7 +84,7 @@ diagnostics. Valid empty catalogs are allowed.
 The successful `snapshot` stays fixed, and concurrent/repeated prepare calls do not reconnect or
 rediscover. Failed managers close; create a new instance for new configuration. `aclose()` attempts
 every owned connection and reports explicit closure failures to the host. Effective env/header
-values in the snapshot are for in-memory fingerprinting and should not be logged or persisted.
+values in the snapshot stay in memory and should not be logged or persisted.
 
 `catalog.build_catalog(server, sdk_tools)` filters original wire names and compiles JSON Schema
 2020-12 input validators. Local references work; unresolved external references and other dialects

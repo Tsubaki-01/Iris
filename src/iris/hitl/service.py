@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from ..exceptions import (
     HITLConflictError,
     HITLResponseMismatchError,
-    IrisRunRecoveryError,
     IrisRunStateError,
 )
 from ..lifecycle import RunPhase, RunSnapshot
@@ -59,7 +58,6 @@ class HumanInteractionService:
         run: RunSnapshot,
         response: HumanInteractionResponse,
         now: datetime,
-        environment_fingerprint: str,
     ) -> None:
         """校验一次 response 是否能安全绑定当前 durable waiting facts。"""
         normalized_now = _aware_utc(now, field_name="now")
@@ -75,8 +73,6 @@ class HumanInteractionService:
             raise IrisRunStateError("interaction 已关闭或不可响应")
         if response.kind != interaction.request.prompt.kind:
             raise HITLResponseMismatchError("response kind 与 interaction request 不匹配")
-        if run.environment_fingerprint != environment_fingerprint:
-            raise IrisRunRecoveryError("恢复环境 fingerprint 已变化", run_id=run.run_id)
         if (
             interaction.status is InteractionStatus.PENDING
             and interaction.expires_at is not None

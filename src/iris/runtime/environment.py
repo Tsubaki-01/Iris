@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
@@ -117,7 +117,6 @@ class RuntimeEnvironment:
         memory_service (MemoryService | None): 显式可选 memory 服务。
         memory_context_builder (MemoryContextBuilder): memory context 裁剪器。
         skill_registry (SkillRegistry | None): 启动发现的 Skill 内容版本快照。
-        provider_fingerprint (dict[str, Any]): 有效 provider 配置或 host 显式版本，不含 API key。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
     """
 
@@ -131,7 +130,6 @@ class RuntimeEnvironment:
     memory_service: MemoryService | None = None
     memory_context_builder: MemoryContextBuilder = field(default_factory=MemoryContextBuilder)
     skill_registry: SkillRegistry | None = None
-    provider_fingerprint: dict[str, Any] = field(default_factory=dict)
     mcp_manager: MCPManager | None = None
 
     def __post_init__(self) -> None:

@@ -7,12 +7,10 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import (
-    IrisConfigError,
     IrisMCPError,
     IrisRunConflictError,
     IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
-    IrisRunRecoveryError,
     IrisRunStateError,
 )
 from iris.harness import AgentRunner, SessionHistory
@@ -36,7 +34,6 @@ from iris.store import InMemoryLifecycleStore
 from ..mcp.fixtures.runtime import MCPPeer, mcp_agent
 from ..mcp.fixtures.tools import AllowTools
 from .fakes import BlockingProvider, FrozenClock, StaticProvider, text_response, tool_response
-from .test_runner_start import NonJsonPolicy
 
 
 @pytest.mark.asyncio
@@ -54,19 +51,14 @@ async def test_prepare_precedes_create_and_reuses_catalog(
         text_response(),
     )
     runner = AgentRunner.from_config(mcp_agent(tmp_path), store=store, provider=provider)
-    with pytest.raises(IrisRunStateError):
-        _ = runner.environment_fingerprint
     assert not peer.events
     if explicit:
         await runner.aprepare()
         assert store.load_run("first") is None
     result = await runner.start(AgentRunRequest(input="call", run_id="first"))
-    fingerprint = runner.environment_fingerprint
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert store.list_tool_calls("first")[0].phase is ToolCallPhase.COMMITTED
-    assert store.load_checkpoint("first").environment_fingerprint == fingerprint
     await runner.start(AgentRunRequest(input="again", run_id="second"))
-    assert runner.environment_fingerprint == fingerprint
     assert peer.events == ["open", "list", "call:echo"]
     await runner.aclose()
     await runner.aclose()
@@ -112,23 +104,6 @@ async def test_active_close_rejected_and_detached_durable_queries_survive_close(
         result = await task
         await runner.aclose()
     assert runner.get_result("run") == result
-
-
-@pytest.mark.asyncio
-async def test_fingerprint_failure_closes_prepared_resources_without_creating_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    peer = MCPPeer(monkeypatch)
-    runner = AgentRunner.from_config(
-        mcp_agent(tmp_path), provider=StaticProvider(), permission_policy=NonJsonPolicy()
-    )
-    with pytest.raises(IrisConfigError):
-        await runner.start(AgentRunRequest(input="call", run_id="invalid"))
-    assert runner.store.load_run("invalid") is None
-    assert peer.events == ["open", "list", "close"]
-    with pytest.raises(IrisRunStateError):
-        await runner.aprepare()
 
 
 @pytest.mark.asyncio
@@ -384,7 +359,7 @@ async def test_public_cancel_waits_for_mcp_cleanup_and_preserves_known_outcome(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("drift", [False, True])
-async def test_outcome_ready_recovery_still_prepares_and_compares_fingerprint(
+async def test_outcome_ready_recovery_prepares_current_catalog(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     drift: bool,
@@ -412,13 +387,9 @@ async def test_outcome_ready_recovery_still_prepares_and_compares_fingerprint(
     second = AgentRunner.from_config(config, store=store, provider=provider)
     try:
         fence = store.load_run("finalize").current_activation_id
-        if drift:
-            with pytest.raises(IrisRunRecoveryError):
-                await second.recover("finalize", expected_activation_id=fence)
-        else:
-            assert (
-                await second.recover("finalize", expected_activation_id=fence)
-            ).run.stop_reason is RunStopReason.COMPLETED
+        assert (
+            await second.recover("finalize", expected_activation_id=fence)
+        ).run.stop_reason is RunStopReason.COMPLETED
         assert peer.events == ["open", "list"] and not provider.requests
     finally:
         await second.aclose()

@@ -42,7 +42,7 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 - In a terminal run's durable history, every `tool_use` has exactly one matching result. Tool-call
   phase still distinguishes a committed result, unknown outcome, and never-started execution; a
   synthetic closer must not erase side-effect knowledge.
-- Run, checkpoint, session revision, usage counters, and environment fingerprint cross-validate.
+- Run, checkpoint, session revision, and usage counters cross-validate.
 - Mutation events append atomically with aggregate facts and use monotonic sequence numbers.
 
 ## Checkpoint v1

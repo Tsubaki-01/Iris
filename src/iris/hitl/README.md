@@ -35,7 +35,7 @@ proxy 使用 parent `resume()`；已 RESOLVED 的 crash gap 用 parent `recover(
 
 - `create_pending()`：从 active run snapshot 构造尚未持久化的 pending value；
 - `create_subagent_proxy()`：从 typed child prompt 与 parent snapshot 构造 proxy；
-- `validate_response()`：校验 run/interaction identity、kind、expiry 与 environment fingerprint；
+- `validate_response()`：校验 run/interaction identity、kind、expiry 与已保存回答的一致性；
 - `project_response(interaction)`：读取 RESOLVED/CLOSED interaction 的存储回答，投影为
   `ToolResult` 或 `ApprovedToolCall`，不再接受第二份 response。
 
@@ -45,7 +45,7 @@ proxy 使用 parent `resume()`；已 RESOLVED 的 crash gap 用 parent `recover(
 ## Fingerprint
 
 `make_call_fingerprint()` 对 session/run/call/tool/arguments/workspace 的 canonical JSON 做 SHA-256。
-批准只适用于该 exact subject；任何 identity 或环境漂移都必须 fail closed。
+批准只适用于该 exact subject；调用身份、参数或 workspace 不匹配时拒绝执行。
 
 ## 公开接口
 

@@ -98,7 +98,6 @@ from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._events import _RunEventCollector
-from ._fingerprint import compute_environment_fingerprint
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
@@ -212,7 +211,6 @@ class AgentRunner:
         _live_publisher (LivePublisher | None): 可选的同进程 live fact publisher。
         clock (Clock): aware UTC 时间源。
         interaction_service (HumanInteractionService): 无状态 HITL 领域服务。
-        environment_fingerprint (str): 环境指纹，用于拒绝跨环境 resume/recover。
 
     Example:
         runner = AgentRunner.from_config_path("agent.yaml")
@@ -247,11 +245,7 @@ class AgentRunner:
         self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
-        self._environment_fingerprint = (
-            compute_environment_fingerprint(runtime)
-            if runtime.environment.mcp_manager is None
-            else None
-        )
+        self._prepared = runtime.environment.mcp_manager is None
         self._closed = False
         self._live_publisher = live_publisher
         if live_publisher is None:
@@ -263,23 +257,15 @@ class AgentRunner:
         self._active: dict[str, ActiveActivation] = {}
         self._subagent_controller: HarnessSubagentController | None = None
 
-    @property
-    def environment_fingerprint(self) -> str:
-        """返回准备后的唯一指纹；未准备的 MCP 环境不能用于恢复比较。"""
-        if self._environment_fingerprint is None:
-            raise IrisRunStateError("MCP 环境尚未准备，请先 await runner.aprepare()")
-        return self._environment_fingerprint
-
     async def aprepare(self) -> None:
-        """准备环境并固定最终指纹；失败后释放资源，必须新建 runner。"""
+        """准备运行资源；失败后释放资源，必须新建 runner。"""
         if self._closed:
             raise IrisRunStateError("runner 已关闭")
-        if self._environment_fingerprint is not None:
+        if self._prepared:
             return
         try:
             await self.runtime.environment.aprepare()
-            if self._environment_fingerprint is None:
-                self._environment_fingerprint = compute_environment_fingerprint(self.runtime)
+            self._prepared = True
         except BaseException:
             self._closed = True
             try:
@@ -478,13 +464,11 @@ class AgentRunner:
             session_revision=session.revision,
             model_steps_reserved=0,
             model_steps_committed=0,
-            environment_fingerprint=self.environment_fingerprint,
         )
         return CreateRun(
             request=resolved_request,
             options=resolved_options,
             agent_id=self.runtime.environment.agent_config.name,
-            environment_fingerprint=self.environment_fingerprint,
             start_activation_id=activation_id,
             initial_checkpoint=checkpoint,
             now=self._now(),
@@ -604,7 +588,7 @@ class AgentRunner:
             IrisRunRecoveryError: 当 waiting run 缺少 checkpoint 或 checkpoint 校验失败时。
         """
         # --- 1. 校验 run/interaction identity ---
-        needs_prepare = self._environment_fingerprint is None
+        needs_prepare = not self._prepared
         normalized_run_id = self._required_id(run_id)
         normalized_interaction_id = self._required_id(interaction_id)
         run = self.store.load_run(normalized_run_id)
@@ -666,7 +650,6 @@ class AgentRunner:
             run=snapshot_run(run),
             response=response,
             now=now,
-            environment_fingerprint=self.environment_fingerprint,
         )
         if interaction.status is InteractionStatus.PENDING:
             resolved = self.store.resolve_interaction(
@@ -1076,7 +1059,7 @@ class AgentRunner:
             IrisRunRecoveryError: 当 durable interaction/checkpoint 缺失或校验失败时。
         """
         # --- 1. 按 phase 分派 recovery 入口 ---
-        needs_prepare = self._environment_fingerprint is None
+        needs_prepare = not self._prepared
         normalized = self._required_id(run_id)
         run = self.store.load_run(normalized)
         if run is None:
@@ -1092,7 +1075,7 @@ class AgentRunner:
             settled = await self._settle_waiting_if_due(run, interaction, now=self._now())
             if settled is not None:
                 return settled
-            if needs_prepare and self._environment_fingerprint is not None:
+            if needs_prepare and self._prepared:
                 return await self.recover(run_id, expected_activation_id=expected_activation_id)
             if (
                 interaction.status is InteractionStatus.RESOLVED
@@ -1260,8 +1243,6 @@ class AgentRunner:
             or checkpoint.session_revision != session.revision
             or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
             or checkpoint.model_steps_committed != run.usage.model_steps_committed
-            or checkpoint.environment_fingerprint != run.environment_fingerprint
-            or checkpoint.environment_fingerprint != self.environment_fingerprint
         ):
             raise IrisRunRecoveryError(
                 "active checkpoint 与 durable run/session facts 不匹配",
@@ -1340,7 +1321,7 @@ class AgentRunner:
     ) -> RuntimeCursor:
         """在消费人工响应前验证 waiting checkpoint 的交叉事实。
 
-        除了 recovery 同款的 run/session/usage/environment 校验，还要求 cursor 恰好停在
+        除了 recovery 同款的 run/session/usage 校验，还要求 cursor 恰好停在
         该 interaction 对应的 tool call 上，并且 durable tool call 记录仍是 prepared。
         人工决定一旦被投影就会真实执行工具，因此必须先确认要执行的正是被批准的那一次调用。
         """
@@ -1351,8 +1332,6 @@ class AgentRunner:
             or checkpoint.session_revision != session.revision
             or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
             or checkpoint.model_steps_committed != run.usage.model_steps_committed
-            or checkpoint.environment_fingerprint != run.environment_fingerprint
-            or checkpoint.environment_fingerprint != self.environment_fingerprint
             or checkpoint.resumability is not CheckpointResumability.SAFE
         ):
             raise IrisRunRecoveryError(
@@ -1440,7 +1419,7 @@ class AgentRunner:
             and run.cancellation_requested_at is None
             and (deadline is None or now < deadline)
         ):
-            needs_prepare = self._environment_fingerprint is None
+            needs_prepare = not self._prepared
             await self.aprepare()
             if needs_prepare:
                 current = cast(RunRecord, self.store.load_run(run.run_id))

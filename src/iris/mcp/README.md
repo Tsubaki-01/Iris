@@ -30,10 +30,10 @@ servers = [
 required 默认为 true，无效声明抛 `IrisConfigError`；optional 项进入 `config.diagnostics`。
 `agents.config.mcp.MCPServerOverride` 支持 required、trust_annotations 和两个 timeout 覆盖项。
 `AgentConfig.mcp` 使用 `AgentMCPConfig`；`mcp.path` 相对 agent YAML 解析。
-shared assembly 读取声明；root `AgentRunner.aprepare()` 在首次执行前准备，完整目录参与最终指纹。
+shared assembly 读取声明；root `AgentRunner.aprepare()` 在首次执行前准备并发布完整目录。
 连接跨 run 复用，host 等所有原执行调用完整结束后 await `runner.aclose()`。
-child 使用相同 YAML 配置和独立连接，admission 前准备，WAITING/结束后关闭；恢复重新发现并
-检查普通 fingerprint。child 关闭不影响 root；权限由既有父子组合策略裁决。
+child 使用相同 YAML 配置和独立连接，admission 前准备，WAITING/结束后关闭；恢复按当前配置
+重新发现工具。child 关闭不影响 root；权限由既有父子组合策略裁决。
 
 `resolve_server_config()` 处理 `${VAR}`、`${VAR:-default}`、`${env:VAR}`，只展开一次。
 STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。相对 cwd/envFile
@@ -73,7 +73,7 @@ server id 顺序解析环境、连接和完整发现。每服务共享一个 sta
 
 `snapshot` 在成功准备后固定；并发/重复 prepare 不重复连接或发现。失败后 manager 关闭，
 需要新配置时构造新实例。`aclose()` 尝试关闭所有 owned connection，显式关闭错误报告 host。
-快照中的有效 env/header 仅供后续内存指纹计算，不应整体记录或持久化。
+快照中的有效 env/header 保留在内存中，不应整体记录或持久化。
 
 `catalog.build_catalog(server, sdk_tools)` 按原始 wire 名过滤，编译 JSON Schema 2020-12
 输入 validator；本地 `$defs`/引用可用，不能解析的外部引用和其他 dialect 留诊断后排除。

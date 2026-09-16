@@ -37,7 +37,7 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
   session 累计消息数，此后保持不变；terminal 必须为非负整数，non-terminal 必须为 `None`；
 - terminal run 的 durable history 中，每个 `tool_use` 都恰好有一个匹配的 result；tool-call phase
   继续区分已提交结果、结果未知与从未开始，不能用合成 closer 抹去副作用知识；
-- run、checkpoint、session revision、usage counters 与 environment fingerprint 必须交叉一致；
+- run、checkpoint、session revision 与 usage counters 必须交叉一致；
 - mutation events 与 aggregate facts 同事务追加，sequence 单调递增。
 
 ## Checkpoint v1

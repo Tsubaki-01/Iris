@@ -18,7 +18,6 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "mcp"
 
 @pytest.mark.asyncio
 async def test_json_and_toml_examples_execute_same_local_tool(tmp_path: Path) -> None:
-    fingerprints: list[str] = []
     for filename in ("mcp.json", "mcp.toml"):
         config = load_agent_config(EXAMPLE / "agent.yaml")
         config = config.model_copy(
@@ -45,10 +44,8 @@ async def test_json_and_toml_examples_execute_same_local_tool(tmp_path: Path) ->
             assert record.result.model_content.startswith("你好 MCP")
             artifact = json.loads(record.result.artifact.path.read_text(encoding="utf-8"))
             assert artifact["content"][0]["text"] == "你好 MCP"
-            fingerprints.append(runner.environment_fingerprint)
         finally:
             await runner.aclose()
-    assert fingerprints[0] == fingerprints[1]
 
 
 @pytest.mark.asyncio

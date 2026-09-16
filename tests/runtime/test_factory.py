@@ -181,7 +181,6 @@ def test_private_assembly_registers_subagent_only_in_root(tmp_path: Path, scope:
     assert ("subagent" in names) == (scope == "root")
     if scope == "root":
         assert view.get("subagent").input_schema["properties"]["agent"]["enum"] == ["researcher"]
-    # 普通 Runner fingerprint 必须能够消费 composite policy。
     runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
     assert runner.runtime.environment.workspace_root == tmp_path
 

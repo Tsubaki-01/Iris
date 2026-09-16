@@ -274,7 +274,6 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
             session_revision=1,
             model_steps_reserved=1,
             model_steps_committed=1,
-            environment_fingerprint="environment-v1",
         ),
         assistant_message=Msg.assistant("two"),
         now=_NOW,
@@ -462,7 +461,6 @@ def _create_command() -> CreateRun:
         session_revision=0,
         model_steps_reserved=0,
         model_steps_committed=0,
-        environment_fingerprint="environment-v1",
     )
     return CreateRun(
         request=AgentRunRequest(
@@ -472,7 +470,6 @@ def _create_command() -> CreateRun:
         ),
         options=AgentRunOptions(),
         agent_id="agent-1",
-        environment_fingerprint="environment-v1",
         start_activation_id="act-1",
         initial_checkpoint=checkpoint,
         now=_NOW,
@@ -521,7 +518,6 @@ def _suspend_command(run_revision: int) -> SuspendRun:
         session_revision=0,
         model_steps_reserved=0,
         model_steps_committed=0,
-        environment_fingerprint="environment-v1",
     )
     return SuspendRun(
         run_id="run-1",
@@ -578,7 +574,6 @@ def _prepare_claimed_tool(store: SQLiteStore) -> RunCommit:
                 session_revision=1,
                 model_steps_reserved=1,
                 model_steps_committed=1,
-                environment_fingerprint="environment-v1",
             ),
             assistant_message=assistant,
             now=_NOW,

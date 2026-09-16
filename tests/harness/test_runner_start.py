@@ -1,4 +1,4 @@
-"""AgentRunner start-to-terminal 与环境指纹测试。"""
+"""AgentRunner start-to-terminal 测试。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ import pytest
 
 from iris.exceptions import IrisProviderError, IrisRunConflictError
 from iris.harness import AgentRunner
-from iris.harness._fingerprint import compute_environment_fingerprint
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -25,13 +24,7 @@ from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
 from iris.runtime import SteeringInput
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
-    BaseTool,
-    DefaultPermissionPolicy,
-    PermissionDecision,
-    PermissionEffect,
-    PermissionPolicy,
     ToolCapability,
-    ToolExecutionContext,
     ToolRegistry,
 )
 
@@ -43,53 +36,6 @@ from .fakes import (
     text_response,
     tool_response,
 )
-
-
-class OpaquePolicy(PermissionPolicy):
-    """故意缺少 deterministic fingerprint payload 的自定义策略。"""
-
-    def check(
-        self,
-        tool: BaseTool,
-        params: dict[str, object],
-        context: ToolExecutionContext,
-    ) -> PermissionDecision:
-        """允许调用；本测试只关注 fingerprint contract。"""
-        del tool, params, context
-        return PermissionDecision(effect=PermissionEffect.ALLOW)
-
-
-class NonJsonPolicy(OpaquePolicy):
-    """返回 live object 的错误 fingerprint 实现。"""
-
-    def fingerprint_payload(self) -> dict[str, object]:
-        return {"live": object()}
-
-
-@pytest.mark.parametrize(
-    "dimension",
-    ["agent", "context", "tool", "policy", "workspace"],
-)
-def test_environment_fingerprint_changes_for_resumability_drift(
-    tmp_path: Path,
-    dimension: str,
-) -> None:
-    """遗漏任一可恢复语义维度都会让 drift 未被检测。"""
-    base = build_runtime(tmp_path)
-    registry = ToolRegistry()
-    if dimension == "tool":
-        registry.register_function(lambda: "ok", name="probe", description="探针")
-    changed = build_runtime(
-        tmp_path / "other" if dimension == "workspace" else tmp_path,
-        system_text="改变后的指令" if dimension == "context" else "遵守用户指令",
-        registry=registry,
-        permission_policy=(
-            DefaultPermissionPolicy(write_mode="allow") if dimension == "policy" else None
-        ),
-        agent_name="other-agent" if dimension == "agent" else "runner-agent",
-    )
-
-    assert compute_environment_fingerprint(base) != compute_environment_fingerprint(changed)
 
 
 @pytest.mark.asyncio

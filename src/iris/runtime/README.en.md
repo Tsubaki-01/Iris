@@ -275,14 +275,6 @@ runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
 The factory never reads or creates a lifecycle database. Harness composition interprets the
 `session` section of `agent.yaml`; the low-level factory has no persistence side effect from it.
 
-When creating `ProviderClient`, the factory projects the effective provider, LiteLLM provider,
-endpoint, and headers after global configuration merging into
-`RuntimeEnvironment.provider_fingerprint` for harness recovery comparisons. API keys are excluded.
-A host injecting its own provider owns its version declaration: set
-`runtime.environment.provider_fingerprint = {"version": "my-provider-v2"}` before constructing
-the runner. The empty default does not infer custom provider internals, and unused raw route
-configuration does not affect the fingerprint.
-
 The factory resolves `permissions.workspace` before constructing base context and user-declared
 tools. With `skills.enabled: true`, it takes one project-level discovery snapshot against that
 workspace. A non-empty result adds the `available_skills` system slot and registers `load_skill`
@@ -290,8 +282,7 @@ from the same registry before creating `ToolRegistryView` / `ToolExecutor`. Disa
 empty result bypass both additions exactly, preserving the previous context/tool shape. A factory
 or runtime instance does not refresh the snapshot automatically.
 
-`RuntimeEnvironment.skill_registry` retains that shared registry so the harness can include
-discovered Skill content versions in the recovery fingerprint without rereading Skill files.
+`RuntimeEnvironment.skill_registry` retains that shared registry.
 `load_skill` checks the discovery version during its complete read and returns
 `SKILL_VERSION_CHANGED` after a file change. Create a new runtime and start a new run to use it.
 

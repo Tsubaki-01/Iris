@@ -36,7 +36,7 @@ have been removed.
 ## Stateless service
 
 `HumanInteractionService` constructs pending values and typed child proxies, validates responses
-against exact run/interaction/environment facts, and projects a stored response to `ToolResult` or
+against exact run/interaction facts, expiry, and any stored response, and projects a response to `ToolResult` or
 `ApprovedToolCall`. `project_response(interaction)` reads the RESOLVED/CLOSED interaction's response
 without accepting a second copy. It performs no persistence. Harness uses lifecycle commands, including
 `ResumeWaitingRun`, for atomic state transitions.
@@ -44,7 +44,7 @@ without accepting a second copy. It performs no persistence. Harness uses lifecy
 ## Fingerprint
 
 `make_call_fingerprint()` hashes canonical JSON for session/run/call/tool/arguments/workspace.
-Approval applies to that exact subject only; identity or environment drift fails closed.
+Approval applies to that exact subject only; mismatched call identity, arguments, or workspace rejects execution.
 
 ## Public API
 

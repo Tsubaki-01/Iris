@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from ..agents import AgentConfig, build_tool_registry
 from ..context import (
@@ -166,7 +166,6 @@ def assemble_runtime(
         tool_registry,
         permission_policy=boundary.permission_policy,
     )
-    provider_fingerprint: dict[str, Any] = {}
     resolved_provider: RuntimeProvider
     if provider is None:
         client = create_provider_client(
@@ -176,12 +175,6 @@ def assemble_runtime(
             timeout=config.model.timeout,
         )
         resolved_provider = client
-        provider_fingerprint = {
-            "provider": client.provider,
-            "litellm_provider": client.litellm_provider or client.provider,
-            "base_url": client.base_url,
-            "headers": dict(client.headers),
-        }
     else:
         resolved_provider = provider
 
@@ -197,7 +190,6 @@ def assemble_runtime(
         workspace_root=workspace_root,
         memory_service=memory_service,
         skill_registry=skill_registry,
-        provider_fingerprint=provider_fingerprint,
         mcp_manager=mcp_manager,
     )
     return AgentRuntime(environment)

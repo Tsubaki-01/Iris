@@ -20,7 +20,6 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 默认策略只对具体内置 `SubagentTool` 返回 ALLOW，其他 AGENT 工具仍要求人工确认。
 内部 `MostRestrictivePermissionPolicy` 对真实 child 工具分别调用父子策略，按
 DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/metadata。
-两侧 payload 直接纳入既有 environment fingerprint。
 
 `ToolExecutor` 的专用 Sub Agent 入口保留 raw 参数解析、fresh permission refresh 与最终
 identity/artifact 归一化；linked continuation 跳过 outer permission。ChildWaiting 直接返回，
@@ -325,11 +324,8 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 - `PermissionEffect`: `ALLOW`、`DENY`、`REQUIRE_HUMAN` 三态权限裁决。
 - `PermissionDecision(effect, reason="", metadata={})`: 权限裁决结果；拒绝或等待人工时必须有 `reason`。
 - `PermissionPolicy.check(tool, params, context)`: 权限策略接口。
-- `PermissionPolicy.fingerprint_payload()`: 返回决定 lifecycle 恢复兼容性的确定性、
-  JSON-safe 策略状态；自定义策略必须显式实现，基类不会按对象表示猜测状态。
 - `DefaultPermissionPolicy(write_mode="confirm"|"allow"|"deny")`: 只读工具允许；写工具按
-  配置等待人工、直接允许或直接拒绝；其指纹 payload 固定包含策略类型、版本和
-  `write_mode`。
+  配置等待人工、直接允许或直接拒绝。
 - `WorkspacePolicy`: 路径边界策略，用于文件工具。
 - `ReadFileState` / `ReadFileRecord`: 文件读后写入的乐观锁状态。
 
@@ -346,7 +342,7 @@ artifact 时保存完整 model_content；已有 artifact 保留。最终预算�
 
 `persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
 取得 store。MCP adapter 见 [iris.mcp](../mcp/README.md)，复用现有 executor 与取消桥。
-默认策略仅允许本地受信只读 MCP，其余仍需确认；策略 fingerprint version 为 2。
+默认策略仅允许本地受信只读 MCP，其余仍需确认。
 `IrisMCPOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
 
 会话与调用 ID 的文件名片段统一为 `id_` 加完整 UTF-8 字节的小写十六进制编码；空 ID

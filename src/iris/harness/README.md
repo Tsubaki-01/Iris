@@ -27,12 +27,10 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
 
 配置 MCP 时构造不连接；`aprepare()` 可显式预热，也会由首次执行入口自动调用。完整目录发布
-后才计算唯一 `environment_fingerprint` 并创建 run；此前读取该属性会报 `IrisRunStateError`。
-required 准备或指纹计算失败会关闭资源且不创建 run，修正后需新建 runner。无 MCP 保持同步指纹。
+后才创建 run；required 准备失败会关闭资源且不创建 run，修正后需新建 runner。
 
-resume/recover 先保留纯 durable 结算，确需比较/执行才准备；准备后重新读取状态、checkpoint、
-claim 与时间，沿普通指纹规则拒绝目录/配置/有效只读策略漂移。只有最终 digest 进入 store；
-有效 env/header 不单独持久化。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
+resume/recover 先保留纯 durable 结算，确需执行才准备；准备后重新读取状态、checkpoint、
+claim 与时间，使用当前 runner 的配置继续。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
 恢复、查询、history fork 和取消申请不依赖 MCP 连接。
 
 root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
@@ -40,9 +38,9 @@ cancel 的 durable result 或观察超时不代表 body 清理、事件投递已
 重复关闭幂等；关闭后仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，
 使用它时先 `close(cancel_run=True)` 再关闭 runner。
 
-child 的普通 YAML 可独立配置 MCP。fresh child 在 admission 前准备并计算指纹；准备失败返回
+child 的普通 YAML 可独立配置 MCP。fresh child 在 admission 前准备；准备失败返回
 `SUBAGENT_PREPARE_ERROR`，不创建 child run/link。每次 child WAITING/结束、恢复失败或提前返回
-均关闭本次资源；WAITING 只保留 durable link，下次 resume/recover 重建并按普通指纹比较。
+均关闭本次资源；WAITING 只保留 durable link，下次 resume/recover 按当前配置重建。
 父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
 创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
@@ -114,7 +112,7 @@ parent `resume()` 提交回答；回答先持久化，再继续 exact child。�
 
 回答已持久化但推进中断时，`recover(parent_run_id)` 从 RESOLVED proxy 或 outer permission
 恢复；普通 PENDING waiting 仍需 `resume()`。ACTIVE recovery 仍要求 activation fence。
-新进程按 durable selector 取当前 catalog 快照，保留普通 parent/child fingerprint 检查。
+新进程按 durable selector 取当前 catalog 快照，继续原有 parent/child run。
 Linked continuation 不重复 outer permission；未 admission 的存储批准仍执行 permission refresh。
 WAITING finalize 成功后先发布原工具 activation 的 `tool.completed`，再执行 fresh RESUME
 activation。SessionManager 在第一次 child await 前完成 resume admission，并拒绝并行回答。
@@ -165,8 +163,8 @@ tools:
 ```
 
 Host 收到 parent `pending_interaction` 后，仍按普通 typed HITL 调用 parent `resume()`。
-无需操作 child runner。Catalog default/selector/description 改变若导致普通 environment
-fingerprint 不匹配，恢复会拒绝；不会绕过检查或新建替代 child。
+无需操作 child runner。恢复按已保存的 selector 查找当前 catalog 中的 child 配置；
+catalog 描述变化不阻止恢复，也不会新建替代 child。
 Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE recovery 仍从该 interaction
 恢复存储回答。Child 的 `IrisRunRecoveryError` 原样传播，保留 parent/child 的可恢复状态。
 
@@ -346,28 +344,18 @@ runtime 的只读并发窗口使用固定内部上限 8；它不增加 public co
 claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown；现有 terminal
 settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
 
-active recovery 会验证 checkpoint v1、session revision、usage counters、environment fingerprint
+active recovery 会验证 checkpoint v1、session revision、usage counters
 与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 会原子 abandon 旧 activation，
 把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
 继续写入。同步阻塞 callable 不保证并发加速，并且仍可能延迟 settlement。
 
-恢复指纹绑定 agent 名称、有效模型路由与请求参数、已加载的结构化 context、模板来源版本、
-当前工具定义、权限 policy、workspace 和 checkpoint 版本。启动时已启用目录发现的全部 Skill
-内容版本也会参与，包括尚未加载的 Skill。会话存储路径、context 配置文件位置和重复声明写法
-不参与；相同模板移动位置不改变版本。工具实现如需显式版本，应写入
-`ToolDefinition.metadata`；框架不推断 Python 源码版本，也不扫描整个 workspace。
+恢复使用当前 runner 的模型、context、工具和权限配置。修改 system prompt、压缩预算或
+工具目录不会触发全局配置相等检查。已保存的请求、运行限制、cursor、调用身份和执行结果
+仍来自原 run；待执行工具仍需满足参数与当前权限规则。运行记录和 checkpoint 不保存环境指纹。
 
-Factory 创建内置 `ProviderClient` 时，把合并全局配置后的 provider、LiteLLM provider、endpoint
-和 headers 保存在 `RuntimeEnvironment.provider_fingerprint`；指纹不包含 API key。Host 注入
-自定义 provider 时，应在创建 runner 前显式设置该字典中的路由或版本标识；默认空字典表示
-框架不推断该 provider 的内部行为。模型请求名称与请求参数仍参与恢复比较。
-
-模板来源在 runner 构造期间冻结；同一 runtime 的后续渲染使用这个快照，新 runtime 才读取新
-版本。来源范围包括静态嵌套依赖、可选依赖和文件名列表；动态文件名表达式不受支持，可改为
-条件分支中的静态引用。配置的空 memory 模板也会冻结，因为 run options 可稍后启用它；空前置
-段仍跳过。指纹不渲染 context，`StrictUndefined` 和字符上限保留到实际渲染。详见
-[`iris.context`](../context/README.md)。
+模板在首次渲染时读取并缓存静态依赖，同一 runtime 后续使用该快照，新 runtime 读取新内容。
+`StrictUndefined` 和字符上限在渲染时检查。详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
 `initial_session_message_count`。`before_model / step 0` 重建尚未归档的输入；后续步骤不再追加。

@@ -28,14 +28,11 @@ finally:
 selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`.
 
 MCP construction does not connect. Call `aprepare()` to warm up, or let the execution entry prepare
-automatically. The complete catalog publishes before computing the final `environment_fingerprint`
-and creating a run. Reading it earlier raises `IrisRunStateError`. Required preparation or fingerprint
-failure closes resources without creating a run; construct a new runner after correcting configuration.
-Runners without MCP retain synchronous fingerprints.
+automatically. The complete catalog publishes before creating a run. Required preparation failure
+closes resources without creating a run; construct a new runner after correcting configuration.
 
-Resume/recover keep pure durable settlement first, preparing only for comparison/execution. They then
-reload state, checkpoints, claims, and time. Ordinary fingerprint checks reject catalog, configuration,
-or effective read-only-policy drift. Only the digest persists; effective env/header values do not.
+Resume/recover keep pure durable settlement first, preparing only for execution. They then reload
+state, checkpoints, claims, and time, and continue with the current runner configuration.
 Terminal reads, ordinary waiting expiry, unresolved-CLAIMED unknown recovery, queries, history forks,
 and cancellation requests do not depend on MCP connections.
 
@@ -45,10 +42,10 @@ delivery finished. Active closure raises; repeated closure is idempotent, and du
 available. `SessionManager.close()` does not own runner resources: use `close(cancel_run=True)` before
 closing the runner.
 
-Ordinary child YAML can configure MCP independently. Fresh children prepare and compute fingerprints
+Ordinary child YAML can configure MCP independently. Fresh children prepare
 before admission. Failure returns `SUBAGENT_PREPARE_ERROR` without a child run/link. Every child
 WAITING/completion, recovery failure, or early return closes its resources. WAITING retains only durable
-links; resume/recover rebuilds and checks the ordinary fingerprint. Parent and child connections remain
+links; resume/recover rebuilds with current configuration. Parent and child connections remain
 independent, with the more restrictive combined permission policy. Live cancellation borrows the runner
 and waits for its original task; the creating scope closes resources. Closure failures are logged without
 replacing outcomes. Non-live cancellation persists its request before any required preparation.
@@ -129,7 +126,7 @@ parent identity, artifact handling, and tool error policy.
 After a crash following response persistence, `recover(parent_run_id)` continues a RESOLVED proxy
 or outer permission from the stored response. Ordinary PENDING waits still require `resume()`;
 ACTIVE recovery still requires its activation fence. A fresh process uses the durable selector
-against its catalog snapshot and retains ordinary parent/child fingerprint checks. Linked calls
+against its current catalog snapshot and continues the existing parent/child runs. Linked calls
 skip outer permission; stored approval without admission still requires execution refresh.
 Successful WAITING finalization publishes `tool.completed` with the original tool activation before
 running the fresh RESUME activation. SessionManager admits resume before the first child await and
@@ -182,8 +179,8 @@ tools:
 ```
 
 When the host receives parent `pending_interaction`, it uses ordinary typed HITL on parent
-`resume()` without managing a child runner. Catalog default/selector/description changes that alter
-the ordinary environment fingerprint reject recovery, without bypassing checks or replacing the child.
+`resume()` without managing a child runner. Recovery uses the stored selector to find the child
+configuration in the current catalog. Description changes do not prevent recovery or create a replacement child.
 If the child has closed its HITL interaction but not committed the tool result, ordinary ACTIVE
 recovery restores its stored response. Child `IrisRunRecoveryError` propagates unchanged, preserving
 recoverable parent/child state.
@@ -392,35 +389,22 @@ order. Claim telemetry event order is not an ordinal contract. Any uncommitted c
 cancellation, deadline, or program interruption settle outcome unknown; the existing terminal
 settlement closes every unresolved claim for that activation in one aggregate transaction.
 
-Active recovery validates checkpoint v1, session revision, usage counters, environment
-fingerprint, and cursor. Tools are never replayed while unresolved claims exist. Recovery atomically
+Active recovery validates checkpoint v1, session revision, usage counters, and cursor.
+Tools are never replayed while unresolved claims exist. Recovery atomically
 abandons the old activation, closes every claim as outcome unknown, and creates the terminal result.
 Normal parent/control/infrastructure exit waits for runtime children to drain before revoking the
 commit port, preventing late child writes. Synchronous blocking callables have no concurrency
 speedup guarantee and may still delay settlement.
 
-The recovery fingerprint binds the agent name, effective model route and request options, loaded
-structured context, template source versions, current tool definitions, permission policy,
-workspace, and checkpoint version. It also includes content versions for every Skill discovered
-in the enabled startup directory, including Skills not yet loaded. Session storage paths,
-context configuration locations, and duplicate declaration forms are excluded. Moving identical
-templates does not change their versions. Use `ToolDefinition.metadata` for an explicit tool
-implementation version; the framework neither infers Python source versions nor scans the workspace.
+Recovery uses the current runner's model, context, tools, and permission configuration. Changes to
+system prompts, compaction budgets, or tool catalogs do not trigger a global configuration equality
+check. Saved requests, run limits, cursors, call identities, and execution results still come from
+the original run. Pending tools must satisfy argument and current permission rules. Run records and
+checkpoints do not store an environment fingerprint.
 
-When the factory creates a built-in `ProviderClient`, it saves the effective provider, LiteLLM
-provider, endpoint, and headers after global configuration merging in
-`RuntimeEnvironment.provider_fingerprint`. API keys are excluded. A host injecting its own
-provider should set explicit route or version identifiers in this dictionary before constructing
-the runner. Its empty default means the framework does not infer provider internals; request
-model names and options still participate in recovery comparisons.
-
-Template sources are frozen when the runner is constructed. The same runtime renders from that
-snapshot; a new runtime reads new versions. The snapshot includes nested static dependencies,
-optional dependencies, and filename lists. Dynamic filename expressions are unsupported; use
-static references in conditional branches instead. A configured empty memory template is frozen
-because run options may activate it later, while an empty before-input section is skipped. The
-fingerprint does not render context; `StrictUndefined` and character limits remain rendering-time
-checks. See [`iris.context`](../context/README.en.md).
+Template sources and static dependencies are cached on first rendering. The same runtime reuses
+that snapshot; a new runtime reads current content. `StrictUndefined` and character limits are
+checked during rendering. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
 `initial_session_message_count` from the durable run. `before_model / step 0` reconstructs input

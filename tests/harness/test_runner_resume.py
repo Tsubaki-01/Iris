@@ -169,7 +169,7 @@ async def test_resume_exposes_same_batch_question_gates_in_original_order(
 
 
 @pytest.mark.asyncio
-async def test_resume_fails_closed_when_environment_fingerprint_changes(tmp_path: Path) -> None:
+async def test_resume_uses_current_system_configuration(tmp_path: Path) -> None:
     registry = ToolRegistry()
     registry.register(AskQuestionTool())
     path = tmp_path / "lifecycle.db"
@@ -187,28 +187,32 @@ async def test_resume_fails_closed_when_environment_fingerprint_changes(tmp_path
     ).start(AgentRunRequest(input="提问", run_id="run-drift"))
     assert waiting.pending_interaction is not None
 
+    provider = StaticProvider(text_response())
     changed = AgentRunner(
         runtime=build_runtime(
             tmp_path,
             registry=registry,
             system_text="改变后的系统提示",
-            provider=StaticProvider(text_response()),
+            provider=provider,
         ),
         store=SQLiteStore(path),
     )
-    with pytest.raises(IrisRunRecoveryError):
-        await changed.resume(
-            "run-drift",
-            interaction_id=waiting.pending_interaction.interaction_id,
-            response=QuestionInteractionResponse(answer="继续"),
-        )
+    result = await changed.resume(
+        "run-drift",
+        interaction_id=waiting.pending_interaction.interaction_id,
+        response=QuestionInteractionResponse(answer="继续"),
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert len(provider.requests) == 1
+    assert "改变后的系统提示" in provider.requests[0].messages[0].text
+    assert "遵守用户指令" not in provider.requests[0].messages[0].text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("column", "value"),
     [
-        ("environment_fingerprint", "drifted-checkpoint"),
         ("cursor_json", "{}"),
         ("session_revision", "99"),
         ("model_steps_reserved", "2"),
@@ -241,9 +245,6 @@ async def test_resume_rejects_corrupt_checkpoint_before_consuming_response(
     before_interaction = store.load_interaction(waiting.pending_interaction.interaction_id)
 
     statement = {
-        "environment_fingerprint": (
-            "UPDATE run_checkpoints SET environment_fingerprint = ? WHERE run_id = ?"
-        ),
         "cursor_json": "UPDATE run_checkpoints SET cursor_json = ? WHERE run_id = ?",
         "session_revision": ("UPDATE run_checkpoints SET session_revision = ? WHERE run_id = ?"),
         "model_steps_reserved": (

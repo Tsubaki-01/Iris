@@ -49,10 +49,6 @@ class AllowTools(PermissionPolicy):
         """返回固定的测试策略。"""
         return PermissionDecision(effect=PermissionEffect.ALLOW)
 
-    def fingerprint_payload(self) -> dict[str, object]:
-        """声明稳定测试策略。"""
-        return {"type": "test-allow"}
-
 
 def make_tool(
     config: MCPResolvedServer,

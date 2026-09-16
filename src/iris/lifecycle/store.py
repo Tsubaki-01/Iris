@@ -54,7 +54,6 @@ class CreateRun:
     request: AgentRunRequest
     options: AgentRunOptions
     agent_id: str
-    environment_fingerprint: str
     start_activation_id: str
     initial_checkpoint: RunCheckpoint
     now: datetime
@@ -69,8 +68,6 @@ class CreateRun:
             raise ValueError("initial checkpoint 必须绑定 start activation")
         if self.initial_checkpoint.sequence != 1:
             raise ValueError("initial checkpoint sequence 必须为 1")
-        if self.initial_checkpoint.environment_fingerprint != self.environment_fingerprint:
-            raise ValueError("initial checkpoint environment fingerprint 不匹配")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
