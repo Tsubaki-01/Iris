@@ -17,7 +17,8 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 `SubagentTool.execute_subagent()` 通过窄 port 返回 `ToolResult | ChildWaiting`；
 直接 `arun()` 抛 `IrisToolExecutionError`。普通 `BaseTool.arun()` 的返回契约不变。
 
-默认策略只对具体内置 `SubagentTool` 返回 ALLOW，其他 AGENT 工具仍要求人工确认。
+默认策略对具体内置 `SubagentTool`、`WebSearchTool`、`WebFetchTool` 返回 ALLOW，
+其他 AGENT/NETWORK 工具仍要求人工确认。
 内部 `MostRestrictivePermissionPolicy` 对真实 child 工具分别调用父子策略，按
 DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/metadata。
 
@@ -72,6 +73,60 @@ result = await executor.execute_one(
 
 assert result.model_content == "你好，Iris"
 ```
+
+## Web 搜索与网页读取
+
+`WebSearchTool` 调用 Tavily Search 查找来源，`WebFetchTool` 调用 Tavily Extract 读取
+选定 URL。两者固定使用 `basic`，返回模型可直接阅读和引用的 Markdown；最终答案由
+主模型形成。内容覆盖取决于 Tavily basic 的实际提取能力。
+
+在 host 初始化全局配置前设置环境变量 `IRIS_PROVIDER_API_KEYS__TAVILY`，或通过
+`init_config(provider_api_keys={"tavily": tavily_key})` 提供凭据。现有
+`init_config(env_file=".env")` 可显式加载 dotenv。工具不会使用聊天模型的通用
+`api_key` 代替 Tavily key，也不额外读取 `TAVILY_API_KEY`。
+
+在 agent YAML 中启用：
+
+```yaml
+tools:
+  builtin:
+    - web.search
+    - web.fetch
+    - file.read
+```
+
+两个 Web 工具可独立启用。注册时缺少 Tavily key 会产生 `IrisConfigError`；未启用
+Web 的配置不受影响。Python SDK 可从 `iris.tools` 导入这两个类，通过构造函数的
+`api_key` 关键字直接提供凭据。
+
+| 模型工具名 | 参数 | 返回内容 |
+| --- | --- | --- |
+| `web_search` | 必填 `query`；`max_results` 默认 10、范围 1–20；可选 `time_range` 为 day/week/month/year，以及 `include_domains`、`exclude_domains` | 按相关性排序的标题、URL 和来源片段；无结果是正常成功 |
+| `web_fetch` | 必填 `urls` 列表，1–20 个 HTTP(S) URL；可选 `query` | 不传 query 时为 `full_content` 正文，传 query 时为 `excerpts` 定向摘录；每条内容以 URL 标识 |
+
+Search 的域名包含列表用于限定来源，最多 300 项；排除列表最多 150 项。时间筛选
+沿用 Tavily 语义，不保证排除无法识别日期的来源。Search 不请求生成答案或整页正文。
+Fetch 的 query 对整批 URL 生效，采用 Tavily 默认的每页最多 3 个相关片段；省略
+query 时返回服务提取的正文，不等同于原始 HTML。片段长度由服务决定，Iris 不承诺
+每段最多 500 字符，也不在本地裁剪内容。服务若返回超长结果，继续使用下述 artifact
+机制处理。
+
+批量 Fetch 会同时展示成功正文与失败 URL/原因，失败摘要放在正文之前；API 返回
+顺序不保证与输入一致。全部 URL 失败（包括 HTTP 200 的业务失败）、HTTP 错误、
+超时及响应解析失败会进入现有 `EXECUTION_ERROR` 工具结果，模型可据此调整后续调用。
+
+超过默认 50,000 字符的整份 Markdown 由现有 executor 保存为 artifact，返回预览和
+文件路径。示例中的 `file.read` 让模型通过 `read_file` 继续分页读取；它需要显式启用，
+不会因为产生 artifact 自动注册。
+
+默认 policy 允许这两个具体 builtin 自动执行，仍保留 NETWORK 标签、执行前权限刷新和
+现有串行调度；SDK 自定义策略和父级策略继续生效。每次调用创建并关闭异步 HTTP 客户端，
+使用 30 秒客户端阶段超时，不新增自动重试、供应商回退或共享客户端生命周期。
+Extract 不传服务端 timeout，使用 basic 默认值。
+
+实现见 [Web 工具](builtin/web.py) 与 [共用 Tavily HTTP 调用](builtin/_tavily.py)；
+上游契约见 [Search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+和 [Extract](https://docs.tavily.com/documentation/api-reference/endpoint/extract)。
 
 ## 核心定义
 
@@ -439,6 +494,7 @@ ToolArtifactStore, ToolCapability, ToolDefinition, ToolErrorInfo,
 ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
+WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool,
 register_file_tools, schema_from_callable, schema_from_pydantic_model,
 to_anthropic_tool_schema, to_openai_chat_tool_schema,
 to_openai_responses_tool_schema, tool
@@ -451,6 +507,7 @@ to_openai_responses_tool_schema, tool
 | 基础模型、callable/schema 适配与注册 | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_schema.py`, `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
 | 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
+| Web 搜索、批量正文与模型输出 | `builtin/web.py`, `builtin/_tavily.py` | `tests/tools/test_web_tools.py`, `tests/tools/test_middleware_artifact.py`, `tests/tools/test_permissions.py` |
 | 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
 
 `discovery.py` 的 deferred 检索当前没有独立测试文件。

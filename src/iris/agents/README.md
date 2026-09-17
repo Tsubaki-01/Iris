@@ -202,9 +202,31 @@ runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run �
 - `file.write`
 - `file.edit`
 - `human.ask`
+- `web.search`
+- `web.fetch`
 
 `human.ask` 向模型暴露的工具名是 `ask_question`。它只声明人工问题；实际呈现问题、
 收集回答与调用 `AgentRuntime.resume()` 仍由 runtime 和宿主 adapter 完成。
+
+`web.search` 和 `web.fetch` 分别暴露 `web_search`、`web_fetch`，使用 Tavily Search/Extract。
+两者固定 basic，可独立启用，不增加专用 Web 配置块：
+
+```yaml
+tools:
+  builtin:
+    - web.search
+    - web.fetch
+    - file.read
+```
+
+注册 Web 工具前，host 需要通过现有 `init_config()` 初始化全局配置。凭据来自
+`Config.provider_api_keys["tavily"]`，对应环境变量 `IRIS_PROVIDER_API_KEYS__TAVILY`；
+也可在初始化时传入 `provider_api_keys`。需要 dotenv 时显式传 `env_file`。缺少 Tavily key
+会抛出 `IrisConfigError`，不会改用聊天模型的通用 key。
+
+两个具体 Web builtin 在默认策略下自动执行，自定义策略仍然生效。`file.read` 用于
+继续读取长网页正文的 artifact，需要显式启用。检索筛选、批量 URL、正文/摘录和错误
+行为见 [Web 工具说明](../tools/README.md#web-搜索与网页读取)。
 
 `tools.python` 必须使用结构化对象，不支持混合列表：
 

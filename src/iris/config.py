@@ -7,6 +7,7 @@
 默认不会加载 `.env` 文件（`env_file=None`）。
 如有需要，可在调用`init_config` 时传入 `env_file`。
 Provider API key 使用 `IRIS_PROVIDER_API_KEYS__{PROVIDER}` 这类 nested env。
+该凭据字典也用于 Tavily Web 工具，键为 `tavily`；`providers` 仍只配置聊天 provider。
 
 示例:
     import iris

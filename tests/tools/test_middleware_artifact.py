@@ -1,8 +1,11 @@
 """工具最终结果在全部 middleware 后统一生成 artifact。"""
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
+import httpx2 as httpx
 import pytest
 from pydantic import BaseModel
 
@@ -236,3 +239,63 @@ async def test_tiny_budget_keeps_retrieval_notice_without_preview(tmp_path: Path
     assert result.artifact is not None
     assert result.model_content.startswith("\n\n[")
     assert str(result.artifact.path) in result.model_content
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_artifact_can_be_read_with_configured_file_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """批量网页长正文沿配置、HTTP、artifact 和 read_file 链路完整可读。"""
+    import iris.config as iris_config
+    from iris.agents import ToolsConfig, build_tool_registry
+
+    body = "资料" * 30000 + "\nWEB_BODY_END"
+    url = "https://example.com/article"
+    failed_url = "https://example.com/unavailable"
+
+    async def respond(
+        client: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
+    ) -> httpx.Response:
+        """只替换网络发送，保留真实客户端和工具响应解析。"""
+        assert request.headers["Authorization"] == "Bearer tvly-artifact-test"
+        assert str(request.url) == "https://api.tavily.com/extract"
+        assert json.loads(request.content)["urls"] == [url, failed_url]
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"url": url, "raw_content": body}],
+                "failed_results": [{"url": failed_url, "error": "Unavailable"}],
+            },
+            request=request,
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", respond)
+    monkeypatch.setattr(iris_config, "_config", None)
+    iris_config.init_config(provider_api_keys={"tavily": "tvly-artifact-test"})
+    registry = build_tool_registry(ToolsConfig(builtin=["web.fetch", "file.read"]))
+    executor = ToolExecutor(registry)
+    context = ToolExecutionContext(workspace_root=tmp_path)
+
+    result = await executor.execute_one(
+        ToolUseBlock(id="fetch", name="web_fetch", input={"urls": [url, failed_url]}), context
+    )
+
+    assert not result.is_error
+    assert result.artifact is not None
+    assert failed_url in result.model_content
+    assert str(result.artifact.path) in result.model_content
+    assert body in result.artifact.path.read_text(encoding="utf-8")
+    read_input: dict[str, Any] = {"file_path": str(result.artifact.path)}
+    page = await executor.execute_one(
+        ToolUseBlock(id="read-first", name="read_file", input=read_input), context
+    )
+    assert not page.is_error
+    cursor = re.search(r"next_offset=(\d+), next_column=(\d+); has_more=true", page.model_content)
+    assert cursor is not None
+    read_input.update(offset=int(cursor[1]), column=int(cursor[2]))
+    remainder = await executor.execute_one(
+        ToolUseBlock(id="read-rest", name="read_file", input=read_input), context
+    )
+    assert not remainder.is_error
+    assert "WEB_BODY_END" in remainder.model_content
+    assert "has_more=false" in remainder.model_content

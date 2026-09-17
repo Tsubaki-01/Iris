@@ -6,6 +6,7 @@ from collections.abc import Callable
 from importlib import import_module
 from typing import Any
 
+from ...config import get_config
 from ...exceptions import IrisConfigError
 from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
@@ -16,6 +17,7 @@ from ...tools.builtin.file import (
     ReadFileTool,
     WriteFileTool,
 )
+from ...tools.builtin.web import WebFetchTool, WebSearchTool
 from .base import ToolsConfig
 
 _FileToolFactory = Callable[[WorkspaceFileService], BaseTool]
@@ -31,6 +33,11 @@ _BUILTIN_FILE_TOOL_FACTORIES: dict[str, _FileToolFactory] = {
 
 _BUILTIN_HUMAN_TOOL_FACTORIES: dict[str, _ToolFactory] = {
     "human.ask": AskQuestionTool,
+}
+
+_BUILTIN_WEB_TOOL_CLASSES: dict[str, type[WebSearchTool] | type[WebFetchTool]] = {
+    "web.search": WebSearchTool,
+    "web.fetch": WebFetchTool,
 }
 
 
@@ -71,6 +78,11 @@ def _register_builtin_tools(registry: ToolRegistry, names: list[str]) -> None:
             if factory is None:
                 raise IrisConfigError("未知内置工具", tool=name)
             registry.register(factory(file_service))
+        elif name in _BUILTIN_WEB_TOOL_CLASSES:
+            api_key = get_config().provider_api_keys.get("tavily")
+            if api_key is None:
+                raise IrisConfigError("Web 工具需要配置 IRIS_PROVIDER_API_KEYS__TAVILY", tool=name)
+            registry.register(_BUILTIN_WEB_TOOL_CLASSES[name](api_key=api_key))
         else:
             human_factory = _BUILTIN_HUMAN_TOOL_FACTORIES.get(name)
             if human_factory is None:

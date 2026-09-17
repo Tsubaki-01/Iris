@@ -105,9 +105,12 @@ class DefaultPermissionPolicy(PermissionPolicy):
         params: dict[str, Any],
         context: ToolExecutionContext,
     ) -> PermissionDecision:
-        """只读允许，写入依 write_mode，其他高风险能力需要人工确认。"""
+        """只读及内置 Web/Sub Agent 允许，写入依 write_mode，其余需确认。"""
+        # file 工具初始化时会导入本模块，Web 类型在裁决时加载以避免循环导入。
+        from .builtin.web import WebFetchTool, WebSearchTool
+
         del context
-        if isinstance(tool, SubagentTool):
+        if isinstance(tool, (SubagentTool, WebSearchTool, WebFetchTool)):
             return PermissionDecision(effect=PermissionEffect.ALLOW)
         if ToolCapability.MCP in tool.definition.capabilities and tool.is_read_only(params):
             return PermissionDecision(effect=PermissionEffect.ALLOW)
