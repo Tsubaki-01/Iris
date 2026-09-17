@@ -852,6 +852,8 @@ class AgentRuntime:
                     memory_service=self.environment.memory_service,
                     memory_context_builder=self.environment.memory_context_builder,
                 )
+            else:
+                context_input = context_input.model_copy(update={"before_current_input": None})
             context_output = self.environment.context_builder.build(context_input)
             current_input = Msg.user(activation.run_input) if cursor.step_index == 0 else None
             turn_messages = self.environment.assembler.build_turn_messages(

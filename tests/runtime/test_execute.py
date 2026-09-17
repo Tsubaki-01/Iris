@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -244,6 +245,78 @@ async def test_execute_start_commits_no_tool_completion(tmp_path: Path) -> None:
         Role.USER,
     ]
     assert provider.requests[0].messages[-1].text == "当前问题"
+
+
+@pytest.mark.asyncio
+async def test_execute_reuses_archived_before_input_after_template_changes(tmp_path: Path) -> None:
+    """后续 step 使用已归档的 BCI，新 run 才再次读取该模板。"""
+    template = tmp_path / "before-input.j2"
+    template.write_text("当前输入前的上下文", encoding="utf-8")
+    original_mtime = template.stat().st_mtime
+
+    class EditingProvider(FakeProvider):
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            response = await super().complete(request)
+            if len(self.requests) == 1:
+                template.write_text("{% if %}", encoding="utf-8")
+                os.utime(template, (original_mtime + 2, original_mtime + 2))
+            return response
+
+    def echo() -> str:
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    provider = EditingProvider(
+        [
+            _tool_response(ToolUseBlock(id="echo-1", name="echo", input={})),
+            _text_response("完成"),
+        ]
+    )
+    context_input = _context_input().model_copy(
+        update={
+            "before_current_input": ContextSection(
+                template=template,
+                slots=[ContextSlot(name="input_context", content="上下文")],
+            )
+        }
+    )
+    runtime = build_runtime(
+        agent_config=_agent_config(),
+        context_input=context_input,
+        provider=provider,
+        tool_registry=registry,
+        workspace_root=tmp_path,
+    )
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+
+    result = await runtime.execute(
+        activation, commits=commits, cancellation=MutableCancellationSignal()
+    )
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(provider.requests) == 2
+    assert all(
+        sum(message.text == "当前输入前的上下文" for message in request.messages) == 1
+        for request in provider.requests
+    )
+    assert sum(message.text == "当前输入前的上下文" for message in commits.messages) == 1
+    assert runtime.environment.context_input is context_input
+    assert runtime.environment.context_input.before_current_input is not None
+
+    next_activation = start_activation(run_id="run-2", activation_id="activation-2")
+    next_commits = FakeRuntimeCommitPort(next_activation)
+    next_result = await runtime.execute(
+        next_activation, commits=next_commits, cancellation=MutableCancellationSignal()
+    )
+
+    assert next_result.outcome is RuntimeActivationOutcome.FAILED
+    assert next_result.error is not None
+    assert next_result.error.source == "context"
+    assert next_result.error.code == "CONTEXT_ERROR"
+    assert len(provider.requests) == 2
+    assert next_commits.model_commits == []
 
 
 @pytest.mark.asyncio

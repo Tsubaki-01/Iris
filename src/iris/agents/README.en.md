@@ -144,8 +144,9 @@ system message. Iris provides the previous summary and current history batch in 
 the template needs no data variables. Custom instructions may change the headings and wording.
 Iris still wraps the summary body in `<summary>` when adding it to the main request.
 
-Files use the existing `iris.context` Jinja2 renderer, including static includes and caching after
-the first read. Create a new runtime to pick up edits. Config loading resolves only the path; the
+Files use the `iris.context` Jinja2 renderer's native on-demand loading and compiled cache, including
+dynamic include/import/extends. The same runtime detects file edits on the next compaction; all
+batches and retries within one operation reuse the same rendered instructions. Config loading resolves only the path; the
 first compaction reads the file. With the Python SDK, relative paths use the directory of
 `config_path`, or the current working directory when it is omitted.
 

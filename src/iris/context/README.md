@@ -272,14 +272,14 @@ class ContextBuildOutput(BaseModel):
 模板渲染使用数据副本；模板 renderer 对传入上下文的修改不会改变原 section
 或 slot。
 
-同一个 `ContextTemplateRenderer` 在首次 `render_file()` 时读取入口与
-静态 `include` / `import` / `extends` 依赖，随后复用来源快照、Jinja Environment 与编译模板。
-修改文件、增加之前缺失的可选文件只影响新 renderer；无需扫描模板目录。嵌套依赖、静态文件名
-列表备用与 `ignore missing` 均保留首次快照中的存在性和内容。
+`ContextTemplateRenderer` 按解析后的入口目录复用 Jinja Environment，保留 FileSystemLoader，
+每次渲染都通过 `get_template()` 获取入口。Jinja 使用默认的进程内编译缓存和 `auto_reload=True`，
+按文件 mtime 检测入口与实际使用依赖的变化；文件未变时复用编译结果，每次仍用当前数据生成文本。
+同一 runner 的多个 run 复用此缓存，它不保存最终 prompt，也不写入 Store 或 SQLite。
 
-依赖文件名必须是静态字符串或静态字符串列表。动态数据与条件分支仍可使用；把
-`{% include selected %}` 改为在每个条件分支分别引用固定文件名。动态文件名表达式会抛出带有
-该修正指引的 `IrisContextError`，因为首次读取时无法确定完整的依赖来源。
+`include` / `import` / `extends` 支持 Jinja 原生动态文件名；依赖在分支实际执行时才加载。
+新增可选文件与优先候选文件可在下次渲染生效。修改实际使用的模板导致语法错误、缺失或未定义
+变量时抛出 `IrisContextError`，不退回旧内容；这不是一次 run 内所有模板来源的固定快照。
 
 `build()` 对没有启用 slot 的可选段直接返回 `None`，不会读取该段的模板。
 `StrictUndefined` 与 `max_chars` 只在实际渲染时生效。
@@ -396,7 +396,7 @@ class ContextTemplateRenderer:
 | --- | --- | --- |
 | slot/section 约束、顺序、角色、字符上限与 XML 渲染 | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML、模板路径与 Jinja2 渲染 | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
-| 模板来源快照 | `renderer.py` | `tests/context/test_template_snapshot.py` |
+| 模板加载与更新 | `renderer.py` | `tests/context/test_template_renderer.py` |
 
 ```bash
 uv run pytest tests/context

@@ -7,14 +7,11 @@ from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
 from jinja2 import (
-    DictLoader,
     Environment,
     FileSystemLoader,
     StrictUndefined,
     Template,
     TemplateError,
-    TemplateNotFound,
-    meta,
     select_autoescape,
 )
 
@@ -57,33 +54,37 @@ class ContextXmlRenderer:
 
 
 class ContextTemplateRenderer:
-    """从首次读取的来源快照渲染 XML Jinja2 模板。
-
-    每个模板及其静态依赖只读取一次；修改文件后应创建新的 renderer。
-    """
+    """使用 Jinja 原生加载、编译缓存和默认更新检测渲染 XML 模板。"""
 
     def __init__(self) -> None:
-        """为当前 renderer 保留按模板入口索引的来源快照。"""
-        self._snapshots: dict[Path, Template] = {}
+        """按入口目录复用 Environment，由 Jinja 管理模板缓存。"""
+        self._environments: dict[Path, Environment] = {}
 
     def render_file(
         self,
         template_path: Path,
         context: dict[str, Any],
     ) -> str:
-        """使用 XML 自动转义渲染同一来源快照。
+        """使用 XML 自动转义和当前数据渲染模板。
 
         Args:
             template_path (Path): 模板入口文件路径。
-            context (dict[str, Any]): 本次渲染的数据；不会写入来源快照。
+            context (dict[str, Any]): 本次渲染的数据；不会写入编译模板缓存。
 
         Returns:
             str: 去除首尾空白后的模板输出。
 
         Raises:
-            IrisContextError: 来源无法冻结或模板执行失败。
+            IrisContextError: 模板读取、解析或执行失败。
         """
-        template = self._snapshot(template_path)
+        try:
+            template = self._load_template(template_path)
+        except (OSError, UnicodeError, TemplateError) as exc:
+            raise IrisContextError(
+                "context 模板来源读取或解析失败",
+                path=str(template_path),
+                error=str(exc),
+            ) from exc
         try:
             return template.render(**context).strip()
         except Exception as exc:
@@ -93,70 +94,25 @@ class ContextTemplateRenderer:
                 error=str(exc),
             ) from exc
 
-    def _snapshot(self, template_path: Path) -> Template:
-        """冻结入口和依赖，后续渲染复用同一来源。"""
+    def _load_template(self, template_path: Path) -> Template:
+        """每次通过 get_template 检查入口更新，依赖由 Jinja 按需加载。"""
         template_path = template_path.resolve()
-        cached = self._snapshots.get(template_path)
-        if cached is not None:
-            return cached
-        loader = FileSystemLoader(str(template_path.parent))
-        environment = Environment(
-            loader=loader,
-            autoescape=select_autoescape(
-                enabled_extensions=("xml", "j2", "xml.j2"),
-                default_for_string=True,
-                default=True,
-            ),
-            undefined=StrictUndefined,
-            trim_blocks=True,
-            lstrip_blocks=True,
-            auto_reload=False,
-        )
-        try:
-            sources = _read_template_sources(environment, loader, template_path.name)
-            environment.loader = DictLoader(sources)
-            template = environment.get_template(template_path.name)
-        except (OSError, UnicodeError, TemplateError) as exc:
-            raise IrisContextError(
-                "context 模板来源读取或解析失败",
-                path=str(template_path),
-                error=str(exc),
-            ) from exc
-        self._snapshots[template_path] = template
-        return template
-
-
-def _read_template_sources(
-    environment: Environment,
-    loader: FileSystemLoader,
-    root_name: str,
-) -> dict[str, str]:
-    """只读取静态引用闭包，保留可选依赖在首次读取时的缺失事实。"""
-    sources: dict[str, str] = {}
-    visited: set[str] = set()
-    pending = [root_name]
-    while pending:
-        name = pending.pop()
-        if name in visited:
-            continue
-        visited.add(name)
-        try:
-            source, _, _ = loader.get_source(environment, name)
-        except TemplateNotFound:
-            if name == root_name:
-                raise
-            # 缺失的静态候选不加入快照，运行时仍由 Jinja 处理 ignore missing / 列表备用。
-            continue
-        sources[name] = source
-        for dependency in meta.find_referenced_templates(environment.parse(source)):
-            if dependency is None:
-                raise IrisContextError(
-                    "context 模板依赖必须使用静态文件名；请在条件分支中分别 include/import/extends "
-                    "固定文件名，而不是使用动态文件名表达式",
-                    template=name,
-                )
-            pending.append(dependency)
-    return sources
+        directory = template_path.parent
+        environment = self._environments.get(directory)
+        if environment is None:
+            environment = Environment(
+                loader=FileSystemLoader(str(directory)),
+                autoescape=select_autoescape(
+                    enabled_extensions=("xml", "j2", "xml.j2"),
+                    default_for_string=True,
+                    default=True,
+                ),
+                undefined=StrictUndefined,
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+            self._environments[directory] = environment
+        return environment.get_template(template_path.name)
 
 
 def _render_value(value: Any) -> str:

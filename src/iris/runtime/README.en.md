@@ -64,6 +64,8 @@ fact only; the owner must reload the final `RunResult` from durable storage.
 Every activation carries the original `run_input` and `initial_session_message_count` captured
 when the run was created. The engine injects input only at `step 0` and archives it with the first
 model response. Resume and recovery retain these anchors without appending the input again.
+BCI is also built only at `step 0`; later steps consume its archived history without rendering
+an unused BCI template again.
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
@@ -90,7 +92,7 @@ Summary instructions come from a separate Jinja2 file. The bundled
 the conversation's primary language. `compaction.prompt` can replace the instructions and output
 format; Iris still supplies the previous summary and current history batch. Each compaction obtains
 instructions once through the existing renderer and reuses them for all batch estimates and requests.
-Files are cached after the first read; create a new runtime to pick up edits. There is no heading
+Jinja reuses compiled templates and detects edits by mtime for the next compaction. There is no heading
 parser or format-repair loop. See [agents](../agents/README.en.md) for path configuration.
 
 Summary requests reuse effective main-model options but override streaming, tools, response schema,

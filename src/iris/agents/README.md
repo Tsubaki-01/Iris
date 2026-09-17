@@ -162,8 +162,9 @@ compaction:
 旧摘要与本批历史由框架作为 user 消息提供，无需在模板里插入数据变量。自定义文件可以
 改变栏目和措辞；摘要正文仍由框架统一包裹 `<summary>` 后注入主请求。
 
-模板沿用 `iris.context` 的 Jinja2 渲染器，支持静态 include，首次读取后使用缓存；修改文件
-后创建新的 runtime 生效。配置加载只解析路径，首次压缩时读取文件。直接使用 Python SDK
+模板沿用 `iris.context` 的 Jinja2 原生按需加载与编译缓存，支持动态 include/import/extends。
+同一 runtime 在下次压缩操作检测文件修改；一次操作的全部分块与重试共用同一份已渲染指令。
+配置加载只解析路径，首次压缩时读取文件。直接使用 Python SDK
 时，相对路径以 `config_path` 所在目录为基准，未提供时以当前工作目录为基准。
 
 配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过

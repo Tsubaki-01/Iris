@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,7 @@ def _case(
     history_chars: int = 100,
     operation_timeout: float = 300,
     request_timeout: float | None = None,
+    prompt: Path | None = None,
 ) -> tuple[AgentRuntime, RuntimeActivationInput, FakeRuntimeCommitPort, MutableCancellationSignal]:
     activation = start_activation(
         initial_session_message_count=1,
@@ -87,7 +89,11 @@ def _case(
             name="compaction-controls",
             model={"provider": "openai", "name": "test"},
             system="test",
-            compaction={"input_budget_tokens": 10000, "timeout_seconds": operation_timeout},
+            compaction={
+                "input_budget_tokens": 10000,
+                "timeout_seconds": operation_timeout,
+                "prompt": prompt,
+            },
         ),
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="system", content="test")])
@@ -110,6 +116,53 @@ async def test_only_failed_batch_is_retried(tmp_path: Path) -> None:
     assert all(request.provider_options["num_retries"] == 0 for request in provider.summaries)
     assert len(commits.compaction_usages) == 2
     assert len(commits.compaction_commits) == len(commits.model_commits) == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_prompt_reloads_between_operations_not_batches(tmp_path: Path) -> None:
+    prompt = tmp_path / "summary.j2"
+    original_prompt = "You create a concise summary. Original instructions."
+    updated_prompt = "You create a concise summary. Updated instructions."
+    prompt.write_text(original_prompt, encoding="utf-8")
+    original_mtime = prompt.stat().st_mtime
+
+    def edit_prompt() -> None:
+        prompt.write_text(updated_prompt, encoding="utf-8")
+        os.utime(prompt, (original_mtime + 2, original_mtime + 2))
+        provider.on_summary = None
+
+    provider = _Provider(
+        [
+            _response("A"),
+            IrisAPIConnectionError("瞬断"),
+            _response("B"),
+            _response("C"),
+            _response("D"),
+        ],
+        on_summary=edit_prompt,
+    )
+    runtime, activation, commits, cancellation = _case(
+        tmp_path, provider, history_chars=16000, prompt=prompt
+    )
+
+    result = await runtime.execute(activation, commits=commits, cancellation=cancellation)
+
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(provider.summaries) == 3
+    assert all(request.messages[0].text == original_prompt for request in provider.summaries)
+    assert provider.summaries[1].messages == provider.summaries[2].messages
+
+    next_activation = start_activation(
+        run_id="run-2", activation_id="activation-2", initial_session_message_count=1
+    )
+    next_commits = FakeRuntimeCommitPort(next_activation, messages=[Msg.assistant("y" * 16000)])
+    next_result = await runtime.execute(
+        next_activation, commits=next_commits, cancellation=MutableCancellationSignal()
+    )
+
+    assert next_result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(provider.summaries) == 5
+    assert all(request.messages[0].text == updated_prompt for request in provider.summaries[3:])
 
 
 @pytest.mark.asyncio

@@ -99,17 +99,16 @@ JSON-mode list of slot dictionaries. Jinja2 uses XML autoescape and `StrictUndef
 is preserved as prompt text. Missing templates, encoding/dependency/render errors, and non-serializable
 slot values raise `IrisContextError`.
 
-On its first `render_file()` call for an entry template, a
-`ContextTemplateRenderer` reads that source and its static `include` / `import` / `extends`
-dependencies. Later calls reuse the source snapshot, Jinja Environment, and compiled templates.
-File edits and newly added optional files affect only a new renderer. No directory scan is needed.
-Nested dependencies, static fallback filename lists, and `ignore missing` preserve the content and
-file availability observed in that first snapshot.
+`ContextTemplateRenderer` reuses a Jinja Environment per resolved entry directory, retains
+FileSystemLoader, and calls `get_template()` for each render. Jinja's default in-memory compiled
+cache and `auto_reload=True` detect changes to the entry and used dependencies by file mtime.
+Unchanged templates reuse compiled code while each render uses current data. Runs on the same
+runner share this cache; final prompts are not cached or stored in the Store or SQLite.
 
-Dependency filenames must be static strings or lists of static strings. Dynamic data and
-conditional branches remain supported: replace `{% include selected %}` with fixed filenames in
-the respective branches. A dynamic filename expression raises `IrisContextError` with that
-actionable guidance because its full dependency sources cannot be determined on the first read.
+`include` / `import` / `extends` accept native Jinja dynamic filenames, and dependencies load only
+when their branch executes. Newly added optional files and preferred candidates can take effect on
+the next render. Invalid, missing, or undefined content in a used template raises `IrisContextError`
+without falling back to old content. Template sources are not frozen for the duration of a run.
 
 `build()` returns `None` for optional sections without enabled slots and does not read their
 templates. `StrictUndefined` and `max_chars` apply only during actual rendering.
@@ -144,7 +143,7 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 | --- | --- | --- |
 | Slot/section contracts, ordering, roles, limits, and XML rendering | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML, template paths, and Jinja2 rendering | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
-| Template snapshots | `renderer.py` | `tests/context/test_template_snapshot.py` |
+| Template loading and reloading | `renderer.py` | `tests/context/test_template_renderer.py` |
 
 ```bash
 uv run pytest tests/context

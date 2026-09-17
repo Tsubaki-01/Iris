@@ -402,8 +402,8 @@ check. Saved requests, run limits, cursors, call identities, and execution resul
 the original run. Pending tools must satisfy argument and current permission rules. Run records and
 checkpoints do not store an environment fingerprint.
 
-Template sources and static dependencies are cached on first rendering. The same runtime reuses
-that snapshot; a new runtime reads current content. `StrictUndefined` and character limits are
+Templates use Jinja's native on-demand loading, compiled cache, and default reload detection;
+later renders on the same runtime can see file edits. `StrictUndefined` and character limits are
 checked during rendering. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and

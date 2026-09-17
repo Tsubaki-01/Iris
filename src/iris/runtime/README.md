@@ -56,6 +56,7 @@ result = await runtime.execute(
 
 所有 activation 都携带原始 `run_input` 与创建 run 时的 `initial_session_message_count`。
 engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recover 保留锚点，不重复追加原文。
+BCI 也只在 `step 0` 构建；后续步骤使用已归档历史，不再渲染未被消费的 BCI 模板。
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
@@ -77,7 +78,7 @@ engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recov
 摘要指令来自独立 Jinja2 文件，默认使用 [`prompts/compaction.j2`](../prompts/compaction.j2)，
 要求七栏 Markdown、正文跟随对话主要语言。`compaction.prompt` 可以替换指令与输出格式；
 旧摘要与本批历史仍由框架提供。每次压缩操作通过既有模板渲染器取得一次指令，供全部分块
-计量和请求共用；文件首次读取后使用缓存，修改后需创建新 runtime。没有标题 parser 或
+计量和请求共用；Jinja 复用编译缓存并按 mtime 检测更新，文件修改在下次压缩操作生效。没有标题 parser 或
 格式修复循环。路径配置见 [agents 说明](../agents/README.md#compactionconfig)。
 
 摘要请求复用有效主模型选项，覆盖为非流式、无工具/response schema、输出上限 S，并设置
