@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from hashlib import sha256
 from io import StringIO
 from itertools import islice
 from pathlib import Path
@@ -13,7 +12,6 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..exceptions import (
-    IrisSkillError,
     IrisSkillNotFoundError,
     IrisSkillPathError,
     IrisToolExecutionError,
@@ -47,7 +45,7 @@ class LoadSkillInput(BaseModel):
 
 
 class LoadSkillTool(BaseTool):
-    """按名称读取与启动版本一致的 SKILL.md，不执行其中内容。"""
+    """按目录快照中的名称读取当前 SKILL.md，不执行其中内容。"""
 
     def __init__(
         self,
@@ -131,13 +129,6 @@ class LoadSkillTool(BaseTool):
                 metadata,
                 worker_context,
             )
-        except IrisSkillError as exc:
-            return self._error_result(
-                code="SKILL_VERSION_CHANGED",
-                message=exc.message,
-                retryable=False,
-                details={"name": input_data.name},
-            )
         except IrisToolValidationError as exc:
             if exc.message.startswith("PATH_OUTSIDE_WORKSPACE"):
                 return self._path_error(
@@ -172,10 +163,8 @@ class LoadSkillTool(BaseTool):
         metadata: SkillMetadata,
         context: ToolExecutionContext,
     ) -> tuple[str, ReadFileRecord]:
-        """在 worker 内读取完整版本，成功后再保留原有的 1000 行输出范围。"""
+        """在 worker 内读取当前文本，保留含 frontmatter 的前 1000 行。"""
         text, record = self.file_service.read_text_observed(metadata.relative_skill_file, context)
-        if sha256(text.encode("utf-8")).hexdigest() != metadata.content_version:
-            raise IrisSkillError("Skill 内容已变化，请开始新 run", name=metadata.name)
         return "\n".join(line.rstrip("\n") for line in islice(StringIO(text), 1000)), record
 
     def _resolve_live_file(

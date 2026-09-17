@@ -21,7 +21,7 @@ flowchart LR
 ```
 
 Factory 每次构造 runtime 时只发现一次，各候选目录只枚举一次。正文不常驻 registry 或 context；
-`SkillMetadata.content_version` 保存发现时完整 UTF-8 文本的摘要，复用同一次读取。catalog 非空时，
+名称、描述与路径保留为构造时的目录快照；`load_skill` 每次读取登记路径的当前文本。catalog 非空时，
 `RuntimeFactory` 才会把 `available_skills` slot 和共享同一 registry 的 `load_skill` 注册到
 context/tool 链路中。当前 runtime 不自动刷新这份快照。
 
@@ -90,14 +90,14 @@ Read the relevant files, then report concrete findings.
 {"name": "my-skill"}
 ```
 
-`load_skill` 返回与启动时内容版本一致的 `SKILL.md` Markdown（最多 1000 行）。Discovery 负责配置 root
+`load_skill` 返回当前 `SKILL.md` 含 frontmatter 的前 1000 行，不重新解析 frontmatter。Discovery 负责配置 root
 与扫描目录边界；实际加载时会重新校验文件仍位于原 Skill 目录内，并由共享文件服务复核
 workspace 边界。模型无需、也不应改用 `file.read` 获取正文。该工具只读取文本：不会执行正文、
 自动调用其中命令或把 Skill 转换成一组工具。完整文本与文件观测在单个 worker 中从同一次
-打开读取，版本一致后才截取输出；成功的 `ReadFileRecord` 在事件循环合并，worker 不修改共享读取状态。
+打开读取，再截取输出；成功的 `ReadFileRecord` 在事件循环合并，worker 不修改共享读取状态。
 
-稳定工具错误码为 `SKILL_NOT_FOUND`、`SKILL_PATH_ERROR`、`SKILL_READ_ERROR` 和
-`SKILL_VERSION_CHANGED`。内容变化时最后一种错误要求开始新 run，不返回变化后的正文。
+稳定工具错误码为 `SKILL_NOT_FOUND`、`SKILL_PATH_ERROR` 和 `SKILL_READ_ERROR`。
+文件删除或无法读取仍返回读取错误；单纯编辑不会拒绝加载。
 
 ### 自定义 system template
 
@@ -128,16 +128,17 @@ Factory 会记录 warning；若 template 忽略该 slot，catalog 对模型不�
 | Description | catalog 最多 1024 字符；超长时截断并 warning |
 | Context | `system.max_chars` 是完整渲染后的硬上限；超限抛 `IrisContextError`，不省略条目 |
 | Provider | 仍受 provider 的总 context window 限制 |
-| File read | 完整读取并检查版本，`load_skill` 最多返回 1000 行 |
+| File read | 读取当前完整文本，`load_skill` 返回含 frontmatter 的前 1000 行 |
 | Tool result | `load_skill` 默认 `max_result_chars=50000`；超长非错误结果由 executor 落为 artifact 并返回 preview |
 
 目前没有 user-level 共享目录。临时方案是把 `permissions.workspace` 指向多个项目的共同父目录，
 再把 `skills.root` 指向其中的共享路径；这同时扩大了所有文件工具的 workspace 权限边界，使用前
 必须接受这一安全代价。
 
-运行恢复绑定启动时启用目录中实际发现的全部 Skill 内容版本，即使某条 Skill 尚未被加载，
-其正文变化也要求开始新 run。关闭 Skill 时不读取目录或正文，不扫描 workspace 中的其他文件。
-更新 Skill 后应重新构造 runtime 或重启长期运行的 `iris chat`；当前不承诺 provider cache 保持命中。
+同一 run 或同一 runner 的后续 run 都可读到编辑后的文件；catalog 描述仍是构造时快照，
+可以与当前文件的新 frontmatter 不同。新增、重命名或刷新 catalog 需要重新构造 runtime，
+或重启长期运行的 `iris chat`。关闭 Skill 时不读取目录或正文，不扫描 workspace 中的其他文件。
+当前不承诺 provider cache 保持命中。
 
 未来若加入多 scope，裸名称可能演进为 `scope:name`；`require` 和调用方不应假定裸名称永远能
 跨 scope 唯一。只有实际规模超过几十个 Skill 时，才考虑第三层检索或 deferred catalog。

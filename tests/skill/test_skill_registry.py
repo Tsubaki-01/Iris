@@ -23,7 +23,6 @@ def _metadata(name: str, *, root_index: int = 0) -> SkillMetadata:
         skill_file=root_dir / "SKILL.md",
         root_dir=root_dir,
         relative_skill_file=f"skills/{name}/SKILL.md",
-        content_version=f"version-{name}",
         root_index=root_index,
     )
 

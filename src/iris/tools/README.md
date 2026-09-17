@@ -198,7 +198,7 @@ INLINE 阻塞仍可能延迟退出。线程取消只结束 async waiter，worker
 
 `read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
 
-`WorkspaceFileService.read_text_observed()` 为 Skill 内容版本检查提供同一次打开的完整文本与
+`WorkspaceFileService.read_text_observed()` 为 Skill 加载提供同一次打开的完整文本与
 文件观测，复用文件读取的 workspace 和普通文件边界。它不更新共享读取状态；调用方在 await
 成功后合并。常规 `read_file_observed(..., max_chars=...)` 只读取预算内的分页范围，额外观察一个
 字符判断是否还有内容；跳过前置行和列时也按块读取，不把超长行整体载入内存。

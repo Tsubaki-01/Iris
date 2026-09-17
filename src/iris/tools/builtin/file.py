@@ -395,7 +395,7 @@ class WorkspaceFileService:
         file_path: str,
         context: ToolExecutionContext,
     ) -> tuple[str, ReadFileRecord]:
-        """从同一次打开读取完整文本并获取观测，供需要内容版本的调用方使用。
+        """从同一次打开读取完整文本并获取观测，供 Skill 等文本读取方使用。
 
         Args:
             file_path: workspace 内的文件路径。

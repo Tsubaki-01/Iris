@@ -116,7 +116,7 @@ class RuntimeEnvironment:
         workspace_root (Path): 工具执行使用的 workspace 根路径。
         memory_service (MemoryService | None): 显式可选 memory 服务。
         memory_context_builder (MemoryContextBuilder): memory context 裁剪器。
-        skill_registry (SkillRegistry | None): 启动发现的 Skill 内容版本快照。
+        skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
     """
 

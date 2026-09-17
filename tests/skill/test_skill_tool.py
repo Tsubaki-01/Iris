@@ -124,22 +124,36 @@ async def test_skill_read_runs_in_worker_and_merges_read_state_on_event_loop(
     ["changed instructions", "line\n" * 1100 + "changed tail"],
     ids=["body", "beyond-output-limit"],
 )
-async def test_modified_skill_requires_new_run(tmp_path: Path, body: str) -> None:
+async def test_modified_skill_returns_current_text(tmp_path: Path, body: str) -> None:
     registry, skill_file = _registry(tmp_path, body="line\n" * 1100 + "original tail")
     original = skill_file.read_text(encoding="utf-8")
     frontmatter = original.rsplit("---\n", 1)[0]
     skill_file.write_text(f"{frontmatter}---\n{body}", encoding="utf-8")
 
+    context = ToolExecutionContext(workspace_root=tmp_path)
     result = await LoadSkillTool(registry).arun(
         LoadSkillInput(name="example-skill"),
-        ToolExecutionContext(workspace_root=tmp_path),
+        context,
     )
 
-    assert result.is_error
-    assert result.error is not None
-    assert result.error.code == "SKILL_VERSION_CHANGED"
-    assert not result.error.retryable
-    assert result.content == []
+    assert not result.is_error
+    expected = "\n".join(skill_file.read_text(encoding="utf-8").splitlines()[:1000])
+    assert result.model_content == expected
+    assert len(result.model_content.splitlines()) <= 1000
+    assert context.read_state.get(skill_file.resolve()) is not None
+
+
+@pytest.mark.asyncio
+async def test_load_skill_does_not_reparse_changed_frontmatter(tmp_path: Path) -> None:
+    """目录仍是发现快照，加载直接返回包含已改 frontmatter 的当前文本。"""
+    registry, skill_file = _registry(tmp_path)
+    skill_file.write_text("---\ndescription: [unfinished\n---\nnew body", encoding="utf-8")
+    result = await LoadSkillTool(registry).arun(
+        LoadSkillInput(name="example-skill"), ToolExecutionContext(workspace_root=tmp_path)
+    )
+    assert not result.is_error
+    assert result.model_content == skill_file.read_text(encoding="utf-8")
+    assert registry.get("example-skill").description == "Use example-skill"
 
 
 @pytest.mark.asyncio

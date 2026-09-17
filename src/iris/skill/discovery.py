@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from hashlib import sha256
 from pathlib import Path
 
 from ..exceptions import (
@@ -297,7 +296,6 @@ def _load_skill(
         skill_file=resolved_skill_file,
         root_dir=resolved_skill_dir,
         relative_skill_file=resolved_skill_file.relative_to(resolved_workspace).as_posix(),
-        content_version=sha256(text.encode("utf-8")).hexdigest(),
         root_index=root_index,
         description_truncated=description_truncated,
         declared_name=declared_name,

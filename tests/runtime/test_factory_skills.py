@@ -17,10 +17,13 @@ from iris.agents import (
 )
 from iris.context import ContextBuilder, ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisConfigError, IrisContextError
+from iris.harness import AgentRunner
+from iris.lifecycle import AgentRunRequest
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.runtime import RuntimeFactory
 from iris.runtime._assembly import _prepare_skills
 from iris.skill import CATALOG_SLOT_NAME, LoadSkillTool
+from iris.store import InMemoryLifecycleStore
 from iris.tools import ReadFileState, ToolExecutionContext
 
 
@@ -189,6 +192,47 @@ async def test_catalog_and_loader_share_snapshot_and_execute_without_file_builti
     assert "# Instructions" in loaded.model_content
     assert isinstance(context.read_state, ReadFileState)
     assert context.read_state.get(skill_file.resolve()) is not None
+
+
+@pytest.mark.asyncio
+async def test_same_runner_loads_changed_skill_on_next_run(tmp_path: Path) -> None:
+    """同一 runner 的目录不刷新，后续 run 的 load_skill 读取编辑后的文件。"""
+    skill_file = _write_skill(tmp_path, "example-skill", description="First", body="old body")
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="fake",
+                content=[
+                    ToolUseBlock(
+                        id=f"load-{index}", name="load_skill", input={"name": "example-skill"}
+                    )
+                ],
+            )
+            if step == 0
+            else LLMResponse(provider="fake", content=[TextBlock(text="done")])
+            for index in range(2)
+            for step in range(2)
+        ]
+    )
+    runtime = RuntimeFactory.from_config(
+        _config(tmp_path, skills=AgentSkillsConfig(enabled=True)), provider=provider
+    )
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=runtime, store=store)
+    first = await runner.start(AgentRunRequest(input="load", session_id="skills"))
+    assert first.run.stop_reason == "completed"
+    assert "old body" in store.list_tool_calls(first.run.run_id)[0].result.model_content
+
+    updated = (
+        skill_file.read_text(encoding="utf-8")
+        .replace("First", "Changed")
+        .replace("old body", "new body")
+    )
+    skill_file.write_text(updated, encoding="utf-8")
+    second = await runner.start(AgentRunRequest(input="load again", session_id="skills"))
+    assert second.run.stop_reason == "completed"
+    assert store.list_tool_calls(second.run.run_id)[0].result.model_content == updated
+    assert runtime.environment.skill_registry.get("example-skill").description == "First"
 
 
 def test_skill_description_changes_only_affect_new_runtime_catalog(

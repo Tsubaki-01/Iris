@@ -22,8 +22,8 @@ flowchart LR
 ```
 
 The factory takes one discovery snapshot per runtime construction and enumerates each candidate
-directory once. Bodies are not retained in the registry or context. `SkillMetadata.content_version`
-stores a digest of the complete UTF-8 text already read during discovery.
+directory once. Bodies are not retained in the registry or context. Names, descriptions, and paths
+remain a construction-time catalog snapshot; `load_skill` reads current text at the registered path.
 Only a non-empty catalog adds the `available_skills` slot and a `load_skill`
 tool backed by the same registry. The runtime does not refresh that snapshot.
 
@@ -95,18 +95,18 @@ contains only `name` and `description`. After selecting an entry, the model call
 {"name": "my-skill"}
 ```
 
-`load_skill` returns up to 1000 lines of `SKILL.md` Markdown matching its startup content version. Discovery owns the
+`load_skill` returns the first 1000 lines of current `SKILL.md` text, including frontmatter, without
+parsing frontmatter again. Discovery owns the
 configured root and scan-directory boundaries. At load time, the tool revalidates that the file is
 still inside its original Skill directory, while the shared file service enforces the workspace
 boundary. The model does not need `file.read` for Skill bodies. The tool reads text only: it never
 executes body content, invokes commands automatically, or turns a Skill into a mounted tool set.
-A single worker reads the complete text and observation from one open file, verifies the version,
+A single worker reads the complete text and observation from one open file,
 then selects the output lines. The event loop merges the successful `ReadFileRecord`; the worker
 does not mutate shared read state.
 
-Stable tool error codes are `SKILL_NOT_FOUND`, `SKILL_PATH_ERROR`, `SKILL_READ_ERROR`, and
-`SKILL_VERSION_CHANGED`. Changed content produces the last error, requires a new run, and is not
-returned to the model.
+Stable tool error codes are `SKILL_NOT_FOUND`, `SKILL_PATH_ERROR`, and `SKILL_READ_ERROR`.
+Deleted or unreadable files still produce read errors; editing a file does not prevent loading it.
 
 ### Custom system templates
 
@@ -139,17 +139,17 @@ is invisible to the model even though `load_skill` remains registered.
 | Description | At most 1024 catalog characters; longer text is truncated with a warning |
 | Context | `system.max_chars` is a hard post-render limit; overflow raises `IrisContextError` without omitting entries |
 | Provider | The provider's total context window still applies |
-| File read | Read the complete text and verify its version; `load_skill` returns at most 1000 lines |
+| File read | Read current complete text; `load_skill` returns its first 1000 lines including frontmatter |
 | Tool result | `load_skill` defaults to `max_result_chars=50000`; the executor stores a larger non-error result as an artifact and returns a preview |
 
 There is no user-level shared directory. A temporary workaround is to set `permissions.workspace`
 to a common parent of several projects and point `skills.root` to a shared path below it. This also
 broadens the workspace boundary for every file tool and must be treated as a security tradeoff.
 
-Run recovery binds the startup content versions of every Skill actually discovered in enabled
-directories. A changed body requires a new run even if that Skill has not been loaded yet. Disabled
-Skills do not read directories or bodies, and unrelated workspace files are not scanned.
-Rebuild the runtime or restart long-running `iris chat` processes after changing Skills.
+Repeated loads in the same run or subsequent runs on the same runner can see edited files.
+Catalog descriptions remain the construction-time snapshot and may differ from current frontmatter.
+Rebuild the runtime or restart long-running `iris chat` to discover added or renamed Skills or refresh
+the catalog. Disabled Skills do not read directories or bodies, and unrelated files are not scanned.
 No provider-cache hit behavior is guaranteed.
 
 If multiple scopes are added, bare names may evolve into `scope:name`; callers and `require` should

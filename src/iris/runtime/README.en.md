@@ -283,8 +283,10 @@ empty result bypass both additions exactly, preserving the previous context/tool
 or runtime instance does not refresh the snapshot automatically.
 
 `RuntimeEnvironment.skill_registry` retains that shared registry.
-`load_skill` checks the discovery version during its complete read and returns
-`SKILL_VERSION_CHANGED` after a file change. Create a new runtime and start a new run to use it.
+`load_skill` reads the current text at the registered path each time and returns its first 1000
+lines, including frontmatter, without parsing it again. File edits require no new run. Rebuilding
+the runtime refreshes catalog names, descriptions, and paths; an old catalog description can
+therefore coexist with a new description in the returned file.
 
 A `skills.root` escape, missing `skills.require` entry, or name/alias collision between
 `load_skill` and a user tool becomes an assembly-time `IrisConfigError` and fails closed. See

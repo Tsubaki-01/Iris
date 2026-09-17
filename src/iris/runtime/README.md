@@ -250,8 +250,9 @@ Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户
 registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过 catalog 和 loader，不改变
 原有 context/tool 形状；每个 factory/runtime 实例内不自动刷新快照。
 
-`RuntimeEnvironment.skill_registry` 保存这个共享 registry。`load_skill` 完整读取时会核对发现版本，文件
-变化后返回 `SKILL_VERSION_CHANGED`，需要重新创建 runtime 并开始新 run。
+`RuntimeEnvironment.skill_registry` 保存这个共享目录快照。`load_skill` 每次读取登记路径的当前文本，
+返回含 frontmatter 的前 1000 行，不重新解析 frontmatter。文件编辑无需新 run；名称、描述与路径的
+目录更新仍需重新构造 runtime，因此旧 catalog 描述可以与返回文件中的新描述并存。
 
 `skills.root` 越出 workspace、`skills.require` 缺失，或 `load_skill` 与用户工具名称/别名冲突，
 都会在装配阶段转为 `IrisConfigError` 并 fail closed。完整契约见

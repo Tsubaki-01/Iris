@@ -170,7 +170,7 @@ and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A re
 immutable `ReadFileRecord` observation that the event loop merges only after a successful await.
 
 `WorkspaceFileService.read_text_observed()` supplies complete text and a file observation from one
-open file for Skill content-version checks, sharing the workspace and regular-file boundaries.
+open file for Skill loading, sharing the workspace and regular-file boundaries.
 It does not update shared read state; callers merge after a successful await. Ordinary
 `read_file_observed(..., max_chars=...)` reads only the budgeted page plus one lookahead character.
 Skipping preceding lines and columns is also chunked, without loading an entire long line.
