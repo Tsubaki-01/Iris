@@ -198,6 +198,10 @@ recoverable parent/child state.
   `list_events(after_sequence=0, limit=None)` are side-effect-free durable reads. When provided,
   `limit` must be a positive integer.
 
+`resume()` passes the current interaction ID, run revision, interaction version, and typed response
+to the Store without echoing the stored call fingerprint as a resolve argument. Actual tool
+execution still retains fingerprint binding.
+
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
 

@@ -63,6 +63,10 @@ needed. Stores do not promise successful resubmission of historical commands. St
 idempotence for matching answers, cancellation, and child admission follows each mutation's contract.
 Run-state mutations carry the expected revision/fence facts required by their contracts; stale
 writers conflict instead of overwriting.
+`ResolveInteraction` carries the run ID, current interaction ID, expected run revision, expected
+interaction version, typed response, and time; it no longer accepts `expected_fingerprint`.
+Pending writes check revision/version. A matching stored answer while WAITING returns current facts
+with empty events; a different answer conflicts. Tool argument/workspace fingerprints remain intact.
 Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
 SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and

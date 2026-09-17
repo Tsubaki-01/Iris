@@ -75,6 +75,8 @@ Store 不缓存完整 command，也不承诺历史写入原样重交成功。每
 revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态错误，不重复追加事实。
 已有业务状态幂等仍保留：WAITING 已回答 interaction 的相同 response、同 activation 的相同
 未结算取消请求、同 parent/tool 的 child admission。调用方通过现有 read/recovery 接口确认结果。
+`resolve_interaction` 先匹配当前等待的 interaction identity 和 response kind，再对 PENDING
+写入检查 run revision 与 interaction version；RESOLVED 的同回答直接返回当前事实。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
 时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v7，

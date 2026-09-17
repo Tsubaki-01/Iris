@@ -182,6 +182,8 @@ Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE 
   正整数。
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
+`resume()` 将当前 interaction ID、run revision、interaction version 与 typed response 交给 Store；
+不再回传 interaction 内已有的调用指纹作为 resolve 参数，实际工具执行的指纹绑定仍保留。
 
 `get_run_control()` 只读取 run identity、phase、activation fence、revision 与取消控制字段。
 SessionManager 在锁内用它判断 steer 是否仍可进入当前 activation，不装载完整 run snapshot。

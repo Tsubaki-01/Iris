@@ -90,6 +90,8 @@ with a conflict or state error without duplicating facts. Existing state-based i
 for the same response to a resolved WAITING interaction, the same unsettled cancellation request
 within an activation, and child admission under the same parent/tool key. Callers use the existing
 read/recovery interfaces to inspect outcomes.
+`resolve_interaction` first matches the current waiting interaction identity and response kind.
+PENDING writes check run revision and interaction version; a matching RESOLVED answer returns current facts.
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations

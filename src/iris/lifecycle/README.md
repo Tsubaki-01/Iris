@@ -59,6 +59,9 @@ reads。
 `SessionSnapshot`；需要 history 时显式调用 `load_session()`。Store 不承诺历史 command 原样
 重交成功；已有相同回答、取消和 child admission 的业务状态幂等按各 mutation 契约保留。
 Run 状态 mutation 按各自契约携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
+`ResolveInteraction` 携带 run ID、当前 interaction ID、expected run revision、expected interaction
+version、typed response 和时间，不再接收 `expected_fingerprint`。待回答写入检查 revision/version；
+WAITING 已保存相同回答时返回当前事实与空 events，不同回答冲突。工具执行的参数/workspace 指纹仍保留。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
 checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。

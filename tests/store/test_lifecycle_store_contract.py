@@ -1025,7 +1025,6 @@ def _resolve(store: LifecycleStore, waiting: RunCommit) -> tuple[ResolveInteract
         interaction_id=_INTERACTION_ID,
         expected_interaction_version=waiting.interaction.version,
         response=QuestionInteractionResponse(answer="继续"),
-        expected_fingerprint=_TOOL_FINGERPRINT,
         now=_T2,
     )
     return command, store.resolve_interaction(command)
@@ -1813,7 +1812,32 @@ def test_cancelled_claim_preserves_exact_subject_error_priority(
     assert all(call.phase == "prepared" for call in lifecycle_store.list_tool_calls("run-1"))
 
 
-def test_resolve_exact_response_replays_but_different_response_conflicts(
+@pytest.mark.parametrize("stale_field", ["expected_run_revision", "expected_interaction_version"])
+def test_resolve_pending_rejects_stale_revision_or_version(
+    lifecycle_store: LifecycleStore, stale_field: str
+) -> None:
+    """待回答 interaction 的写入仍由 run revision 与 interaction version CAS 约束。"""
+    waiting = _suspend(lifecycle_store, _create(lifecycle_store))
+    command = ResolveInteraction(
+        run_id="run-1",
+        expected_run_revision=waiting.run.revision,
+        interaction_id=_INTERACTION_ID,
+        expected_interaction_version=waiting.interaction.version,
+        response=QuestionInteractionResponse(answer="继续"),
+        now=_T2,
+    )
+    events = lifecycle_store.list_events("run-1")
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.resolve_interaction(
+            replace(command, **{stale_field: getattr(command, stale_field) - 1})
+        )
+    assert lifecycle_store.load_run("run-1") == waiting.run
+    assert lifecycle_store.load_interaction(_INTERACTION_ID) == waiting.interaction
+    assert lifecycle_store.list_events("run-1") == events
+    assert lifecycle_store.resolve_interaction(command).interaction.status == "resolved"
+
+
+def test_resolve_same_response_is_idempotent_but_different_response_conflicts(
     lifecycle_store: LifecycleStore,
 ) -> None:
     """同 response 幂等，改变 response 不能覆盖已经 durable 的人工事实。"""
@@ -2380,7 +2404,6 @@ def _resolve_proxy(store: LifecycleStore, waiting: RunCommit) -> RunCommit:
             interaction_id=waiting.interaction.interaction_id,
             expected_interaction_version=waiting.interaction.version,
             response=QuestionInteractionResponse(answer="continue"),
-            expected_fingerprint=_TOOL_FINGERPRINT,
             now=_T2,
         )
     )

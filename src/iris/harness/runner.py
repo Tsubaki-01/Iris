@@ -659,7 +659,6 @@ class AgentRunner:
                     interaction_id=interaction.interaction_id,
                     expected_interaction_version=interaction.version,
                     response=response,
-                    expected_fingerprint=interaction.request.tool_call.fingerprint,
                     now=now,
                 )
             )

@@ -113,6 +113,7 @@ cursor 位置只有：
 原子提交 waiting checkpoint 与 interaction；恢复不会重复已经提交的前缀调用。
 人工响应绑定该 durable subject。等待期间动态权限变为 ALLOW 时，批准可继续执行；变为
 DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_REJECTED`，执行前仍刷新权限。
+生成 tool fact 时直接复用已有人工请求的调用指纹；没有人工请求时才按精确参数和 workspace 计算。
 
 工具路径通过 `ToolBridge.preflight()` 形成计划，再调用带执行守卫的 `execute_prepared()`；
 工具结果统一经 `ToolResult.to_msg()` 投影为 history 消息。

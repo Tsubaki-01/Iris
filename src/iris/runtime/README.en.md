@@ -129,6 +129,8 @@ current `next_tool_index`. Resume does not repeat the committed prefix. Human re
 that durable subject. If dynamic permission changes to ALLOW while waiting, an approval can
 execute; if it changes to DENY, approval produces a permission error. User rejection remains
 `USER_REJECTED`, and permission is still refreshed before execution.
+Tool facts reuse a human request's existing call fingerprint when available; otherwise runtime
+computes it from the exact arguments and workspace.
 
 Tool execution uses `ToolBridge.preflight()` to produce a plan, then guarded
 `execute_prepared()`. Tool results share the `ToolResult.to_msg()` projection into history.

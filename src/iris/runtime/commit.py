@@ -192,16 +192,17 @@ def build_runtime_tool_call(
     arguments: dict[str, object] = dict(
         prepared.arguments if prepared.validated_input is not None else prepared.tool_use.input
     )
-    fingerprint = make_call_fingerprint(
-        session_id=activation.session_id,
-        run_id=activation.run_id,
-        tool_call_id=prepared.tool_use.id,
-        tool_name=prepared.tool_use.name,
-        arguments=arguments,
-        workspace_root=str(workspace_root.resolve()),
-    )
     if prepared.human_request is not None:
         fingerprint = prepared.human_request.tool_call.fingerprint
+    else:
+        fingerprint = make_call_fingerprint(
+            session_id=activation.session_id,
+            run_id=activation.run_id,
+            tool_call_id=prepared.tool_use.id,
+            tool_name=prepared.tool_use.name,
+            arguments=arguments,
+            workspace_root=str(workspace_root.resolve()),
+        )
     return RuntimeToolCall(
         run_id=activation.run_id,
         activation_id=activation.activation_id,

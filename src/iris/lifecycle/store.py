@@ -226,14 +226,13 @@ class SuspendRun:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResolveInteraction:
-    """以 response/version/fingerprint CAS 解决 pending interaction。"""
+    """以当前 interaction identity、run revision 和 interaction version 写入响应。"""
 
     run_id: str
     expected_run_revision: int
     interaction_id: str
     expected_interaction_version: int
     response: HumanInteractionResponse
-    expected_fingerprint: str
     now: datetime
 
 

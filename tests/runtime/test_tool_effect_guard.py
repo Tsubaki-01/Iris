@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fakes import start_activation
 
 from iris.exceptions import (
     IrisCancellationRequestedError,
     IrisRunConflictError,
     IrisRunPersistenceError,
 )
+from iris.hitl import make_call_fingerprint
 from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import Msg, ToolUseBlock
 from iris.runtime import (
@@ -21,6 +23,7 @@ from iris.runtime import (
     RuntimeToolCall,
     ToolCallClaim,
 )
+from iris.runtime.commit import build_runtime_tool_call
 from iris.tools import (
     BaseTool,
     DefaultPermissionPolicy,
@@ -115,6 +118,41 @@ def _prepared_call(
         context,
     ).calls[0]
     return executor, prepared, context
+
+
+@pytest.mark.parametrize("write_mode", ["ask", "allow"])
+def test_runtime_tool_call_reuses_human_request_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_mode: str
+) -> None:
+    """人工请求已有指纹时直接复用，其余调用仍按精确参数和 workspace 计算。"""
+    _, prepared, _ = _prepared_call(tmp_path, write_mode=write_mode)
+    activation = start_activation(run_id="run_1", session_id="session_1")
+    expected = make_call_fingerprint(
+        session_id=activation.session_id,
+        run_id=activation.run_id,
+        tool_call_id=prepared.tool_use.id,
+        tool_name=prepared.tool_use.name,
+        arguments=prepared.arguments,
+        workspace_root=str(tmp_path.resolve()),
+    )
+    computed: list[dict[str, Any]] = []
+
+    def compute(**kwargs: Any) -> str:
+        computed.append(kwargs)
+        return make_call_fingerprint(**kwargs)
+
+    monkeypatch.setattr("iris.runtime.commit.make_call_fingerprint", compute)
+    result = build_runtime_tool_call(
+        activation=activation, cursor=activation.cursor, prepared=prepared, workspace_root=tmp_path
+    )
+    assert result.fingerprint == expected
+    if write_mode == "ask":
+        assert prepared.human_request is not None
+        assert result.fingerprint == prepared.human_request.tool_call.fingerprint
+        assert computed == []
+    else:
+        assert prepared.human_request is None
+        assert len(computed) == 1
 
 
 @pytest.mark.asyncio

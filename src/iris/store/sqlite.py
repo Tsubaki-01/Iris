@@ -1790,7 +1790,7 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         command: ResolveInteraction,
     ) -> RunCommit:
-        """使用 version、kind 与 fingerprint CAS 增量写入人工响应。"""
+        """按当前 interaction identity、response kind 与 revision/version 增量写入人工响应。"""
         operation = "resolve_interaction"
         run = self._require_run(connection, command.run_id, operation=operation)
         if run.phase is not RunPhase.WAITING:
@@ -1802,8 +1802,6 @@ class SQLiteStore:
         )
         if run.pending_interaction_id != interaction.interaction_id:
             raise IrisRunConflictError("interaction 已不再属于 run 当前等待")
-        if interaction.request.tool_call.fingerprint != command.expected_fingerprint:
-            raise IrisRunConflictError("interaction fingerprint 不匹配")
         if interaction.request.prompt.kind != command.response.kind:
             raise IrisRunConflictError("interaction response kind 不匹配")
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
