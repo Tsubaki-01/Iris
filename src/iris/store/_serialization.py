@@ -1,6 +1,6 @@
 """Lifecycle store 共用的私有序列化投影。
 
-该模块只把已经验证的 command 值转换为 replay key 和 durable JSON 可消费的稳定值。
+该模块只把已经验证的 command 值转换为 durable JSON 可消费的稳定值。
 
 Example:
     payload = jsonable(command)

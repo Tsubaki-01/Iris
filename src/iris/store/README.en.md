@@ -66,8 +66,8 @@ mutation, the active precondition reads the lane fence once in the transaction a
 history precondition checks only the session revision. Both stores share lifecycle typed-transition
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
-load/recovery boundaries such as SQLite row decoding, while one private store serializer projects
-replay keys and durable commands to JSON values. Schema v7 keeps revision,
+load/recovery boundaries such as SQLite row decoding; a private store serializer projects durable
+values to JSON. Schema v7 keeps revision,
 message count, update time, nullable `forked_from_run_id`, and the `compaction_json` projection in
 `sessions`; later appends preserve the direct source and summary. Messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
@@ -79,15 +79,17 @@ reread full history.
 Run creation records `initial_session_message_count` within its transaction. The first terminal
 settlement records the cumulative session message count in `RunRecord.terminal_session_message_count`,
 including tool closers, and freezes the current summary in `terminal_compaction` (`None` without a
-summary). Later replays preserve this snapshot. Creation-time deadlines, budget exhaustion, waiting cancellation,
+summary). Later reads preserve this snapshot. Creation-time deadlines, budget exhaustion, waiting cancellation,
 ordinary finish, `OUTCOME_UNKNOWN` recovery, and `FINALIZE` recovery all record it. Runs without a
 checkpoint or closer still record the actual count, including zero. SQLite uses already loaded
 session metadata instead of loading full history to count messages.
 
-Exact-retry cache values contain only a run ID, a flag for returning the session revision, and an
-interaction ID. Hits reload current authoritative facts with empty events. Each mutation encodes
-its complete canonical command key once. The cache retains its existing process-local lifetime,
-without TTL/LRU eviction; complete command keys still grow with the number of mutations.
+Stores do not cache complete commands or promise successful resubmission of historical writes.
+Each mutation uses current state, revision/CAS, and activation fences; stale writes normally fail
+with a conflict or state error without duplicating facts. Existing state-based idempotence remains
+for the same response to a resolved WAITING interaction, the same unsettled cancellation request
+within an activation, and child admission under the same parent/tool key. Callers use the existing
+read/recovery interfaces to inspect outcomes.
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
@@ -132,7 +134,7 @@ activation fence, cancellation, and advancing coverage. Runtime owns tool-group 
 token limits. The event contains only the covered count and before/after input estimates.
 
 Recovery after a projection commit but before a main response uses the committed summary and the
-same pending reservation. Both mutations use the existing process-local exact replay mechanism;
+same pending reservation. Both mutations require the current revision, so stale command resubmissions conflict;
 it does not promise exactly-once external model billing across process restarts.
 
 ### Stores and queries

@@ -57,7 +57,7 @@ fence，随后 history precondition 只检查 session revision。任一 SQL 失�
 rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
-load/recovery 边界；replay key 与 durable command 的 JSON 投影共用同一个 store 私有 serializer。
+load/recovery 边界；durable JSON 投影使用 store 私有 serializer。
 schema v7 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
 及 `compaction_json` 摘要投影；后续追加保留直接来源和摘要。消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
@@ -66,14 +66,15 @@ Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生
 
 创建 run 在同一事务内记录 `initial_session_message_count`。首次 terminal settlement 在
 `RunRecord.terminal_session_message_count` 记录 session 累计消息数，包括本次工具闭合消息，
-并在 `terminal_compaction` 冻结当时的摘要；没有摘要时为 `None`。后续 replay 不改写快照。
+并在 `terminal_compaction` 冻结当时的摘要；没有摘要时为 `None`。后续读取保持该快照。
 创建时 deadline、预算耗尽、waiting 取消、普通
 finish、`OUTCOME_UNKNOWN` recovery 和 `FINALIZE` recovery 均写入该字段。没有 checkpoint 或
 没有 closer 时也记录实际消息数，0 合法。SQLite 使用已读取的 session metadata 计数，无需加载完整历史。
 
-精确重试缓存只保留 run ID、是否返回 session revision 和 interaction ID；命中后从当前权威
-存储重建事实，events 为空。每次 mutation 只编码一次完整 canonical command key。缓存维持
-原有进程内有效期，没有 TTL/LRU 淘汰；完整 command key 仍会随提交数量增长。
+Store 不缓存完整 command，也不承诺历史写入原样重交成功。每次 mutation 都按当前状态、
+revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态错误，不重复追加事实。
+已有业务状态幂等仍保留：WAITING 已回答 interaction 的相同 response、同 activation 的相同
+未结算取消请求、同 parent/tool 的 child admission。调用方通过现有 read/recovery 接口确认结果。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
 时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v7，
@@ -114,7 +115,7 @@ child run 的用量不复制到 parent。
 token 额度由 runtime 负责。事件只含覆盖条数和前后输入估算，不含摘要正文。
 
 摘要已提交、主响应尚未提交时，恢复仍使用该摘要与原 pending reservation。两条 mutation
-复用现有进程内 exact replay；它不承诺跨进程外部模型调用只计费一次。
+按当前 revision 提交，旧 command 重交会冲突；不承诺跨进程外部模型调用只计费一次。
 
 ### Store 与查询
 

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from importlib import import_module
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -213,10 +212,10 @@ def _compaction_command(current: RunCommit, *, count: int = 2) -> CommitCompacti
     )
 
 
-def test_compaction_usage_only_replays_without_events_or_checkpoint_changes(
+def test_compaction_usage_rejects_stale_command_without_events_or_checkpoint_changes(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """分块摘要费用独立累加，exact replay 不重复收费。"""
+    """分块摘要费用独立累加，旧 revision 重交失败且不重复收费。"""
     ready = _compaction_ready(lifecycle_store)
     before_session = lifecycle_store.load_session("session-1")
     before_events = lifecycle_store.list_events("run-1")
@@ -228,7 +227,8 @@ def test_compaction_usage_only_replays_without_events_or_checkpoint_changes(
         now=_T3,
     )
     first = lifecycle_store.record_compaction_usage(command)
-    assert lifecycle_store.record_compaction_usage(command).run == first.run
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.record_compaction_usage(command)
     second = lifecycle_store.record_compaction_usage(
         replace(
             command,
@@ -276,9 +276,9 @@ def test_compaction_projection_is_atomic_and_preserves_pending_step(
         "before_input_tokens": 80000,
         "after_input_tokens": 20000,
     }
-    replay = lifecycle_store.commit_compaction(command)
-    assert replay.events == ()
-    assert replay.run == committed.run
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.commit_compaction(command)
+    assert lifecycle_store.load_run("run-1") == committed.run
     assert lifecycle_store.load_session("session-1") == saved
     recovered = lifecycle_store.recover_active_run(
         RecoverActiveRun(
@@ -455,7 +455,7 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
     lifecycle_store: LifecycleStore,
     path: str,
 ) -> None:
-    """所有终态与同事务原文截点冻结相同摘要，后续重放保持快照。"""
+    """所有终态与同事务原文截点冻结相同摘要，拒绝旧提交后保持快照。"""
     ready = _compaction_ready(lifecycle_store)
     used = lifecycle_store.record_compaction_usage(
         RecordCompactionUsage(
@@ -580,7 +580,8 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
             now=_T3,
         )
         terminal = lifecycle_store.recover_active_run(recovery)
-        assert lifecycle_store.recover_active_run(recovery).run == terminal.run
+        with pytest.raises(IrisRunConflictError):
+            lifecycle_store.recover_active_run(recovery)
     elif path == "budget":
         terminal = lifecycle_store.reserve_model_step(
             ReserveModelStep(
@@ -599,7 +600,8 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
             now=_T3,
         )
         terminal = lifecycle_store.finish_run(finish)
-        assert lifecycle_store.finish_run(finish).run == terminal.run
+        with pytest.raises(IrisRunConflictError):
+            lifecycle_store.finish_run(finish)
         if path == "deadline":
             command = _create_command(
                 run_id="expired",
@@ -658,7 +660,9 @@ def test_fork_uses_frozen_compaction_when_source_compacts_again(
     )
     lifecycle_store.commit_compaction(_compaction_command(reserved))
     assert lifecycle_store.load_session("session-1").compaction.covered_message_count == 2
-    assert lifecycle_store.finish_run(finish).run.terminal_compaction == old.terminal_compaction
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.finish_run(finish)
+    assert lifecycle_store.load_run("run-1").terminal_compaction == old.terminal_compaction
     fork = lifecycle_store.fork_session(
         ForkSession(
             source_run_id="run-1",
@@ -1271,7 +1275,8 @@ def test_recovery_without_closer_keeps_committed_message_cutoff(
     assert terminal.session_revision is None
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 2
     assert lifecycle_store.load_session("session-1").revision == 1
-    assert lifecycle_store.recover_active_run(command).run.terminal_session_message_count == 2
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.recover_active_run(command)
     if isinstance(lifecycle_store, SQLiteStore):
         reopened = SQLiteStore(lifecycle_store.path)
         assert reopened.load_run("run-1").terminal_session_message_count == 2
@@ -1438,10 +1443,10 @@ def test_session_lane_read_tracks_non_terminal_owner_without_mutation(
     assert lifecycle_store.load_session_lane("session-1") is None
 
 
-def test_reserve_exact_replay_is_noop_and_budget_exhaustion_is_terminal(
+def test_reserve_rejects_stale_command_and_budget_exhaustion_is_terminal(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """精确 replay 不增加 revision/event，下一 reservation 报预算耗尽。"""
+    """旧 reservation 冲突且不增加 revision/event，下一 reservation 报预算耗尽。"""
     created = _create(lifecycle_store, max_model_steps=1)
     command = ReserveModelStep(
         run_id="run-1",
@@ -1452,9 +1457,9 @@ def test_reserve_exact_replay_is_noop_and_budget_exhaustion_is_terminal(
     first = lifecycle_store.reserve_model_step(command)
     events_after_first = lifecycle_store.list_events("run-1")
 
-    replay = lifecycle_store.reserve_model_step(command)
-    assert replay.events == ()
-    assert replay.run.revision == first.run.revision
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.reserve_model_step(command)
+    assert lifecycle_store.load_run("run-1") == first.run
     assert lifecycle_store.list_events("run-1") == events_after_first
 
     assistant = Msg.assistant("done")
@@ -1571,44 +1576,6 @@ def test_sqlite_reads_do_not_deepcopy_newly_decoded_facts(
     assert store.list_events("run-1")
 
 
-def test_replay_retains_only_fact_identifiers(lifecycle_store: LifecycleStore) -> None:
-    """精确重试缓存只保留重载事实所需的标识，不保存旧 aggregate。"""
-    _prepare_tool(lifecycle_store)
-    for replay in lifecycle_store._replays.values():
-        assert all(
-            isinstance(getattr(replay, item.name), str | bool | type(None))
-            for item in fields(replay)
-        )
-
-
-def test_replay_key_is_encoded_once_per_mutation(
-    lifecycle_store: LifecycleStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """同次提交复用 canonical key；命中重试仍精确匹配完整命令。"""
-    created = _create(lifecycle_store)
-    module = import_module(type(lifecycle_store).__module__)
-    original = module.replay_key
-    encodings = 0
-
-    def encode(operation: str, command: object) -> str:
-        nonlocal encodings
-        encodings += 1
-        return original(operation, command)
-
-    monkeypatch.setattr(module, "replay_key", encode)
-    command = ReserveModelStep(
-        run_id="run-1",
-        expected_run_revision=created.run.revision,
-        activation_id="activation-1",
-        now=_T1,
-    )
-    lifecycle_store.reserve_model_step(command)
-    assert encodings == 1
-    assert lifecycle_store.reserve_model_step(command).events == ()
-    assert encodings == 2
-
-
 @pytest.mark.parametrize(
     "usage_json",
     [
@@ -1627,11 +1594,11 @@ def test_sqlite_usage_json_is_validated_at_row_load(tmp_path: Path, usage_json: 
         store.load_run("run-1")
 
 
-def test_model_commit_replay_returns_current_facts_without_repeating_events(
+def test_old_model_commit_conflicts_without_repeating_events(
     lifecycle_store: LifecycleStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """稍后重试旧提交会取得终态与最新 revision，且不重复消息和事件。"""
+    """终态后重交旧提交会冲突，当前结果、消息和事件保持不变。"""
     commands: list[CommitModelStep] = []
     original = lifecycle_store.commit_model_step
 
@@ -1652,12 +1619,12 @@ def test_model_commit_replay_returns_current_facts_without_repeating_events(
     )
     events = lifecycle_store.list_events("run-1")
     session = lifecycle_store.load_session("session-1")
-    replay = original(commands[0])
-    assert replay.run == terminal.run
-    assert replay.result == terminal.result
-    assert replay.checkpoint == terminal.checkpoint
-    assert replay.session_revision == session.revision == 2
-    assert replay.events == ()
+    with pytest.raises(IrisRunConflictError):
+        original(commands[0])
+    assert lifecycle_store.load_run("run-1") == terminal.run
+    assert lifecycle_store.load_result("run-1") == terminal.result
+    assert lifecycle_store.load_checkpoint("run-1") == terminal.checkpoint
+    assert session.revision == 2
     assert lifecycle_store.list_events("run-1") == events
     assert lifecycle_store.load_session("session-1") == session
     with pytest.raises(IrisRunConflictError):
@@ -1688,7 +1655,8 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
         now=_T2,
     )
     claimed = lifecycle_store.claim_tool_call(claim)
-    assert lifecycle_store.claim_tool_call(claim).events == ()
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.claim_tool_call(claim)
     claimed_call = lifecycle_store.list_tool_calls("run-1")[0]
     result = ToolResult(
         tool_use_id="call-tool",
@@ -1732,7 +1700,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
 def test_claim_batch_respects_durable_cancellation_fence(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """取消前可多 claim；取消后只允许 exact replay 与既有 claim result。"""
+    """取消前可多 claim；取消后拒绝旧 claim 与新 claim，仍可提交既有结果。"""
     prepared = _prepare_tool_batch(lifecycle_store)
     first_command = ClaimToolCall(
         run_id="run-1",
@@ -1762,8 +1730,8 @@ def test_claim_batch_respects_durable_cancellation_fence(
     )
     events_after_cancel = lifecycle_store.list_events("run-1")
 
-    replay = lifecycle_store.claim_tool_call(first_command)
-    assert replay.events == ()
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.claim_tool_call(first_command)
     with pytest.raises(IrisRunStateError, match="取消"):
         lifecycle_store.claim_tool_call(
             replace(
@@ -2014,10 +1982,10 @@ def test_cancellation_request_is_once_only_and_does_not_release_active_lane(
         )
 
 
-def test_finish_exact_replay_is_noop_and_releases_lane(
+def test_finish_rejects_stale_command_and_releases_lane(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """Terminal event 只能出现一次，精确 finish replay 不制造新事实。"""
+    """Terminal event 只能出现一次，旧 finish 冲突且不制造新事实。"""
     created = _create(lifecycle_store)
     command = FinishRun(
         run_id="run-1",
@@ -2028,10 +1996,11 @@ def test_finish_exact_replay_is_noop_and_releases_lane(
         now=_T1,
     )
     terminal = lifecycle_store.finish_run(command)
-    replay = lifecycle_store.finish_run(command)
-
-    assert replay.events == ()
-    assert replay.run == terminal.run
+    events = lifecycle_store.list_events("run-1")
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.finish_run(command)
+    assert lifecycle_store.list_events("run-1") == events
+    assert lifecycle_store.load_result("run-1") == terminal.result
     assert terminal.run.terminal_session_message_count == 0
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 0
     next_run = _create(
@@ -2119,9 +2088,9 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
     assert terminal.run.terminal_session_message_count == 4
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
 
-    replay = lifecycle_store.finish_run(command)
-    assert replay.events == ()
-    assert replay.run.terminal_session_message_count == 4
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.finish_run(command)
+    assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
     assert lifecycle_store.load_session("session-1") == session
 
 
@@ -2721,9 +2690,10 @@ def test_finalize_subagent_result_commits_parent_once_without_claim(
         assert closed.status == InteractionStatus.CLOSED
         if mode == "expired":
             assert closed.response is None
-    replay = store.finalize_subagent_result(command)
-    assert replay.run == result.run
-    assert replay.events == ()
+    events_before_retry = store.list_events("parent")
+    with pytest.raises(IrisRunConflictError):
+        store.finalize_subagent_result(command)
+    assert store.list_events("parent") == events_before_retry
     assert store.load_run("parent").usage.tool_calls_committed == 1
     assert len(store.load_session("parent-session").messages) == 2
 

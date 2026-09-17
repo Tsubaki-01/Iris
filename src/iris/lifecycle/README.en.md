@@ -59,7 +59,8 @@ cancellation/finish/recover commands plus run/session/lane/interaction/checkpoin
 reads.
 `RunCommit.session_revision` returns the committed revision when raw history or its summary changes;
 it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
-needed. Exact retries return current facts with empty events, rather than the original snapshot.
+needed. Stores do not promise successful resubmission of historical commands. State-based
+idempotence for matching answers, cancellation, and child admission follows each mutation's contract.
 Run-state mutations carry the expected revision/fence facts required by their contracts; stale
 writers conflict instead of overwriting.
 Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
@@ -91,7 +92,7 @@ with the child. Provider totals are preserved without assuming total equals inpu
   appends `context.compacted`. Cursor, raw messages, reservation, and usage remain unchanged. The
   event contains only coverage and before/after input estimates.
 
-Both reuse the active fence, CAS, and existing exact replay. Neither promises cross-process
+Both use the active fence and CAS; stale revisions conflict. Neither promises cross-process
 exactly-once billing for external model calls.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.

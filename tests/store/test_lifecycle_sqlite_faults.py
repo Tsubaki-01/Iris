@@ -446,7 +446,7 @@ def test_compaction_write_failures_roll_back_projection_checkpoint_and_event(
         assert reopened.load_checkpoint("current") == before_checkpoint
         assert reopened.list_events("current") == before_events
 
-        # 失败提交不能进入 process-local replay cache，原命令可重新成功提交。
+        # 失败事务不推进 revision，原命令可重新成功提交。
         committed = store.commit_compaction(command)
         assert committed.session_revision == before_session.revision + 1
         assert store.load_session("main").compaction == command.compaction

@@ -88,7 +88,6 @@ from ..lifecycle.transitions import (
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._compaction import add_compaction_usage, validate_compaction_commit
-from ._replay import ReplayRecord, replay_key
 from ._serialization import jsonable as _jsonable
 from ._session_history import build_fork_point_page, project_fork_point, validate_fork_source
 from ._sqlite_messages import decode_session_messages
@@ -149,7 +148,6 @@ class SQLiteStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._lock = RLock()
-        self._replays: dict[str, ReplayRecord] = {}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             is_empty = not self.path.exists() or self.path.stat().st_size == 0
@@ -489,7 +487,6 @@ class SQLiteStore:
             "create_run",
             command,
             self._create_run,
-            replayable=False,
         )
 
     def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit:
@@ -890,23 +887,13 @@ class SQLiteStore:
         operation: str,
         command: _CommandT,
         handler: Callable[[sqlite3.Connection, _CommandT], RunCommit],
-        *,
-        replayable: bool = True,
     ) -> RunCommit:
         with self._lock:
             try:
-                key = replay_key(operation, command) if replayable else None
                 with self._connect() as connection:
                     _execute(connection, "BEGIN IMMEDIATE")
-                    if key is not None:
-                        replay = self._load_replay(connection, operation, key)
-                        if replay is not None:
-                            connection.commit()
-                            return replay
                     commit = handler(connection, deepcopy(command))
                     connection.commit()
-                    if key is not None:
-                        self._replays[key] = ReplayRecord.from_commit(commit)
                     return deepcopy(commit)
             except (IrisRunConflictError, IrisRunPersistenceError):
                 raise
@@ -922,49 +909,6 @@ class SQLiteStore:
                     path=str(self.path),
                     operation=operation,
                 ) from exc
-
-    def _load_replay(
-        self,
-        connection: sqlite3.Connection,
-        operation: str,
-        key: str,
-    ) -> RunCommit | None:
-        """把 process-local replay 刷新为当前 durable facts。"""
-        replay = self._replays.get(key)
-        if replay is None:
-            return None
-        run = self._require_run(connection, replay.run_id, operation=operation)
-        session_revision = (
-            self._select_session_metadata(
-                connection,
-                run.session_id,
-                operation=operation,
-            ).revision
-            if replay.includes_session_revision
-            else None
-        )
-        checkpoint = self._select_checkpoint(
-            connection,
-            run.run_id,
-            operation=operation,
-        )
-        interaction = (
-            self._select_interaction(
-                connection,
-                replay.interaction_id,
-                operation=operation,
-            )
-            if replay.interaction_id is not None
-            else None
-        )
-        return RunCommit(
-            run=run,
-            session_revision=session_revision,
-            checkpoint=checkpoint,
-            interaction=interaction,
-            events=(),
-            result=self._select_result(connection, run, operation=operation),
-        )
 
     def _require_run(
         self,
