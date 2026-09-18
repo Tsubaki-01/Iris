@@ -8,6 +8,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from .chat import ChatOptions, run_chat
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """解析命令行参数并执行 chat 命令。
+    """初始化 UTF-8 标准输出，解析命令行参数并执行 chat 命令。
 
     Args:
         argv (Sequence[str] | None): 可选命令行参数；为 ``None`` 时读取进程参数。
@@ -25,6 +26,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         int: 进程退出码。
     """
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
