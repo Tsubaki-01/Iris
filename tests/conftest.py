@@ -20,6 +20,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="运行需要真实 DeepSeek API key 和外网的 live integration 测试。",
     )
+    parser.addoption(
+        "--run-live-web",
+        action="store_true",
+        default=False,
+        help="运行真实 Tavily 和 DeepSeek Web 示例测试，会消耗 API 额度。",
+    )
+    parser.addoption("--web-env-file", default=None, help="Web live 测试使用的 dotenv 文件。")
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -28,3 +35,4 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "live_deepseek: 需要真实 DeepSeek API key 和外网的 live integration 测试",
     )
+    config.addinivalue_line("markers", "live_web: 需要显式开启的真实 Web API 测试")

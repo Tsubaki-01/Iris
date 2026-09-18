@@ -28,6 +28,16 @@ Chat 的本地输出器在 runtime 所属 event loop 中直接消费 typed 文�
 `/follow-up <消息>` 可以排入下一轮。Ctrl-C 会先请求中断当前 run，再保持原有行为退出 chat。
 permission / question 提示出现后，下一行输入会作为 typed HITL response，而不是普通消息。
 
+## Web
+
+[Web 示例](web/README.md) 提供 Tavily 搜索、批量正文与 query 摘录、长结果续读，以及
+真实 DeepSeek 驱动的搜索和来源引用。独立工具调用仅需 Tavily key，Agent 示例还需 DeepSeek key。
+
+```powershell
+uv run python -m examples.web.tools --env-file .env.local search "Python asyncio TaskGroup" --max-results 3
+uv run python -m examples.web.agent --env-file .env.local
+```
+
 ## MCP
 
 本地 MCP 的 JSON/Codex TOML 双格式示例见 [mcp/README.md](mcp/README.md)。服务提供无需凭据的

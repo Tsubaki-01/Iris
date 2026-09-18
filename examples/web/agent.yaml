@@ -1,0 +1,28 @@
+name: iris-web-example
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  max_tokens: 2048
+  timeout: 60
+
+system: |
+  你是联网研究助手。先用 web_search 搜索，再用 web_fetch 读取搜索结果中相关的 URL。
+  复制搜索结果里的完整 URL，不自行改写语言、版本或路径。
+  概念问题优先使用 query 获取相关摘录；需要全文时省略 query。
+  如果结果保存成 artifact，按返回路径调用 read_file，使用 next_offset 和 next_column 续读。
+  根据实际读取的来源作答，用 Markdown 链接标明来源；页面失败时说明，不编造内容。
+
+tools:
+  builtin:
+    - web.search
+    - web.fetch
+    - file.read
+
+permissions:
+  workspace: .iris/workspace
+
+session:
+  backend: sqlite
+  path: .iris/web.db
