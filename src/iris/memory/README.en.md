@@ -103,10 +103,15 @@ namespace. An empty read range returns no items.
 - `process_candidates()` explicitly accepts, rejects, or promotes candidates; the default no-op
   extractor creates none and no background extraction exists.
 
+For partial updates, omitted fields remain unchanged. `confidence` and `importance` accept `null`
+to clear a score; use `[]` and `{}` to clear artifacts and metadata. Text, classification, status,
+and collection fields do not accept explicit `null`.
+
 Candidate promotion acquires a `BEGIN IMMEDIATE` write transaction before reading candidate
 status. Concurrent or repeated promotions return the same item and write only one pair of add and
-accept events. `update_item()` also reads and applies its patch in one write transaction, so changes
-to different fields from separate connections merge sequentially. Item, candidate, and event IDs
+accept events. Updates and soft deletes also acquire the write lock before reading the current
+item, preventing stale overwrites and duplicate deletion events. Changes to different fields from
+separate connections merge sequentially. Item, candidate, and event IDs
 are globally unique across namespaces within the database.
 
 `process_candidates()` rebuilds the current namespace's mirror once per batch.

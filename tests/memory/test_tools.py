@@ -139,6 +139,20 @@ def _executor(service: MemoryService, *, write_namespace: str = "project") -> To
     return ToolExecutor(registry, permission_policy=DefaultPermissionPolicy(write_mode="allow"))
 
 
+def test_update_schema_distinguishes_optional_fields_from_nullable_scores(tmp_path: Path) -> None:
+    """提供给模型的 schema 允许省略更新字段，不把非 nullable 字段声明为可传 null。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "patch-schema.db"))
+    schema = _executor(service).registry.get("memory_update").definition.input_schema
+    patch = schema["$defs"]["MemoryItemPatch"]
+    properties = patch["properties"]
+    for field in ("text", "category", "kind", "status", "artifacts", "metadata"):
+        assert field not in patch.get("required", [])
+        assert {"type": "null"} not in properties[field].get("anyOf", [])
+        assert "default" not in properties[field]
+    for field in ("confidence", "importance"):
+        assert {"type": "null"} in properties[field]["anyOf"]
+
+
 @pytest.mark.asyncio
 async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_path: Path) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "crud.db"))
@@ -262,3 +276,60 @@ async def test_write_tool_distinguishes_store_failure_from_mirror_failure(
     )
     assert result.is_error is (failure == "store")
     assert len(service.list_items(["project"])) == (0 if failure == "store" else 1)
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_null_metadata_without_corrupting_saved_item(tmp_path: Path) -> None:
+    """正常模型调用传入 metadata:null 时应在预检失败，条目保持可读取。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "null-metadata.db"))
+    item = service.remember(
+        MemoryWriteInput(text="unchanged fact", metadata={"origin": "user"}, reason="seed")
+    )
+    result = await _executor(service).execute_one(
+        ToolUseBlock(
+            id="update-null",
+            name="memory_update",
+            input={"item_id": item.id, "patch": {"metadata": None}, "reason": "clear metadata"},
+        ),
+        _context(tmp_path),
+    )
+
+    assert service.get_item(item.id, ["project"]) == item
+    assert result.is_error
+    assert result.error is not None and result.error.code == "VALIDATION_ERROR"
+    assert len(service.list_events("project", item_id=item.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_can_clear_nullable_scores_without_changing_omitted_fields(
+    tmp_path: Path,
+) -> None:
+    """允许明确清空 nullable 评分，省略的正文与元数据不随之改变。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "clear-scores.db"))
+    item = service.remember(
+        MemoryWriteInput(
+            text="keep fact",
+            metadata={"origin": "user"},
+            confidence=0.8,
+            importance=0.7,
+            reason="seed",
+        )
+    )
+    result = await _executor(service).execute_one(
+        ToolUseBlock(
+            id="clear-scores",
+            name="memory_update",
+            input={
+                "item_id": item.id,
+                "patch": {"confidence": None, "importance": None},
+                "reason": "clear scores",
+            },
+        ),
+        _context(tmp_path),
+    )
+
+    assert not result.is_error
+    updated = service.get_item(item.id, ["project"])
+    assert updated is not None
+    assert updated.confidence is None and updated.importance is None
+    assert updated.text == item.text and updated.metadata == item.metadata

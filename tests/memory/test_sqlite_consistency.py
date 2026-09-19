@@ -9,6 +9,7 @@ from threading import Event
 
 import pytest
 
+from iris.exceptions import IrisMemoryError
 from iris.memory import (
     MemoryCandidate,
     MemoryCandidateStatus,
@@ -161,6 +162,84 @@ def test_concurrent_disjoint_item_patches_preserve_both_changes(
     assert updated.text == "更新后的内容"
     assert updated.importance == 0.8
     assert len(second_store.list_events(namespace, item_id=item.id)) == 3
+
+
+@pytest.mark.parametrize("second_operation", ["update", "delete"])
+def test_concurrent_soft_delete_preserves_serialized_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    second_operation: str,
+) -> None:
+    """删除与其它写入串行，正文/索引一致且实际删除事件只记录一次。"""
+    first_store = SQLiteMemoryStore(tmp_path / "memory.db")
+    second_store = SQLiteMemoryStore(first_store.path)
+    item = MemoryItem(text="beforetoken")
+    first_store.add_item(item, event=MemoryEvent(event_type=MemoryEventType.ADD, item_id=item.id))
+    first_read = Event()
+    release_first = Event()
+    fetch_item = first_store._fetch_item
+
+    def pause_after_read(
+        connection: sqlite3.Connection,
+        item_id: str,
+        namespace: str,
+        *,
+        include_deleted: bool,
+    ) -> MemoryItem | None:
+        current = fetch_item(connection, item_id, namespace, include_deleted=include_deleted)
+        first_read.set()
+        assert release_first.wait(timeout=5)
+        return current
+
+    monkeypatch.setattr(first_store, "_fetch_item", pause_after_read)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_store.delete_item,
+            item.id,
+            "project",
+            event=MemoryEvent(event_type=MemoryEventType.DELETE, item_id=item.id),
+        )
+        assert first_read.wait(timeout=5)
+        if second_operation == "update":
+            second = executor.submit(
+                second_store.update_item,
+                item.id,
+                "project",
+                MemoryItemPatch(text="aftertoken"),
+                event=MemoryEvent(event_type=MemoryEventType.UPDATE, item_id=item.id),
+            )
+        else:
+            second = executor.submit(
+                second_store.delete_item,
+                item.id,
+                "project",
+                event=MemoryEvent(event_type=MemoryEventType.DELETE, item_id=item.id),
+            )
+        try:
+            second.result(timeout=0.25)
+        except TimeoutError:
+            pass
+        finally:
+            release_first.set()
+        assert first.result(timeout=5) is True
+        try:
+            second_result = second.result(timeout=5)
+        except IrisMemoryError as exc:
+            assert second_operation == "update" and "记忆条目不存在" in str(exc)
+            second_result = None
+
+    deleted = second_store.search(MemoryQuery(item_ids=[item.id], include_deleted=True))[0].item
+    assert deleted.status == MemoryItemStatus.DELETED
+    events = second_store.list_events("project", item_id=item.id)
+    assert sum(event.event_type == MemoryEventType.DELETE for event in events) == 1
+    if second_operation == "delete":
+        assert second_result is False
+    else:
+        expected_text = "aftertoken" if second_result is not None else "beforetoken"
+        assert deleted.text == expected_text
+        results = second_store.search(MemoryQuery(text=expected_text, include_deleted=True))
+        assert [result.item for result in results] == [deleted]
+        assert second_store.search(MemoryQuery(text=expected_text)) == []
 
 
 def test_reopening_fts_preserves_existing_and_new_items(tmp_path: Path) -> None:

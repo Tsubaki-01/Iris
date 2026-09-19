@@ -248,6 +248,8 @@ class SQLiteMemoryStore:
         """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
         try:
             with self._connection() as connection:
+                # 先串行化写入，避免软删除用旧正文覆盖更新或重复记录实际删除。
+                connection.execute("BEGIN IMMEDIATE")
                 current = self._fetch_item(connection, item_id, namespace, include_deleted=False)
                 if current is None:
                     return False
