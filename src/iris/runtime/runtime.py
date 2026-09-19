@@ -862,6 +862,10 @@ class AgentRuntime:
                 memory_service=self.environment.memory_service,
                 memory_context_builder=self.environment.memory_context_builder,
                 context_builder=self.environment.context_builder,
+                config=self.environment.agent_config.memory,
+                run_input=activation.run_input,
+                run_id=activation.run_id,
+                visible_history=project_history(snapshot.messages, snapshot.compaction, ()),
             )
             before_current_input = self.environment.context_builder.build_before_current_input(
                 self.environment.context_input.before_current_input

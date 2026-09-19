@@ -26,7 +26,7 @@ class RuntimeFactory:
     """从配置构造 `AgentRuntime`。
 
     Factory 只负责本地依赖装配，不调用 provider 网络接口。显式注入的 provider、
-    provider 和 memory service 优先于配置派生对象，便于测试和 SDK 用户接管边界。
+    memory service 优先于配置派生对象，便于测试和 SDK 用户接管边界。
 
     Example:
         runtime = RuntimeFactory.from_config(config, provider=fake_provider)
@@ -46,7 +46,7 @@ class RuntimeFactory:
         Args:
             path (str | Path): Agent YAML 配置文件路径。
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
-            memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
+            memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -78,7 +78,7 @@ class RuntimeFactory:
             config (AgentConfig): 已校验的 Agent 配置。
             config_path (Path | None): 配置文件路径；相对它解析 workspace、context 和摘要 prompt。
             provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
-            memory_service (MemoryService | None): 预留给显式 memory 阶段的服务注入。
+            memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:

@@ -213,16 +213,22 @@ thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来
 retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
 引入 delta/merge/lock/hash 模型。
 
-## 显式 Memory 注入
+## Memory 召回与历史快照
 
-`RuntimeExecutionOptions.memory_query` 和 `memory_results` 是显式 opt-in 的动态 memory 输入。
-每个 logical run 在 `before_input` 读取并渲染一次，每个片段一条 `sender=context` 历史消息，
-metadata 保存 `context_kind=memory`、`item_id` 和 `truncated`。工具循环、HITL resume 与
+配置启用或宿主注入 memory service 后，默认每个新用户 logical run 在 `before_input` 用当前
+输入自动召回一次。`memory.recall_mode=manual` 关闭自动召回；显式 `memory_results`（包括
+空列表）或 `memory_query` 优先于自动查询，两个显式字段互斥。每个片段一条 `sender=context`
+历史消息，metadata 保存 `context_kind=memory`、`namespace`、`item_id` 和 `truncated`。
+工具循环、同 run 的 steer、HITL resume 与
 已提交输入后的 recover 不再查询，继续重放历史中的快照；普通压缩仍可把原文替换为摘要。
 输入提交前中断则可在恢复时重新准备。新的 run 可指定新的查询或结果。
 `context.yaml` 中的静态 memory slot 保持固定位置，不复制进历史。
-`memory_results` 只处理调用方提供的本地快照；`memory_query` 才会 await
-`MemoryService.abuild_context()`。配置构造的 SQLite service 会在单个 worker job 中完成建连、
+`memory_results` 只处理调用方提供的本地快照；显式 `memory_query` 调用
+`MemoryService.abuild_context()`，自动路径调用 `arecall()` 并形成预算内片段。只有自动路径
+按当前历史投影中相同 item_id、相同渲染原文跳过重复追加；不把摘要/工具输出当原文，也不为
+跳过的条目补查或添加压缩保护。自动配置的词项预算不传给显式查询和工具。
+自动读取失败以带 run_id 的 WARNING 提示并继续；渲染、显式输入和服务初始化错误正常报告。
+配置构造的 SQLite service 会在单个 worker job 中完成建连、
 查询、物化和关闭，runtime 不消费取消后的迟到结果。
 
 ## Factory

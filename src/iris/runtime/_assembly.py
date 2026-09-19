@@ -17,6 +17,7 @@ from ..context import (
     load_context_build_input,
 )
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
+from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
 from ..skill import (
     CATALOG_SLOT_NAME,
@@ -113,7 +114,7 @@ def assemble_runtime(
     boundary: RuntimeAssemblyBoundary,
     subagent: SubagentAssembly | None = None,
 ) -> AgentRuntime:
-    """消费已解析边界装配 inner engine，不加载 catalog 或创建 store。"""
+    """消费已解析边界装配 inner engine 和可选 memory，不创建 lifecycle store。"""
     base_dir = _base_dir(config_path)
     if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
         config = config.model_copy(
@@ -128,8 +129,12 @@ def assemble_runtime(
             }
         )
     workspace_root = boundary.workspace_root
+    if memory_service is None:
+        memory_service = build_memory_service_from_config(config.memory, workspace_root)
     context_input = _build_context_input(config, base_dir=base_dir)
-    tool_registry = build_tool_registry(config.tools)
+    tool_registry = build_tool_registry(
+        config.tools, memory_service=memory_service, memory_config=config.memory
+    )
     context_input, skill_registry = _prepare_skills(
         context_input,
         config=config,

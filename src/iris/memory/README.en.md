@@ -4,12 +4,28 @@
 
 `iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, L1 episodes,
 candidates, L2 items, audit events, SQLite persistence, human-readable file projections, explicit
-orchestration, and read-only model tools. SQLite is authoritative; Markdown/JSON under
+orchestration, and memory tools. SQLite is authoritative; Markdown/JSON under
 `.iris/memory/` is a projection for humans.
 
-Memory is not currently an `AgentConfig` YAML field and runtime never enables or recalls it by
-default. Callers must build a `MemoryService`, inject it through `AgentRunner.from_config*()`, and
-explicitly pass `RuntimeExecutionOptions.memory_query` or `memory_results` for each run.
+`AgentConfig.memory` defaults to a disabled backend. Enabling SQLite in `agent.yaml` enables one
+automatic recall per new user run and three read tools for additional model-directed queries.
+Dynamic snapshots enter session history for tool loops and recovery. Static `context.yaml` memory
+slots remain separate.
+
+```yaml
+memory:
+  backend: sqlite
+  # These defaults can be omitted
+  recall_mode: on_turn
+  read_namespaces: [project]
+  write_namespace: project
+  max_query_terms: null
+```
+
+`recall_mode: manual` disables automatic recall while keeping tools and explicit SDK queries.
+An injected `memory_service` in `AgentRunner.from_config*()` takes precedence over the configured
+backend. CLI and child agents use the same assembly path. Each child uses its own memory config
+and effective workspace, without copying the parent's dynamic snapshots or explicit query options.
 
 ## Quick start
 
@@ -65,7 +81,8 @@ flowchart LR
     Candidate --> Item["L2 MemoryItem"]
     Query["MemoryQuery"] --> Service
     Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["explicit RuntimeExecutionOptions injection"]
+    Context --> Runtime["before_input automatic recall / explicit input"]
+    Runtime --> History["one history snapshot per fragment"]
 ```
 
 Each workspace has its own database/service. Items use an opaque `namespace` string, defaulting to
@@ -103,9 +120,24 @@ the mirror before returning.
 the first fragment when necessary and counting omissions. Prompt fragments keep semantic metadata
 but omit storage source and retrieval score by default.
 
-Runtime archives explicit dynamic fragments with BCI and user input in `before_input`. Later tool
+Runtime archives dynamic fragments with BCI and user input in `before_input`. Later tool
 steps, HITL, and recovery replay that history without another query; ordinary compaction can still
 replace the raw fragments with a summary.
+
+Source precedence is `memory_results` (including an empty list), then `memory_query`, then automatic
+recall; the two explicit fields are mutually exclusive. Automatic recall uses only the current user
+input, not the full transcript. Tool steps, steer input, and recovery do not trigger it again.
+Automatic read failures log a WARNING with the run ID and let the conversation continue. Config,
+initialization, explicit-call, and rendering failures retain their normal error behavior.
+
+Only automatic recall suppresses a fragment with the same item ID and exactly the same rendered
+content already visible as a raw memory message. Summaries, static slots, and tool outputs do not
+count as evidence. Result and body budgets apply before deduplication, with no refill query.
+There is no global seen set or raw-content pinning; a compacted fragment can be injected again.
+Explicit queries/results and tool responses are not suppressed. Updates and forgetting affect
+future reads without rewriting historical snapshots.
+
+Use an explicit SDK query to override automatic selection for one run:
 
 ```python
 from iris.harness import (
@@ -140,7 +172,7 @@ The large `iris.memory` export surface is grouped as follows:
   `resolve_memory_path()`;
 - orchestration: extractor/classifier protocols, policy, orchestrator, and rule/no-op defaults;
 - projection: `FileMemoryMirror` and `MemoryContextBuilder`;
-- tools: search/list/get tools, `default_memory_access_policy_factory()`, and
+- tools: search/list/get and remember/update/forget tools, `default_memory_access_policy_factory()`, and
   `register_memory_tools()`.
 
 The exact set is `src/iris/memory/__init__.py::__all__`. Private SQL helpers, mirror markers, and
@@ -164,8 +196,24 @@ miss a question in the middle. Empty terms do not return recent items; use `list
 FTS matches are candidates rather than verified relevance, and lexical search does not guarantee
 paraphrase recall.
 
-`register_memory_tools()` exposes only `memory_search`, `memory_list`, and `memory_get`, all with
-`READ` capability. There are no model-visible remember/forget tools. Tool input cannot override the
+`MemoryConfig.max_query_terms` applies only to automatic recall. Explicit SDK and tool queries do
+not inherit that budget.
+
+`register_memory_tools()` defaults to `memory_search`, `memory_list`, and `memory_get`, all with
+`READ` capability. Agents with memory enabled receive these automatically. Agents that manage
+memory can opt into write tools through the existing builtin configuration:
+
+```yaml
+tools:
+  builtin: [memory.remember, memory.update, memory.forget]
+```
+
+These expose `memory_remember`, `memory_update`, and `memory_forget` with `WRITE` capability and
+the existing permission, claim, and result-commit lifecycle. Writes use one policy-bound namespace
+and the same service as SDK calls. Forget returns the actual soft-delete result. Direct SDK tool
+registration can select builtin names through `register_memory_tools(..., tool_names=[...])`.
+
+Tool input cannot override the
 namespace. `MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` binds host-owned read and
 write ranges, defaulting to `project`; an empty read range returns nothing. The default factory uses
 `MemoryConfig.read_namespaces/write_namespace` without partitioning by agent ID. The factory runs
@@ -208,7 +256,7 @@ requests a complete mirror projection.
 | Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Batched mirror projection, rebuild, and atomic replacement | `mirror.py` | `tests/memory/test_mirror.py` |
 | Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
-| Runtime injection | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
+| Automatic recall, deduplication, and history recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
 ```bash
 uv run pytest tests/memory tests/runtime/test_execute.py

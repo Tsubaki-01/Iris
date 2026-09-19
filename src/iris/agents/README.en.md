@@ -114,6 +114,45 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
+`AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `backend: none`, so no
+memory service or tools are created unless configured or explicitly injected:
+
+```yaml
+memory:
+  backend: sqlite
+  recall_mode: on_turn
+  read_namespaces: [project]
+  write_namespace: project
+  max_query_terms: null
+tools:
+  builtin:
+    - memory.remember
+    - memory.update
+    - memory.forget
+```
+
+An enabled service automatically registers `memory_search`, `memory_list`, and `memory_get`.
+The example's write tools are optional declarations; none is enabled automatically. The six
+memory builtin names are `memory.search/list/get/remember/update/forget`. `recall_mode: manual`
+disables automatic per-run recall while retaining tools and explicit SDK reads. `max_query_terms`
+applies only to automatic queries; explicit SDK/tool queries do not inherit it. See
+[memory](../memory/README.en.md) for retrieval and budget semantics.
+
+Loading YAML does not open a database. Runtime first resolves the effective workspace, then builds
+one service shared by recall and tools. Its default database is `.iris/memory/memory.db` within that
+workspace. Agents in the same project can share the default `project` namespace; different
+workspaces use separate databases. An explicitly injected `memory_service` takes precedence over
+the configured backend. CLI uses the same assembly path. Each child uses its own configuration and
+narrowed effective workspace without inheriting the parent's service or dynamic snapshots.
+Initialization failures propagate from assembly.
+
+`build_tool_registry(config, *, memory_service=None, memory_config=None)` adds missing default read
+tools alongside declared builtins before registering Python extensions. Explicit memory builtins
+require a service. `memory_config` binds read and write namespaces, defaulting to `MemoryConfig()`.
+An explicitly declared default read tool is registered once; other actual name or alias conflicts
+remain registry errors. This helper neither resolves a workspace nor opens databases; use the
+complete runner or RuntimeFactory to construct services from YAML.
+
 `AgentConfig.compaction` defaults to `CompactionConfig`, exported from both `iris.agents` and
 `iris.agents.config`:
 
@@ -197,6 +236,7 @@ database, or an ORM.
 | `agent.yaml` loading and relative context paths | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
 | Compaction budgets and summary instructions | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py`, `tests/runtime/test_compaction_prompt.py` |
 | Skill config and factory integration | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
+| Memory config and ROOT/CHILD assembly | `config/base.py`, `config/tools.py`, `../runtime/_assembly.py` | `tests/agents/test_memory_config.py`, `tests/runtime/test_memory_assembly.py` |
 | Built-ins and Python references | `config/tools.py` | `tests/agents/test_tools_config.py` |
 
 ```bash

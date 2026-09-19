@@ -1,7 +1,7 @@
 """记忆系统 config-first 声明面。
 
-本模块只负责把简单配置转换为 Stage 1/2 的 memory SDK 对象，不解析 YAML 文件，
-也不接入 agent runtime。
+本模块把已解析的配置转换为 memory SDK 对象；AgentConfig 复用这些声明，
+runtime 在确定 effective workspace 后调用服务构造入口。
 
 Example:
     config = MemoryConfig(backend="sqlite")

@@ -243,16 +243,25 @@ Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concu
 conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
 delta/merge/lock/hash model.
 
-## Explicit memory injection
+## Memory recall and history snapshots
 
-`RuntimeExecutionOptions.memory_query` and `memory_results` are explicit opt-in dynamic memory
-inputs. Each logical run reads and renders them in `before_input`, with one context history message
-per fragment marked by `context_kind=memory`, `item_id`, and `truncated`. Tool loops, HITL resume,
+A configured or injected memory service defaults to one automatic recall per new user logical run
+in `before_input`, using the current input text. `memory.recall_mode=manual` disables automatic
+recall. Explicit `memory_results` (including an empty list) or `memory_query` overrides that choice;
+the two explicit fields are mutually exclusive. Each fragment becomes a context history message
+marked by `context_kind=memory`, `namespace`, `item_id`, and `truncated`. Tool loops, steer within the
+same run, HITL resume,
 and recovery after the input commit replay those snapshots without another query. Ordinary
 compaction can still replace their original text with a summary. Recovery before input commit may
 prepare again; a new run may specify fresh input. Static memory slots declared in `context.yaml`
 remain fixed sections and are not copied into history. `memory_results` consumes only the local
-snapshot supplied by the caller; only `memory_query` awaits `MemoryService.abuild_context()`. A
+snapshot supplied by the caller. Explicit queries await `MemoryService.abuild_context()`; automatic
+recall awaits `arecall()` and then builds budgeted fragments. Only automatic recall suppresses a
+fragment with the same item ID and rendered text already visible as raw memory in projected history.
+Summaries and tool outputs do not count; deduplication adds neither refill queries nor compaction
+protection. Automatic term budgets do not propagate to explicit queries or tools. Automatic read
+failures log a WARNING with the run ID and continue; rendering, explicit-input, and initialization
+failures keep their normal error behavior. A
 configured SQLite service creates, uses, and closes its connection inside one worker job, and the
 runtime does not consume a late result after cancellation.
 

@@ -116,7 +116,9 @@ ordinary child configuration, independently of one-off parent provider credentia
 `from_config*()` accepts `permission_policy=` and `child_provider_factory=`. With a catalog,
 the runner reads one route snapshot and assembles an internal controller. The selected child uses
 ordinary AgentConfig, independent session/run IDs, fresh `AgentRunOptions()`, empty request
-metadata, no memory service, and the parent's store/clock. CHILD excludes subagent. Linked ACTIVE
+metadata, and the parent's store/clock. Each child constructs memory from its own configuration and
+effective workspace without inheriting the parent's service or dynamic snapshots. CHILD excludes
+subagent. Linked ACTIVE
 runs continue through ordinary recovery; WAITING/TERMINAL paths read the existing result. Dedicated
 execution creates a parent proxy when the child waits, keeping the tool PREPARED. The host submits
 answers only to parent `resume()`: the response becomes durable before the exact child continues.
@@ -412,7 +414,7 @@ checked during rendering. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
 `initial_session_message_count` from the durable run. A new run starts at `before_input`, renders
-explicit dynamic memory as one context message per fragment, then atomically archives those
+automatic or explicit dynamic memory as one context message per fragment, then atomically archives those
 messages with BCI and user input through `CommitRunInput` before advancing to `before_model`.
 This input commit consumes no model-step budget. Empty memory results still commit normal run
 input, and provider failure does not undo committed input.

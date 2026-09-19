@@ -3,12 +3,26 @@
 # `iris.memory`
 
 `iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、L1 episode、候选记忆、L2
-长期条目、审计事件、SQLite 存储、文件镜像、显式编排和只读工具。SQLite 是权威数据源；
+长期条目、审计事件、SQLite 存储、文件镜像、显式编排和记忆工具。SQLite 是权威数据源；
 `.iris/memory/` 下的 Markdown/JSON 是便于人工查看的投影。
 
-Memory 当前不是 `AgentConfig` 的 YAML 字段，也不会被 runtime 自动启用或自动召回。
-调用方需要显式构造 `MemoryService`，注入 `AgentRunner.from_config*()`，并在每次运行的
-`RuntimeExecutionOptions.memory_query` 或 `memory_results` 中选择要注入的内容。
+`AgentConfig.memory` 默认关闭后端。在 `agent.yaml` 中启用 SQLite 后，每个新用户 run 默认
+自动召回一次，并提供三个读取工具供模型主动补查。动态快照进入会话历史，工具循环和恢复
+继续使用它；静态 `context.yaml` memory 槽位保持独立。
+
+```yaml
+memory:
+  backend: sqlite
+  # 以下是可省略的默认值
+  recall_mode: on_turn
+  read_namespaces: [project]
+  write_namespace: project
+  max_query_terms: null
+```
+
+`recall_mode: manual` 关闭自动召回，保留工具和显式 SDK 查询。`AgentRunner.from_config*()` 的
+显式 `memory_service` 优先于配置后端；CLI 与子 Agent 复用同一装配入口。子 Agent 使用自己的
+memory 配置和 effective workspace，不复制父 run 的快照或显式查询选项。
 
 ## 运行要求与快速开始
 
@@ -65,7 +79,8 @@ flowchart LR
     Candidate --> Item["L2 MemoryItem"]
     Query["MemoryQuery"] --> Service
     Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["RuntimeExecutionOptions 显式注入"]
+    Context --> Runtime["before_input 自动召回 / 显式输入"]
+    Runtime --> History["逐片段历史快照"]
 ```
 
 ### Namespace 与项目共享
@@ -106,10 +121,20 @@ patch，不同连接对同一条目不同字段的修改会依次合并。条目
 category、kind、level、reason、confidence 和 importance，但不会把 store source 或检索
 score 默认写进 prompt。
 
-显式动态片段在 runtime 的 `before_input` 阶段与 BCI/用户输入一起归档，之后的工具循环、
+动态片段在 runtime 的 `before_input` 阶段与 BCI/用户输入一起归档，之后的工具循环、
 HITL 与恢复重放同一历史，不因不再查询而删除资料。动态原文仍可被普通压缩摘要化。
 
-runtime 只有在调用方显式提供 memory 时才执行：
+来源优先级是 `memory_results`（包括空列表）→ `memory_query` → 默认自动召回；两个显式
+字段互斥。自动查询只用当前用户输入文本，同一 run 的工具 step、steer 和恢复不再自动检索。
+自动读取失败通过带 run_id 的 WARNING 提示后继续对话；配置、初始化、显式调用和渲染错误
+正常报告，不把它们当成正常无命中。
+
+自动路径按候选条数和正文预算形成片段，再与当前可见历史的 memory 原文比较：相同 item_id
+且实际渲染内容完全相同时跳过，否则追加。摘要、静态 memory 和工具结果不作为去重证据。
+不建立全局 seen 表或原文保护，不在去重后补查凑满预算；原文已压缩时可以重新注入。
+显式 query/results 和主动工具结果不受自动去重抑制。条目更新或 forget 不回写历史快照。
+
+需要覆盖本轮自动选择时，通过 SDK 显式指定查询：
 
 ```python
 from iris.harness import (
@@ -146,7 +171,8 @@ result = await runner.start(
 - 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
   rule/no-op 实现；
 - 投影：`FileMemoryMirror`、`MemoryContextBuilder`；
-- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、
+- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、`MemoryRememberTool`、
+  `MemoryUpdateTool`、`MemoryForgetTool`、
   `default_memory_access_policy_factory()` 与 `register_memory_tools()`。
 
 完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
@@ -165,11 +191,23 @@ result = await runner.start(
 floor(B/2) 项和尾部余下配额的不同项，再合并去重、不回填；尾部按最后出现位置选取。
 该上限只约束最终词项数，仍需扫描全文；首尾预算可能漏掉中部问题。空词项不返回最近条目，
 列举请调用 `list_items()`。FTS 命中不等于相关性已确认，词法查询也不保证同义改写召回。
+`MemoryConfig.max_query_terms` 只用于自动召回，不会给显式 SDK 或工具查询附加隐形预算。
 
-## 只读 memory 工具
+## Memory 工具
 
-`register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
-`READ` 能力。当前没有模型可见的 remember/forget 工具；写入仍须通过 SDK 或上层策略显式完成。
+`register_memory_tools()` 默认注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
+`READ` 能力。启用 memory 的 Agent 自动获得这三个工具。负责记忆管理的 Agent 再在现有
+`tools.builtin` 中选择写工具：
+
+```yaml
+tools:
+  builtin: [memory.remember, memory.update, memory.forget]
+```
+
+它们暴露为 `memory_remember`、`memory_update` 和 `memory_forget`，具有 `WRITE` 能力，沿用
+已有权限确认、claim 和结果提交机制。写入绑定 policy 的一个 write_namespace，SDK 与工具
+使用同一个 service；forget 返回实际软删除结果，不把未找到条目冒充删除成功。
+直接 SDK 注册可用 `register_memory_tools(..., tool_names=[...])` 选择 builtin 名称。
 
 工具输入不能覆盖 namespace。`MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)`
 由宿主绑定读写范围；默认读写 `project`，空读取集合不返回任何条目。
@@ -213,7 +251,7 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 | async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
 | mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
 | 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
-| runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |
+| 自动召回、去重与历史恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
 ```bash
 uv run pytest tests/memory tests/runtime/test_execute.py

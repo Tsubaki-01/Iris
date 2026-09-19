@@ -8,6 +8,12 @@ from typing import Any
 
 from ...config import get_config
 from ...exceptions import IrisConfigError
+from ...memory import (
+    MEMORY_TOOL_CLASSES,
+    MemoryConfig,
+    MemoryService,
+    default_memory_access_policy_factory,
+)
 from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
 from ...tools.builtin.file import (
@@ -41,11 +47,18 @@ _BUILTIN_WEB_TOOL_CLASSES: dict[str, type[WebSearchTool] | type[WebFetchTool]] =
 }
 
 
-def build_tool_registry(config: ToolsConfig) -> ToolRegistry:
+def build_tool_registry(
+    config: ToolsConfig,
+    *,
+    memory_service: MemoryService | None = None,
+    memory_config: MemoryConfig | None = None,
+) -> ToolRegistry:
     """根据 Agent 工具配置构建工具注册表。
 
     Args:
         config (ToolsConfig): 已校验的工具配置。
+        memory_service: 可选 memory service；存在时自动注册三个读取工具。
+        memory_config: 绑定工具的读取范围和单个写入 namespace。
 
     Returns:
         ToolRegistry: 已注册配置声明工具的注册表。
@@ -54,7 +67,19 @@ def build_tool_registry(config: ToolsConfig) -> ToolRegistry:
         IrisConfigError: 工具名称或 Python 引用无法解析时抛出。
     """
     registry = ToolRegistry()
-    _register_builtin_tools(registry, config.builtin)
+    builtin_names = list(config.builtin)
+    if memory_service is not None:
+        builtin_names.extend(
+            name
+            for name in ("memory.search", "memory.list", "memory.get")
+            if name not in builtin_names
+        )
+    _register_builtin_tools(
+        registry,
+        builtin_names,
+        memory_service=memory_service,
+        memory_config=memory_config or MemoryConfig(),
+    )
     for ref in config.python.functions:
         registry.register_function(_import_ref(ref))
     for ref in config.python.registrars:
@@ -69,7 +94,13 @@ def build_tool_registry(config: ToolsConfig) -> ToolRegistry:
     return registry
 
 
-def _register_builtin_tools(registry: ToolRegistry, names: list[str]) -> None:
+def _register_builtin_tools(
+    registry: ToolRegistry,
+    names: list[str],
+    *,
+    memory_service: MemoryService | None,
+    memory_config: MemoryConfig,
+) -> None:
     """注册 YAML 声明的内置工具。"""
     file_service = WorkspaceFileService()
     for name in names:
@@ -83,6 +114,15 @@ def _register_builtin_tools(registry: ToolRegistry, names: list[str]) -> None:
             if api_key is None:
                 raise IrisConfigError("Web 工具需要配置 IRIS_PROVIDER_API_KEYS__TAVILY", tool=name)
             registry.register(_BUILTIN_WEB_TOOL_CLASSES[name](api_key=api_key))
+        elif name in MEMORY_TOOL_CLASSES:
+            if memory_service is None:
+                raise IrisConfigError("memory 工具需要启用或注入 memory service", tool=name)
+            registry.register(
+                MEMORY_TOOL_CLASSES[name](
+                    service=memory_service,
+                    access_policy_factory=default_memory_access_policy_factory(memory_config),
+                )
+            )
         else:
             human_factory = _BUILTIN_HUMAN_TOOL_FACTORIES.get(name)
             if human_factory is None:
