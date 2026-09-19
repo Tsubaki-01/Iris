@@ -14,7 +14,15 @@ from iris.agents import CompactionConfig
 from iris.context import ContextSection, ContextSlot
 from iris.harness import AgentRunner, SessionHistory
 from iris.hitl import QuestionInteractionResponse
-from iris.lifecycle import AgentRunRequest, LifecycleStore, RunEventKind, RunStopReason
+from iris.lifecycle import (
+    AgentRunOptions,
+    AgentRunRequest,
+    LifecycleStore,
+    RunEventKind,
+    RunStopReason,
+    RuntimeExecutionOptions,
+)
+from iris.memory import MemoryItem, MemoryScope, MemorySearchResult
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -202,7 +210,9 @@ async def test_recover_after_projection_commit_reuses_summary_reservation_and_fo
     before = compaction_store.load_session("default")
     crashed = compaction_store.load_run("crashed")
     assert before.compaction is not None
-    assert len(before.messages) == 2
+    assert len(before.messages) == 4
+    assert before.messages[-2].metadata["context_kind"] == "before_current_input"
+    assert before.messages[-1].text == "继续原任务"
     assert crashed is not None and crashed.current_activation_id is not None
     assert crashed.usage.model_steps_reserved == 1
     assert crashed.usage.model_steps_committed == 0
@@ -271,7 +281,11 @@ async def test_sqlite_projection_write_failure_preserves_old_summary_and_never_s
     assert result.error.code == "RUN_PERSISTENCE_ERROR"
     assert provider.requests == []
     assert len(provider.summary_requests) == 1
-    assert store.load_session("default") == before
+    after = store.load_session("default")
+    assert after.compaction == before.compaction
+    assert after.messages[:-2] == before.messages
+    assert after.messages[-2].metadata["context_kind"] == "before_current_input"
+    assert after.messages[-1].text == "再次压缩"
     assert store.load_run("write-failed").usage.compaction.total_tokens == 11
     assert [
         fact.kind for fact in publisher.facts if fact.kind.startswith("context.compaction")
@@ -279,6 +293,43 @@ async def test_sqlite_projection_write_failure_preserves_old_summary_and_never_s
     assert RunEventKind.CONTEXT_COMPACTED not in {
         event.kind for event in store.list_events("write-failed")
     }
+
+
+@pytest.mark.asyncio
+async def test_first_request_can_compact_dynamic_memory_but_keeps_bci_and_user(
+    tmp_path: Path, compaction_store: LifecycleStore
+) -> None:
+    """动态记忆先归档再普通压缩，不占用 BCI 与原始用户输入的保护位置。"""
+    provider = CompactionProvider(text_response())
+    memory_text = "可压缩的动态资料" * 160
+    memory = MemorySearchResult(
+        item=MemoryItem(
+            id="long-memory",
+            scope=MemoryScope(workspace_id="workspace", agent_id="agent"),
+            text=memory_text,
+        )
+    )
+    result = await AgentRunner(runtime=_runtime(tmp_path, provider), store=compaction_store).start(
+        AgentRunRequest(input="保留原始问题", run_id="memory-compaction"),
+        options=AgentRunOptions(
+            runtime=RuntimeExecutionOptions(memory_results=[memory.model_dump(mode="json")])
+        ),
+    )
+
+    assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
+    assert len(provider.summary_requests) == len(provider.requests) == 1
+    request = provider.requests[0]
+    assert any(message.text.startswith("<summary>") for message in request.messages)
+    assert all(memory_text not in message.text for message in request.messages)
+    assert sum("本轮有效环境" in message.text for message in request.messages) == 1
+    assert sum(message.text == "保留原始问题" for message in request.messages) == 1
+    session = compaction_store.load_session("default")
+    assert session.compaction is not None
+    assert session.compaction.covered_message_count == 1
+    assert session.messages[0].metadata["context_kind"] == "memory"
+    assert memory_text in session.messages[0].text
+    assert session.messages[1].metadata["context_kind"] == "before_current_input"
+    assert session.messages[2].text == "保留原始问题"
 
 
 @pytest.mark.asyncio

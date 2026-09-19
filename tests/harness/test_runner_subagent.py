@@ -26,6 +26,7 @@ from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
     CommitModelStep,
+    CommitRunInput,
     CreateRun,
     FinishRun,
     ReserveModelStep,
@@ -1499,10 +1500,29 @@ def _prepare_parent(
         options=options,
     )
     created = runner.store.create_run(command)
+    input_committed = runner.store.commit_run_input(
+        CommitRunInput(
+            run_id="parent",
+            expected_run_revision=created.run.revision,
+            activation_id=command.start_activation_id,
+            expected_session_revision=0,
+            message_delta=[Msg.user("Parent private history")],
+            checkpoint=command.initial_checkpoint.model_copy(
+                update={
+                    "sequence": 2,
+                    "session_revision": 1,
+                    "engine_cursor": cursor.model_copy(
+                        update={"position": "before_model"}
+                    ).model_dump(mode="json"),
+                }
+            ),
+            now=runner.clock.now(),
+        )
+    )
     reserved = runner.store.reserve_model_step(
         ReserveModelStep(
             run_id="parent",
-            expected_run_revision=created.run.revision,
+            expected_run_revision=input_committed.run.revision,
             activation_id=command.start_activation_id,
             now=runner.clock.now(),
         )
@@ -1536,8 +1556,8 @@ def _prepare_parent(
             run_id="parent",
             expected_run_revision=reserved.run.revision,
             activation_id=command.start_activation_id,
-            expected_session_revision=0,
-            message_delta=[Msg.user("Parent private history"), assistant],
+            expected_session_revision=1,
+            message_delta=[assistant],
             usage=RunUsage(model_steps_reserved=1, model_steps_committed=1, total_tokens=11),
             prepared_tool_calls=[
                 RunToolCallRecord(
@@ -1556,8 +1576,8 @@ def _prepare_parent(
             ],
             checkpoint=command.initial_checkpoint.model_copy(
                 update={
-                    "sequence": 2,
-                    "session_revision": 1,
+                    "sequence": 3,
+                    "session_revision": 2,
                     "model_steps_reserved": 1,
                     "model_steps_committed": 1,
                     "engine_cursor": after.model_dump(mode="json"),

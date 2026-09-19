@@ -40,7 +40,10 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
 - run、checkpoint、session revision 与 usage counters 必须交叉一致；
 - mutation events 与 aggregate facts 同事务追加，sequence 单调递增。
 
-## Checkpoint v1
+## Checkpoint v2
+
+`RunCheckpoint.checkpoint_version` 固定为 `2`，加载时拒绝旧版本，不迁移历史 checkpoint。
+新 run 从 `before_input` 开始；输入组保存后进入 `before_model`，恢复位置明确区分输入是否已归档。
 
 `RunCheckpoint.resumability` 只有：
 
@@ -55,6 +58,9 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
+`CommitRunInput` / `commit_run_input()` 在既有 run/session CAS 和 activation fence 下原子追加
+动态 memory、BCI、用户输入，并推进 checkpoint sequence 到 `before_model`。只改变 cursor
+位置，不改变 step index、usage 或 model reservation，也不追加模型事件。重复旧 command 冲突。
 `RunCommit.session_revision` 只在 mutation 改变原文或摘要投影时返回提交后的 revision，不携带完整
 `SessionSnapshot`；需要 history 时显式调用 `load_session()`。Store 不承诺历史 command 原样
 重交成功；已有相同回答、取消和 child admission 的业务状态幂等按各 mutation 契约保留。

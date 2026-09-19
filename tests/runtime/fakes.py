@@ -33,6 +33,7 @@ from iris.runtime import (
     RuntimeMessageAssembler,
     RuntimeModelStepCommit,
     RuntimeProvider,
+    RuntimeRunInputCommit,
     RuntimeSteeringPort,
     RuntimeSuspension,
     RuntimeSuspensionResult,
@@ -126,6 +127,7 @@ class FakeRuntimeCommitPort:
         self.fail_at = fail_at
         self.events: list[str] = []
         self.model_commits: list[RuntimeModelStepCommit] = []
+        self.input_commits: list[RuntimeRunInputCommit] = []
         self.compaction: SessionCompaction | None = None
         self.compaction_usages: list[TokenUsage] = []
         self.compaction_commits: list[RuntimeCompactionCommit] = []
@@ -150,6 +152,18 @@ class FakeRuntimeCommitPort:
             messages=list(self.messages),
             compaction=self.compaction,
         )
+
+    def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
+        """归档输入组，保持模型计数和 reservation 不变。"""
+        self._record("commit_run_input")
+        self._require_cursor(commit.cursor_before)
+        if commit.cursor_before.position != "before_input":
+            raise IrisRunConflictError("输入只能在 before_input 提交")
+        self.messages.extend(commit.message_delta)
+        self.cursor = commit.cursor_after
+        self._revision += 1
+        self.input_commits.append(commit)
+        return self.cursor
 
     def reserve_model_step(self, cursor: RuntimeCursor) -> ModelStepReservation:
         """校验 cursor 并模拟预算预留。"""
@@ -564,7 +578,7 @@ def start_activation(
         kind="start",
         run_input=input,
         initial_session_message_count=initial_session_message_count,
-        cursor=RuntimeCursor(position="before_model", step_index=0),
+        cursor=RuntimeCursor(position="before_input", step_index=0),
         options=options or RuntimeExecutionOptions(),
     )
 

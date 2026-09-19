@@ -100,6 +100,10 @@ the mirror before returning.
 the first fragment when necessary and counting omissions. Prompt fragments keep semantic metadata
 but omit storage source and retrieval score by default.
 
+Runtime archives explicit dynamic fragments with BCI and user input in `before_input`. Later tool
+steps, HITL, and recovery replay that history without another query; ordinary compaction can still
+replace the raw fragments with a summary.
+
 ```python
 from iris.harness import (
     AgentRunOptions,

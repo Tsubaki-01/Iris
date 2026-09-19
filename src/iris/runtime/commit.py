@@ -63,6 +63,15 @@ class ToolCallClaim:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeRunInputCommit:
+    """首个模型请求前的完整历史输入组提交事实。"""
+
+    cursor_before: RuntimeCursor
+    message_delta: tuple[Msg, ...]
+    cursor_after: RuntimeCursor
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RuntimeCompactionCommit:
     """替换历史投影并保持当前模型步 reservation 的提交事实。"""
 
@@ -129,6 +138,9 @@ class RuntimeCommitPort(Protocol):
 
     def load_session(self) -> SessionSnapshot:
         """读取 port 绑定 session 的 revisioned history。"""
+
+    def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
+        """原子归档输入组并进入 before_model，不消耗模型步。"""
 
     def reserve_model_step(self, cursor: RuntimeCursor) -> ModelStepReservation:
         """在 provider effect 前预留一个模型步。"""
@@ -297,6 +309,7 @@ __all__ = [
     "RuntimeCommitPort",
     "RuntimeCompactionCommit",
     "RuntimeModelStepCommit",
+    "RuntimeRunInputCommit",
     "RuntimeSuspension",
     "RuntimeSuspensionResult",
     "RuntimeToolCall",

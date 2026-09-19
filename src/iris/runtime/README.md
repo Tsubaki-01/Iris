@@ -55,8 +55,10 @@ result = await runtime.execute(
 事实；调用方必须从 durable store 重载最终 `RunResult`。
 
 所有 activation 都携带原始 `run_input` 与创建 run 时的 `initial_session_message_count`。
-engine 只在 `step 0` 注入并随首次模型响应归档输入；resume/recover 保留锚点，不重复追加原文。
-BCI 也只在 `step 0` 构建；后续步骤使用已归档历史，不再渲染未被消费的 BCI 模板。
+engine 在 `before_input` 准备动态 memory、BCI 和用户输入，通过 `commit_run_input()`
+原子归档后进入 `before_model`，不消耗模型 reservation 或增加 step index。
+BCI 只在输入阶段构建；后续步骤及已提交输入的 resume/recover 使用历史，不重复追加或渲染。
+checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_model/step0` 的输入状态。
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
@@ -66,8 +68,9 @@ BCI 也只在 `step 0` 构建；后续步骤使用已归档历史，不再渲染
 ### 历史投影与摘要构造
 
 内部 `compaction.py` 在完整原文上定位本 run 的原始输入、最新已归档 steer 与已注入 BCI。
-历史投影依次放入摘要消息、已覆盖锚点、未覆盖原文；assembler 仍拥有 system、memory 和
-尚未归档 BCI/input 的固定位置。摘要只在投影时包装一层 `<summary>`，不追加回原文。
+历史投影依次放入摘要消息、已覆盖锚点、未覆盖原文；assembler 将固定 system、静态 memory
+放在历史之前。BCI 的 `context_kind=before_current_input` 标记与动态 memory 明确区分；
+动态快照按普通历史压缩，不加入强制保护集合。摘要只在投影时包装一层 `<summary>`，不追加回原文。
 切点保持 assistant 的整批 tool calls/results 完整，近期原文是软目标，大组放不下时可以仅留
 较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
 
@@ -100,6 +103,7 @@ response 的 message delta，也不增加主步骤 reservation。
 
 cursor 位置只有：
 
+- `before_input`：准备并原子归档本轮输入，完成后进入 `before_model`；
 - `before_model`：可预留下一次 provider step；
 - `tool_batch`：provider response 已提交，按 `next_tool_index` 推进 exact tool calls；
 - `outcome_ready`：assistant outcome 已提交，只差 lifecycle terminal settlement。
@@ -212,10 +216,12 @@ retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当�
 ## 显式 Memory 注入
 
 `RuntimeExecutionOptions.memory_query` 和 `memory_results` 是显式 opt-in 的动态 memory 输入。
-每个 logical run 只在第一次 `before_model` step 注入一次；同一用户输入后续因工具循环或
-HITL resume 产生的 provider 请求不会再次附加这条动态 memory。新的用户输入会创建新的
-`start` activation，因此可以重新注入一次。`context.yaml` 中声明的静态 memory slot 不受此
-规则影响。`memory_results` 只处理调用方提供的本地快照；`memory_query` 才会 await
+每个 logical run 在 `before_input` 读取并渲染一次，每个片段一条 `sender=context` 历史消息，
+metadata 保存 `context_kind=memory`、`item_id` 和 `truncated`。工具循环、HITL resume 与
+已提交输入后的 recover 不再查询，继续重放历史中的快照；普通压缩仍可把原文替换为摘要。
+输入提交前中断则可在恢复时重新准备。新的 run 可指定新的查询或结果。
+`context.yaml` 中的静态 memory slot 保持固定位置，不复制进历史。
+`memory_results` 只处理调用方提供的本地快照；`memory_query` 才会 await
 `MemoryService.abuild_context()`。配置构造的 SQLite service 会在单个 worker job 中完成建连、
 查询、物化和关闭，runtime 不消费取消后的迟到结果。
 

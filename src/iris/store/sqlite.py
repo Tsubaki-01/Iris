@@ -61,6 +61,7 @@ from ..lifecycle.store import (
     ClaimToolCall,
     CommitCompaction,
     CommitModelStep,
+    CommitRunInput,
     CommitToolResult,
     CreateRun,
     FinalizeSubagentResult,
@@ -84,6 +85,7 @@ from ..lifecycle.transitions import (
     replace_run,
     reserve_model_step,
     settle_activation,
+    validate_run_input_transition,
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
@@ -495,6 +497,10 @@ class SQLiteStore:
             command,
             self._resume_waiting_run,
         )
+
+    def commit_run_input(self, command: CommitRunInput) -> RunCommit:
+        """原子归档输入组与 before_model checkpoint。"""
+        return self._mutate("commit_run_input", command, self._commit_run_input)
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
         return self._mutate(
@@ -1382,6 +1388,46 @@ class SQLiteStore:
             session_revision=next_revision,
             checkpoint=command.checkpoint,
             events=(event,),
+        )
+
+    def _commit_run_input(
+        self,
+        connection: sqlite3.Connection,
+        command: CommitRunInput,
+    ) -> RunCommit:
+        """在同一事务推进输入历史和 cursor，不建立模型 reservation。"""
+        operation = "commit_run_input"
+        run = self._require_active(connection, command, operation=operation)
+        session = self._require_history_preconditions(
+            connection, run, command.expected_session_revision, operation=operation
+        )
+        current_checkpoint = self._require_checkpoint(
+            connection, run.run_id, operation=operation
+        )
+        validate_run_input_transition(current_checkpoint, command.checkpoint)
+        next_revision = session.revision + bool(command.message_delta)
+        _validate_checkpoint_replacement(
+            run,
+            current_checkpoint,
+            command.checkpoint,
+            command.activation_id,
+            next_revision,
+            run.usage,
+        )
+        updated = _replace_run(
+            run,
+            revision=run.revision + 1,
+            checkpoint_sequence=command.checkpoint.sequence,
+            updated_at=command.now,
+        )
+        if command.message_delta:
+            self._update_session(connection, session, command.message_delta, command.now)
+        self._update_run(connection, run, updated, next_revision)
+        self._update_checkpoint(connection, current_checkpoint, command.checkpoint, command.now)
+        return RunCommit(
+            run=updated,
+            session_revision=next_revision if command.message_delta else None,
+            checkpoint=command.checkpoint,
         )
 
     def _commit_model_step(

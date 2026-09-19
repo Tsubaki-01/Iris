@@ -34,6 +34,7 @@ from iris.runtime import RuntimeCursor
 from iris.runtime.commit import (
     RuntimeCompactionCommit,
     RuntimeModelStepCommit,
+    RuntimeRunInputCommit,
     RuntimeToolCall,
     RuntimeToolResultCommit,
 )
@@ -49,7 +50,8 @@ def _store_commit_port(
     event_collector: _RunEventCollector | None = None,
 ) -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
     store = InMemoryLifecycleStore()
-    before = RuntimeCursor(position="before_model", step_index=0)
+    initial = RuntimeCursor(position="before_input", step_index=0)
+    before = initial.model_copy(update={"position": "before_model"})
     created = store.create_run(
         CreateRun(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
@@ -60,7 +62,7 @@ def _store_commit_port(
                 run_id="run_1",
                 sequence=1,
                 activation_id="activation_1",
-                engine_cursor=before.model_dump(mode="json"),
+                engine_cursor=initial.model_dump(mode="json"),
                 session_revision=0,
                 model_steps_reserved=0,
                 model_steps_committed=0,
@@ -73,9 +75,16 @@ def _store_commit_port(
         store=store,
         run=created.run,
         activation_id="activation_1",
-        cursor=before,
+        cursor=initial,
         clock=lambda: NOW,
         event_collector=event_collector or _RunEventCollector(),
+    )
+    port.commit_run_input(
+        RuntimeRunInputCommit(
+            cursor_before=initial,
+            message_delta=(Msg.user("hello"),),
+            cursor_after=before,
+        )
     )
     port.reserve_model_step(before)
     tool_use = ToolUseBlock(id="call_1", name="echo", input={"value": "hello"})
@@ -93,7 +102,7 @@ def _store_commit_port(
     port.commit_model_step(
         RuntimeModelStepCommit(
             cursor_before=before,
-            message_delta=(Msg.user("hello"), assistant),
+            message_delta=(assistant,),
             assistant_message=assistant,
             prepared_tool_calls=(call,),
             cursor_after=RuntimeCursor(
@@ -249,7 +258,7 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
 ) -> None:
     path = tmp_path / "cross-process.db"
     owner = SQLiteStore(path)
-    before = RuntimeCursor(position="before_model", step_index=0)
+    before = RuntimeCursor(position="before_input", step_index=0)
     created = owner.create_run(
         CreateRun(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),

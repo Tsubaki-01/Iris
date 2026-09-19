@@ -57,6 +57,7 @@ from ..lifecycle.store import (
     ClaimToolCall,
     CommitCompaction,
     CommitModelStep,
+    CommitRunInput,
     CommitToolResult,
     CreateRun,
     FinalizeSubagentResult,
@@ -80,6 +81,7 @@ from ..lifecycle.transitions import (
     replace_run,
     reserve_model_step,
     settle_activation,
+    validate_run_input_transition,
 )
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
@@ -536,6 +538,40 @@ class InMemoryLifecycleStore:
             self._events[run.run_id].append(deepcopy(event))
             self._results.pop(run.run_id, None)
             return deepcopy(commit)
+
+    def commit_run_input(self, command: CommitRunInput) -> RunCommit:
+        """原子保存动态 memory、BCI 与用户输入，不推进模型用量。"""
+        command = deepcopy(command)
+        with self._lock:
+            run = self._require_active(command)
+            session = self._require_history_preconditions(run, command.expected_session_revision)
+            current_checkpoint = self._require_checkpoint(run.run_id)
+            validate_run_input_transition(current_checkpoint, command.checkpoint)
+            next_session = self._append_messages(session, command.message_delta)
+            self._validate_checkpoint_replacement(
+                run,
+                current_checkpoint,
+                command.checkpoint,
+                command.activation_id,
+                next_session.revision,
+                run.usage,
+            )
+            updated = self._replace_run(
+                run,
+                revision=run.revision + 1,
+                checkpoint_sequence=command.checkpoint.sequence,
+                updated_at=command.now,
+            )
+            self._runs[run.run_id] = updated
+            self._sessions[session.session_id] = next_session
+            self._checkpoints[run.run_id] = command.checkpoint
+            return deepcopy(
+                RunCommit(
+                    run=updated,
+                    session_revision=next_session.revision if command.message_delta else None,
+                    checkpoint=command.checkpoint,
+                )
+            )
 
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
         """在 provider effect 前增加 durable model-step reservation。"""

@@ -272,6 +272,13 @@ class RuntimeExecutionOptions(_FrozenModel):
     def _validate_memory_snapshots(cls, value: Any, info: ValidationInfo) -> Any:
         return validate_json_safe(value, field_name=str(info.field_name))
 
+    @model_validator(mode="after")
+    def _validate_memory_source(self) -> RuntimeExecutionOptions:
+        """一次调用只能显式选择查询或结果快照。"""
+        if self.memory_query is not None and self.memory_results is not None:
+            raise ValueError("memory_query 与 memory_results 不能同时提供")
+        return self
+
 
 class AgentRunOptions(_FrozenModel):
     """Logical run 的完整固定选项。"""
@@ -612,7 +619,7 @@ class ActivationRecord(_FrozenModel):
 class RunCheckpoint(_FrozenModel):
     """Logical run 当前可恢复位置。"""
 
-    checkpoint_version: Literal[1] = 1
+    checkpoint_version: Literal[2] = 2
     run_id: str
     sequence: int = Field(ge=1)
     activation_id: str

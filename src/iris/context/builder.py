@@ -40,22 +40,25 @@ class ContextBuilder:
 
     def build(self, input_data: ContextBuildInput) -> ContextBuildOutput:
         """构建 system、memory 和 current input 前置 context 消息。"""
-        system_text = self._render_section("system", input_data.system)
+        system_text = self.render_section("system", input_data.system)
         memory_text = self._render_optional_section("memory", input_data.memory)
-        before_input_text = self._render_optional_section(
-            "before_current_input",
-            input_data.before_current_input,
-        )
         return ContextBuildOutput(
             system=Msg.system(system_text),
             memory=(
                 Msg.user(memory_text, sender=CONTEXT_SENDER) if memory_text is not None else None
             ),
-            before_current_input=(
-                Msg.user(before_input_text, sender=CONTEXT_SENDER)
-                if before_input_text is not None
-                else None
-            ),
+            before_current_input=self.build_before_current_input(input_data.before_current_input),
+        )
+
+    def build_before_current_input(self, section: ContextSection | None) -> Msg | None:
+        """独立构建输入前置消息，避免输入归档时重复渲染固定上下文。"""
+        text = self._render_optional_section("before_current_input", section)
+        if text is None:
+            return None
+        return Msg.user(
+            text,
+            sender=CONTEXT_SENDER,
+            metadata={"context_kind": "before_current_input"},
         )
 
     def _render_optional_section(
@@ -69,16 +72,16 @@ class ContextBuilder:
         slots = _enabled_slots(section)
         if not slots:
             return None
-        return self._render_section(section_name, section, slots=slots)
+        return self.render_section(section_name, section, slots=slots)
 
-    def _render_section(
+    def render_section(
         self,
         section_name: SectionName,
         section: ContextSection,
         *,
         slots: list[ContextSlot] | None = None,
     ) -> str:
-        """渲染一个 context section"""
+        """渲染一个已定义的 section，供固定上下文和独立动态消息复用。"""
         enabled_slots = slots if slots is not None else _enabled_slots(section)
         if section.template is not None:
             try:

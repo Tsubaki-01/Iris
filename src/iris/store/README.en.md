@@ -120,6 +120,16 @@ conflict/state errors.
 
 ## Public API
 
+### Run input archival
+
+`commit_run_input(CommitRunInput)` appends the complete input group and advances the checkpoint
+from `before_input` to `before_model` within one lock or SQLite transaction. It reuses run and
+session revisions, the activation fence, and checkpoint sequence. It consumes no model reservation
+and leaves the step index, usage, and event sequence unchanged. Old commands conflict; SQL failures
+roll back the entire group, so recovery cannot observe partial memory/BCI/user input.
+Checkpoint payload version is `2`; loading an older payload fails. The database structure remains
+lifecycle schema v7.
+
 ### Summary usage and history projection
 
 `record_compaction_usage(RecordCompactionUsage)` adds to `RunUsage.compaction` under the current

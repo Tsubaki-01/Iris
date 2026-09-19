@@ -37,7 +37,7 @@ class RuntimeActivationOutcome(StrEnum):
 class RuntimeCursor(_FrozenRuntimeModel):
     """可持久化的 inner engine 精确位置。"""
 
-    position: Literal["before_model", "tool_batch", "outcome_ready"]
+    position: Literal["before_input", "before_model", "tool_batch", "outcome_ready"]
     step_index: int = Field(ge=0)
     next_tool_index: int = Field(default=0, ge=0)
     tool_calls: tuple[ToolUseBlock, ...] = ()
@@ -59,14 +59,16 @@ class RuntimeCursor(_FrozenRuntimeModel):
             if result.tool_use_id != call.id or result.tool_name != call.name:
                 raise ValueError("tool result identity 与已提交调用前缀不匹配")
 
-        if self.position == "before_model":
+        if self.position in {"before_input", "before_model"}:
             if (
                 self.next_tool_index != 0
                 or self.tool_calls
                 or self.tool_results
                 or self.assistant_message is not None
             ):
-                raise ValueError("before_model cursor 不能包含 model/tool 结果")
+                raise ValueError("输入或模型准备阶段不能包含 model/tool 结果")
+            if self.position == "before_input" and self.step_index != 0:
+                raise ValueError("before_input cursor 必须处于 step 0")
         elif self.position == "tool_batch":
             if self.assistant_message is None or not self.tool_calls:
                 raise ValueError("tool_batch cursor 必须包含 assistant message 和 tool calls")
@@ -121,8 +123,8 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
     @model_validator(mode="after")
     def _validate_activation_shape(self) -> RuntimeActivationInput:
         if self.kind == "start":
-            if self.cursor.position != "before_model" or self.cursor.step_index != 0:
-                raise ValueError("start activation 必须从 step 0 before_model 开始")
+            if self.cursor.position != "before_input":
+                raise ValueError("start activation 必须从 before_input 开始")
             if self.interaction_projection is not None:
                 raise ValueError("start activation 不能携带 interaction projection")
         if self.interaction_projection is not None and self.cursor.position != "tool_batch":

@@ -62,10 +62,12 @@ frozen `RuntimeExecutionOptions`, and a JSON-safe cursor. `RuntimeActivationResu
 fact only; the owner must reload the final `RunResult` from durable storage.
 
 Every activation carries the original `run_input` and `initial_session_message_count` captured
-when the run was created. The engine injects input only at `step 0` and archives it with the first
-model response. Resume and recovery retain these anchors without appending the input again.
-BCI is also built only at `step 0`; later steps consume its archived history without rendering
-an unused BCI template again.
+when the run was created. In `before_input`, the engine prepares dynamic memory, BCI, and user input,
+then archives them atomically through `commit_run_input()` before entering `before_model`. This
+does not consume a model reservation or increment the step index. BCI is built only during input
+preparation; later steps and recovery after the input commit replay history without appending or
+rendering it again. Checkpoint version 2 rejects older checkpoints rather than guessing whether an
+old `before_model/step0` cursor had archived its input.
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
@@ -78,8 +80,10 @@ does not consume an additional model-step budget slot.
 
 Internal `compaction.py` locates the current run's original input, latest archived steer, and injected
 BCI in complete raw history. Projection orders the summary, covered anchors, and uncovered raw suffix.
-The assembler still positions system, memory, and unarchived BCI/input. A single `<summary>` wrapper
-is added only in the projection; summaries never append to raw history. Cuts keep each assistant tool
+The assembler places fixed system and static memory before history. BCI is marked with
+`context_kind=before_current_input`; dynamic memory is ordinary compressible history and is not
+pinned. A single `<summary>` wrapper is added only in the projection; summaries never append to raw
+history. Cuts keep each assistant tool
 batch and its results together. Recent retention is a soft target: an oversized group can be summarized
 while retaining smaller recent groups, or leaving an empty suffix. Completed steps within the current
 run are eligible too.
@@ -117,7 +121,8 @@ committed summary, and recorded summary usage. Recovery after the projection but
 response uses the new summary and the same pending reservation. WAITING first resumes its tool
 flow; `outcome_ready` only settles. Actual main-provider overflow has no extra compact-and-retry path.
 
-Cursor positions are `before_model`, `tool_batch`, and `outcome_ready`. A provider response without
+Cursor positions are `before_input`, `before_model`, `tool_batch`, and `outcome_ready`.
+`before_input` prepares and commits the input group before model reservation. A provider response without
 tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
 engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
@@ -241,10 +246,12 @@ delta/merge/lock/hash model.
 ## Explicit memory injection
 
 `RuntimeExecutionOptions.memory_query` and `memory_results` are explicit opt-in dynamic memory
-inputs. Each logical run injects them only on its first `before_model` step; provider requests
-caused by later tool-loop steps or HITL resume do not append the same dynamic memory again. A new
-user input creates a new `start` activation and can inject memory once again. Static memory slots
-declared in `context.yaml` are not affected by this rule. `memory_results` consumes only the local
+inputs. Each logical run reads and renders them in `before_input`, with one context history message
+per fragment marked by `context_kind=memory`, `item_id`, and `truncated`. Tool loops, HITL resume,
+and recovery after the input commit replay those snapshots without another query. Ordinary
+compaction can still replace their original text with a summary. Recovery before input commit may
+prepare again; a new run may specify fresh input. Static memory slots declared in `context.yaml`
+remain fixed sections and are not copied into history. `memory_results` consumes only the local
 snapshot supplied by the caller; only `memory_query` awaits `MemoryService.abuild_context()`. A
 configured SQLite service creates, uses, and closes its connection inside one worker job, and the
 runtime does not consume a late result after cancellation.

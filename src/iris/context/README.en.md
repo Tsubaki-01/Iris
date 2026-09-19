@@ -94,6 +94,12 @@ Long-term memory results should first become `MemoryContextBundle`, then be mapp
 fixed-name context slots. Prompt-facing attributes retain category/kind/level semantics but should
 not expose retrieval score or storage source.
 
+Runtime uses `ContextBuilder.render_section()` to render each dynamic fragment as a separate history
+message instead of adding it to the fixed memory section. BCI messages produced by `build()` carry
+`metadata.context_kind=before_current_input` so compaction can identify the original input group.
+`build_before_current_input(section)` prepares BCI on its own for input archival, without rendering
+fixed context sections until the model request.
+
 When `template` is set, `ContextTemplateRenderer` receives exactly one variable, `slots`: an ordered,
 JSON-mode list of slot dictionaries. Jinja2 uses XML autoescape and `StrictUndefined`; rendered text
 is preserved as prompt text. Missing templates, encoding/dependency/render errors, and non-serializable
@@ -127,7 +133,8 @@ Unknown fields are rejected and no legacy migration runs.
 `ContextBuildInput`, `ContextBuildOutput`, `ContextBuilder`, `ContextXmlRenderer`,
 `ContextTemplateRenderer`, and `load_context_build_input`.
 
-The builder accepts optional renderer instances and exposes `build(input_data)`.
+The builder accepts optional renderer instances and exposes `build(input_data)` and
+`render_section(section_name, section)` for rendering one of its defined section types.
 The XML renderer exposes `render_section()` and `render_slot()`;
 the template renderer exposes `render_file()`.
 

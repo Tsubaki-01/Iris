@@ -1,33 +1,29 @@
-"""Runtime memory 适配层。
-
-本模块只把显式 memory 输入转换为 `iris.context` slots，不持有召回、存储、
-provider 或 session 逻辑。
-"""
+"""将显式召回结果转换为独立的动态记忆历史消息。"""
 
 from __future__ import annotations
 
-from ..context import ContextBuildInput, ContextSlot
+from ..context import ContextBuilder, ContextSection, ContextSlot
 from ..exceptions import IrisMemoryError
 from ..lifecycle import RuntimeExecutionOptions
 from ..memory import (
     MemoryContextBuilder,
-    MemoryContextBundle,
     MemoryQuery,
     MemorySearchResult,
     MemoryService,
 )
+from ..message import Msg
 
 
-async def prepare_activation_memory_context_input(
-    context_input: ContextBuildInput,
+async def prepare_run_memory_messages(
     *,
     options: RuntimeExecutionOptions,
     memory_service: MemoryService | None,
     memory_context_builder: MemoryContextBuilder,
-) -> ContextBuildInput:
-    """把 lifecycle JSON snapshot 转回现有 memory 构建边界。"""
+    context_builder: ContextBuilder,
+) -> tuple[Msg, ...]:
+    """在输入提交前读取一次显式 memory，渲染供历史重放的实际片段。"""
     if options.memory_results is None and options.memory_query is None:
-        return context_input
+        return ()
 
     if options.memory_results is not None:
         results = [MemorySearchResult.model_validate(item) for item in options.memory_results]
@@ -35,7 +31,7 @@ async def prepare_activation_memory_context_input(
             results,
             max_chars=options.memory_max_chars,
         )
-    elif options.memory_query is not None:
+    else:
         if memory_service is None:
             raise IrisMemoryError("显式 memory_query 需要注入 memory_service")
         bundle = await memory_service.abuild_context(
@@ -43,27 +39,34 @@ async def prepare_activation_memory_context_input(
             max_chars=options.memory_max_chars,
         )
 
-    return context_input.with_memory_slots(*_memory_bundle_to_slots(bundle))
-
-
-def _memory_bundle_to_slots(bundle: MemoryContextBundle) -> list[ContextSlot]:
-    """将 memory bundle 转换成 prompt-facing context slots。"""
-    slots: list[ContextSlot] = []
+    messages: list[Msg] = []
     for fragment in bundle.fragments:
-        slots.append(
-            ContextSlot(
-                name="memory",
-                content=fragment.text,
-                attributes={
+        slot = ContextSlot.model_construct(
+            name="memory",
+            content=fragment.text,
+            attributes={
+                "item_id": fragment.item_id,
+                "category": fragment.category.value,
+                "kind": fragment.kind.value,
+                "level": fragment.level.value,
+                "truncated": str(fragment.truncated).lower(),
+            },
+        )
+        text = context_builder.render_section(
+            "memory", ContextSection.model_construct(slots=[slot])
+        )
+        messages.append(
+            Msg.user(
+                text,
+                sender="context",
+                metadata={
+                    "context_kind": "memory",
                     "item_id": fragment.item_id,
-                    "category": fragment.category.value,
-                    "kind": fragment.kind.value,
-                    "level": fragment.level.value,
-                    "truncated": str(fragment.truncated).lower(),
+                    "truncated": fragment.truncated,
                 },
             )
         )
-    return slots
+    return tuple(messages)
 
 
-__all__ = ["prepare_activation_memory_context_input"]
+__all__ = ["prepare_run_memory_messages"]

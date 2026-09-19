@@ -393,7 +393,7 @@ order. Claim telemetry event order is not an ordinal contract. Any uncommitted c
 cancellation, deadline, or program interruption settle outcome unknown; the existing terminal
 settlement closes every unresolved claim for that activation in one aggregate transaction.
 
-Active recovery validates checkpoint v1, session revision, usage counters, and cursor.
+Active recovery validates checkpoint v2, session revision, usage counters, and cursor.
 Tools are never replayed while unresolved claims exist. Recovery atomically
 abandons the old activation, closes every claim as outcome unknown, and creates the terminal result.
 Normal parent/control/infrastructure exit waits for runtime children to drain before revoking the
@@ -411,9 +411,24 @@ later renders on the same runtime can see file edits. `StrictUndefined` and char
 checked during rendering. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
-`initial_session_message_count` from the durable run. `before_model / step 0` reconstructs input
-that has not yet been archived; later steps do not append it again. Recovery after a projection
-commit but before the main response uses the new session revision and the same pending model step.
+`initial_session_message_count` from the durable run. A new run starts at `before_input`, renders
+explicit dynamic memory as one context message per fragment, then atomically archives those
+messages with BCI and user input through `CommitRunInput` before advancing to `before_model`.
+This input commit consumes no model-step budget. Empty memory results still commit normal run
+input, and provider failure does not undo committed input.
+
+Tool loops, HITL resume, and `before_model` recovery reuse dynamic memory snapshots from history
+without querying again or re-rendering options. An interruption before the input commit permits
+preparation to run again; raw explicit queries/results remain in run options for that recovery
+stage. Static memory slots from `context.yaml` remain fixed context and do not enter session
+history. Old checkpoints use different step-zero input semantics: recovery explicitly rejects v1
+without migration or automatic data deletion.
+
+Dynamic memory can be compacted like ordinary history, including before the first model request.
+BCI, original user input, and the latest steer retain their existing protection. Memory snapshots
+receive no additional pinning, so compaction need not preserve their original text in requests.
+Recovery after a projection commit but before the main response uses the new session revision and
+the same pending model step.
 
 `RunUsage` input/output/total fields count only the main model. Summary calls accumulate under
 `usage.compaction`; add the corresponding fields for combined consumption. A summary usage-only

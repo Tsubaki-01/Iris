@@ -37,24 +37,26 @@ class RuntimeMessageAssembler:
     def build_turn_messages(
         self,
         *,
-        context_output: ContextBuildOutput,
+        before_current_input: Msg | None,
         current_input: Msg | None,
+        dynamic_memory: tuple[Msg, ...] = (),
     ) -> list[Msg]:
         """构建仅属于当前用户 turn 的输入消息。
 
         Args:
-            context_output (ContextBuildOutput): 已构建完成的 context 输出。
+            before_current_input (Msg | None): 已构建完成的 BCI 消息。
             current_input (Msg | None): 当前用户输入；continuation step 为空。
+            dynamic_memory (tuple[Msg, ...]): 输入提交阶段准备的独立记忆快照。
 
         Returns:
-            list[Msg]: 按 BCI、当前输入排列的独立消息列表。
+            list[Msg]: 按动态记忆、BCI、当前输入排列的独立消息列表。
         """
         if current_input is None:
             return []
 
-        messages: list[Msg] = []
-        if context_output.before_current_input is not None:
-            messages.append(context_output.before_current_input)
+        messages: list[Msg] = list(dynamic_memory)
+        if before_current_input is not None:
+            messages.append(before_current_input)
         messages.append(current_input)
         return messages
 
@@ -81,7 +83,7 @@ class RuntimeMessageAssembler:
         messages.extend(history)
         messages.extend(
             self.build_turn_messages(
-                context_output=context_output,
+                before_current_input=context_output.before_current_input,
                 current_input=current_input,
             )
         )

@@ -236,8 +236,8 @@ async def test_execute_start_commits_no_tool_completion(tmp_path: Path) -> None:
     assert result.assistant_message.text == "最终回答"
     assert result.cursor.position == "outcome_ready"
     assert len(commits.model_commits) == 1
+    assert [message.role for message in commits.input_commits[0].message_delta] == [Role.USER]
     assert [message.role for message in commits.model_commits[0].message_delta] == [
-        Role.USER,
         Role.ASSISTANT,
     ]
     assert [message.role for message in provider.requests[0].messages] == [
@@ -349,8 +349,8 @@ async def test_execute_no_tool_steer_commits_input_before_next_model_step(
 
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert len(provider.requests) == 2
+    assert [message.role for message in commits.input_commits[0].message_delta] == [Role.USER]
     assert [message.role for message in commits.model_commits[0].message_delta] == [
-        Role.USER,
         Role.ASSISTANT,
         Role.USER,
     ]
@@ -1203,7 +1203,7 @@ async def test_execute_propagates_unexpected_child_self_cancellation(
 
 
 @pytest.mark.asyncio
-async def test_execute_injects_explicit_memory_only_on_first_model_step(
+async def test_execute_archives_explicit_memory_once_and_replays_in_tool_loop(
     tmp_path: Path,
 ) -> None:
     registry = ToolRegistry()
@@ -1244,7 +1244,12 @@ async def test_execute_injects_explicit_memory_only_on_first_model_step(
 
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert any("用户喜欢简洁回答" in message.text for message in provider.requests[0].messages)
-    assert all(message.sender != "context" for message in provider.requests[1].messages)
+    assert any("用户喜欢简洁回答" in message.text for message in provider.requests[1].messages)
+    memories = [message for message in commits.messages if message.metadata.get("item_id")]
+    assert len(memories) == 1
+    assert memories[0].metadata["context_kind"] == "memory"
+    assert memories[0].metadata["item_id"] == "memory-1"
+    assert commits.events.index("commit_run_input") < commits.events.index("reserve_model_step")
 
 
 @pytest.mark.asyncio

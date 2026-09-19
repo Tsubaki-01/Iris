@@ -22,6 +22,7 @@ from ..lifecycle import (
     ClaimToolCall,
     CommitCompaction,
     CommitModelStep,
+    CommitRunInput,
     CommitToolResult,
     LifecycleStore,
     RecordCompactionUsage,
@@ -49,6 +50,7 @@ from ..runtime import (
     RuntimeCompactionCommit,
     RuntimeCursor,
     RuntimeModelStepCommit,
+    RuntimeRunInputCommit,
     RuntimeSuspension,
     RuntimeSuspensionResult,
     RuntimeToolCall,
@@ -127,6 +129,28 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         session = self._store.load_session(self._run.session_id)
         self._session_revision = session.revision
         return session
+
+    def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
+        """输入组与恢复位置在首个模型请求前一次归档。"""
+        self._require_writable()
+        self._require_cursor(commit.cursor_before)
+        checkpoint = self._next_checkpoint(
+            cursor=commit.cursor_after,
+            usage=self._run.usage,
+            session_revision=self._session_revision + bool(commit.message_delta),
+        )
+        stored = self._store.commit_run_input(
+            CommitRunInput(
+                run_id=self._run.run_id,
+                expected_run_revision=self._run.revision,
+                activation_id=self._activation_id,
+                expected_session_revision=self._session_revision,
+                message_delta=list(commit.message_delta),
+                checkpoint=checkpoint,
+                now=self._clock(),
+            )
+        )
+        return self._accept_checkpoint(stored, checkpoint, commit.cursor_after)
 
     def reserve_model_step(self, cursor: RuntimeCursor) -> ModelStepReservation:
         """在 provider effect 前通过 aggregate 预留一步预算。"""

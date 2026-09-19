@@ -127,6 +127,19 @@ class ResumeWaitingRun:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class CommitRunInput:
+    """原子归档 run 输入组并进入首个模型请求，不消耗模型步。"""
+
+    run_id: str
+    expected_run_revision: int
+    activation_id: str
+    expected_session_revision: int
+    message_delta: list[Msg]
+    checkpoint: RunCheckpoint
+    now: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReserveModelStep:
     """在 provider effect 前 durable 预留一个模型步。"""
 
@@ -311,6 +324,8 @@ class LifecycleStore(Protocol):
 
     def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit: ...
 
+    def commit_run_input(self, command: CommitRunInput) -> RunCommit: ...
+
     def reserve_model_step(self, command: ReserveModelStep) -> RunCommit: ...
 
     def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit: ...
@@ -390,6 +405,7 @@ __all__ = [
     "ResumeWaitingRun",
     "ClaimToolCall",
     "CommitModelStep",
+    "CommitRunInput",
     "CommitCompaction",
     "RecordCompactionUsage",
     "CommitToolResult",
