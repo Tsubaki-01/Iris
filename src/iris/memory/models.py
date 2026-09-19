@@ -16,6 +16,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 # endregion
 
@@ -216,24 +217,32 @@ class MemoryCandidate(BaseModel):
 
 
 class MemoryItemPatch(BaseModel):
-    """长期记忆条目的部分更新。"""
+    """长期记忆条目的部分更新，省略字段不修改，仅评分允许显式 null。"""
 
-    text: str | None = None
-    category: MemoryCategory | None = None
-    kind: MemoryItemKind | None = None
-    status: MemoryItemStatus | None = None
+    text: str | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    category: MemoryCategory | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    kind: MemoryItemKind | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    status: MemoryItemStatus | SkipJsonSchema[None] = Field(default_factory=lambda: None)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     importance: float | None = Field(default=None, ge=0.0, le=1.0)
-    artifacts: list[MemoryArtifactRef] | None = None
-    metadata: dict[str, Any] | None = None
+    artifacts: list[MemoryArtifactRef] | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    metadata: dict[str, Any] | SkipJsonSchema[None] = Field(default_factory=lambda: None)
 
     model_config = {"use_enum_values": False, "extra": "forbid"}
 
+    @field_validator("text", "category", "kind", "status", "artifacts", "metadata", mode="before")
+    @classmethod
+    def _reject_explicit_null(cls, value: Any) -> Any:
+        """必需条目字段可省略，但显式 null 不能进入可信 patch。"""
+        if value is None:
+            raise ValueError("更新字段不能显式设为 null；不修改时请省略该字段")
+        return value
+
     @field_validator("text")
     @classmethod
-    def _validate_optional_text(cls, value: str | None) -> str | None:
+    def _validate_optional_text(cls, value: str) -> str:
         """校验更新正文不能是空白。"""
-        if value is not None and not value.strip():
+        if not value.strip():
             raise ValueError("记忆正文不能为空")
         return value
 

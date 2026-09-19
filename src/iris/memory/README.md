@@ -104,9 +104,13 @@ flowchart LR
 - `process_candidates()` 才会按 policy 接受、拒绝或晋升候选；默认
   `NoOpMemoryExtractor` 不产生候选，也不存在后台自动提取。
 
+部分更新中，省略字段表示不修改；`confidence` / `importance` 可用 `null` 清空，
+artifacts / metadata 用 `[]` / `{}` 清空。正文、分类、状态和集合字段不接受显式 `null`。
+
 候选晋升在 SQLite 中先取得 `BEGIN IMMEDIATE` 写事务，再读取候选状态；并发或重复晋升
-返回同一条目，只写入一组新增和接受事件。`update_item()` 同样在一个写事务中读取和应用
-patch，不同连接对同一条目不同字段的修改会依次合并。条目、候选和事件 ID 在同库所有 namespace
+返回同一条目，只写入一组新增和接受事件。更新和软删除也在读取当前条目前取得写锁，避免
+旧快照覆盖并发更新或重复记录实际删除。不同连接对同一条目不同字段的修改会依次合并。
+条目、候选和事件 ID 在同库所有 namespace
 中全局唯一。
 
 `process_candidates()` 每批只为当前 namespace 重建一次镜像。`MemoryService.promote_candidates()`
