@@ -62,6 +62,7 @@ async def prepare_run_memory_messages(
                 metadata={
                     "context_kind": "memory",
                     "item_id": fragment.item_id,
+                    "namespace": fragment.namespace,
                     "truncated": fragment.truncated,
                 },
             )

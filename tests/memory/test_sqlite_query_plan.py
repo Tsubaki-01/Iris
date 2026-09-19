@@ -7,7 +7,6 @@ import pytest
 
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
-    MemoryScope,
     SQLiteMemoryStore,
 )
 
@@ -16,28 +15,18 @@ from iris.memory import (
 @pytest.mark.parametrize(
     "operation",
     [
-        lambda store, scope, limit: store.list_items(scope, limit=limit),
-        lambda store, scope, limit: store.list_events(scope, limit=limit),
-        lambda store, scope, limit: store.list_candidates(scope, limit=limit),
+        lambda store, namespace, limit: store.list_items([namespace], limit=limit),
+        lambda store, namespace, limit: store.list_events(namespace, limit=limit),
+        lambda store, namespace, limit: store.list_candidates(namespace, limit=limit),
     ],
 )
 def test_list_methods_reject_out_of_range_limits(
     tmp_path: Path,
-    operation: Callable[[SQLiteMemoryStore, MemoryScope, int], object],
+    operation: Callable[[SQLiteMemoryStore, str, int], object],
     limit: int,
 ) -> None:
-    store = SQLiteMemoryStore(tmp_path / "invalid-limit.db", use_fts=False)
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent")
+    store = SQLiteMemoryStore(tmp_path / "invalid-limit.db")
+    namespace = "project"
 
     with pytest.raises(IrisMemoryError, match="limit 必须在 1 到 100 之间"):
-        operation(store, scope, limit)
-
-
-def _scope_params(scope: MemoryScope) -> list[str]:
-    return [
-        scope.workspace_id,
-        scope.agent_id,
-        scope.collection,
-        scope.visibility.value,
-        scope.session_id or "",
-    ]
+        operation(store, namespace, limit)

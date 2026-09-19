@@ -4,16 +4,12 @@ from .config import (
     MemoryBackend,
     MemoryConfig,
     MemoryMirrorConfig,
-    MemoryScopeConfig,
-    MemorySearchConfig,
     build_memory_service_from_config,
     resolve_memory_path,
 )
 from .context import MEMORY_CONTEXT_WARNING, MemoryContextBuilder
 from .mirror import FileMemoryMirror
 from .models import (
-    WORKSPACE_SHARED_AGENT_ID,
-    WORKSPACE_SHARED_COLLECTION,
     MemoryActor,
     MemoryArtifactRef,
     MemoryCandidate,
@@ -31,12 +27,9 @@ from .models import (
     MemoryLevel,
     MemoryObserveInput,
     MemoryQuery,
-    MemoryScope,
     MemorySearchResult,
     MemorySourceType,
-    MemoryVisibility,
     MemoryWriteInput,
-    workspace_shared_scope,
 )
 from .orchestrator import (
     MemoryClassifier,
@@ -95,14 +88,10 @@ __all__ = [
     "MemoryOrchestrator",
     "MemoryPolicy",
     "MemoryQuery",
-    "MemoryScope",
-    "MemoryScopeConfig",
     "MemorySearchResult",
-    "MemorySearchConfig",
     "MemorySourceType",
     "MemoryService",
     "MemoryStore",
-    "MemoryVisibility",
     "MemoryWriteInput",
     "MEMORY_TOOL_CLASSES",
     "MemoryAccessPolicy",
@@ -119,11 +108,8 @@ __all__ = [
     "RuleMemoryClassifier",
     "RuleMemoryExtractor",
     "SQLiteMemoryStore",
-    "WORKSPACE_SHARED_AGENT_ID",
-    "WORKSPACE_SHARED_COLLECTION",
     "build_memory_service_from_config",
     "default_memory_access_policy_factory",
     "register_memory_tools",
     "resolve_memory_path",
-    "workspace_shared_scope",
 ]

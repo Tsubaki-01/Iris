@@ -82,6 +82,7 @@ def _fragment_from_result(
     """从召回结果创建上下文片段。"""
     return MemoryContextFragment(
         item_id=result.item.id,
+        namespace=result.item.namespace,
         text=text,
         category=result.item.category,
         kind=result.item.kind,

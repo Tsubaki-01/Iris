@@ -27,7 +27,6 @@ from .models import (
     MemoryLevel,
     MemoryObserveInput,
     MemoryQuery,
-    MemoryScope,
 )
 from .service import MemoryService
 
@@ -60,7 +59,7 @@ class RuleMemoryExtractor:
             return []
         return [
             MemoryCandidate(
-                scope=episode.scope,
+                namespace=episode.namespace,
                 episode_ids=[episode.id],
                 category=_enum_hint(
                     episode.metadata,
@@ -181,13 +180,13 @@ class MemoryOrchestrator:
 
     def process_candidates(
         self,
-        scope: MemoryScope,
+        namespace: str,
         *,
         limit: int = 50,
     ) -> list[MemoryItem]:
         """显式处理 pending candidates，并在策略允许时晋升为 L2 item。"""
         candidates = self.service.list_candidates(
-            scope,
+            namespace,
             status=MemoryCandidateStatus.PENDING,
             limit=limit,
         )
@@ -199,14 +198,14 @@ class MemoryOrchestrator:
                 if not decision.allowed:
                     self.service.reject_candidate(
                         candidate.id,
-                        scope,
+                        namespace,
                         actor=MemoryActor.SDK,
                         reason=decision.reason,
                     )
                     continue
                 yield candidate.id, _candidate_kind(candidate), decision.reason
 
-        return self.service.promote_candidates(scope, promotions())
+        return self.service.promote_candidates(namespace, promotions())
 
     def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """复用 MemoryService 构建记忆上下文。"""
