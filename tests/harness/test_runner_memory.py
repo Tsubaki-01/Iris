@@ -22,7 +22,6 @@ from iris.memory import (
     MemoryContextBundle,
     MemoryItem,
     MemoryQuery,
-    MemoryScope,
     MemorySearchResult,
     MemoryService,
     MemoryWriteInput,
@@ -48,7 +47,7 @@ def _result(item_id: str, text: str) -> MemorySearchResult:
     return MemorySearchResult(
         item=MemoryItem(
             id=item_id,
-            scope=MemoryScope(workspace_id="workspace", agent_id="agent"),
+            namespace="project",
             text=text,
         )
     )
@@ -71,10 +70,9 @@ def _memory_messages(messages: list[Msg] | tuple[Msg, ...]) -> list[Msg]:
 
 
 def _query_service(tmp_path: Path) -> tuple[MemoryService, MemoryQuery]:
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent")
-    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False))
-    service.remember(MemoryWriteInput(scope=scope, text="动态资料", reason="测试输入归档"))
-    return service, MemoryQuery(scope=scope, text="动态资料")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
+    service.remember(MemoryWriteInput(text="动态资料", reason="测试输入归档"))
+    return service, MemoryQuery(text="动态资料")
 
 
 @pytest.mark.asyncio
@@ -344,9 +342,7 @@ async def test_explicit_query_failure_leaves_no_partial_input(
 ) -> None:
     """缺少显式查询服务是输入准备失败，不提交 BCI/user 或预留模型调用。"""
     provider = StaticProvider()
-    query = MemoryQuery(
-        scope=MemoryScope(workspace_id="workspace", agent_id="agent"), text="动态资料"
-    )
+    query = MemoryQuery(text="动态资料")
     runner = AgentRunner(
         runtime=_with_context(build_runtime(tmp_path, provider=provider)), store=lifecycle_store
     )

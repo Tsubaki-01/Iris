@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,6 @@ from iris.memory import (
     MemoryEventType,
     MemoryItem,
     MemoryItemKind,
-    MemoryScope,
 )
 
 
@@ -68,25 +68,25 @@ def test_project_batch_reads_renders_and_replaces_each_target_once(
     assert "item-b" in content
 
 
-def test_rebuild_reads_store_once_and_preserves_manual_and_other_scope(
+def test_rebuild_reads_store_once_and_preserves_manual_and_other_namespace(
     tmp_path: Path,
 ) -> None:
     mirror = FileMemoryMirror(tmp_path / "mirror")
-    current_scope = _scope("agent-a")
-    other_scope = _scope("agent-b")
-    stale = _item("stale", scope=current_scope)
-    other = _item("other", scope=other_scope)
+    current_namespace = "研究:中文 / alpha"
+    other_namespace = "研究:中文 / beta"
+    stale = _item("stale", namespace=current_namespace)
+    other = _item("other", namespace=other_namespace)
     mirror.project_batch(items=[stale, other])
     target = mirror.root / "User/user.md"
     target.write_text(
         f"manual preface\n\n{target.read_text(encoding='utf-8')}",
         encoding="utf-8",
     )
-    replacement = _item("replacement", scope=current_scope)
-    event = _event("replacement-event", scope=current_scope, item_id=replacement.id)
+    replacement = _item("replacement", namespace=current_namespace)
+    event = _event("replacement-event", namespace=current_namespace, item_id=replacement.id)
     store = _RebuildStore(items=[replacement], events=[event])
 
-    mirror.rebuild_from_store(store, current_scope)  # type: ignore[arg-type]
+    mirror.rebuild_from_store(store, current_namespace)  # type: ignore[arg-type]
 
     content = target.read_text(encoding="utf-8")
     assert store.item_reads == 1
@@ -156,31 +156,28 @@ class _RebuildStore:
         self.item_reads = 0
         self.event_reads = 0
 
-    def list_items(self, scope: MemoryScope, **kwargs: object) -> list[MemoryItem]:
-        del scope, kwargs
+    def list_items(self, namespaces: Sequence[str], **kwargs: object) -> list[MemoryItem]:
+        assert list(namespaces) == [self.items[0].namespace]
+        assert kwargs["limit"] is None
         self.item_reads += 1
         return list(self.items)
 
-    def list_events(self, scope: MemoryScope, **kwargs: object) -> list[MemoryEvent]:
-        del scope, kwargs
+    def list_events(self, namespace: str, **kwargs: object) -> list[MemoryEvent]:
+        del namespace, kwargs
         self.event_reads += 1
         return list(self.events)
-
-
-def _scope(agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id)
 
 
 def _item(
     item_id: str,
     *,
-    scope: MemoryScope | None = None,
+    namespace: str | None = None,
     category: MemoryCategory = MemoryCategory.USER,
     kind: MemoryItemKind = MemoryItemKind.NOTE,
 ) -> MemoryItem:
     return MemoryItem(
         id=item_id,
-        scope=scope or _scope(),
+        namespace=namespace or "project",
         text=f"text for {item_id}",
         category=category,
         kind=kind,
@@ -192,12 +189,12 @@ def _item(
 def _event(
     event_id: str,
     *,
-    scope: MemoryScope,
+    namespace: str,
     item_id: str,
 ) -> MemoryEvent:
     return MemoryEvent(
         id=event_id,
-        scope=scope,
+        namespace=namespace,
         event_type=MemoryEventType.ADD,
         item_id=item_id,
         created_at="2026-01-01T00:00:00Z",

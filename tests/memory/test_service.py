@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from iris.exceptions import IrisMemoryError
 from iris.memory import (
+    FileMemoryMirror,
+    MemoryCategory,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
+    MemoryItemPatch,
     MemoryObserveInput,
     MemoryQuery,
-    MemoryScope,
     MemoryService,
     MemorySourceType,
     MemoryWriteInput,
@@ -18,11 +23,11 @@ from iris.memory import (
 
 def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    scope = _scope()
+    namespace = "project"
 
     episode = service.observe(
         MemoryObserveInput(
-            scope=scope,
+            namespace=namespace,
             text="用户说希望回答更短",
             source_type=MemorySourceType.MESSAGE,
             source_id="msg_1",
@@ -30,8 +35,8 @@ def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
     )
 
     assert episode.source_id == "msg_1"
-    assert service.list_items(scope) == []
-    events = service.list_events(scope)
+    assert service.list_items([namespace]) == []
+    events = service.list_events(namespace)
     assert [(event.event_type, event.episode_id) for event in events] == [
         (MemoryEventType.OBSERVE, episode.id)
     ]
@@ -39,64 +44,112 @@ def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
 
 def test_remember_recall_and_build_context(tmp_path: Path) -> None:
     service = _service(tmp_path)
-    scope = _scope()
+    namespace = "project"
 
     item = service.remember(
         MemoryWriteInput(
-            scope=scope,
+            namespace=namespace,
             text="用户偏好简洁的中文回答",
             reason="explicit user preference",
         )
     )
-    results = service.recall(MemoryQuery(scope=scope, text="简洁", limit=5))
-    bundle = service.build_context(MemoryQuery(scope=scope, text="简洁", limit=5), max_chars=100)
+    results = service.recall(MemoryQuery(namespaces=[namespace], text="简洁", limit=5))
+    bundle = service.build_context(
+        MemoryQuery(namespaces=[namespace], text="简洁", limit=5), max_chars=100
+    )
 
     assert [result.item.id for result in results] == [item.id]
     assert bundle.fragments[0].item_id == item.id
+    assert bundle.fragments[0].namespace == namespace
     assert bundle.omitted_count == 0
 
 
-def test_forget_tombstones_without_leaking_cross_scope_existence(
+def test_forget_tombstones_without_leaking_cross_namespace_existence(
     tmp_path: Path,
 ) -> None:
     service = _service(tmp_path)
-    owner_scope = _scope(agent_id="agent-a")
-    other_scope = _scope(agent_id="agent-b")
+    owner_namespace = "private-a"
+    other_namespace = "private-b"
     item = service.remember(
         MemoryWriteInput(
-            scope=owner_scope,
-            text="只能由 owner scope 删除",
+            namespace=owner_namespace,
+            text="只能由 owner namespace 删除",
             reason="test seed",
         )
     )
 
-    assert service.forget(item.id, other_scope, reason="wrong scope request") is False
-    assert service.get_item(item.id, owner_scope) is not None
-    assert service.forget(item.id, owner_scope, reason="owner deletion request") is True
-    assert service.get_item(item.id, owner_scope) is None
+    assert service.forget(item.id, other_namespace, reason="wrong namespace request") is False
+    assert service.get_item(item.id, [owner_namespace]) is not None
+    assert service.forget(item.id, owner_namespace, reason="owner deletion request") is True
+    assert service.get_item(item.id, [owner_namespace]) is None
 
 
-def test_sqlite_search_keeps_full_scope_isolation(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False)
-    owner_scope = _scope(agent_id="agent-a")
-    other_scope = _scope(agent_id="agent-b")
-    item = MemoryItem(scope=owner_scope, text="只有 agent-a 能看到")
+def test_sqlite_search_keeps_full_namespace_isolation(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "memory.db")
+    owner_namespace = "private-a"
+    other_namespace = "private-b"
+    item = MemoryItem(namespace=owner_namespace, text="只有 agent-a 能看到")
     store.add_item(
         item,
         event=MemoryEvent(
-            scope=owner_scope,
+            namespace=owner_namespace,
             event_type=MemoryEventType.ADD,
             item_id=item.id,
             reason="test seed",
         ),
     )
 
-    assert store.search(MemoryQuery(scope=other_scope, text="agent-a")) == []
+    assert store.search(MemoryQuery(namespaces=[other_namespace], text="agent-a")) == []
 
 
 def _service(tmp_path: Path) -> MemoryService:
-    return MemoryService(SQLiteMemoryStore(tmp_path / "memory.db", use_fts=False))
+    return MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
 
 
-def _scope(*, agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id, collection="default")
+def test_update_keeps_identity_refreshes_search_and_relocates_mirror(tmp_path: Path) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    item = service.remember(MemoryWriteInput(text="initial bananas", reason="seed"))
+    updated = service.update(
+        item.id,
+        "project",
+        MemoryItemPatch(text="updated oranges", category=MemoryCategory.REFERENCE),
+        reason="correct facts",
+    )
+
+    assert updated.id == item.id
+    assert service.get_item(item.id, ["project"]) == updated
+    assert service.recall(MemoryQuery(text="bananas")) == []
+    assert [result.item.id for result in service.recall(MemoryQuery(text="oranges"))] == [item.id]
+    assert item.id not in (mirror.root / "User/user.md").read_text(encoding="utf-8")
+    assert "updated oranges" in (mirror.root / "Reference/notes.md").read_text(encoding="utf-8")
+    assert service.forget(item.id, "project", reason="finished") is True
+    assert service.recall(MemoryQuery(text="oranges")) == []
+    assert item.id not in (mirror.root / "Reference/notes.md").read_text(encoding="utf-8")
+
+
+def test_committed_writes_survive_automatic_mirror_failure_but_explicit_rebuild_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise IrisMemoryError("mirror unavailable")
+
+    monkeypatch.setattr(mirror, "project_batch", fail)
+    monkeypatch.setattr(mirror, "rebuild_from_store", fail)
+    with caplog.at_level("WARNING", logger="iris.memory.service"):
+        item = service.remember(MemoryWriteInput(text="original text", reason="seed"))
+        updated = service.update(
+            item.id, "project", MemoryItemPatch(text="new text"), reason="edit"
+        )
+        assert service.get_item(item.id, ["project"]) == updated
+        assert service.forget(item.id, "project", reason="remove") is True
+    assert service.get_item(item.id, ["project"]) is None
+    assert len(caplog.records) == 3
+    assert all(
+        record.levelname == "WARNING" and "mirror" in record.message for record in caplog.records
+    )
+    with pytest.raises(IrisMemoryError, match="mirror unavailable"):
+        mirror.rebuild_from_store(service.store, "project")

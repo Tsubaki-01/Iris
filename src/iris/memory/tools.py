@@ -37,7 +37,6 @@ from .models import (
     MemoryItem,
     MemoryItemKind,
     MemoryQuery,
-    MemoryScope,
     MemorySearchResult,
 )
 from .service import MemoryService
@@ -52,14 +51,11 @@ MemoryAccessPolicyFactory = Callable[[ToolExecutionContext], "MemoryAccessPolicy
 class MemoryAccessPolicy:
     """一次工具执行可使用的记忆访问策略。
 
-    `read_scopes` 由宿主根据当前执行上下文明确提供；空集合表示不读取任何 scope。
+    读写 namespace 由宿主绑定；空读取集合表示不读取任何空间。
     """
 
-    read_scopes: Sequence[MemoryScope]
-
-    def effective_read_scopes(self) -> list[MemoryScope]:
-        """返回本次执行允许读取的 scope 列表。"""
-        return _dedupe_scopes(self.read_scopes)
+    read_namespaces: Sequence[str] = ("project",)
+    write_namespace: str = "project"
 
 
 class MemorySearchToolInput(BaseModel):
@@ -157,16 +153,16 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
             content=[TextBlock(text=content)],
         )
 
-    def _read_scopes(self, context: ToolExecutionContext) -> list[MemoryScope]:
-        """读取当前工具调用允许访问的 read scopes。"""
-        return self.access_policy_factory(context).effective_read_scopes()
+    def _read_namespaces(self, context: ToolExecutionContext) -> list[str]:
+        """取得宿主为当前调用绑定的读取范围。"""
+        return list(self.access_policy_factory(context).read_namespaces)
 
 
 class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
-    """搜索当前 scope 内的长期记忆。"""
+    """联合搜索允许读取的 namespace。"""
 
     name: ClassVar[str] = "memory_search"
-    description: ClassVar[str] = "搜索当前 agent scope 内的长期记忆"
+    description: ClassVar[str] = "搜索允许读取的项目记忆"
     input_type: type[MemorySearchToolInput] = MemorySearchToolInput
 
     async def _impl(
@@ -175,33 +171,23 @@ class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.recall 执行搜索。"""
-        scopes = self._read_scopes(context)
-
-        def search_scopes() -> list[MemorySearchResult]:
-            results: list[MemorySearchResult] = []
-            for scope in scopes:
-                results.extend(
-                    self.service.recall(
-                        MemoryQuery.model_construct(
-                            scope=scope,
-                            text=params.query,
-                            categories=params.categories,
-                            kinds=params.kinds,
-                            limit=params.limit,
-                        )
-                    )
-                )
-            return _dedupe_results(results)[: params.limit]
-
-        results = await self.service.run_async_read(search_scopes)
+        results = await self.service.arecall(
+            MemoryQuery.model_construct(
+                namespaces=self._read_namespaces(context),
+                text=params.query,
+                categories=params.categories,
+                kinds=params.kinds,
+                limit=params.limit,
+            )
+        )
         return self._json_result({"results": [_result_payload(result) for result in results]})
 
 
 class MemoryListTool(MemoryTool[MemoryListToolInput]):
-    """列出当前 scope 内的长期记忆。"""
+    """联合列出允许读取的 namespace 内的长期记忆。"""
 
     name: ClassVar[str] = "memory_list"
-    description: ClassVar[str] = "列出当前 agent scope 内的长期记忆"
+    description: ClassVar[str] = "列出允许读取的项目记忆"
     input_type: type[MemoryListToolInput] = MemoryListToolInput
 
     async def _impl(
@@ -211,29 +197,17 @@ class MemoryListTool(MemoryTool[MemoryListToolInput]):
     ) -> ToolResult:
         """调用 MemoryService.list_items 执行列表读取。"""
         categories = [params.category] if params.category is not None else None
-        scopes = self._read_scopes(context)
-
-        def list_scopes() -> list[MemoryItem]:
-            items: list[MemoryItem] = []
-            for scope in scopes:
-                items.extend(
-                    self.service.list_items(
-                        scope,
-                        limit=params.limit,
-                        categories=categories,
-                    )
-                )
-            return _dedupe_items(items)[: params.limit]
-
-        items = await self.service.run_async_read(list_scopes)
+        items = await self.service.alist_items(
+            self._read_namespaces(context), limit=params.limit, categories=categories
+        )
         return self._json_result({"items": [_item_payload(item) for item in items]})
 
 
 class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
-    """读取当前 scope 内的一条长期记忆。"""
+    """按 ID 在允许读取的 namespace 中定位记忆。"""
 
     name: ClassVar[str] = "memory_get"
-    description: ClassVar[str] = "按 id 读取当前 agent scope 内的一条长期记忆"
+    description: ClassVar[str] = "按 id 读取允许范围内的一条项目记忆"
     input_type: type[MemoryGetToolInput] = MemoryGetToolInput
 
     async def _impl(
@@ -242,16 +216,7 @@ class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用 MemoryService.get_item 读取单条记忆。"""
-        scopes = self._read_scopes(context)
-
-        def get_from_scopes() -> MemoryItem | None:
-            for scope in scopes:
-                item = self.service.get_item(params.item_id, scope)
-                if item is not None:
-                    return item
-            return None
-
-        item = await self.service.run_async_read(get_from_scopes)
+        item = await self.service.aget_item(params.item_id, self._read_namespaces(context))
         if item is not None:
             return self._json_result({"found": True, "item": _item_payload(item)})
         return self._json_result({"found": False})
@@ -270,12 +235,10 @@ def default_memory_access_policy_factory(
     """基于 memory config 构造默认记忆访问策略工厂。"""
 
     def _factory(context: ToolExecutionContext) -> MemoryAccessPolicy:
-        scope = config.scope.to_scope(
-            workspace_id=str(context.workspace_root.resolve(strict=False)),
-            agent_id=context.agent_id or "default",
-            session_id=context.session_id or None,
+        return MemoryAccessPolicy(
+            read_namespaces=config.read_namespaces,
+            write_namespace=config.write_namespace,
         )
-        return MemoryAccessPolicy(read_scopes=[scope])
 
     return _factory
 
@@ -292,7 +255,7 @@ def register_memory_tools(
     Args:
         service (MemoryService): 供所有记忆工具共享的服务实例。
         access_policy_factory (MemoryAccessPolicyFactory): 基于工具执行上下文生成
-            read/write scope 分离访问策略的工厂。
+            read/write namespace 分离访问策略的工厂。
         registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
 
@@ -316,6 +279,7 @@ def _item_payload(item: MemoryItem) -> dict[str, Any]:
     """转换长期记忆条目为工具输出 payload。"""
     payload: dict[str, Any] = {
         "id": item.id,
+        "namespace": item.namespace,
         "text": item.text,
         "category": item.category.value,
         "kind": item.kind.value,
@@ -335,46 +299,3 @@ def _result_payload(result: MemorySearchResult) -> dict[str, Any]:
     payload["score"] = result.score
     payload["source"] = result.source
     return payload
-
-
-def _dedupe_results(results: list[MemorySearchResult]) -> list[MemorySearchResult]:
-    """按全局 item id 去重搜索结果，并保持 policy scope 顺序。"""
-    seen: set[str] = set()
-    deduped: list[MemorySearchResult] = []
-    for result in results:
-        if result.item.id in seen:
-            continue
-        seen.add(result.item.id)
-        deduped.append(result)
-    return deduped
-
-
-def _dedupe_items(items: list[MemoryItem]) -> list[MemoryItem]:
-    """按全局 item id 去重列表结果，并保持 policy scope 顺序。"""
-    seen: set[str] = set()
-    deduped: list[MemoryItem] = []
-    for item in items:
-        if item.id in seen:
-            continue
-        seen.add(item.id)
-        deduped.append(item)
-    return deduped
-
-
-def _dedupe_scopes(scopes: Sequence[MemoryScope]) -> list[MemoryScope]:
-    """按完整 scope key 去重，避免重复查询同一块记忆。"""
-    seen: set[tuple[str, str, str, str, str]] = set()
-    deduped: list[MemoryScope] = []
-    for scope in scopes:
-        key = (
-            scope.workspace_id,
-            scope.agent_id,
-            scope.collection,
-            scope.visibility.value,
-            scope.session_id or "",
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(scope)
-    return deduped

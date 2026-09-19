@@ -2,7 +2,7 @@
 
 # `iris.memory`
 
-`iris.memory` 是 Iris 的本地长期记忆 SDK：它定义隔离 scope、L1 episode、候选记忆、L2
+`iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、L1 episode、候选记忆、L2
 长期条目、审计事件、SQLite 存储、文件镜像、显式编排和只读工具。SQLite 是权威数据源；
 `.iris/memory/` 下的 Markdown/JSON 是便于人工查看的投影。
 
@@ -12,8 +12,9 @@ Memory 当前不是 `AgentConfig` 的 YAML 字段，也不会被 runtime 自动�
 
 ## 运行要求与快速开始
 
-本包随 Iris 安装，使用标准库 SQLite；FTS5 可用时用于检索，不可用或无 Unicode 命中时回退
-到确定性的文本搜索。
+本包随 Iris 安装，使用标准库 SQLite 和 FTS5。FTS5 是唯一文本检索路径；初始化或查询错误
+报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 2，旧版库
+在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
 from pathlib import Path
@@ -21,7 +22,6 @@ from pathlib import Path
 from iris.memory import (
     MemoryConfig,
     MemoryQuery,
-    MemoryScope,
     MemoryWriteInput,
     build_memory_service_from_config,
 )
@@ -33,24 +33,22 @@ service = build_memory_service_from_config(
 )
 assert service is not None
 
-scope = MemoryScope(workspace_id=str(workspace), agent_id="notes-agent")
 item = service.remember(
     MemoryWriteInput(
-        scope=scope,
         text="用户偏好简洁中文回答",
         reason="用户显式说明",
     )
 )
-results = service.recall(MemoryQuery(scope=scope, text="回答偏好"))
+results = service.recall(MemoryQuery(text="回答偏好"))
 bundle = service.build_context(
-    MemoryQuery(scope=scope, text="回答偏好"),
+    MemoryQuery(text="回答偏好"),
     max_chars=1000,
 )
 ```
 
 `backend="none"` 返回 `None` 且不创建文件。memory root 和 database path 必须解析在调用方给定
 的 workspace 内。由 `build_memory_service_from_config()` 构造的 SQLite service 会让 async
-读取在一个 worker job 中完成；同步 `recall()` 等 API 仍在调用线程执行。直接构造
+读写在一个 worker job 中完成；同步 `recall()` 等 API 仍在调用线程执行。直接构造
 `MemoryService` 或注入自定义 store 时默认 `MemoryIOExecutionMode.INLINE`，不会静默改变其
 线程亲和性。
 
@@ -70,20 +68,21 @@ flowchart LR
     Context --> Runtime["RuntimeExecutionOptions 显式注入"]
 ```
 
-### Scope 与隔离
+### Namespace 与项目共享
 
-`MemoryScope` 由 `workspace_id`、`agent_id`、`collection`、`visibility` 与可选
-`session_id` 组成。`visibility=session` 必须提供 session ID；agent/workspace scope 会忽略
-运行时 session，以保持跨会话可见。
+每个 workspace 使用独立数据库/service，条目以普通字符串 `namespace` 分组，默认
+`project`。同项目 Agent 读取同一空间即可共享资料；不再要求 Agent ID、session、visibility
+等五个字段同时匹配。不同项目使用不同数据库。
 
-`workspace_shared_scope(workspace_id)` 使用固定的 `agent_id="__workspace__"`、
-`collection="shared"` 和 workspace 可见性。SQLite 的 get/list/search/update/delete 都执行
-完整 scope 过滤；错误 scope 不会泄露条目是否存在。
+`MemoryQuery(namespaces=["project", "notes"], text="...")` 对多个空间做一次联合查询，
+全局排序后取 limit。`get_item(item_id, namespaces)` 和 `list_items(namespaces)` 也接受联合
+读取范围；写入、更新、删除和候选操作绑定单个 namespace。空读取集合不返回任何条目。
 
 ### 记忆生命周期
 
 - `observe()` 保存 L1 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
 - `remember()` 显式写入 L2 `MemoryItem` 与 `ADD` 事件。
+- `update(item_id, namespace, patch, reason=...)` 更新同一条目并记录 `UPDATE`，ID 保持不变。
 - `recall()` 返回带排序分数和来源的 `MemorySearchResult`。
 - `forget()` 使用 tombstone，不物理删除；默认查询不返回 deleted 条目。
 - `MemoryOrchestrator.observe()` 通过可注入 extractor/classifier 生成候选。
@@ -92,11 +91,11 @@ flowchart LR
 
 候选晋升在 SQLite 中先取得 `BEGIN IMMEDIATE` 写事务，再读取候选状态；并发或重复晋升
 返回同一条目，只写入一组新增和接受事件。`update_item()` 同样在一个写事务中读取和应用
-patch，不同连接对同一条目不同字段的修改会依次合并。条目、候选和事件 ID 在所有 scope
+patch，不同连接对同一条目不同字段的修改会依次合并。条目、候选和事件 ID 在同库所有 namespace
 中全局唯一。
 
-`process_candidates()` 每批只为当前 scope 重建一次镜像。`MemoryService.promote_candidates()`
-接收 scope 与按顺序提供 `(candidate_id, kind, reason)` 的 iterable，仍逐项调用 store 的原子
+`process_candidates()` 每批只为当前 namespace 重建一次镜像。`MemoryService.promote_candidates()`
+接收 namespace 与按顺序提供 `(candidate_id, kind, reason)` 的 iterable，仍逐项调用 store 的原子
 晋升；后续候选或策略失败时，已成功提交的条目会在异常传播前统一刷新。空批次不重建镜像，
 单条 `promote_candidate()` 仍在返回前刷新。
 
@@ -124,7 +123,7 @@ runner = AgentRunner.from_config_path(
     "agent.yaml",
     memory_service=service,
 )
-query = MemoryQuery(scope=scope, text="上次任务")
+query = MemoryQuery(text="上次任务")
 result = await runner.start(
     AgentRunRequest(input="继续上次任务"),
     options=AgentRunOptions(
@@ -137,11 +136,11 @@ result = await runner.start(
 
 `iris.memory` 顶层导出较大，按能力分为：
 
-- 模型与枚举：`MemoryScope`、`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
+- 模型与枚举：`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
   `MemoryEvent`、`MemoryQuery`、`MemorySearchResult`、`MemoryContextBundle` 等；
 - 服务与协议：`MemoryService`、`MemoryStore`、`SQLiteMemoryStore`；
-- async 读取调度：`MemoryIOExecutionMode`，以及 service 上与同步读取对应的 `arecall()`、
-  `aget_item()`、`alist_items()`、`alist_events()`、`abuild_context()`；
+- async IO：`MemoryIOExecutionMode`，以及 `arecall()`、`aget_item()`、`alist_items()`、
+  `alist_events()`、`abuild_context()`、`aremember()`、`aupdate()`、`aforget()`；
 - 配置：`MemoryConfig` 及其子配置、`build_memory_service_from_config()`、
   `resolve_memory_path()`；
 - 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
@@ -153,42 +152,49 @@ result = await runner.start(
 完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
 接口：SQLite 私有 SQL helper、mirror marker 格式和工具 payload helper。
 
-`MemoryConfig.search` 只包含 `use_fts`，用于选择是否启用全文索引。返回数量由每次
-`MemoryQuery.limit` 或工具输入的 `limit` 决定，没有配置级搜索数量默认值。
-配置仅支持 `backend`、`root`、`path`、`scope`、`search` 与 `mirror.enabled`；编排器必须显式
-构造，写入通过 SDK，删除使用 tombstone，不提供无行为的模式选择。
+返回数量由 `MemoryQuery.limit` 或工具输入的 `limit` 决定；它与查询词项预算、注入正文预算
+分别约束不同内容。编排器仍须显式构造，默认不会运行观察/提炼流程。
+
+### 普通文本检索
+
+索引和 query 使用同一词法：ASCII 英文/数字连续串小写化，连续中文按相邻双字拆分，只有
+独立单字才保留单字。例如“中文回答”得到“中文、文回、回答”。查询词项去重并作字面量 OR，
+不接受高级 FTS 表达式。索引保留全部词项及频次。
+
+`MemoryQuery.max_query_terms` 默认 `None`，保留全文。显式设为 B 后，超限时选首部
+floor(B/2) 项和尾部余下配额的不同项，再合并去重、不回填；尾部按最后出现位置选取。
+该上限只约束最终词项数，仍需扫描全文；首尾预算可能漏掉中部问题。空词项不返回最近条目，
+列举请调用 `list_items()`。FTS 命中不等于相关性已确认，词法查询也不保证同义改写召回。
 
 ## 只读 memory 工具
 
 `register_memory_tools()` 只注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
 `READ` 能力。当前没有模型可见的 remember/forget 工具；写入仍须通过 SDK 或上层策略显式完成。
 
-工具输入不能覆盖 scope。`MemoryAccessPolicy(read_scopes=[...])` 只声明当前允许读取的 scope；
-空集合不读取任何 scope。宿主可显式加入约定的 workspace-shared scope，多 scope 结果按 item
-ID 去重。`effective_read_scopes()` 按顺序去重；工厂在每次工具执行前从当前宿主上下文重新计算策略。
-`register_memory_tools()` 必须直接接收 `access_policy_factory`；不再接受单 scope factory，
-也不会推断或包装旧契约。
+工具输入不能覆盖 namespace。`MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)`
+由宿主绑定读写范围；默认读写 `project`，空读取集合不返回任何条目。
+默认工厂使用 `MemoryConfig.read_namespaces/write_namespace`，不按 Agent ID 重新分区；
+工厂在每次工具执行前调用，`register_memory_tools()` 接收 `access_policy_factory`。
 `MemoryQuery`、`memory_search` 与 `memory_list` 的 `limit` 都声明为 `1..100`；工具输入在 raw
 边界验证后投影为 trusted `MemoryQuery`，不会重复校验相同范围。
-工具会先在事件循环执行 access policy，再把完整的多 scope 读取作为一个 service job 调度；
-不会按 scope 重复切换线程。
+工具先在事件循环取得策略，再以一个 service job 执行联合读取；不逐 namespace 拼接结果，
+配置顺序不决定谁先占满 limit。显式搜索工具保持完整 query，不继承自动召回词项预算。
 
 ## 文件镜像与持久化
 
 `FileMemoryMirror.initialize_layout()` 创建固定的 `Memory.md`、User、Feedback、Reference、
 Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成功写入 store 后同步镜像；
-`rebuild_from_store()` 可按 scope 确定性重建 active 条目和最近 100 条事件。
+`rebuild_from_store()` 可按 namespace 确定性重建 active 条目和最近 100 条事件。
 
 `project_batch()` 会在实例锁内按目标归组，一次读取并在内存中合并每个目标，保留 marker
 之外的手工内容，再通过同目录临时文件原子替换。布局只在成功后记为已初始化；初始化失败
-可以重试，投影或替换错误仍向调用方传播。
+可以重试。数据库成功后自动投影失败只记录 warning，不把成功写入误报为失败；显式调用
+镜像投影/重建时仍正常报告错误，不启动后台重试。
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
-以及可选 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
-每次启用 FTS 的 store 初始化时，都会在同一事务中从权威表重建全部 active 条目的索引，
-使关闭索引期间的新增、改写和删除在重新启用后生效；代价是启动时的一次全量重建。
-显式 `rebuild_index()` 也可从权威表重建。FTS 只保存 active 条目，因此
-`MemoryQuery(include_deleted=True)` 直接查询权威表并使用文本匹配，避免漏掉已删除的命中。
+以及 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
+索引保留全部状态，默认查询过滤为 active；显式 `MemoryQuery(include_deleted=True)` 使用
+相同检索路径读取已删除内容。新增/更新与索引在同一事务内完成，`rebuild_index()` 可从权威表重建。
 公开 store 的 `list_items()`、`list_events()` 与 `list_candidates()` 对非 `1..100` 的 limit
 直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
 
@@ -196,15 +202,15 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 
 - 不提供向量数据库、embedding、语义 reranker 或远程后端。
 - 不自动从 session 消息提取记忆，不启动后台任务。
-- `collection` 参与 SQLite 硬隔离，但当前不是独立的业务管理对象。
+- namespace 只是库内分组，不另建空间管理服务；不同项目不混在同一个库中。
 
 ## 维护与验证
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| SDK 生命周期、审计、scope 隔离、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
+| SDK 生命周期、namespace 范围、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
 | 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
-| async 读取、工具多 scope 调度、查询计划 | `service.py`, `tools.py`, `sqlite.py` | `tests/memory/test_async_io.py`, `tests/memory/test_sqlite_query_plan.py` |
+| async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
 | mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
 | 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | runtime 显式注入 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/runtime/test_execute.py` |

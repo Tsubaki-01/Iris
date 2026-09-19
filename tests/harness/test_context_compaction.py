@@ -22,7 +22,7 @@ from iris.lifecycle import (
     RunStopReason,
     RuntimeExecutionOptions,
 )
-from iris.memory import MemoryItem, MemoryScope, MemorySearchResult
+from iris.memory import MemoryItem, MemorySearchResult
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -305,7 +305,7 @@ async def test_first_request_can_compact_dynamic_memory_but_keeps_bci_and_user(
     memory = MemorySearchResult(
         item=MemoryItem(
             id="long-memory",
-            scope=MemoryScope(workspace_id="workspace", agent_id="agent"),
+            namespace="project",
             text=memory_text,
         )
     )

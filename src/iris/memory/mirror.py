@@ -34,40 +34,40 @@ Mirror 文件大致长这样：
 是按记忆类别投影的 Markdown 文件。每条记忆由稳定 marker 包裹，便于后续覆盖更新：
 
 ```markdown
-<!-- iris-memory-item:scopehash12345678:mem_123 -->
+<!-- iris-memory-item:project:mem_123 -->
 ### Memory Item mem_123
 
 - id: mem_123
 - category: user
 - kind: preference
-- scope: workspace=workspace, agent=agent, collection=default, visibility=agent
+- namespace: project
 - created_at: 2026-06-03T10:00:00
 - updated_at: 2026-06-03T10:00:00
 - confidence: 0.8
 - importance: 0.7
 
 用户偏好简洁中文回答
-<!-- /iris-memory-item:scopehash12345678:mem_123 -->
+<!-- /iris-memory-item:project:mem_123 -->
 ```
 
-`Sessions/recent_events.md` 记录每个 scope 最近 100 条审计事件：
+`Sessions/recent_events.md` 记录每个 namespace 最近 100 条审计事件：
 
 ```markdown
 # Recent Memory Events
 
-This file is a generated recent projection. It keeps only the latest 100 events per scope.
+This file is a generated recent projection. It keeps only the latest 100 events per namespace.
 The complete audit logs shall be subject to SQLite memory_events.
 
-<!-- iris-memory-event:scopehash12345678:evt_123 -->
+<!-- iris-memory-event:project:evt_123 -->
 ### Memory Event evt_123
 
 - id: evt_123
 - event_type: observe
 - actor: agent
-- scope: workspace=workspace, agent=agent, collection=default, visibility=agent
+- namespace: project
 - created_at: 2026-06-03T10:00:00
 - reason: user message observed
-<!-- /iris-memory-event:scopehash12345678:evt_123 -->
+<!-- /iris-memory-event:project:evt_123 -->
 ```
 
 `Tasks/task.json` 是任务状态的结构化投影：
@@ -77,6 +77,7 @@ The complete audit logs shall be subject to SQLite memory_events.
   "items": [
     {
       "id": "mem_123",
+      "namespace": "project",
       "text": "阶段二实现 mirror",
       "metadata": {
         "stage": 2,
@@ -99,7 +100,6 @@ Example:
 # region imports
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -108,16 +108,15 @@ from collections.abc import Sequence
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from urllib.parse import quote
 
 from ..exceptions import IrisMemoryError
-from ._scope import scope_summary as _scope_summary
 from .models import (
     MemoryCategory,
     MemoryEvent,
     MemoryItem,
     MemoryItemKind,
     MemoryItemStatus,
-    MemoryScope,
 )
 from .store import MemoryStore
 
@@ -176,7 +175,7 @@ RECENT_EVENTS_PATH = "Sessions/recent_events.md"
 RECENT_EVENTS_HEADER = (
     "# Recent Memory Events\n\n"
     "This file is a generated recent projection. It keeps only the latest "
-    f"{RECENT_EVENTS_LIMIT} events per scope.\n"
+    f"{RECENT_EVENTS_LIMIT} events per namespace.\n"
     "The complete audit logs shall be subject to SQLite memory_events.\n"
 )
 # endregion
@@ -242,12 +241,12 @@ class FileMemoryMirror:
         with self._lock:
             self._project_batch(items=active_items, events=events)
 
-    def rebuild_from_store(self, store: MemoryStore, scope: MemoryScope) -> None:
+    def rebuild_from_store(self, store: MemoryStore, namespace: str) -> None:
         """从权威 store 确定性重建 active mirror 文件。"""
         self.initialize_layout()
         with self._lock:
             items = sorted(
-                store.list_items(scope, limit=None),
+                store.list_items([namespace], limit=None),
                 key=lambda item: (
                     item.category.value,
                     item.kind.value,
@@ -256,17 +255,17 @@ class FileMemoryMirror:
                 ),
             )
             events = sorted(
-                store.list_events(scope, limit=RECENT_EVENTS_LIMIT),
+                store.list_events(namespace, limit=RECENT_EVENTS_LIMIT),
                 key=lambda event: (event.created_at, event.id),
             )
-            self._project_batch(items=items, events=events, rebuild_scope=scope)
+            self._project_batch(items=items, events=events, rebuild_namespace=namespace)
 
     def _project_batch(
         self,
         *,
         items: Sequence[MemoryItem],
         events: Sequence[MemoryEvent],
-        rebuild_scope: MemoryScope | None = None,
+        rebuild_namespace: str | None = None,
     ) -> None:
         """在锁内读取、渲染并原子替换一批目标文件。"""
         targets = {self._target_for_item(item) for item in items}
@@ -277,7 +276,7 @@ class FileMemoryMirror:
             targets.add("Tasks/task.json")
         if events:
             targets.add(RECENT_EVENTS_PATH)
-        if rebuild_scope is not None:
+        if rebuild_namespace is not None:
             targets.update(GENERATED_ITEM_MARKDOWN_FILES)
             targets.add(RECENT_EVENTS_PATH)
             targets.add("Tasks/task.json")
@@ -289,7 +288,7 @@ class FileMemoryMirror:
                 content,
                 items=items,
                 events=events,
-                rebuild_scope=rebuild_scope,
+                rebuild_namespace=rebuild_namespace,
             )
             for target, content in existing.items()
         }
@@ -336,7 +335,7 @@ class FileMemoryMirror:
             f"- id: {item.id}",
             f"- category: {item.category.value}",
             f"- kind: {item.kind.value}",
-            f"- scope: {_scope_summary(item.scope)}",
+            f"- namespace: {item.namespace}",
             f"- created_at: {item.created_at}",
             f"- updated_at: {item.updated_at}",
         ]
@@ -355,7 +354,7 @@ class FileMemoryMirror:
             f"- id: {event.id}",
             f"- event_type: {event.event_type.value}",
             f"- actor: {event.actor.value}",
-            f"- scope: {_scope_summary(event.scope)}",
+            f"- namespace: {event.namespace}",
             f"- created_at: {event.created_at}",
         ]
         if event.item_id:
@@ -398,12 +397,12 @@ class FileMemoryMirror:
         *,
         items: Sequence[MemoryItem],
         events: Sequence[MemoryEvent],
-        rebuild_scope: MemoryScope | None,
+        rebuild_namespace: str | None,
     ) -> str:
         """在内存中完成一个目标文件的整批渲染。"""
         if relative_path == "Tasks/task.json":
             try:
-                return self._render_task_json(content, items, rebuild_scope=rebuild_scope)
+                return self._render_task_json(content, items, rebuild_namespace=rebuild_namespace)
             except TypeError as exc:
                 path = self._resolve_relative(relative_path)
                 raise IrisMemoryError(
@@ -413,8 +412,8 @@ class FileMemoryMirror:
 
         marker_type = "event" if relative_path == RECENT_EVENTS_PATH else "item"
         rendered = content
-        if rebuild_scope is not None:
-            rendered = _remove_scope_markdown_blocks(rendered, marker_type, rebuild_scope)
+        if rebuild_namespace is not None:
+            rendered = _remove_namespace_markdown_blocks(rendered, marker_type, rebuild_namespace)
 
         if relative_path == RECENT_EVENTS_PATH:
             for event in events:
@@ -423,10 +422,10 @@ class FileMemoryMirror:
                     event.id,
                     self._render_event_markdown(event),
                     marker_type="event",
-                    scope=event.scope,
+                    namespace=event.namespace,
                 )
-            for scope in _event_scopes(events):
-                rendered = _trim_recent_events(rendered, scope)
+            for namespace in _event_namespaces(events):
+                rendered = _trim_recent_events(rendered, namespace)
             return _normalize_markdown_content(_with_recent_events_header(rendered))
 
         for item in items:
@@ -437,9 +436,9 @@ class FileMemoryMirror:
                 item.id,
                 self._render_item_markdown(item),
                 marker_type="item",
-                scope=item.scope,
+                namespace=item.namespace,
             )
-        if rebuild_scope is not None:
+        if rebuild_namespace is not None:
             return _normalize_markdown_content(rendered)
         return rendered
 
@@ -448,17 +447,16 @@ class FileMemoryMirror:
         content: str,
         items: Sequence[MemoryItem],
         *,
-        rebuild_scope: MemoryScope | None,
+        rebuild_namespace: str | None,
     ) -> str:
         """在内存中更新结构化 task state 投影。"""
         current = _load_json_object(content)
         entries = list(current.get("items", []))
-        if rebuild_scope is not None:
-            scope_hash = _scope_hash(rebuild_scope)
+        if rebuild_namespace is not None:
             entries = [
                 entry
                 for entry in entries
-                if not isinstance(entry, dict) or entry.get("scope_hash") != scope_hash
+                if not isinstance(entry, dict) or entry.get("namespace") != rebuild_namespace
             ]
         for item in items:
             if item.category != MemoryCategory.TASK or item.kind != MemoryItemKind.TASK_STATE:
@@ -469,8 +467,7 @@ class FileMemoryMirror:
             entries.append(
                 {
                     "id": item.id,
-                    "scope_hash": _scope_hash(item.scope),
-                    "scope": _scope_summary(item.scope),
+                    "namespace": item.namespace,
                     "text": item.text,
                     "metadata": item.metadata,
                     "updated_at": item.updated_at,
@@ -479,7 +476,7 @@ class FileMemoryMirror:
         current["items"] = sorted(
             entries,
             key=lambda entry: (
-                str(entry.get("scope_hash", "")),
+                str(entry.get("namespace", "")),
                 str(entry.get("id", "")),
             ),
         )
@@ -509,46 +506,36 @@ class FileMemoryMirror:
                     pass
 
 
-def _scope_key(scope: MemoryScope) -> str:
-    """生成稳定 scope key，用于派生 marker hash。"""
-    session_id = scope.session_id or ""
-    return (
-        f"workspace={scope.workspace_id}|agent={scope.agent_id}|"
-        f"collection={scope.collection}|visibility={scope.visibility.value}|"
-        f"session={session_id}"
-    )
+def _namespace_key(namespace: str) -> str:
+    """把不透明 namespace 编码为可逆的 Markdown marker 标识。"""
+    return quote(namespace, safe="")
 
 
-def _scope_hash(scope: MemoryScope) -> str:
-    """生成短 hash，避免把长 scope 直接塞进 marker。"""
-    return hashlib.sha256(_scope_key(scope).encode("utf-8")).hexdigest()[:16]
-
-
-def _wrap_block(marker_type: str, scope_hash: str, entity_id: str, block: str) -> str:
+def _wrap_block(marker_type: str, namespace_key: str, entity_id: str, block: str) -> str:
     """包裹生成内容，便于后续稳定替换。"""
     return (
-        f"<!-- iris-memory-{marker_type}:{scope_hash}:{entity_id} -->\n"
+        f"<!-- iris-memory-{marker_type}:{namespace_key}:{entity_id} -->\n"
         f"{block.rstrip()}\n"
-        f"<!-- /iris-memory-{marker_type}:{scope_hash}:{entity_id} -->"
+        f"<!-- /iris-memory-{marker_type}:{namespace_key}:{entity_id} -->"
     )
 
 
-def _block_pattern(marker_type: str, scope_hash: str, entity_id: str) -> str:
+def _block_pattern(marker_type: str, namespace_key: str, entity_id: str) -> str:
     """生成匹配指定生成块的正则。"""
-    escaped_scope_hash = re.escape(scope_hash)
+    escaped_namespace_key = re.escape(namespace_key)
     escaped_id = re.escape(entity_id)
     return (
-        rf"<!-- iris-memory-{marker_type}:{escaped_scope_hash}:{escaped_id} -->.*?"
-        rf"<!-- /iris-memory-{marker_type}:{escaped_scope_hash}:{escaped_id} -->"
+        rf"<!-- iris-memory-{marker_type}:{escaped_namespace_key}:{escaped_id} -->.*?"
+        rf"<!-- /iris-memory-{marker_type}:{escaped_namespace_key}:{escaped_id} -->"
     )
 
 
-def _scope_blocks_pattern(marker_type: str, scope: MemoryScope) -> str:
-    """生成匹配同一 scope 下全部生成块的正则。"""
-    escaped_scope_hash = re.escape(_scope_hash(scope))
+def _namespace_blocks_pattern(marker_type: str, namespace: str) -> str:
+    """生成匹配同一 namespace 下全部生成块的正则。"""
+    escaped_namespace_key = re.escape(_namespace_key(namespace))
     return (
-        rf"(?:\r?\n)*<!-- iris-memory-{marker_type}:{escaped_scope_hash}:[^>\n]+ -->.*?"
-        rf"<!-- /iris-memory-{marker_type}:{escaped_scope_hash}:[^>\n]+ -->(?:\r?\n)*"
+        rf"(?:\r?\n)*<!-- iris-memory-{marker_type}:{escaped_namespace_key}:[^>\n]+ -->.*?"
+        rf"<!-- /iris-memory-{marker_type}:{escaped_namespace_key}:[^>\n]+ -->(?:\r?\n)*"
     )
 
 
@@ -558,12 +545,12 @@ def _upsert_markdown_block(
     block: str,
     *,
     marker_type: str,
-    scope: MemoryScope,
+    namespace: str,
 ) -> str:
     """在内存文本中替换或追加一个生成块。"""
-    scope_hash = _scope_hash(scope)
-    pattern = _block_pattern(marker_type, scope_hash, entity_id)
-    generated = _wrap_block(marker_type, scope_hash, entity_id, block)
+    namespace_key = _namespace_key(namespace)
+    pattern = _block_pattern(marker_type, namespace_key, entity_id)
+    generated = _wrap_block(marker_type, namespace_key, entity_id, block)
     if re.search(pattern, content, flags=re.DOTALL):
         rendered = re.sub(pattern, lambda _: generated, content, flags=re.DOTALL)
     else:
@@ -572,40 +559,32 @@ def _upsert_markdown_block(
     return f"{rendered.rstrip()}\n"
 
 
-def _remove_scope_markdown_blocks(
+def _remove_namespace_markdown_blocks(
     content: str,
     marker_type: str,
-    scope: MemoryScope,
+    namespace: str,
 ) -> str:
-    """从内存文本删除指定 scope 的全部生成块。"""
+    """从内存文本删除指定 namespace 的全部生成块。"""
     return re.sub(
-        _scope_blocks_pattern(marker_type, scope),
+        _namespace_blocks_pattern(marker_type, namespace),
         lambda _: "\n\n",
         content,
         flags=re.DOTALL,
     )
 
 
-def _trim_recent_events(content: str, scope: MemoryScope) -> str:
-    """在内存文本中只保留指定 scope 的最近事件。"""
-    matches = list(re.finditer(_scope_blocks_pattern("event", scope), content, re.DOTALL))
+def _trim_recent_events(content: str, namespace: str) -> str:
+    """在内存文本中只保留指定 namespace 的最近事件。"""
+    matches = list(re.finditer(_namespace_blocks_pattern("event", namespace), content, re.DOTALL))
     overflow = len(matches) - RECENT_EVENTS_LIMIT
     if overflow <= 0:
         return content
     return _remove_spans(content, [match.span() for match in matches[:overflow]])
 
 
-def _event_scopes(events: Sequence[MemoryEvent]) -> list[MemoryScope]:
-    """按事件出现顺序返回去重后的 scope。"""
-    seen: set[str] = set()
-    scopes: list[MemoryScope] = []
-    for event in events:
-        key = _scope_key(event.scope)
-        if key in seen:
-            continue
-        seen.add(key)
-        scopes.append(event.scope)
-    return scopes
+def _event_namespaces(events: Sequence[MemoryEvent]) -> list[str]:
+    """按事件出现顺序返回去重后的 namespace。"""
+    return list(dict.fromkeys(event.namespace for event in events))
 
 
 def _normalize_markdown_content(content: str) -> str:

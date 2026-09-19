@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,16 +11,19 @@ import pytest
 
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
+    FileMemoryMirror,
     MemoryAccessPolicy,
     MemoryBackend,
     MemoryConfig,
     MemoryGetTool,
     MemoryGetToolInput,
     MemoryIOExecutionMode,
+    MemoryItem,
+    MemoryItemPatch,
     MemoryListTool,
     MemoryListToolInput,
     MemoryQuery,
-    MemoryScope,
+    MemorySearchResult,
     MemorySearchTool,
     MemorySearchToolInput,
     MemoryService,
@@ -31,19 +34,15 @@ from iris.memory import (
 from iris.tools import ToolExecutionContext
 
 
-def _scope(agent_id: str = "agent") -> MemoryScope:
-    return MemoryScope(workspace_id="workspace", agent_id=agent_id)
-
-
 @pytest.mark.asyncio
 async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_together(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = SQLiteMemoryStore(tmp_path / "thread.db", use_fts=False)
+    store = SQLiteMemoryStore(tmp_path / "thread.db")
     service = MemoryService(store, io_execution_mode=MemoryIOExecutionMode.THREAD)
-    scope = _scope()
-    service.remember(MemoryWriteInput(scope=scope, text="thread item", reason="test"))
+    namespace = "project"
+    service.remember(MemoryWriteInput(namespace=namespace, text="thread item", reason="test"))
     loop_thread = threading.get_ident()
     to_thread_calls = 0
     create_threads: list[int] = []
@@ -73,7 +72,7 @@ async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_togeth
     monkeypatch.setattr(asyncio, "to_thread", to_thread)
     monkeypatch.setattr(store, "_connection", connection)
 
-    items = await service.alist_items(scope)
+    items = await service.alist_items([namespace])
 
     assert [item.text for item in items] == ["thread item"]
     assert to_thread_calls == 1
@@ -93,7 +92,7 @@ async def test_async_read_preserves_memory_exception_identity(
     monkeypatch: pytest.MonkeyPatch,
     mode: MemoryIOExecutionMode,
 ) -> None:
-    store = SQLiteMemoryStore(tmp_path / f"error-{mode.value}.db", use_fts=False)
+    store = SQLiteMemoryStore(tmp_path / f"error-{mode.value}.db")
     service = MemoryService(store, io_execution_mode=mode)
     error = IrisMemoryError("injected memory read failure")
 
@@ -104,7 +103,7 @@ async def test_async_read_preserves_memory_exception_identity(
     monkeypatch.setattr(store, "search", fail)
 
     with pytest.raises(IrisMemoryError) as captured:
-        await service.arecall(MemoryQuery(scope=_scope(), text="error"))
+        await service.arecall(MemoryQuery(namespaces=["project"], text="error"))
 
     assert captured.value is error
 
@@ -112,7 +111,7 @@ async def test_async_read_preserves_memory_exception_identity(
 @pytest.mark.asyncio
 async def test_cancelled_thread_read_does_not_publish_late_result(tmp_path: Path) -> None:
     service = MemoryService(
-        SQLiteMemoryStore(tmp_path / "cancel.db", use_fts=False),
+        SQLiteMemoryStore(tmp_path / "cancel.db"),
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
     started = threading.Event()
@@ -125,7 +124,7 @@ async def test_cancelled_thread_read_does_not_publish_late_result(tmp_path: Path
         finished.set()
         return "late-result"
 
-    task = asyncio.create_task(service.run_async_read(operation))
+    task = asyncio.create_task(service.run_async_io(operation))
     assert await asyncio.to_thread(started.wait, 1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -141,7 +140,6 @@ def test_configured_sqlite_uses_thread_but_direct_service_stays_inline(tmp_path:
             backend=MemoryBackend.SQLITE,
             path=".iris/memory/memory.db",
             root=".iris/memory",
-            search={"use_fts": False},
         ),
         tmp_path,
     )
@@ -149,7 +147,7 @@ def test_configured_sqlite_uses_thread_but_direct_service_stays_inline(tmp_path:
 
     assert configured.io_execution_mode is MemoryIOExecutionMode.THREAD
     assert (
-        MemoryService(SQLiteMemoryStore(tmp_path / "direct.db", use_fts=False)).io_execution_mode
+        MemoryService(SQLiteMemoryStore(tmp_path / "direct.db")).io_execution_mode
         is MemoryIOExecutionMode.INLINE
     )
 
@@ -159,15 +157,15 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = SQLiteMemoryStore(tmp_path / "tools.db", use_fts=False)
+    store = SQLiteMemoryStore(tmp_path / "tools.db")
     service = MemoryService(store, io_execution_mode=MemoryIOExecutionMode.THREAD)
-    first_scope = _scope("agent-a")
-    second_scope = _scope("agent-b")
+    first_namespace = "private-a"
+    second_namespace = "private-b"
     first = service.remember(
-        MemoryWriteInput(scope=first_scope, text="shared first", reason="test")
+        MemoryWriteInput(namespace=first_namespace, text="shared first", reason="test")
     )
     second = service.remember(
-        MemoryWriteInput(scope=second_scope, text="shared second", reason="test")
+        MemoryWriteInput(namespace=second_namespace, text="shared second", reason="test")
     )
     loop_thread = threading.get_ident()
     policy_threads: list[int] = []
@@ -181,20 +179,20 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     def policy(context: ToolExecutionContext) -> MemoryAccessPolicy:
         policy_threads.append(threading.get_ident())
         return MemoryAccessPolicy(
-            read_scopes=[first_scope, second_scope],
+            read_namespaces=[first_namespace, second_namespace],
         )
 
-    def search(query: MemoryQuery):
+    def search(query: MemoryQuery) -> list[MemorySearchResult]:
         store_threads.append(threading.get_ident())
         return original_search(query)
 
-    def list_items(scope: MemoryScope, **kwargs: object):
+    def list_items(namespaces: Sequence[str], **kwargs: object) -> list[MemoryItem]:
         store_threads.append(threading.get_ident())
-        return original_list(scope, **kwargs)
+        return original_list(namespaces, **kwargs)
 
-    def get_item(item_id: str, scope: MemoryScope):
+    def get_item(item_id: str, namespaces: Sequence[str]) -> MemoryItem | None:
         store_threads.append(threading.get_ident())
-        return original_get(item_id, scope)
+        return original_get(item_id, namespaces)
 
     async def to_thread(
         function: Callable[..., object],
@@ -228,8 +226,8 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     search_payload = json.loads(search_result.content[0].text)
     list_payload = json.loads(list_result.content[0].text)
     get_payload = json.loads(get_result.content[0].text)
-    assert [item["id"] for item in search_payload["results"]] == [first.id, second.id]
-    assert [item["id"] for item in list_payload["items"]] == [first.id, second.id]
+    assert {item["id"] for item in search_payload["results"]} == {first.id, second.id}
+    assert {item["id"] for item in list_payload["items"]} == {first.id, second.id}
     assert get_payload == {
         "found": True,
         "item": get_payload["item"],
@@ -237,7 +235,7 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     assert get_payload["item"]["id"] == first.id
     assert policy_threads == [loop_thread, loop_thread, loop_thread]
     assert to_thread_calls == 3
-    assert len(store_threads) == 5
+    assert len(store_threads) == 3
     assert all(thread_id != loop_thread for thread_id in store_threads)
 
 
@@ -249,3 +247,66 @@ class _CustomReadStore:
         del query
         self.search_threads.append(threading.get_ident())
         return []
+
+
+@pytest.mark.asyncio
+async def test_direct_custom_store_remains_inline() -> None:
+    store = _CustomReadStore()
+    service = MemoryService(store)  # type: ignore[arg-type]
+    assert await service.arecall(MemoryQuery(text="anything")) == []
+    assert store.search_threads == [threading.get_ident()]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["remember", "update", "forget"])
+async def test_async_write_and_mirror_refresh_share_one_worker_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    store = SQLiteMemoryStore(tmp_path / "writes.db")
+    service = MemoryService(store, mirror=mirror, io_execution_mode=MemoryIOExecutionMode.THREAD)
+    seeded = service.remember(MemoryWriteInput(text="seed", reason="seed"))
+    loop_thread = threading.get_ident()
+    worker_jobs = 0
+    connection_threads: list[int] = []
+    mirror_threads: list[int] = []
+    original_connection = store._connection
+    original_replace = mirror._atomic_replace
+    original_to_thread = asyncio.to_thread
+
+    @contextmanager
+    def connection() -> Iterator[object]:
+        connection_threads.append(threading.get_ident())
+        with original_connection() as opened:
+            yield opened
+
+    def replace(relative_path: str, content: str) -> None:
+        mirror_threads.append(threading.get_ident())
+        original_replace(relative_path, content)
+
+    async def to_thread(
+        function: Callable[..., object], /, *args: object, **kwargs: object
+    ) -> object:
+        nonlocal worker_jobs
+        worker_jobs += 1
+        return await original_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(store, "_connection", connection)
+    monkeypatch.setattr(mirror, "_atomic_replace", replace)
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+
+    if operation == "remember":
+        result = await service.aremember(MemoryWriteInput(text="new fact", reason="new"))
+        assert result.text == "new fact"
+    elif operation == "update":
+        result = await service.aupdate(
+            seeded.id, "project", MemoryItemPatch(text="updated fact"), reason="edit"
+        )
+        assert result.id == seeded.id and result.text == "updated fact"
+    else:
+        assert await service.aforget(seeded.id, "project", reason="done") is True
+
+    assert worker_jobs == 1
+    assert connection_threads and mirror_threads
+    assert set(connection_threads) == set(mirror_threads)
+    assert loop_thread not in connection_threads

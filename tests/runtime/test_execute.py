@@ -34,7 +34,6 @@ from iris.memory import (
     MemoryItemKind,
     MemoryLevel,
     MemoryQuery,
-    MemoryScope,
     MemorySearchResult,
     MemoryService,
     MemoryWriteInput,
@@ -1221,7 +1220,7 @@ async def test_execute_archives_explicit_memory_once_and_replays_in_tool_loop(
     memory = MemorySearchResult(
         item=MemoryItem(
             id="memory-1",
-            scope=MemoryScope(workspace_id="workspace", agent_id="agent"),
+            namespace="project",
             text="用户喜欢简洁回答",
             category=MemoryCategory.USER,
             kind=MemoryItemKind.PREFERENCE,
@@ -1685,7 +1684,7 @@ async def test_execute_injects_explicit_memory_snapshot(tmp_path: Path) -> None:
     memory = MemorySearchResult(
         item=MemoryItem(
             id="memory-1",
-            scope=MemoryScope(workspace_id="workspace", agent_id="agent"),
+            namespace="project",
             text="用户喜欢简洁回答",
             category=MemoryCategory.USER,
             kind=MemoryItemKind.PREFERENCE,
@@ -1722,12 +1721,11 @@ async def test_execute_awaits_memory_query_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = SQLiteMemoryStore(tmp_path / "runtime-memory.db", use_fts=False)
+    store = SQLiteMemoryStore(tmp_path / "runtime-memory.db")
     service = MemoryService(store, io_execution_mode=MemoryIOExecutionMode.THREAD)
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent")
     service.remember(
         MemoryWriteInput(
-            scope=scope,
+            namespace="project",
             text="用户喜欢简洁回答",
             reason="test seed",
         )
@@ -1750,7 +1748,7 @@ async def test_execute_awaits_memory_query_off_event_loop(
     activation = start_activation(
         options=RuntimeExecutionOptions(
             memory_query=MemoryQuery(
-                scope=scope,
+                namespaces=["project"],
                 text="简洁",
             ).model_dump(mode="json"),
             memory_max_chars=100,

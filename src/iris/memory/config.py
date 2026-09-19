@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..exceptions import IrisConfigError
 from .mirror import FileMemoryMirror
-from .models import MemoryScope, MemoryVisibility
 from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
 
@@ -30,60 +30,6 @@ class MemoryBackend(StrEnum):
 
     NONE = "none"
     SQLITE = "sqlite"
-
-
-class MemoryScopeConfig(BaseModel):
-    """记忆 scope 的配置默认值。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    collection: str = "default"
-    visibility: MemoryVisibility = MemoryVisibility.AGENT
-
-    def to_scope(
-        self,
-        *,
-        workspace_id: str,
-        agent_id: str,
-        session_id: str | None = None,
-    ) -> MemoryScope:
-        """结合运行时标识构造 `MemoryScope`。
-
-        Args:
-            workspace_id: 运行时 workspace 标识。
-            agent_id: 运行时 agent 标识。
-            session_id: 可选运行时 session 标识。仅 `visibility=session` 时写入 scope；
-                agent/workspace 级记忆会忽略该值以保持跨会话可见。
-
-        Returns:
-            MemoryScope: 可传给 Stage 1 SDK 的 scope。
-
-        Raises:
-            IrisConfigError: 当配置的 visibility 与运行时 session 参数不匹配时抛出。
-        """
-        effective_session_id = session_id if self.visibility == MemoryVisibility.SESSION else None
-        try:
-            return MemoryScope(
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                collection=self.collection,
-                visibility=self.visibility,
-                session_id=effective_session_id,
-            )
-        except ValueError as exc:
-            raise IrisConfigError(
-                "memory scope 配置无效",
-                visibility=self.visibility.value,
-                session_id=effective_session_id,
-            ) from exc
-
-
-class MemorySearchConfig(BaseModel):
-    """记忆搜索配置。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    use_fts: bool = True
 
 
 class MemoryMirrorConfig(BaseModel):
@@ -102,8 +48,12 @@ class MemoryConfig(BaseModel):
     backend: MemoryBackend = MemoryBackend.NONE
     root: str = ".iris/memory"
     path: str = ".iris/memory/memory.db"
-    scope: MemoryScopeConfig = Field(default_factory=MemoryScopeConfig)
-    search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
+    read_namespaces: list[Annotated[str, StringConstraints(pattern=r"\S")]] = Field(
+        default_factory=lambda: ["project"]
+    )
+    write_namespace: str = Field(default="project", pattern=r"\S")
+    recall_mode: Literal["on_turn", "manual"] = "on_turn"
+    max_query_terms: int | None = Field(default=None, gt=0)
     mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
 
 
@@ -125,12 +75,9 @@ def build_memory_service_from_config(
     """
     if config.backend == MemoryBackend.NONE:
         return None
-    if config.backend != MemoryBackend.SQLITE:
-        raise IrisConfigError("不支持的 memory backend", backend=config.backend.value)
-
     root = resolve_memory_path(config.root, workspace_root)
     path = resolve_memory_path(config.path, workspace_root)
-    store = SQLiteMemoryStore(path, use_fts=config.search.use_fts)
+    store = SQLiteMemoryStore(path)
     mirror: FileMemoryMirror | None = None
     if config.mirror.enabled:
         mirror = FileMemoryMirror(root)

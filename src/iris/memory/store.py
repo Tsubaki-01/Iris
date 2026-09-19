@@ -16,7 +16,6 @@ from .models import (
     MemoryItemKind,
     MemoryItemPatch,
     MemoryQuery,
-    MemoryScope,
     MemorySearchResult,
 )
 
@@ -33,32 +32,32 @@ class MemoryStore(Protocol):
     def update_item(
         self,
         item_id: str,
-        scope: MemoryScope,
+        namespace: str,
         patch: MemoryItemPatch,
         *,
         event: MemoryEvent,
     ) -> MemoryItem:
         """更新长期记忆条目并记录审计事件。"""
 
-    def delete_item(self, item_id: str, scope: MemoryScope, *, event: MemoryEvent) -> bool:
+    def delete_item(self, item_id: str, namespace: str, *, event: MemoryEvent) -> bool:
         """将长期记忆条目标记为删除并记录审计事件，返回是否实际删除。"""
 
-    def get_item(self, item_id: str, scope: MemoryScope) -> MemoryItem | None:
-        """读取指定 scope 下的活跃长期记忆条目。"""
+    def get_item(self, item_id: str, namespaces: Sequence[str]) -> MemoryItem | None:
+        """读取指定 namespace 下的活跃长期记忆条目。"""
 
     def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """按查询条件召回长期记忆。"""
 
     def list_items(
         self,
-        scope: MemoryScope,
+        namespaces: Sequence[str],
         *,
         limit: int | None = 50,
         include_deleted: bool = False,
         categories: Sequence[MemoryCategory] | None = None,
         kinds: Sequence[MemoryItemKind] | None = None,
     ) -> list[MemoryItem]:
-        """列出指定 scope 下的长期记忆条目。
+        """列出指定 namespace 下的长期记忆条目。
 
         `categories` 与 `kinds` 必须由 store 在读取层过滤，再应用 `limit`。
         `limit` 必须在 1 到 100 之间；`None` 表示读取完整投影，主要供 mirror 重建使用。
@@ -66,12 +65,12 @@ class MemoryStore(Protocol):
 
     def list_events(
         self,
-        scope: MemoryScope,
+        namespace: str,
         *,
         item_id: str | None = None,
         limit: int = 100,
     ) -> list[MemoryEvent]:
-        """列出指定 scope 下的审计事件，`limit` 必须在 1 到 100 之间。"""
+        """列出指定 namespace 下的审计事件，`limit` 必须在 1 到 100 之间。"""
 
     def add_candidate(
         self,
@@ -83,17 +82,17 @@ class MemoryStore(Protocol):
 
     def list_candidates(
         self,
-        scope: MemoryScope,
+        namespace: str,
         *,
         status: MemoryCandidateStatus | None = None,
         limit: int = 50,
     ) -> list[MemoryCandidate]:
-        """列出指定 scope 下的候选记忆，`limit` 必须在 1 到 100 之间。"""
+        """列出指定 namespace 下的候选记忆，`limit` 必须在 1 到 100 之间。"""
 
     def update_candidate_status(
         self,
         candidate_id: str,
-        scope: MemoryScope,
+        namespace: str,
         status: MemoryCandidateStatus,
         *,
         event: MemoryEvent,
@@ -103,7 +102,7 @@ class MemoryStore(Protocol):
     def promote_candidate(
         self,
         candidate_id: str,
-        scope: MemoryScope,
+        namespace: str,
         *,
         kind: MemoryItemKind,
         actor: MemoryActor,

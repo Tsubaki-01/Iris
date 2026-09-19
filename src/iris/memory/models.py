@@ -1,10 +1,9 @@
 """长期记忆内核数据模型。
 
-本模块只定义 Stage 1 的 SDK 与持久化边界模型，不包含 mirror、工具或编排器逻辑。
+本模块定义 namespace 隔离的 SDK 与持久化边界模型，不包含 mirror、工具或编排器逻辑。
 
 Example:
-    scope = MemoryScope(workspace_id="workspace", agent_id="agent", collection="default")
-    item = MemoryItem(scope=scope, text="用户偏好简洁回答")
+    item = MemoryItem(namespace="project", text="用户偏好简洁回答")
 """
 
 # region imports
@@ -14,14 +13,11 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
-from typing import Any, Self
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 # endregion
-
-WORKSPACE_SHARED_AGENT_ID = "__workspace__"
-WORKSPACE_SHARED_COLLECTION = "shared"
 
 
 def _new_id() -> str:
@@ -32,14 +28,6 @@ def _new_id() -> str:
 def _now_iso() -> str:
     """生成与现有 SQLite session store 风格一致的时间戳。"""
     return datetime.now().isoformat()
-
-
-class MemoryVisibility(StrEnum):
-    """记忆可见范围。"""
-
-    SESSION = "session"
-    AGENT = "agent"
-    WORKSPACE = "workspace"
 
 
 class MemoryLevel(StrEnum):
@@ -123,56 +111,6 @@ class MemoryActor(StrEnum):
     SYSTEM = "system"
 
 
-class MemoryScope(BaseModel):
-    """记忆隔离边界。
-
-    `workspace_id`、`agent_id` 与 `collection` 共同组成基础隔离键；
-    session 可见性额外要求 `session_id`。
-    """
-
-    workspace_id: str
-    agent_id: str
-    collection: str = "default"
-    visibility: MemoryVisibility = MemoryVisibility.AGENT
-    session_id: str | None = None
-
-    model_config = {"use_enum_values": False}
-
-    @field_validator("workspace_id", "agent_id", "collection", "session_id")
-    @classmethod
-    def _validate_non_empty_text(cls, value: str | None) -> str | None:
-        """校验 scope 文本字段不能是空白。"""
-        if value is not None and not value.strip():
-            raise ValueError("记忆 scope 字段不能为空")
-        return value
-
-    @model_validator(mode="after")
-    def _validate_session_visibility(self) -> Self:
-        """校验 session 可见性必须绑定 session_id。"""
-        if self.visibility == MemoryVisibility.SESSION and self.session_id is None:
-            raise ValueError("session 可见记忆必须提供 session_id")
-        return self
-
-
-def workspace_shared_scope(workspace_id: str) -> MemoryScope:
-    """构造约定的 workspace 共享记忆 scope。
-
-    Args:
-        workspace_id: 当前 workspace 标识。
-
-    Returns:
-        MemoryScope: 固定使用 `agent_id="__workspace__"`、
-            `collection="shared"`、`visibility=workspace` 且无 session 的共享 scope。
-    """
-    return MemoryScope(
-        workspace_id=workspace_id,
-        agent_id=WORKSPACE_SHARED_AGENT_ID,
-        collection=WORKSPACE_SHARED_COLLECTION,
-        visibility=MemoryVisibility.WORKSPACE,
-        session_id=None,
-    )
-
-
 class MemoryArtifactRef(BaseModel):
     """记忆关联产物的本地相对引用。"""
 
@@ -195,7 +133,7 @@ class MemoryEpisode(BaseModel):
     """L1 片段记忆，记录一次观察到的事实来源。"""
 
     id: str = Field(default_factory=_new_id)
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     text: str = ""
@@ -204,14 +142,14 @@ class MemoryEpisode(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
 
 class MemoryItem(BaseModel):
     """L2 长期记忆条目。"""
 
     id: str = Field(default_factory=_new_id)
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     text: str
     level: MemoryLevel = MemoryLevel.SEMANTIC
     category: MemoryCategory = MemoryCategory.USER
@@ -229,7 +167,7 @@ class MemoryItem(BaseModel):
     updated_at: str = Field(default_factory=_now_iso)
     deleted_at: str | None = None
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
     @field_validator("text")
     @classmethod
@@ -244,7 +182,7 @@ class MemoryCandidate(BaseModel):
     """从 L1 episode 抽取出的待处理候选记忆。"""
 
     id: str = Field(default_factory=_new_id)
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     episode_ids: list[str] = Field(default_factory=list)
     category: MemoryCategory = MemoryCategory.USER
     suggested_level: MemoryLevel = MemoryLevel.SEMANTIC
@@ -256,7 +194,7 @@ class MemoryCandidate(BaseModel):
     created_at: str = Field(default_factory=_now_iso)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
     @field_validator("episode_ids")
     @classmethod
@@ -289,7 +227,7 @@ class MemoryItemPatch(BaseModel):
     artifacts: list[MemoryArtifactRef] | None = None
     metadata: dict[str, Any] | None = None
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
     @field_validator("text")
     @classmethod
@@ -304,7 +242,7 @@ class MemoryEvent(BaseModel):
     """记忆审计事件。"""
 
     id: str = Field(default_factory=_new_id)
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     event_type: MemoryEventType
     actor: MemoryActor = MemoryActor.SDK
     item_id: str | None = None
@@ -313,13 +251,16 @@ class MemoryEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
 
 class MemoryQuery(BaseModel):
     """长期记忆召回查询。"""
 
-    scope: MemoryScope
+    namespaces: list[Annotated[str, Field(pattern=r"\S")]] = Field(
+        default_factory=lambda: ["project"], min_length=1
+    )
+    max_query_terms: int | None = Field(default=None, gt=0)
     text: str = ""
     item_ids: list[str] = Field(default_factory=list)
     categories: list[MemoryCategory] = Field(default_factory=list)
@@ -327,7 +268,7 @@ class MemoryQuery(BaseModel):
     limit: int = Field(default=10, gt=0, le=100)
     include_deleted: bool = False
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
 
 class MemorySearchResult(BaseModel):
@@ -342,7 +283,7 @@ class MemorySearchResult(BaseModel):
 class MemoryWriteInput(BaseModel):
     """写入长期记忆的 SDK 输入。"""
 
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     text: str
     reason: str
     category: MemoryCategory = MemoryCategory.USER
@@ -356,7 +297,7 @@ class MemoryWriteInput(BaseModel):
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
     @field_validator("text", "reason")
     @classmethod
@@ -370,7 +311,7 @@ class MemoryWriteInput(BaseModel):
 class MemoryObserveInput(BaseModel):
     """写入 L1 观察片段的 SDK 输入。"""
 
-    scope: MemoryScope
+    namespace: str = Field(default="project", pattern=r"\S")
     text: str = ""
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
@@ -380,13 +321,14 @@ class MemoryObserveInput(BaseModel):
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "extra": "forbid"}
 
 
 class MemoryContextFragment(BaseModel):
     """构建提示上下文时包含的一条记忆片段。"""
 
     item_id: str
+    namespace: str = Field(default="project", pattern=r"\S")
     text: str
     category: MemoryCategory
     kind: MemoryItemKind
