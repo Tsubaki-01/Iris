@@ -45,7 +45,11 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 - Run, checkpoint, session revision, and usage counters cross-validate.
 - Mutation events append atomically with aggregate facts and use monotonic sequence numbers.
 
-## Checkpoint v1
+## Checkpoint v2
+
+`RunCheckpoint.checkpoint_version` is fixed at `2`; loading rejects earlier versions without
+migration. New runs start at `before_input` and move to `before_model` after archiving the input
+group, so recovery explicitly distinguishes whether the input has already been saved.
 
 `RunCheckpoint.resumability` is `safe`, `outcome_ready`, or `blocked_unknown`. Safe checkpoints may
 re-enter the engine. Outcome-ready checkpoints only need terminal settlement. Blocked-unknown facts
@@ -57,6 +61,10 @@ provider clients, tasks, locks, signals, or callbacks.
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
+`CommitRunInput` / `commit_run_input()` atomically appends dynamic memory, BCI, and user input under
+the existing run/session CAS and activation fence, advancing the checkpoint sequence to
+`before_model`. Only the cursor position changes: step index, usage, and model reservations stay
+unchanged, and no model event is emitted. Replaying an old command conflicts.
 `RunCommit.session_revision` returns the committed revision when raw history or its summary changes;
 it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
 needed. Stores do not promise successful resubmission of historical commands. State-based

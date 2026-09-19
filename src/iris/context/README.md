@@ -222,6 +222,11 @@ XML 标签名仍由 `ContextSlot.name` 决定；推荐对召回片段使用固�
 `attributes`。`score`、`source` 等召回排序或实现细节不应默认进入
 prompt-facing XML。
 
+runtime 使用 `ContextBuilder.render_section()` 把每个动态片段单独渲染成历史消息，不把它们
+追加到固定 memory section。`build()` 生成的 BCI 消息带有
+`metadata.context_kind=before_current_input`，供压缩识别原始输入组；静态 memory 仍保持固定位置。
+`build_before_current_input(section)` 允许 runtime 在输入阶段只构建 BCI，固定上下文留到模型请求时渲染。
+
 ### `ContextBuildInput`
 
 ```python

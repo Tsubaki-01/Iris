@@ -107,6 +107,9 @@ patch，不同连接对同一条目不同字段的修改会依次合并。条目
 category、kind、level、reason、confidence 和 importance，但不会把 store source 或检索
 score 默认写进 prompt。
 
+显式动态片段在 runtime 的 `before_input` 阶段与 BCI/用户输入一起归档，之后的工具循环、
+HITL 与恢复重放同一历史，不因不再查询而删除资料。动态原文仍可被普通压缩摘要化。
+
 runtime 只有在调用方显式提供 memory 时才执行：
 
 ```python

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from ..exceptions import IrisRunStateError
 from ..tools.base import ToolResult
 from .models import (
     ActivationOutcome,
@@ -28,6 +29,14 @@ from .models import (
 def replace_run(run: RunRecord, **changes: Any) -> RunRecord:
     """应用已由 store 验证的 run 状态增量。"""
     return run.model_copy(update=changes)
+
+
+def validate_run_input_transition(current: RunCheckpoint, replacement: RunCheckpoint) -> None:
+    """输入归档只推进执行位置，保留步骤及其它 engine facts。"""
+    if current.engine_cursor.get("position") != "before_input":
+        raise IrisRunStateError("run input 只能从 before_input 提交")
+    if replacement.engine_cursor != {**current.engine_cursor, "position": "before_model"}:
+        raise IrisRunStateError("run input 只能推进到相同步骤的 before_model")
 
 
 def reserve_model_step(usage: RunUsage) -> RunUsage:
@@ -142,4 +151,5 @@ __all__ = [
     "replace_run",
     "reserve_model_step",
     "settle_activation",
+    "validate_run_input_transition",
 ]

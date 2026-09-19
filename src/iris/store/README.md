@@ -103,6 +103,14 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 
 ## 公开接口
 
+### Run 输入归档
+
+`commit_run_input(CommitRunInput)` 在同一锁或 SQLite 事务内追加完整输入组，并把 checkpoint
+从 `before_input` 推进到 `before_model`。它沿用 run revision、session revision、activation fence
+和 checkpoint sequence；不消耗模型 reservation，不改变步骤索引、usage 或 event sequence。
+旧 command 重交会冲突；SQL 失败整体回滚，恢复不会看到部分 memory/BCI/user 输入。
+Checkpoint payload 版本为 `2`，读取旧 payload 会失败；数据库结构仍为 lifecycle schema v7。
+
 ### 摘要用量与历史投影
 
 `record_compaction_usage(RecordCompactionUsage)` 在当前 activation fence 和 run CAS 下累加

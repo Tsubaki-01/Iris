@@ -346,7 +346,7 @@ runtime 的只读并发窗口使用固定内部上限 8；它不增加 public co
 claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown；现有 terminal
 settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
 
-active recovery 会验证 checkpoint v1、session revision、usage counters
+active recovery 会验证 checkpoint v2、session revision、usage counters
 与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 会原子 abandon 旧 activation，
 把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
@@ -360,7 +360,17 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 `StrictUndefined` 和字符上限在渲染时检查。详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
-`initial_session_message_count`。`before_model / step 0` 重建尚未归档的输入；后续步骤不再追加。
+`initial_session_message_count`。新 run 从 `before_input` 开始，将显式动态 memory 逐条渲染为
+context 消息，连同 BCI 和用户输入通过 `CommitRunInput` 原子归档，并推进至 `before_model`。
+输入提交不占用模型步预算；即使没有记忆结果，也会提交本轮正常输入。provider 失败不会撤销已提交输入。
+
+工具循环、HITL resume 和 `before_model` recovery 使用历史中的动态 memory 快照，不再次查询或
+从 options 重渲染。输入提交前中断则允许恢复时重新准备；原始显式 query/results 仍保存在 run options，
+供这一恢复阶段使用。`context.yaml` 的静态 memory 槽位继续作为固定上下文装配，不进入会话历史。
+旧 checkpoint 的 step 0 输入语义不同，恢复边界明确拒绝 v1，不迁移或自动删除旧数据。
+
+动态 memory 和普通历史一样可被压缩，包括首个模型请求之前；BCI、原始用户输入和最新 steer
+保持既有保护。记忆快照不会因来源是 memory 而额外固定，也不保证压缩后原文继续出现在请求中。
 摘要投影提交后、主响应提交前的恢复使用更新后的 session revision 和同一 pending 模型步。
 
 `RunUsage` 的 input/output/total 只统计主模型；摘要调用累计在 `usage.compaction`，总消耗由两者

@@ -73,7 +73,9 @@ def test_compacted_history_keeps_fixed_sections_and_unarchived_turn_in_order() -
         "尚未归档的新任务",
     ]
     assert conversation.messages[2].sender == "context"
-    assert assembler.build_turn_messages(context_output=context_output, current_input=current) == [
+    assert assembler.build_turn_messages(
+        before_current_input=context_output.before_current_input, current_input=current
+    ) == [
         context_output.before_current_input,
         current,
     ]

@@ -18,17 +18,19 @@ def protected_message_indices(
 ) -> tuple[int, ...]:
     """定位本 run 已归档的 BCI、原始 input 和最新普通用户 steer。
 
-    step0 按 BCI（可选）、input 一次归档；run 起点之前的 context 不属于
+    输入阶段按动态 memory、BCI（可选）、input 一次归档；run 起点之前的 context 不属于
     当前任务。工具结果虽然也使用 user role，但不能被当作 steer。
     """
     if initial_session_message_count == len(messages):
         return ()
 
     original_input = initial_session_message_count
-    protected = {original_input}
-    if messages[original_input].sender == "context":
+    protected: set[int] = set()
+    while messages[original_input].sender == "context":
+        if messages[original_input].metadata.get("context_kind") == "before_current_input":
+            protected.add(original_input)
         original_input += 1
-        protected.add(original_input)
+    protected.add(original_input)
 
     latest_steer = next(
         (
@@ -75,7 +77,13 @@ def select_compaction_end(
     由 runtime 使用真实摘要检查最终请求大小。None 只表示没有新增切点。
     """
     previous_end = previous_compaction.covered_message_count if previous_compaction else 0
-    ends = [end for end in _history_group_ends(messages) if end > previous_end]
+    first_compressible = next(
+        (index for index in range(previous_end, len(messages)) if index not in protected_indices),
+        None,
+    )
+    if first_compressible is None:
+        return None
+    ends = [end for end in _history_group_ends(messages) if end > first_compressible]
     if not ends:
         return None
 
@@ -134,7 +142,7 @@ def _history_group_ends(messages: list[Msg]) -> list[int]:
         if pending_calls:
             continue
         if (
-            message.sender == "context"
+            message.metadata.get("context_kind") == "before_current_input"
             and index + 1 < len(messages)
             and _is_ordinary_user(messages[index + 1])
         ):

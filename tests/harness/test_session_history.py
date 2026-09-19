@@ -74,7 +74,7 @@ async def test_fork_creates_history_then_starts_independently(
     assert history_store.load_session("main") == source_before
     continued = history_store.load_session(branch.session_id)
     assert continued.forked_from_run_id == "r1"
-    assert continued.revision == 1
+    assert continued.revision == 2
 
 
 @pytest.mark.asyncio
@@ -139,11 +139,12 @@ async def test_branch_uses_new_runner_environment_and_fresh_execution_state(
         assert current.usage.model_steps_reserved == 1
         assert current.usage.model_steps_committed == 0
         assert current.usage.tool_calls_committed == 0
-        assert checkpoint.sequence == 1
-        assert checkpoint.session_revision == 0
+        assert checkpoint.sequence == 2
+        assert checkpoint.session_revision == 1
         assert checkpoint.activation_id != source_checkpoint.activation_id
         assert checkpoint.engine_cursor["position"] == "before_model"
         assert checkpoint.engine_cursor["step_index"] == 0
+        assert history_store.load_session(branch.session_id).messages[-1].text == "alternate"
         messages = provider.requests[0].messages
         assert messages[0].role.value == "system"
         assert "new system" in messages[0].text

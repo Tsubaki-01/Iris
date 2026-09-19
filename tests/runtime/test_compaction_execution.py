@@ -109,13 +109,14 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
         assert result.outcome == RuntimeActivationOutcome.COMPLETED
         assert provider.requests[-1].messages[-1].text == "当前任务"
         assert port.compaction_commits[0].after_input_tokens == after
-        # 主响应归档只包含本turn输入和assistant；summary不进入原文。
+        # 输入独立归档，主响应只追加assistant；summary不进入原文。
         assert [message.text for message in port.messages[:2]] == ["旧任务", "旧结果"]
         assert all("<summary>" not in message.text for message in port.messages)
         assert [message.text for message in port.messages].count("当前任务") == 1
     else:
         assert result.error.code == "CONTEXT_COMPACTION_FAILED"
-        assert port.messages == raw
+        assert port.messages == [*raw, *port.input_commits[0].message_delta]
+        assert port.messages[-1].text == "当前任务"
         assert port.compaction is None
         assert port.model_commits == []
 

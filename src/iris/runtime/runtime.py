@@ -63,6 +63,7 @@ from .commit import (
     RuntimeCommitPort,
     RuntimeCompactionCommit,
     RuntimeModelStepCommit,
+    RuntimeRunInputCommit,
     RuntimeSuspension,
     RuntimeSuspensionResult,
     RuntimeToolCall,
@@ -72,7 +73,7 @@ from .commit import (
 )
 from .compaction import project_history, protected_message_indices, select_compaction_end
 from .environment import RuntimeEnvironment, streaming_provider_for
-from .memory_context import prepare_activation_memory_context_input
+from .memory_context import prepare_run_memory_messages
 from .models import (
     RuntimeActivationInput,
     RuntimeActivationOutcome,
@@ -176,7 +177,21 @@ class AgentRuntime:
                     assistant_message=cursor.assistant_message,
                 )
 
-            # --- 3. 执行模型阶段 ---
+            # --- 3. 归档本轮输入 ---
+            # 读取与渲染只发生在输入阶段；提交后的恢复直接沿历史继续。
+            if cursor.position == "before_input":
+                input_outcome = await self._prepare_run_input(
+                    activation=activation,
+                    cursor=cursor,
+                    commits=commits,
+                    cancellation=cancellation,
+                )
+                if isinstance(input_outcome, RuntimeActivationResult):
+                    return input_outcome
+                cursor = input_outcome
+                continue
+
+            # --- 4. 执行模型阶段 ---
             # before_model 只推进一次模型调用，成功后转入工具批次或结果终态。
             if cursor.position == "before_model":
                 model_outcome = await self._execute_model_step(
@@ -829,6 +844,52 @@ class AgentRuntime:
             )
         return committed_cursor
 
+    async def _prepare_run_input(
+        self,
+        *,
+        activation: RuntimeActivationInput,
+        cursor: RuntimeCursor,
+        commits: RuntimeCommitPort,
+        cancellation: CancellationSignal,
+    ) -> RuntimeCursor | RuntimeActivationResult:
+        """准备动态快照、BCI 和用户输入，在任何模型调用前原子提交。"""
+        snapshot = commits.load_session()
+        if snapshot.session_id != activation.session_id:
+            raise IrisRunConflictError("commit port 返回了跨 session history")
+        try:
+            dynamic_memory = await prepare_run_memory_messages(
+                options=activation.options,
+                memory_service=self.environment.memory_service,
+                memory_context_builder=self.environment.memory_context_builder,
+                context_builder=self.environment.context_builder,
+            )
+            before_current_input = self.environment.context_builder.build_before_current_input(
+                self.environment.context_input.before_current_input
+            )
+            messages = self.environment.assembler.build_turn_messages(
+                before_current_input=before_current_input,
+                current_input=Msg.user(activation.run_input),
+                dynamic_memory=dynamic_memory,
+            )
+        except Exception as exc:
+            return _failed_activation(cursor, exc)
+
+        if _activation_cancelled(commits, cancellation):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+            )
+        if _deadline_expired(commits):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+            )
+        return commits.commit_run_input(
+            RuntimeRunInputCommit(
+                cursor_before=cursor,
+                message_delta=tuple(messages),
+                cursor_after=cursor.model_copy(update={"position": "before_model"}),
+            )
+        )
+
     async def _execute_model_step(
         self,
         *,
@@ -844,22 +905,10 @@ class AgentRuntime:
         if snapshot.session_id != activation.session_id:
             raise IrisRunConflictError("commit port 返回了跨 session history")
         try:
-            context_input = self.environment.context_input
-            if cursor.step_index == 0:
-                context_input = await prepare_activation_memory_context_input(
-                    context_input,
-                    options=activation.options,
-                    memory_service=self.environment.memory_service,
-                    memory_context_builder=self.environment.memory_context_builder,
-                )
-            else:
-                context_input = context_input.model_copy(update={"before_current_input": None})
-            context_output = self.environment.context_builder.build(context_input)
-            current_input = Msg.user(activation.run_input) if cursor.step_index == 0 else None
-            turn_messages = self.environment.assembler.build_turn_messages(
-                context_output=context_output,
-                current_input=current_input,
+            context_input = self.environment.context_input.model_copy(
+                update={"before_current_input": None}
             )
+            context_output = self.environment.context_builder.build(context_input)
             protected_indices = protected_message_indices(
                 list(snapshot.messages), activation.initial_session_message_count
             )
@@ -869,7 +918,7 @@ class AgentRuntime:
                 history=project_history(
                     list(snapshot.messages), snapshot.compaction, protected_indices
                 ),
-                current_input=current_input,
+                current_input=None,
             )
             request = _apply_request_options(request, activation.options.request_options)
             request = _apply_tool_schemas(
@@ -883,7 +932,7 @@ class AgentRuntime:
                 messages = self.environment.assembler.build_conversation(
                     context_output=context_output,
                     history=history,
-                    current_input=current_input,
+                    current_input=None,
                 ).messages
                 return request.model_copy(update={"messages": messages})
 
@@ -995,7 +1044,7 @@ class AgentRuntime:
                 outcome=RuntimeActivationOutcome.CANCELLED,
                 cursor=cursor,
             )
-        message_delta = (*turn_messages, assistant)
+        message_delta = (assistant,)
         read_state = _read_state_snapshot(
             self.environment.tool_bridge.read_state(activation.session_id)
         )
