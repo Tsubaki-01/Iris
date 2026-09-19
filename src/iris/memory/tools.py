@@ -1,7 +1,6 @@
-"""记忆只读工具。
+"""项目记忆的读写工具。
 
-本模块只提供 `memory_search`、`memory_list`、`memory_get` 三个只读工具。
-写入和删除能力仍由 Python SDK 暴露，不在 Stage 4 默认注册为工具。
+默认注册 search/list/get；remember/update/forget 由宿主显式选择，使用既有 WRITE 执行路径。
 
 Example:
     registry = register_memory_tools(
@@ -33,11 +32,15 @@ from ..tools import (
 )
 from .config import MemoryConfig
 from .models import (
+    MemoryActor,
     MemoryCategory,
     MemoryItem,
     MemoryItemKind,
+    MemoryItemPatch,
     MemoryQuery,
     MemorySearchResult,
+    MemorySourceType,
+    MemoryWriteInput,
 )
 from .service import MemoryService
 
@@ -94,6 +97,36 @@ class MemoryGetToolInput(BaseModel):
         return value
 
 
+class MemoryRememberToolInput(BaseModel):
+    """创建记忆的业务输入，写入范围和来源由宿主绑定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(pattern=r"\S")
+    reason: str = Field(pattern=r"\S")
+    category: MemoryCategory = MemoryCategory.USER
+    kind: MemoryItemKind = MemoryItemKind.NOTE
+
+
+class MemoryUpdateToolInput(BaseModel):
+    """修改同一记忆条目的业务输入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(pattern=r"\S")
+    patch: MemoryItemPatch
+    reason: str = Field(pattern=r"\S")
+
+
+class MemoryForgetToolInput(BaseModel):
+    """软删除记忆的业务输入。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(pattern=r"\S")
+    reason: str = Field(pattern=r"\S")
+
+
 class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
     """记忆工具协议适配基类。"""
 
@@ -141,7 +174,7 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
 
     @abstractmethod
     async def _impl(self, params: InputT, context: ToolExecutionContext) -> ToolResult:
-        """执行具体只读记忆工具。"""
+        """执行具体记忆工具。"""
         raise NotImplementedError
 
     def _json_result(self, payload: dict[str, Any]) -> ToolResult:
@@ -222,11 +255,84 @@ class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
         return self._json_result({"found": False})
 
 
-MEMORY_TOOL_CLASSES: tuple[type[MemoryTool[Any]], ...] = (
-    MemorySearchTool,
-    MemoryListTool,
-    MemoryGetTool,
-)
+class MemoryRememberTool(MemoryTool[MemoryRememberToolInput]):
+    """在宿主绑定的 namespace 中创建长期记忆。"""
+
+    name: ClassVar[str] = "memory_remember"
+    description: ClassVar[str] = "保存需要后续复用的项目记忆，并说明保存原因"
+    input_type: type[MemoryRememberToolInput] = MemoryRememberToolInput
+    capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.WRITE}
+
+    async def _impl(
+        self, params: MemoryRememberToolInput, context: ToolExecutionContext
+    ) -> ToolResult:
+        """把已校验业务字段投影为写入请求，来源固定为当前工具调用。"""
+        item = await self.service.aremember(
+            MemoryWriteInput.model_construct(
+                namespace=self.access_policy_factory(context).write_namespace,
+                text=params.text,
+                reason=params.reason,
+                category=params.category,
+                kind=params.kind,
+                actor=MemoryActor.AGENT,
+                source_type=MemorySourceType.TOOL_EVENT,
+                source_id=context.call_id,
+            )
+        )
+        return self._json_result({"item": _item_payload(item)})
+
+
+class MemoryUpdateTool(MemoryTool[MemoryUpdateToolInput]):
+    """只更新宿主绑定的 namespace 中的条目。"""
+
+    name: ClassVar[str] = "memory_update"
+    description: ClassVar[str] = "按 id 更新已有项目记忆，并说明修改原因"
+    input_type: type[MemoryUpdateToolInput] = MemoryUpdateToolInput
+    capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.WRITE}
+
+    async def _impl(
+        self, params: MemoryUpdateToolInput, context: ToolExecutionContext
+    ) -> ToolResult:
+        """直接调用共享 MemoryService 更新，同一条目保留原 ID。"""
+        item = await self.service.aupdate(
+            params.item_id,
+            self.access_policy_factory(context).write_namespace,
+            params.patch,
+            actor=MemoryActor.AGENT,
+            reason=params.reason,
+        )
+        return self._json_result({"item": _item_payload(item)})
+
+
+class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
+    """软删除宿主绑定的 namespace 中的条目。"""
+
+    name: ClassVar[str] = "memory_forget"
+    description: ClassVar[str] = "按 id 删除不再需要的项目记忆，并说明删除原因"
+    input_type: type[MemoryForgetToolInput] = MemoryForgetToolInput
+    capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.WRITE}
+
+    async def _impl(
+        self, params: MemoryForgetToolInput, context: ToolExecutionContext
+    ) -> ToolResult:
+        """返回数据库是否实际删除条目，不把未命中伪装成删除成功。"""
+        deleted = await self.service.aforget(
+            params.item_id,
+            self.access_policy_factory(context).write_namespace,
+            actor=MemoryActor.AGENT,
+            reason=params.reason,
+        )
+        return self._json_result({"deleted": deleted})
+
+
+MEMORY_TOOL_CLASSES: dict[str, type[MemoryTool[Any]]] = {
+    "memory.search": MemorySearchTool,
+    "memory.list": MemoryListTool,
+    "memory.get": MemoryGetTool,
+    "memory.remember": MemoryRememberTool,
+    "memory.update": MemoryUpdateTool,
+    "memory.forget": MemoryForgetTool,
+}
 
 
 def default_memory_access_policy_factory(
@@ -249,8 +355,9 @@ def register_memory_tools(
     access_policy_factory: MemoryAccessPolicyFactory,
     registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
+    tool_names: Sequence[str] = ("memory.search", "memory.list", "memory.get"),
 ) -> ToolRegistry:
-    """注册只读记忆工具并返回 registry。
+    """注册选定记忆工具并返回 registry，默认仅读。
 
     Args:
         service (MemoryService): 供所有记忆工具共享的服务实例。
@@ -258,13 +365,15 @@ def register_memory_tools(
             read/write namespace 分离访问策略的工厂。
         registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
+        tool_names: 从 MEMORY_TOOL_CLASSES 选择的 builtin 声明名。
 
     Returns:
-        ToolRegistry: 已注册 `memory_search`、`memory_list` 和 `memory_get` 的 registry。
+        ToolRegistry: 注册完选定记忆工具的 registry。
             如果传入了 `registry`，返回值就是同一个对象，便于和文件工具等其它工具组合注册。
     """
     registry = registry or ToolRegistry()
-    for tool_cls in MEMORY_TOOL_CLASSES:
+    for name in tool_names:
+        tool_cls = MEMORY_TOOL_CLASSES[name]
         registry.register(
             tool_cls(
                 service=service,

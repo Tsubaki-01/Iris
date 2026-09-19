@@ -1,4 +1,4 @@
-"""记忆读取工具的项目共享、联合排序和显式范围。"""
+"""记忆工具的项目共享、联合读取、显式写入和真实执行结果。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from iris.exceptions import IrisMemoryError
 from iris.memory import (
+    MEMORY_TOOL_CLASSES,
+    FileMemoryMirror,
     MemoryAccessPolicy,
+    MemoryActor,
     MemoryConfig,
     MemoryGetTool,
     MemoryGetToolInput,
@@ -17,11 +21,15 @@ from iris.memory import (
     MemorySearchTool,
     MemorySearchToolInput,
     MemoryService,
+    MemorySourceType,
     MemoryWriteInput,
     SQLiteMemoryStore,
     default_memory_access_policy_factory,
+    register_memory_tools,
 )
-from iris.tools import ToolExecutionContext
+from iris.message import ToolUseBlock
+from iris.tools import ToolCapability, ToolExecutionContext, ToolExecutor
+from iris.tools.permissions import DefaultPermissionPolicy
 
 
 def _context(tmp_path: Path, agent_id: str = "agent") -> ToolExecutionContext:
@@ -95,3 +103,162 @@ async def test_empty_read_range_returns_no_memory(tmp_path: Path) -> None:
     assert json.loads(search.content[0].text) == {"results": []}
     assert json.loads(listed.content[0].text) == {"items": []}
     assert json.loads(found.content[0].text) == {"found": False}
+
+
+def test_memory_registry_defaults_to_reads_and_can_select_write_tools(tmp_path: Path) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "registry.db"))
+    policy = default_memory_access_policy_factory(MemoryConfig())
+    registry = register_memory_tools(service=service, access_policy_factory=policy)
+    assert {tool.definition.name for tool in registry.view().active_tools} == {
+        "memory_search",
+        "memory_list",
+        "memory_get",
+    }
+    writes = register_memory_tools(
+        service=service,
+        access_policy_factory=policy,
+        tool_names=("memory.remember", "memory.update", "memory.forget"),
+    )
+    for tool in writes.view().active_tools:
+        definition = tool.definition
+        assert definition.capabilities == {ToolCapability.WRITE}
+        assert (
+            not {"namespace", "actor", "permission_mode"}
+            & definition.input_schema["properties"].keys()
+        )
+
+
+def _executor(service: MemoryService, *, write_namespace: str = "project") -> ToolExecutor:
+    registry = register_memory_tools(
+        service=service,
+        access_policy_factory=lambda _: MemoryAccessPolicy(
+            read_namespaces=("project", "private"), write_namespace=write_namespace
+        ),
+        tool_names=tuple(MEMORY_TOOL_CLASSES),
+    )
+    return ToolExecutor(registry, permission_policy=DefaultPermissionPolicy(write_mode="allow"))
+
+
+@pytest.mark.asyncio
+async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_path: Path) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "crud.db"))
+    executor = _executor(service, write_namespace="private")
+    context = _context(tmp_path)
+    remembered = await executor.execute_one(
+        ToolUseBlock(
+            id="remember",
+            name="memory_remember",
+            input={
+                "text": "prefers bananas",
+                "reason": "user asked to remember",
+                "kind": "preference",
+            },
+        ),
+        context,
+    )
+    assert not remembered.is_error
+    item = json.loads(remembered.content[0].text)["item"]
+    assert item["namespace"] == "private"
+    stored = service.get_item(item["id"], ["private"])
+    assert stored is not None
+    assert stored.source_type is MemorySourceType.TOOL_EVENT
+    assert stored.source_id == "remember"
+    assert service.list_events("private")[0].actor is MemoryActor.AGENT
+    found = await executor.execute_one(
+        ToolUseBlock(id="get", name="memory_get", input={"item_id": item["id"]}),
+        context,
+    )
+    assert json.loads(found.content[0].text)["item"]["text"] == "prefers bananas"
+    updated = await executor.execute_one(
+        ToolUseBlock(
+            id="update",
+            name="memory_update",
+            input={
+                "item_id": item["id"],
+                "patch": {"text": "prefers oranges"},
+                "reason": "user correction",
+            },
+        ),
+        context,
+    )
+    assert not updated.is_error
+    assert json.loads(updated.content[0].text)["item"]["id"] == item["id"]
+    search = await executor.execute_one(
+        ToolUseBlock(id="search", name="memory_search", input={"query": "oranges"}),
+        context,
+    )
+    assert [entry["id"] for entry in json.loads(search.content[0].text)["results"]] == [item["id"]]
+    for call_id, expected in [("forget", True), ("forget-again", False)]:
+        forgotten = await executor.execute_one(
+            ToolUseBlock(
+                id=call_id,
+                name="memory_forget",
+                input={"item_id": item["id"], "reason": "no longer needed"},
+            ),
+            context,
+        )
+        assert not forgotten.is_error
+        assert json.loads(forgotten.content[0].text) == {"deleted": expected}
+    assert service.get_item(item["id"], ["private"]) is None
+
+
+@pytest.mark.asyncio
+async def test_write_namespace_is_bound_even_when_another_namespace_is_readable(
+    tmp_path: Path,
+) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "bound.db"))
+    other = service.remember(
+        MemoryWriteInput(namespace="private", text="other fact", reason="seed")
+    )
+    executor = _executor(service)
+    context = _context(tmp_path)
+    updated = await executor.execute_one(
+        ToolUseBlock(
+            id="update",
+            name="memory_update",
+            input={"item_id": other.id, "patch": {"text": "changed"}, "reason": "attempt"},
+        ),
+        context,
+    )
+    assert updated.is_error
+    forgotten = await executor.execute_one(
+        ToolUseBlock(
+            id="forget", name="memory_forget", input={"item_id": other.id, "reason": "attempt"}
+        ),
+        context,
+    )
+    assert json.loads(forgotten.content[0].text) == {"deleted": False}
+    injected = await executor.execute_one(
+        ToolUseBlock(
+            id="remember",
+            name="memory_remember",
+            input={"text": "new fact", "reason": "attempt", "namespace": "private"},
+        ),
+        context,
+    )
+    assert injected.is_error
+    assert service.get_item(other.id, ["private"]) == other
+    assert service.list_items(["project"]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["store", "mirror"])
+async def test_write_tool_distinguishes_store_failure_from_mirror_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "fail.db"), mirror=mirror)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise IrisMemoryError(f"{failure} unavailable")
+
+    if failure == "store":
+        monkeypatch.setattr(service.store, "add_item", fail)
+    else:
+        monkeypatch.setattr(mirror, "project_batch", fail)
+    result = await _executor(service).execute_one(
+        ToolUseBlock(id="write", name="memory_remember", input={"text": "fact", "reason": "seed"}),
+        _context(tmp_path),
+    )
+    assert result.is_error is (failure == "store")
+    assert len(service.list_items(["project"])) == (0 if failure == "store" else 1)

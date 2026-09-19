@@ -121,6 +121,7 @@ model: openai/gpt-4o-mini
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
+- `memory`: 复用 `iris.memory.MemoryConfig`，默认 `backend: none`，不创建 memory 服务。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
@@ -175,6 +176,35 @@ runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run �
 已提交摘要保留。主调用 usage 与 `RunUsage.compaction` 分开累计；provider 估算边界见
 [providers 说明](../providers/README.md)，执行与恢复见 [runtime](../runtime/README.md)。
 
+### `MemoryConfig`
+
+通过 `memory` 启用项目记忆；配置模型从 `iris.memory` 导入：
+
+```yaml
+memory:
+  backend: sqlite
+  recall_mode: on_turn
+  read_namespaces: [project]
+  write_namespace: project
+  max_query_terms: null
+tools:
+  builtin:
+    - memory.remember
+    - memory.update
+    - memory.forget
+```
+
+启用后默认提供 `memory_search`、`memory_list`、`memory_get`，无需在 builtin 中重复声明；
+示例中的三个写工具按 Agent 职责选择，不会自动启用。`recall_mode: manual` 关闭每 run 的
+自动召回，保留工具和显式 SDK 读取。`max_query_terms` 只限制自动查询，显式 SDK/tool 查询
+默认不继承；完整检索与预算规则见 [memory 说明](../memory/README.md)。
+
+YAML 加载不打开数据库。Runtime 确定 effective workspace 后构建一个 service，同时供自动
+召回和记忆工具使用。默认数据库为该 workspace 的 `.iris/memory/memory.db`；同项目默认
+`project` namespace 可共享，不同 workspace 使用各自数据库。显式传入 `memory_service`
+优先于配置后端。CLI 使用同一装配链；child 根据自己的配置和收窄后的 effective workspace
+构建服务，不继承父 Agent 的 service 或动态快照。数据库初始化错误直接沿装配入口报告。
+
 ### `ModelConfig`
 
 模型路由配置：
@@ -204,6 +234,8 @@ runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run �
 - `human.ask`
 - `web.search`
 - `web.fetch`
+- `memory.search`、`memory.list`、`memory.get`
+- `memory.remember`、`memory.update`、`memory.forget`
 
 `human.ask` 向模型暴露的工具名是 `ask_question`。它只声明人工问题；实际呈现问题、
 收集回答与调用 `AgentRuntime.resume()` 仍由 runtime 和宿主 adapter 完成。
@@ -283,16 +315,20 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 读取 UTF-8 YAML 文件并返回 `AgentConfig`。配置缺失、YAML 格式错误、字段类型错误、
 未知字段、不可读路径都会包装为 `IrisConfigError`。
 
-### `build_tool_registry(config)`
+### `build_tool_registry(config, *, memory_service=None, memory_config=None)`
 
 根据 `ToolsConfig` 构建 `ToolRegistry`：
 
-1. 注册 `tools.builtin` 中声明的内置工具。
+1. 提供 memory service 时补齐三个默认读工具，与 `tools.builtin` 声明共用注册路径。
 2. 注册 `tools.python.functions` 中的直接函数引用。
 3. 调用 `tools.python.registrars` 中的批量注册入口。
 
 未知内置工具、错误引用格式、模块不存在、函数不存在、引用对象不可调用、registrar
 签名不兼容都会抛出 `IrisConfigError`。
+显式 memory builtin 要求提供 service；`memory_config` 绑定工具的 read/write namespaces，
+不传时使用 `MemoryConfig()` 默认值。重复声明默认读工具不会与自动添加发生冲突，其他实际
+工具名称或别名冲突继续由 `ToolRegistry` 报错。需要按 YAML 自动创建服务时使用完整 runner
+或 RuntimeFactory；此函数不解析 workspace 或打开数据库。
 
 ## 边界
 
@@ -318,6 +354,7 @@ runner = AgentRunner.from_config_path("agent.yaml")
 | `agent.yaml` 加载与相对 context 路径 | `config/base.py`, `../runtime/factory.py` | `tests/runtime/test_factory.py` |
 | 压缩预算与摘要指令配置 | `config/compaction.py`, `config/base.py` | `tests/agents/test_compaction_config.py`, `tests/runtime/test_compaction_prompt.py` |
 | Skill 配置与 factory 集成 | `config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
+| Memory 配置与 ROOT/CHILD 装配 | `config/base.py`, `config/tools.py`, `../runtime/_assembly.py` | `tests/agents/test_memory_config.py`, `tests/runtime/test_memory_assembly.py` |
 | 内置工具与 Python 引用加载 | `config/tools.py` | `tests/agents/test_tools_config.py` |
 
 ```bash

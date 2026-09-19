@@ -104,8 +104,9 @@ Fork 本身不调用 provider 或创建 run，复制终态原文截点、当时�
 
 `from_config*()` 接受 `permission_policy=` 与 `child_provider_factory=`。配置 catalog 时，
 runner 读取一次路由快照并装配内部 controller。Selected child 使用普通 AgentConfig、独立
-session/run、fresh `AgentRunOptions()`、空 request metadata、无 memory service，并共享 parent
-store/clock。Child 不注册 subagent；linked ACTIVE 通过 ordinary recover 继续原 child，
+session/run、fresh `AgentRunOptions()`、空 request metadata，并共享 parent store/clock。
+Child 按自己的 memory 配置和 effective workspace 构造 service，不继承父 service 或动态快照。
+Child 不注册 subagent；linked ACTIVE 通过 ordinary recover 继续原 child，
 WAITING/TERMINAL 只读原结果。Child 等待时创建 parent proxy，工具保持 PREPARED。Host 只向
 parent `resume()` 提交回答；回答先持久化，再继续 exact child。再次等待只替换 proxy，最终结果
 通过单次 finalize 推进 parent cursor，使用 parent identity/artifact 与 tool error policy。
@@ -360,7 +361,7 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 `StrictUndefined` 和字符上限在渲染时检查。详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
-`initial_session_message_count`。新 run 从 `before_input` 开始，将显式动态 memory 逐条渲染为
+`initial_session_message_count`。新 run 从 `before_input` 开始，将自动或显式动态 memory 逐条渲染为
 context 消息，连同 BCI 和用户输入通过 `CommitRunInput` 原子归档，并推进至 `before_model`。
 输入提交不占用模型步预算；即使没有记忆结果，也会提交本轮正常输入。provider 失败不会撤销已提交输入。
 

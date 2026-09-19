@@ -42,6 +42,7 @@ from iris.lifecycle import (
     ToolCallPhase,
     ToolErrorPolicy,
 )
+from iris.memory import MemoryConfig, MemoryService
 from iris.message import (
     LLMRequest,
     ModelResponseCompleted,
@@ -1439,8 +1440,15 @@ def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
     """保留真实 runtime 装配，仅为 child registry 增加受控普通 callable。"""
     tool = BlockingChildTool()
 
-    def with_child_tool(config: ToolsConfig) -> ToolRegistry:
-        registry = build_tool_registry(config)
+    def with_child_tool(
+        config: ToolsConfig,
+        *,
+        memory_service: MemoryService | None = None,
+        memory_config: MemoryConfig | None = None,
+    ) -> ToolRegistry:
+        registry = build_tool_registry(
+            config, memory_service=memory_service, memory_config=memory_config
+        )
         if "human.ask" in config.builtin:
             registry.register_function(tool.run, name="blocking_child")
         return registry
