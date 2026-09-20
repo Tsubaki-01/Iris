@@ -165,12 +165,48 @@ result = await runner.start(
 )
 ```
 
+## Explicit overview generation
+
+The host can call `await service.refresh_overview(namespace)` to summarize all active L2 items in
+that namespace, grouped by category/kind, into core facts and knowledge scope. The complete result
+is published as `Memory.md` in the canonical namespace directory. Configure `overview_provider`,
+`overview_model`, and `overview_config` on the service; the provider follows
+`iris.providers.CompletionProvider`. Agent configuration binds the resolved main provider, while
+an explicitly injected service keeps its host-supplied configuration. Construction, ordinary chat,
+writes, and reads never trigger generation automatically.
+
+```python
+# The service already has its overview provider/model configured.
+result = await service.refresh_overview("project")
+documents = await service.aload_overviews(["project"])
+```
+
+`MemoryOverviewConfig` defaults to a 96,000-token generation input budget and 1,024 output tokens.
+An oversized complete snapshot fails without truncation or batching. One normally completed JSON
+response must contain `core_facts` and `knowledge_scope`; facts may be empty, scope must not be.
+Invalid or incomplete responses and publication errors preserve the previous complete file, with
+known model usage attached to error context. An empty active L2 snapshot publishes “当前无记忆”
+without a model call.
+
+Generation runs outside the publication lock. A short locked source-version comparison prevents an
+older generation from replacing a newer overview. A candidate may still publish behind current
+items and receive a stale warning. `load_overviews/aload_overviews` accept only the complete new
+format; old formats require explicit refresh. A missing file returns a fixed missing-overview
+message without scanning items or generating a directory. `MemoryOverviewDocument.navigation`
+contains knowledge scope. A service without a mirror returns no documents and rejects refresh as
+missing generation dependencies.
+
+The overview SDK does not yet alter runtime recall or inject the file into system context;
+`system_budget_ratio=0.02` is declared but not yet consumed by main-request window selection.
+
 ## Public surface
 
 The large `iris.memory` export surface is grouped as follows:
 
 - models/enums: episode, candidate, item, event, query, search result, and context bundle;
 - service/storage: `MemoryService`, `MemoryStore`, and `SQLiteMemoryStore`;
+- overview: `MemoryOverviewConfig/Content/Document/GenerationResult`, `refresh_overview()`,
+  `load_overviews()`, and `aload_overviews()`;
 - async IO: `MemoryIOExecutionMode`, `arecall()`, `aget_item()`, `alist_items()`, `alist_events()`,
   `abuild_context()`, `aremember()`, `aupdate()`, and `aforget()`;
 - config: `MemoryConfig` and child models, `build_memory_service_from_config()`, and
@@ -267,6 +303,7 @@ requests a complete mirror projection.
 | Concurrent promotion, field updates, FTS completeness, and result-count config | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Namespace snapshots, projection revisions, and atomic replacement | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
+| Explicit overview generation, loading, and versioned publication | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
 | Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | Automatic recall, deduplication, and history recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 

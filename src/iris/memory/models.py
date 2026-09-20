@@ -16,7 +16,7 @@ from enum import StrEnum
 from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 # endregion
@@ -374,3 +374,50 @@ class MemoryContextBundle(BaseModel):
     total_chars: int = 0
     omitted_count: int = 0
     max_chars: int
+
+
+class MemoryOverviewConfig(BaseModel):
+    """显式概览生成与后续窗口采用的独立预算配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_budget_tokens: int = Field(default=96000, gt=0)
+    max_tokens: int = Field(default=1024, gt=0)
+    system_budget_ratio: float = Field(default=0.02, gt=0, le=1)
+
+
+class MemoryOverviewContent(BaseModel):
+    """模型一次生成的核心事实与覆盖全部已知主题的知识范围。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    core_facts: str
+    knowledge_scope: str = Field(pattern=r"\S")
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryOverviewDocument:
+    """供窗口采用的完整概览、知识范围节和读后新鲜度。"""
+
+    namespace: str
+    path: Path
+    source_revision: int | None
+    text: str
+    navigation: str
+    warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryOverviewGenerationResult:
+    """一次显式生成的实际来源、发布结果与 provider 用量。"""
+
+    namespace: str
+    path: Path
+    source_revision: int
+    current_revision: int
+    projection_revision: int | None
+    item_count: int
+    published: bool
+    publication_reason: str | None
+    usage: dict[str, int]
+    elapsed_seconds: float

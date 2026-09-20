@@ -20,6 +20,10 @@ shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定�
 root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 由 harness 在 admission
 前准备，并在 WAITING/结束后关闭独立资源，恢复时重建。
 
+装配先解析 provider，再把同一实例、`model.name` 和 `memory.overview` 配置绑定到按配置构造的
+memory service，供宿主显式调用 `refresh_overview()`。构造过程不生成概览；显式注入的 service
+保留自己的生成依赖。当前 runtime 继续使用下文的召回与历史快照流程，概览尚未进入 system。
+
 ## 依赖方向
 
 ```text
@@ -125,7 +129,8 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 
 ## 可选 live streaming
 
-`RuntimeProvider` 必须同时实现 `complete()` 和同步 `estimate_input_tokens(request)`；后者
+`iris.providers.CompletionProvider` 必须同时实现 `complete()` 和同步
+`estimate_input_tokens(request)`；后者
 计量应用模型选项及工具 schema 后的完整请求。自定义 provider 与测试替身直接满足同一契约。
 `RuntimeEnvironment.agent_config.compaction` 携带压缩配置，无需独立环境字段。
 摘要始终直接使用 `complete()`，不会向 host 发布摘要正文或摘要模型 stream 事件。
@@ -136,7 +141,7 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 没有独立 payload 模型；durable `context.compacted` 保留在事件历史中。
 
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
-`RuntimeProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。
+`CompletionProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。
 传入同步 `RuntimeEventSink` 时，
 runtime 通过独立的 `StreamingRuntimeProvider` structural capability 检测 `stream()`；capability
 缺失会以 `PROVIDER_STREAM_ERROR/provider` 失败，不回退到 `complete()`，也不伪造 token。
@@ -276,9 +281,10 @@ registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过
 
 包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、
 `StreamingRuntimeProvider`、`streaming_provider_for()`、`RuntimeEventSink`、
-`RuntimeStreamEvent`、provider/assembler/tool bridge、`RuntimeSteeringPort`、`SteeringInput`，以及
+`RuntimeStreamEvent`、assembler/tool bridge、`RuntimeSteeringPort`、`SteeringInput`，以及
 activation/commit-port contracts。不存在 complete-run options/status/result、
 `run_turn()`、`run_loop()`、`resume()` 或旧 checkpoint helper。
+共同非流式协议 `CompletionProvider` 从 `iris.providers` 导入。
 
 ## 验证
 

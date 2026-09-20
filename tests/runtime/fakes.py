@@ -22,6 +22,7 @@ from iris.lifecycle import (
 from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryContextBuilder, MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
+from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
     AgentRuntime,
     ModelStepReservation,
@@ -32,7 +33,6 @@ from iris.runtime import (
     RuntimeEnvironment,
     RuntimeMessageAssembler,
     RuntimeModelStepCommit,
-    RuntimeProvider,
     RuntimeRunInputCommit,
     RuntimeSteeringPort,
     RuntimeSuspension,
@@ -663,7 +663,7 @@ def build_runtime(
     *,
     agent_config: AgentConfig,
     context_input: ContextBuildInput,
-    provider: RuntimeProvider,
+    provider: CompletionProvider,
     context_builder: ContextBuilder | None = None,
     assembler: RuntimeMessageAssembler | None = None,
     tool_registry: ToolRegistry | None = None,

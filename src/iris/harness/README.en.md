@@ -110,8 +110,9 @@ The implementation is in `session_history.py`; related integration tests are in
 ## Public operations
 
 `iris.harness.ChildProviderFactory` defines selected-child provider injection through
-`__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`. It receives the loaded
-ordinary child configuration, independently of one-off parent provider credential overrides.
+`__call__(config: AgentConfig, *, config_path: Path) -> CompletionProvider`. Import `CompletionProvider`
+from `iris.providers`; it requires `complete()` and `estimate_input_tokens()`. The factory receives
+the loaded ordinary child configuration, independently of one-off parent provider credential overrides.
 
 `from_config*()` accepts `permission_policy=` and `child_provider_factory=`. With a catalog,
 the runner reads one route snapshot and assembles an internal controller. The selected child uses

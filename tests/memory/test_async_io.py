@@ -22,6 +22,7 @@ from iris.memory import (
     MemoryItemPatch,
     MemoryListTool,
     MemoryListToolInput,
+    MemoryOverviewContent,
     MemoryQuery,
     MemorySearchResult,
     MemorySearchTool,
@@ -80,6 +81,47 @@ async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_togeth
     assert create_threads == close_threads
     assert set(execute_threads) == set(create_threads)
     assert create_threads[0] != loop_thread
+
+
+@pytest.mark.asyncio
+async def test_overviews_whole_read_runs_all_namespaces_in_one_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """所有 namespace 的实际概览读取共用一个 worker job。"""
+    service = build_memory_service_from_config(MemoryConfig(backend="sqlite"), tmp_path)
+    assert service is not None and service.mirror is not None
+    for namespace in ("first", "second"):
+        service.remember(MemoryWriteInput(namespace=namespace, text="fact", reason="seed"))
+        service.mirror.publish_overview(
+            service.store,
+            service.store.read_namespace_snapshot(namespace),
+            MemoryOverviewContent(core_facts="fact", knowledge_scope="项目资料"),
+        )
+    loop_thread = threading.get_ident()
+    read_threads: list[int] = []
+    jobs = 0
+    original_read = service.mirror.read_overview
+    original_to_thread = asyncio.to_thread
+
+    def read(namespace: str) -> tuple[int, str, str] | None:
+        read_threads.append(threading.get_ident())
+        return original_read(namespace)
+
+    async def to_thread(
+        function: Callable[..., object], /, *args: object, **kwargs: object
+    ) -> object:
+        nonlocal jobs
+        jobs += 1
+        return await original_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(service.mirror, "read_overview", read)
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    documents = await service.aload_overviews(["second", "first"])
+    assert [document.namespace for document in documents] == ["second", "first"]
+    assert jobs == 1 and len(read_threads) == 2
+    assert len(set(read_threads)) == 1 and loop_thread not in read_threads
+    assert all(not document.path.is_absolute() for document in documents)
+    assert all(document.source_revision == 1 for document in documents)
 
 
 @pytest.mark.asyncio

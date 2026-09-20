@@ -74,6 +74,7 @@ from ..lifecycle import (
     snapshot_run,
 )
 from ..memory import MemoryService
+from ..providers import CompletionProvider
 from ..runtime import (
     AgentRuntime,
     RuntimeActivationInput,
@@ -82,7 +83,6 @@ from ..runtime import (
     RuntimeApprovedToolCall,
     RuntimeCursor,
     RuntimeEventSink,
-    RuntimeProvider,
     RuntimeSteeringPort,
     RuntimeStreamEvent,
 )
@@ -292,7 +292,7 @@ class AgentRunner:
         cls,
         path: str | Path,
         *,
-        provider: RuntimeProvider | None = None,
+        provider: CompletionProvider | None = None,
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
@@ -326,7 +326,7 @@ class AgentRunner:
         config: AgentConfig,
         *,
         config_path: Path | None = None,
-        provider: RuntimeProvider | None = None,
+        provider: CompletionProvider | None = None,
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,

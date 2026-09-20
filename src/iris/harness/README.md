@@ -99,8 +99,9 @@ Fork 本身不调用 provider 或创建 run，复制终态原文截点、当时�
 ## 公共操作
 
 `iris.harness.ChildProviderFactory` 定义 selected child provider 注入协议：
-`__call__(config: AgentConfig, *, config_path: Path) -> RuntimeProvider`。
-它接收已加载的普通 child 配置，不依赖 parent provider 的单次凭据覆盖。
+`__call__(config: AgentConfig, *, config_path: Path) -> CompletionProvider`。
+`CompletionProvider` 从 `iris.providers` 导入，要求 `complete()` 与 `estimate_input_tokens()`。
+该工厂接收已加载的普通 child 配置，不依赖 parent provider 的单次凭据覆盖。
 
 `from_config*()` 接受 `permission_policy=` 与 `child_provider_factory=`。配置 catalog 时，
 runner 读取一次路由快照并装配内部 controller。Selected child 使用普通 AgentConfig、独立

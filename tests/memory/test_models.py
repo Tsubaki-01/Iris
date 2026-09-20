@@ -11,6 +11,8 @@ from iris.memory.models import (
     MemoryItem,
     MemoryItemPatch,
     MemoryObserveInput,
+    MemoryOverviewConfig,
+    MemoryOverviewContent,
     MemoryQuery,
     MemoryWriteInput,
 )
@@ -76,3 +78,58 @@ def test_patch_preserves_omission_and_allows_nullable_scores_to_clear() -> None:
         "artifacts": [],
         "metadata": {},
     }
+
+
+def test_overview_config_keeps_generation_and_window_budgets_separate() -> None:
+    """生成输入、生成输出和后续窗口比例各自保留明确默认值。"""
+    config = MemoryOverviewConfig()
+    assert config.input_budget_tokens == 96000
+    assert config.max_tokens == 1024
+    assert config.system_budget_ratio == 0.02
+    assert MemoryOverviewConfig(input_budget_tokens=1, max_tokens=1, system_budget_ratio=1)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"input_budget_tokens": 0},
+        {"max_tokens": 0},
+        {"system_budget_ratio": 0},
+        {"system_budget_ratio": 1.01},
+        {"unknown": True},
+    ],
+)
+def test_overview_config_rejects_invalid_budget_and_unknown_fields(
+    data: dict[str, object],
+) -> None:
+    """预算边界由配置模型一次声明，未知配置不被静默接受。"""
+    with pytest.raises(ValidationError):
+        MemoryOverviewConfig.model_validate(data)
+
+
+@pytest.mark.parametrize("core_facts", ["", "用户偏好中文回答。"])
+def test_overview_content_accepts_required_core_facts_including_empty(core_facts: str) -> None:
+    """核心事实字段必须存在，但没有核心事实时允许空字符串。"""
+    content = MemoryOverviewContent(core_facts=core_facts, knowledge_scope="回答偏好与项目约定。")
+    assert content.core_facts == core_facts
+    assert content.knowledge_scope == "回答偏好与项目约定。"
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"knowledge_scope": "项目约定"},
+        {"core_facts": ""},
+        {"core_facts": "", "knowledge_scope": ""},
+        {"core_facts": "", "knowledge_scope": " \n\t "},
+        {"core_facts": None, "knowledge_scope": "项目约定"},
+        {"core_facts": 1, "knowledge_scope": "项目约定"},
+        {"core_facts": "", "knowledge_scope": ["项目约定"]},
+        {"core_facts": "", "knowledge_scope": "项目约定", "version": 1},
+    ],
+)
+def test_overview_content_rejects_missing_invalid_or_extra_fields(data: dict[str, object]) -> None:
+    """双字段内容不接受缺失、空白知识范围、错误类型和额外字段。"""
+    with pytest.raises(ValidationError):
+        MemoryOverviewContent.model_validate(data)

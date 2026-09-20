@@ -9,7 +9,7 @@ from iris.harness import AgentRunner, ChildProviderFactory
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import AgentRunRequest, RunPhase, RunStopReason
 from iris.message import ToolUseBlock
-from iris.runtime import RuntimeProvider
+from iris.providers import CompletionProvider
 from iris.store import SQLiteStore
 
 from ..harness.fakes import StaticProvider, text_response, tool_response
@@ -23,7 +23,7 @@ class _ChildProviders(ChildProviderFactory):
     def __init__(self, **providers: StaticProvider) -> None:
         self.providers = providers
 
-    def __call__(self, config: AgentConfig, *, config_path: Path) -> RuntimeProvider:
+    def __call__(self, config: AgentConfig, *, config_path: Path) -> CompletionProvider:
         """使用已加载 child 的名称选择固定响应。"""
         return self.providers[config.name]
 

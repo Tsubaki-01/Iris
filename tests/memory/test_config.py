@@ -46,3 +46,14 @@ def test_memory_can_choose_manual_recall_and_separate_namespaces() -> None:
     assert config.recall_mode == "manual"
     assert config.read_namespaces == ["project", "research/private"]
     assert config.write_namespace == "research/private"
+
+
+def test_memory_overview_defaults_keep_generation_and_window_budgets_separate() -> None:
+    """显式概览声明完整预算，尚未改变已有召回配置。"""
+    config = MemoryConfig()
+    assert config.overview.input_budget_tokens == 96000
+    assert config.overview.max_tokens == 1024
+    assert config.overview.system_budget_ratio == 0.02
+    assert config.recall_mode == "on_turn"
+    assert config.max_query_terms is None
+    assert config.mirror.enabled
