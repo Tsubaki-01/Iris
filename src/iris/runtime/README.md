@@ -20,9 +20,11 @@ shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定�
 root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 由 harness 在 admission
 前准备，并在 WAITING/结束后关闭独立资源，恢复时重建。
 
-装配先解析 provider，再把同一实例、`model.name` 和 `memory.overview` 配置绑定到按配置构造的
-memory service，供宿主显式调用 `refresh_overview()`。构造过程不生成概览；显式注入的 service
-保留自己的生成依赖。运行时按下文的持久窗口规则将已发布概览加入 system。
+装配先解析 provider，再由 memory 配置工厂统一处理 `memory.enabled`。关闭时不接入服务，
+即使传入 `memory_service` 也不挂载；开启时优先复用注入对象，否则将同一 provider、
+`model.name` 和 `memory.overview` 配置绑定到新建的 SQLite service。有效服务自动提供
+Search/Fetch，写工具仍显式配置。构造过程不生成概览，宿主显式调用 `refresh_overview()`；
+注入服务保留自己的生成依赖。开关在构建时确定，改配置后重建 Agent 并使用新会话。
 
 ## 依赖方向
 
@@ -220,11 +222,16 @@ retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当�
 
 ## Memory 概览窗口与自主读取
 
-Runtime 在 session 的 `context_window` 尚为 `None` 时，按 `read_namespaces` 的配置顺序
+有效 memory service 存在且 session 的 `context_window` 尚为 `None` 时，Runtime 按 `read_namespaces` 的配置顺序
 调用一次 `MemoryService.aload_overviews()`。用包含本次 BCI/user 的完整待发送请求选择窗口，
 将概览、输入与 checkpoint 同次提交，再向 provider 发送。显式空窗口表示已经初始化。
-普通新 run、工具循环、steer、HITL 与输入提交后的 recovery 复用已提交文本；只有新 session
+Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交后的 recovery 复用已提交文本；只有新 session
 或成功压缩才采用新版概览。Fork 的目标窗口为 `None`，首输入重新采用。
+
+`RuntimeEnvironment.memory_service is None` 时，统一请求构造入口传入空 `system_addendum`，
+即使 session 保存着旧概览也不追加到 system。普通请求与恢复不因此读取或改写窗口，也不额外
+推进 session revision；静态 memory、BCI 和包含既有工具结果的普通历史继续保留。成功压缩沿
+原事务一起提交新摘要与空窗口；失败保留旧摘要和窗口，后续无 Service 请求仍屏蔽该概览。
 
 `full` 包含核心事实与知识范围，`navigation` 仅包含知识范围。全部 namespace、状态警告、
 实际工具指引和包装共享 `floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`

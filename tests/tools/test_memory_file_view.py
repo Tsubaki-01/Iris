@@ -119,7 +119,7 @@ async def test_configured_file_tools_read_real_projection_and_report_failed_publ
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """真实memory服务的目录、版本与投影失败沿文件工具返回给模型。"""
-    config = MemoryConfig(backend="sqlite", read_namespaces=["project"])
+    config = MemoryConfig(enabled=True, read_namespaces=["project"])
     service = build_memory_service_from_config(config, tmp_path)
     assert service is not None and service.mirror is not None
     service.remember(
@@ -149,6 +149,8 @@ async def test_configured_file_tools_read_real_projection_and_report_failed_publ
         memory_config=config,
     )
     assert {tool.name for tool in registry.view().active_tools} == {
+        "memory_search",
+        "memory_fetch",
         "read_file",
         "grep_search",
     }
@@ -190,7 +192,7 @@ async def test_first_failed_projection_does_not_look_like_an_empty_search(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """首次发布未产生任何文件时，搜索仍明确数据库已保存但正文未同步。"""
-    config = MemoryConfig(backend="sqlite")
+    config = MemoryConfig(enabled=True)
     service = build_memory_service_from_config(config, tmp_path)
     assert service is not None and service.mirror is not None
 

@@ -5,25 +5,24 @@
 `iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, L1 episodes,
 candidates, L2 items, audit events, SQLite persistence, human-readable file projections, explicit
 orchestration, and memory tools. SQLite is authoritative; Markdown under
-`.iris/memory/namespaces/` is a projection for humans.
+`.iris/memory/namespaces/` is a projection for humans. `MemoryService` is the memory-management SDK
+for reads, writes, promotion, projection, and explicit overview generation.
 
-`AgentConfig.memory` defaults to a disabled backend. With SQLite enabled, the host explicitly
-publishes an overview, and runtime adopts it for a new session or after successful compaction.
-The model uses the adopted overview and the current question to decide whether to call Search or
-Fetch. Ordinary runs do not automatically search items. Declare every memory tool explicitly:
+`memory.enabled` defaults to false. Enabling it automatically adds `memory_search` and
+`memory_fetch` and lets the Agent adopt published overviews for a new session or after successful
+compaction. The model chooses reads based on its overview and the question; ordinary runs never
+search items automatically. Agent construction neither calls the model nor generates an overview.
+Enable it with:
 
 ```yaml
 memory:
-  backend: sqlite
-  read_namespaces: [project]
-  write_namespace: project
-tools:
-  builtin: [memory.search, memory.fetch]
+  enabled: true
 ```
 
-An injected `memory_service` in `AgentRunner.from_config*()` takes precedence over the configured
-backend. CLI and child agents share this assembly path. Each child uses its own read range and
-effective workspace and adopts its own initial overview window. Static `context.yaml` memory slots
+When enabled, an injected `memory_service` in `AgentRunner.from_config*()` takes precedence over a
+configured SQLite service. When disabled, the injected object is neither mounted, called, nor closed.
+CLI and child agents share this assembly path. Each child uses its own switch, read range, and
+effective workspace without inheriting the parent's Service. Static `context.yaml` memory slots
 remain separate.
 
 ## Quick start
@@ -40,7 +39,7 @@ from iris.memory import (
 
 workspace = Path(".").resolve()
 service = build_memory_service_from_config(
-    MemoryConfig(backend="sqlite"),
+    MemoryConfig(enabled=True),
     workspace,
 )
 assert service is not None
@@ -57,14 +56,18 @@ for hit in response.items:
 current = service.get_item(item.id, ["project"])
 ```
 
-`backend="none"` returns `None` without filesystem effects. Memory root and database paths must
-resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
+`build_memory_service_from_config(config, workspace_root, memory_service=...)` is the sole source
+resolver. Disabled memory returns `None` without resolving memory paths or creating files. When
+enabled, it returns the injected object unchanged or builds a SQLite service if none was supplied.
+An injected service keeps its store, mirror, provider/model, and IO mode. Configured memory root and
+database paths must resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
 New databases use schema version 4; older versions are rejected at initialization without migration,
 version overwrite, or deletion. A SQLite service built by
 `build_memory_service_from_config()` runs connection setup, SQL, and result construction in one async worker job, while synchronous methods
 still execute on their caller's thread. Directly constructed services and custom stores default to
-`MemoryIOExecutionMode.INLINE`, so their thread affinity is not changed implicitly.
+`MemoryIOExecutionMode.INLINE`, so their thread affinity is not changed implicitly. Independent
+`MemoryService` and low-level tool-registration SDK calls do not require the Agent switch.
 
 ## Architecture and lifecycle
 
@@ -140,6 +143,13 @@ The host must explicitly generate an overview covering new topics, then adopt it
 after successful compaction. Already covered topics may still query current database records. This
 is a model instruction, not a database topic filter. Search does not require a subsequent Fetch.
 Updates and forgetting never rewrite previously saved conversation history.
+
+The switch is fixed at Agent construction; same-session hot switching is not supported. Rebuild the
+Agent and start a new session after changing configuration. Disabled requests omit the memory
+addendum even if a saved window contains one, without deleting that window, the database, overview
+files, or historical tool results. Static memory, ordinary history, and summaries remain intact.
+Normal successful compaction may still commit an empty overview window. Re-enabling and reusing an
+old session does not force a new overview; start a new session to adopt the current publication.
 
 ## Explicit overview generation
 
@@ -230,11 +240,16 @@ Identical text under different IDs remains separate.
 
 ## Memory tools
 
-`register_memory_tools()` defaults to no tools, and enabling memory does not register any implicitly.
-Explicit `memory.search` and `memory.fetch` declarations expose `memory_search` and `memory_fetch`
-with `READ` capability. Search directly uses `MemorySearchQuery` as its input model and returns
-`items` and `has_more`. Only when more candidates exist does it add the hint
-“还有候选，可收紧关键词或 categories/kinds 后重试”.
+Enabled Agents automatically register the two `READ` tools in Search, Fetch order. Do not declare
+`memory.search` or `memory.fetch` in `tools.builtin`: registry assembly rejects those names with
+`IrisConfigError` and points to `memory.enabled`. The former `memory.backend` field is rejected at
+configuration parsing. `include_tools=False` still omits schemas from that request, with overview
+instructions based on the tools actually available.
+
+Low-level `register_memory_tools()` still defaults to no tools and accepts explicit
+`memory.search/fetch` selection in SDK code. Only manual Agent read declarations have been removed.
+Search directly uses `MemorySearchQuery` as its input and returns `items` and `has_more`. Only when
+more candidates exist does it add the hint “还有候选，可收紧关键词或 categories/kinds 后重试”.
 
 Fetch takes one nonblank `item_id`; a known ID can be fetched without a preceding Search. It calls
 current `aget_item()` and returns `{"item": item.model_dump(mode="json")}` with every stored field,
@@ -245,8 +260,18 @@ value. Ordinary `max_result_chars=50000` and ToolExecutor artifact handling stil
 
 Agents that write memory explicitly declare `memory.remember/memory.update/memory.forget`, exposing
 `memory_remember/memory_update/memory_forget`. These retain the normal `WRITE` permission, claim,
-and result-commit flow and share the SDK service. Forget reports whether a soft delete actually
-occurred. A stale projection adds a warning while retaining the committed database success.
+and result-commit flow and share the SDK service. Agent write declarations require enabled memory;
+enabling memory does not register writes automatically. Forget reports whether a soft delete actually
+occurred. A stale projection adds a warning while retaining the committed database success. For example:
+
+```yaml
+memory:
+  enabled: true
+  read_namespaces: [project, notes]
+  write_namespace: project
+tools:
+  builtin: [memory.remember]
+```
 
 `MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` binds host-owned read/write ranges,
 defaulting to `project`. Its factory runs for every tool call; tool input cannot override namespace.

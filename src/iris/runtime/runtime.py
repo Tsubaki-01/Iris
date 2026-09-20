@@ -915,7 +915,12 @@ class AgentRuntime:
             update={"before_current_input": None}
         )
         context_output = self.environment.context_builder.build(
-            context_input, system_addendum=context_window.memory_overview
+            context_input,
+            system_addendum=(
+                context_window.memory_overview
+                if self.environment.memory_service is not None
+                else ""
+            ),
         )
         request = self.environment.assembler.build_request(
             agent_config=self.environment.agent_config,

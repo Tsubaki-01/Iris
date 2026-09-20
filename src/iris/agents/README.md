@@ -121,7 +121,7 @@ model: openai/gpt-4o-mini
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
-- `memory`: 复用 `iris.memory.MemoryConfig`，默认 `backend: none`，不创建 memory 服务。
+- `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `tools`: `ToolsConfig`，默认不注册任何工具。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
@@ -182,29 +182,31 @@ runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run �
 
 ```yaml
 memory:
-  backend: sqlite
+  enabled: true
   read_namespaces: [project]
   write_namespace: project
 tools:
   builtin:
-    - memory.search
-    - memory.fetch
     - memory.remember
     - memory.update
     - memory.forget
 ```
 
-后端启用与工具注册分别声明；只有列出的工具可用，默认不补入任何 memory 工具。模型根据
-当前概览自主选择 Search/Fetch，查询使用全部词项；旧 recall_mode/max_query_terms/mirror
-配置不再接受。概览通过宿主显式生成，内容为核心事实和知识范围，新会话或成功压缩时采用，
+`memory.enabled` 同时接入服务、概览和自动注册的 Search/Fetch；写工具仍按需声明。旧
+`memory.backend` 和手工 `memory.search/fetch` 声明不再接受。模型根据当前概览自主选择
+Search/Fetch，查询使用全部词项；旧 recall_mode/max_query_terms/mirror 配置不再接受。
+概览通过宿主显式生成，内容为核心事实和知识范围，新会话或成功压缩时采用，
 全部 namespace 合计使用可用输入预算的 2%。概览未提及的主题默认没有，无概览时正常聊天但
 暂不使用长期记忆。完整规则见 [memory 说明](../memory/README.md)。
 
 YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 后构建一个 service，
 供概览及记忆工具使用。默认数据库为该 workspace 的 `.iris/memory/memory.db`；同项目默认
-`project` namespace 可共享，不同 workspace 使用各自数据库。显式传入 `memory_service`
-优先于配置后端。CLI 使用同一装配链；child 根据自己的配置和收窄后的 effective workspace
+`project` namespace 可共享，不同 workspace 使用各自数据库。开启时显式传入的 `memory_service`
+优先于配置构造；关闭时不挂载注入对象。CLI 使用同一装配链；child 根据自己的配置和收窄后的 effective workspace
 构建服务和自己的概览窗口，不继承父 Agent 的 service。数据库初始化错误直接沿装配入口报告。
+
+开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。静态
+`context.yaml` memory 与已有历史不受关闭影响；`include_tools=False` 仍控制当次工具 schema。
 
 ### `ModelConfig`
 
@@ -235,7 +237,6 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 - `human.ask`
 - `web.search`
 - `web.fetch`
-- `memory.search`、`memory.fetch`
 - `memory.remember`、`memory.update`、`memory.forget`
 
 `human.ask` 向模型暴露的工具名是 `ask_question`。它只声明人工问题；实际呈现问题、
@@ -320,15 +321,16 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 
 根据 `ToolsConfig` 构建 `ToolRegistry`：
 
-1. 按 `tools.builtin` 显式注册内置工具，存在 memory service 也不自动添加工具。
+1. 有有效 memory service 时先注册 Search/Fetch，再按 `tools.builtin` 注册其它内置工具。
 2. 注册 `tools.python.functions` 中的直接函数引用。
 3. 调用 `tools.python.registrars` 中的批量注册入口。
 
 未知内置工具、错误引用格式、模块不存在、函数不存在、引用对象不可调用、registrar
 签名不兼容都会抛出 `IrisConfigError`。
-显式 memory builtin 要求提供 service；`memory_config` 绑定工具的 read/write namespaces，
-不传时使用 `MemoryConfig()` 默认值。重复声明默认读工具不会与自动添加发生冲突，其他实际
-工具名称或别名冲突继续由 `ToolRegistry` 报错。需要按 YAML 自动创建服务时使用完整 runner
+显式 memory 写工具要求提供 service；手工 Search/Fetch 声明在本装配边界报配置错误。
+`memory_config` 绑定工具的 read/write namespaces，不传时使用 `MemoryConfig()` 默认范围；
+此处只消费来源工厂已解析的 service，不重新判断 enabled。实际工具名称或别名冲突继续
+由 `ToolRegistry` 报错。需要按 YAML 自动创建服务时使用完整 runner
 或 RuntimeFactory；此函数不解析 workspace 或打开数据库。
 
 ## 边界

@@ -30,12 +30,22 @@ Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 
 ## 长期记忆
 
-Memory 默认关闭。启用后以 SQLite 保存权威条目，Markdown 提供人工可读投影。宿主先显式
+使用以下配置启用长期记忆，默认关闭：
+
+```yaml
+memory:
+  enabled: true
+```
+
+开启后自动接入概览和 Search/Fetch 两个读取工具，以 SQLite 保存权威条目，Markdown 提供
+人工可读投影。宿主先显式
 生成包含“核心事实＋可查询知识”的概览；新会话首次输入和成功压缩时采用，全部读取空间
 共用可用输入预算的 2%，会话窗口内保持稳定。没有概览时仍可正常聊天，但不使用长期记忆。
 
-模型根据概览决定是否调用显式配置的 `memory.search` / `memory.fetch`：Search 返回匹配
+模型根据概览决定是否调用 `memory_search` / `memory_fetch`：Search 返回匹配
 片段，信息充分即可回答；需要完整当前记录时再 Fetch。普通对话轮次不自动检索，工具结果
 进入正常会话历史，静态 `context.yaml` memory 槽位保持独立。
+
+写工具仍需显式声明。开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。
 
 配置、显式概览生成和 SDK 用法见 [`iris.memory`](src/iris/memory/README.md)。

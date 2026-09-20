@@ -4,23 +4,21 @@
 
 `iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、L1 episode、候选记忆、L2
 长期条目、审计事件、SQLite 存储、文件镜像、显式编排和记忆工具。SQLite 是权威数据源；
-`.iris/memory/namespaces/` 下的 Markdown 是便于人工查看的分类投影。
+`.iris/memory/namespaces/` 下的 Markdown 是便于人工查看的分类投影。`MemoryService` 就是
+记忆管理 SDK，统一提供读写、晋升、投影和显式概览入口。
 
-`AgentConfig.memory` 默认关闭后端。启用 SQLite 后，宿主显式生成概览，runtime 在新会话
-或成功压缩后采用已发布概览。模型根据当前概览和问题决定是否调用 Search/Fetch，普通 run
-不会自动查询条目。所有记忆工具都通过既有工具声明入口显式选择。
+`memory.enabled` 默认 false。开启后，Agent 自动获得 `memory_search`、`memory_fetch`，并在
+新会话或成功压缩后采用已发布概览。模型根据概览和问题按需读取，普通 run 不会自动查询条目；
+构建 Agent 不调用模型或生成概览。启用只需：
 
 ```yaml
 memory:
-  backend: sqlite
-  read_namespaces: [project]
-  write_namespace: project
-tools:
-  builtin: [memory.search, memory.fetch]
+  enabled: true
 ```
 
-`AgentRunner.from_config*()` 的显式 `memory_service` 优先于配置后端；CLI 与子 Agent 复用
-同一装配入口。子 Agent 使用自己的读取范围和 effective workspace，首次采用自己的概览窗口。
+开启时，`AgentRunner.from_config*()` 注入的 `memory_service` 优先于配置构造的 SQLite 服务；
+关闭时，即使注入了对象也不挂载、不调用或关闭它。CLI 与子 Agent 复用同一装配入口，子 Agent
+使用自己的开关、读取范围和 effective workspace，不继承父 Agent 的 Service。
 静态 `context.yaml` memory 槽位保持独立。
 
 ## 运行要求与快速开始
@@ -41,7 +39,7 @@ from iris.memory import (
 
 workspace = Path(".").resolve()
 service = build_memory_service_from_config(
-    MemoryConfig(backend="sqlite"),
+    MemoryConfig(enabled=True),
     workspace,
 )
 assert service is not None
@@ -58,11 +56,13 @@ for hit in response.items:
 current = service.get_item(item.id, ["project"])
 ```
 
-`backend="none"` 返回 `None` 且不创建文件。memory root 和 database path 必须解析在调用方给定
-的 workspace 内。由 `build_memory_service_from_config()` 构造的 SQLite service 会让 async
+`build_memory_service_from_config(config, workspace_root, memory_service=...)` 是唯一来源解析入口：
+关闭直接返回 `None`，不解析 memory 路径或创建文件；开启时原样返回注入对象，未注入才构造
+SQLite 服务。注入对象的 store、mirror、provider/model 和 IO 模式保持不变。配置构造时，memory
+root 和 database path 必须位于给定 workspace 内。由该工厂构造的 SQLite service 会让 async
 读写在一个 worker job 中完成，包含连接、SQL 和结果组装；同步 `search()` 等 API 仍在调用线程执行。直接构造
 `MemoryService` 或注入自定义 store 时默认 `MemoryIOExecutionMode.INLINE`，不会静默改变其
-线程亲和性。
+线程亲和性。独立 `MemoryService` 和低层工具注册 SDK 不受 Agent 开关控制。
 
 ## 架构与数据流
 
@@ -132,6 +132,11 @@ runtime 在会话首次输入和成功压缩时读取已发布概览，选择完
 暂不使用长期记忆。新主题须先由宿主显式生成概览，再在新会话或成功压缩后采用；已有主题
 仍可查询数据库中的最新条目。主题约束由模型遵循，数据库不增加主题拦截，也不要求每次
 Search 都继续 Fetch。更新或忘记条目不会回写已经保存的会话历史。
+
+开关在构建 Agent 时确定，不支持同会话热切换。修改配置后重建 Agent 并开始新会话；关闭时
+不会追加已存窗口里的概览 addendum，也不会删除窗口、数据库、概览文件或历史工具结果。
+静态 memory、普通历史和摘要保持原样；正常成功压缩仍可提交空概览窗口。重新开启后复用旧
+session 不会强制刷新已采用概览，需要当前概览时开始新会话。
 
 ## 显式生成概览
 
@@ -206,10 +211,14 @@ Unicode 字符时全文返回；超过时取首个匹配词起点 h，用
 
 ## Memory 工具
 
-`register_memory_tools()` 默认空，Agent 不会因启用 memory 自动获得工具。显式声明
-`memory.search` / `memory.fetch` 后，模型调用名为 `memory_search` / `memory_fetch`，能力为
-`READ`。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和 `has_more`；
-仅有更多候选时附提示“还有候选，可收紧关键词或 categories/kinds 后重试”。
+Agent 开启 memory 后自动按 Search、Fetch 的顺序注册两个 `READ` 工具。无需在
+`tools.builtin` 声明它们；手写 `memory.search` 或 `memory.fetch` 会在 registry 装配时报
+`IrisConfigError`，提示改用 `memory.enabled`。旧 `memory.backend` 字段在配置解析时拒绝。
+`include_tools=False` 仍会让当前请求不发送工具 schema，概览指引也按实际可用工具生成。
+
+低层 `register_memory_tools()` 仍默认空，SDK 可显式选择 `memory.search/fetch`；退出的是
+Agent 手工读声明。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和
+`has_more`；仅有更多候选时附提示“还有候选，可收紧关键词或 categories/kinds 后重试”。
 
 Fetch 输入只有非空白 `item_id`，可直接读取已知 ID，不要求先 Search。它调用当前
 `aget_item()` 并返回 `{"item": item.model_dump(mode="json")}` 的完整记录，包括正文、来源、
@@ -219,8 +228,17 @@ metadata、artifacts 引用和全部状态/时间字段；不会读取附件内�
 
 需要写入的 Agent 显式声明 `memory.remember/memory.update/memory.forget`，对应
 `memory_remember/memory_update/memory_forget`，沿用 `WRITE` 权限、claim 和结果提交路径。
-写工具共享同一 service，forget 返回是否实际完成软删除，镜像未同步时保留数据库成功结果
-并附 warning。
+写工具要求 Agent 已开启 memory，并共享同一 service；开启不会自动注册写工具。
+forget 返回是否实际完成软删除，镜像未同步时保留数据库成功结果并附 warning。例如：
+
+```yaml
+memory:
+  enabled: true
+  read_namespaces: [project, notes]
+  write_namespace: project
+tools:
+  builtin: [memory.remember]
+```
 
 `MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` 由宿主绑定读写范围，默认
 `project`。工厂在每次工具执行时调用，工具参数不能覆盖 namespace。策略计算留在 event loop，

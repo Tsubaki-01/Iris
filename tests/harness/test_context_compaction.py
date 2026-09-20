@@ -19,7 +19,9 @@ from iris.lifecycle import (
     LifecycleStore,
     RunEventKind,
     RunStopReason,
+    SessionContextWindow,
 )
+from iris.memory import MemoryService
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -131,11 +133,68 @@ def _runtime(
     return runtime
 
 
-async def _seed_history(tmp_path: Path, store: LifecycleStore) -> None:
+async def _seed_history(
+    tmp_path: Path, store: LifecycleStore, *, memory_service: MemoryService | None = None
+) -> None:
+    runtime = build_runtime(tmp_path, provider=StaticProvider(text_response("旧" * 900)))
+    runtime.environment.memory_service = memory_service
     await AgentRunner(
-        runtime=build_runtime(tmp_path, provider=StaticProvider(text_response("旧" * 900))),
+        runtime=runtime,
         store=store,
     ).start(AgentRunRequest(input="已有历史", run_id="seed"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary_failure", [False, True])
+async def test_disabled_memory_compaction_commits_empty_window_or_preserves_failed_summary(
+    tmp_path: Path, compaction_store: LifecycleStore, summary_failure: bool
+) -> None:
+    """关闭后的真实压缩不靠旧概览触发；成功提交空窗口，摘要失败保留旧窗口与用量。"""
+    from .test_runner_memory import OverviewService
+
+    service = OverviewService(tmp_path / "memory.db", "关闭前的长期记忆")
+    await _seed_history(tmp_path, compaction_store, memory_service=service)
+    before = compaction_store.load_session("default")
+    assert "关闭前的长期记忆" in before.context_window.memory_overview
+
+    class SummaryProvider(CompactionProvider):
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            response = await super().complete(request)
+            if summary_failure and request.provider_options.get("num_retries") == 0:
+                return response.model_copy(update={"content": []})
+            return response
+
+    provider = SummaryProvider(text_response("关闭后压缩完成"))
+    result = await AgentRunner(
+        runtime=_runtime(tmp_path, provider), store=compaction_store
+    ).start(AgentRunRequest(input="继续处理普通历史", run_id="disabled-compaction"))
+    after = compaction_store.load_session("default")
+    assert len(provider.summary_requests) == 1
+    assert service.reads == [("project",)]
+    assert after.messages[: len(before.messages)] == before.messages
+    assert result.run.usage.compaction.total_tokens == 11
+    if summary_failure:
+        assert result.run.stop_reason is RunStopReason.FAILED
+        assert result.error.code == "CONTEXT_COMPACTION_FAILED"
+        assert after.compaction == before.compaction
+        assert after.context_window == before.context_window
+        assert provider.requests == []
+        retry_provider = StaticProvider(text_response())
+        retry = await AgentRunner(
+            runtime=build_runtime(tmp_path, provider=retry_provider), store=compaction_store
+        ).start(AgentRunRequest(input="失败后继续聊天"))
+        assert retry.run.stop_reason is RunStopReason.COMPLETED, retry.error
+        assert "关闭前的长期记忆" not in retry_provider.requests[0].messages[0].text
+        assert compaction_store.load_session("default").context_window == before.context_window
+    else:
+        assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
+        assert after.compaction is not None
+        assert after.context_window == SessionContextWindow()
+        assert "关闭前的长期记忆" not in provider.requests[0].messages[0].text
+        assert "# Memory overview" not in provider.requests[0].messages[0].text
+        assert after.revision == before.revision + 3
+        checkpoint = compaction_store.load_checkpoint("disabled-compaction")
+        assert checkpoint.session_revision == after.revision
 
 
 @pytest.mark.asyncio
@@ -272,14 +331,28 @@ async def test_recover_after_projection_commit_reuses_summary_reservation_and_fo
 async def test_sqlite_projection_write_failure_preserves_old_summary_and_never_sends_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """真实事务写入失败只保留已记录摘要用量，不发布完成或发送未持久化候选。"""
+    """关闭后的压缩提交失败保留旧摘要和非空窗口，不发送候选或抹掉已记录用量。"""
+    from .test_runner_memory import OverviewService
+
     store = SQLiteStore(tmp_path / "fault.db")
-    await _seed_history(tmp_path, store)
+    service = OverviewService(tmp_path / "memory.db", "写入失败后仍保存的旧概览")
+    await _seed_history(tmp_path, store, memory_service=service)
+    initial_runtime = _runtime(tmp_path, CompactionProvider(text_response("新" * 900)))
+    initial_runtime.environment.memory_service = service
+    memory = initial_runtime.environment.agent_config.memory
+    initial_runtime.environment.agent_config = initial_runtime.environment.agent_config.model_copy(
+        update={
+            "memory": memory.model_copy(
+                update={"overview": memory.overview.model_copy(update={"system_budget_ratio": 0.5})}
+            )
+        }
+    )
     await AgentRunner(
-        runtime=_runtime(tmp_path, CompactionProvider(text_response("新" * 900))), store=store
+        runtime=initial_runtime, store=store
     ).start(AgentRunRequest(input="第一次压缩", run_id="first"))
     before = store.load_session("default")
     assert before.compaction is not None
+    assert "写入失败后仍保存的旧概览" in before.context_window.memory_overview
     original_execute = sqlite_module._execute
 
     def fail_projection_update(
@@ -303,6 +376,8 @@ async def test_sqlite_projection_write_failure_preserves_old_summary_and_never_s
     assert len(provider.summary_requests) == 1
     after = store.load_session("default")
     assert after.compaction == before.compaction
+    assert after.context_window == before.context_window
+    assert service.reads == [("project",), ("project",)]
     assert after.messages[:-2] == before.messages
     assert after.messages[-2].metadata["context_kind"] == "before_current_input"
     assert after.messages[-1].text == "再次压缩"

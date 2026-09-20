@@ -1,7 +1,6 @@
 """Iris 记忆内核公共 API。"""
 
 from .config import (
-    MemoryBackend,
     MemoryConfig,
     build_memory_service_from_config,
     resolve_memory_path,
@@ -70,7 +69,6 @@ __all__ = [
     "FileMemoryMirror",
     "MemoryActor",
     "MemoryArtifactRef",
-    "MemoryBackend",
     "MemoryCandidate",
     "MemoryCandidateStatus",
     "MemoryCategory",

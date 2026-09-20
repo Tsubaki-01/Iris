@@ -366,11 +366,18 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 输入还会把实际选定的 `SessionContextWindow` 与输入/checkpoint 原子提交，再进入 `before_model`。
 即使没有消息增量，窗口初始化也推进一次 session revision；provider 失败不撤销已提交输入。
 
-工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，不重新查询或加载更新后的文件。
+有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
+不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
 重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 8，checkpoint 仍为2，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
+新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。
+这个选择不修改已保存窗口，也不额外推进 session revision；静态 memory 和普通历史仍保留。
+关闭后的成功压缩在原事务内提交空窗口；失败保留旧摘要和窗口，后续请求继续屏蔽该概览。
+
+`memory.enabled` 默认关闭；开启时自动注册 Search/Fetch，写工具仍需显式声明。关闭时不挂载
+宿主传入的 service；开启时复用其原有依赖。改配置后重建 Agent 并使用新会话，不支持热切换。
 记忆读取由模型自主调用 Search/Fetch，结果是普通工具历史，可正常压缩，没有跨轮已读表或
 特殊原文保护。概览指导主题范围，所有 namespace 合计占可用输入预算的2%；没有概览时正常
 聊天但暂不使用长期记忆。静态 `context.yaml` memory 仍为独立固定上下文，不进入会话历史。

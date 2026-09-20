@@ -419,12 +419,21 @@ user input. The first session input also atomically commits the selected `Sessio
 with input and checkpoint before advancing to `before_model`. Window initialization advances the
 session revision once even without a message delta; provider failure does not undo committed input.
 
-Tool loops, later runs, HITL, and recovery replay the committed overview without re-querying or
-reloading updated files. Successful compaction replaces summary and window in the same transaction;
+With an effective runtime memory service, tool loops, later runs, HITL, and recovery replay the committed
+overview without re-querying or reloading updated files. Successful compaction replaces summary and window in the same transaction;
 failure retains the old state. Fork targets start without an adopted window and choose one at their
 first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
 uses schema 8 while checkpoint version stays 2; old formats are rejected without migration or cleanup.
 
+A new runtime without a memory service omits the saved overview from system messages during ordinary
+requests, HITL, and recovery. This does not mutate the saved window or add a session revision change;
+static memory and ordinary history remain available. Successful compaction while disabled commits an
+empty window in the existing transaction. Failure keeps the previous summary and window, while later
+requests continue to omit that overview.
+
+`memory.enabled` defaults to false. Enabling it registers Search/Fetch automatically; writes remain
+explicit. Disabled memory does not attach an injected service; enabled memory preserves that service's
+dependencies. Rebuild the Agent and start a new session after a change; hot switching is not supported.
 Models choose Search/Fetch themselves. Results enter ordinary tool history and may be compacted,
 with no cross-turn seen registry or special text pinning. The overview defines topic scope within
 2% of the available input budget across namespaces; without one, ordinary chat continues without
