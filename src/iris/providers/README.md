@@ -9,6 +9,10 @@ Chat Completion 调用，并把响应与异常归一化回 Iris 类型。runtime
 当前 active path 支持 LiteLLM Chat Completion 的 `complete()` 与 `stream()`；Responses API、
 BIDI/realtime、可注入 HTTP client、历史 adapter API 与 `close()` 都不是公开能力。
 
+Runtime 与显式 memory 概览生成共用 `CompletionProvider` 协议，要求异步 `complete()` 和同步
+`estimate_input_tokens(request)`。协议定义在 [protocols.py](protocols.py)，自定义 provider 和
+测试替身实现同一接口；流式调用仍使用 runtime 的独立 `StreamingRuntimeProvider` 能力。
+
 ## 快速开始
 
 ```python
@@ -52,6 +56,7 @@ flowchart LR
 - `parse_model_route(model)`：按第一个 `/` 解析 `provider/model`。
 - `create_provider_client(...)`：根据路由、配置与显式参数装配 client。
 - `ProviderClient`：执行一次完整或流式 Chat Completion。
+- `CompletionProvider`：完整响应与输入 token 估算的共同协议。
 
 ### 路由与配置
 

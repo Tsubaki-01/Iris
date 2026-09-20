@@ -161,12 +161,42 @@ result = await runner.start(
 )
 ```
 
+## 显式生成概览
+
+宿主可显式调用 `await service.refresh_overview(namespace)`，把该 namespace 的全部 active L2
+条目按 category/kind 组织，一次生成“核心事实＋知识范围”，发布到正式目录的 `Memory.md`。
+生成依赖由构造器的 `overview_provider`、`overview_model` 和 `overview_config` 绑定；provider
+遵循 `iris.providers.CompletionProvider`。配置构造的 Agent 使用已解析的主模型 provider，
+显式注入的 service 则保留宿主原配置。构造、聊天、写入、读取都不会自动生成概览。
+
+```python
+# service 已通过构造器配置概览 provider/model。
+result = await service.refresh_overview("project")
+documents = await service.aload_overviews(["project"])
+```
+
+`MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 1,024 tokens。完整输入超预算
+就报错，不截断或分批摘要。模型只返回含 `core_facts`、`knowledge_scope` 的 JSON：前者允许
+为空，后者必须非空。只有正常完成并解析成功的结果才发布；异常、截断或文件写失败保留旧文件，
+已知模型 usage 留在错误上下文中。空 active L2 快照不调用模型，直接发布“当前无记忆”。
+
+生成期间不持发布锁；发布前在短锁中比较来源版本，较旧生成不能覆盖较新概览。条目后来变化
+但尚无较新概览时，结果可发布并标为陈旧。`load_overviews/aload_overviews` 只读取完整新格式；
+旧格式要求显式 refresh，缺文件只返回“尚未生成概览，知识范围未知”，不扫描条目补目录。
+`MemoryOverviewDocument.navigation` 表示知识范围节。无 mirror 的直接 SDK 返回空 documents，
+refresh 报生成依赖未配置。
+
+当前概览 SDK 不改变既有 runtime 召回行为，也未把文件加入 system；配置中的
+`system_budget_ratio=0.02` 尚未用于主请求窗口计算。
+
 ## 公开接口分组
 
 `iris.memory` 顶层导出较大，按能力分为：
 
 - 模型与枚举：`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
   `MemoryEvent`、`MemoryQuery`、`MemorySearchResult`、`MemoryContextBundle` 等；
+- 概览：`MemoryOverviewConfig/Content/Document/GenerationResult`，以及
+  `refresh_overview()`、`load_overviews()`、`aload_overviews()`；
 - 服务与协议：`MemoryService`、`MemoryStore`、`SQLiteMemoryStore`；
 - async IO：`MemoryIOExecutionMode`，以及 `arecall()`、`aget_item()`、`alist_items()`、
   `alist_events()`、`abuild_context()`、`aremember()`、`aupdate()`、`aforget()`；
@@ -262,6 +292,7 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 | 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
 | namespace 完整快照、投影版本与原子替换 | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
+| 显式概览生成、读回与版本发布 | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
 | 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | 自动召回、去重与历史恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 

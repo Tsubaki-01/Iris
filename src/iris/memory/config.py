@@ -18,7 +18,9 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..exceptions import IrisConfigError
+from ..providers.protocols import CompletionProvider
 from .mirror import FileMemoryMirror
+from .models import MemoryOverviewConfig
 from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
 
@@ -55,17 +57,23 @@ class MemoryConfig(BaseModel):
     recall_mode: Literal["on_turn", "manual"] = "on_turn"
     max_query_terms: int | None = Field(default=None, gt=0)
     mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
+    overview: MemoryOverviewConfig = Field(default_factory=MemoryOverviewConfig)
 
 
 def build_memory_service_from_config(
     config: MemoryConfig,
     workspace_root: Path,
+    *,
+    overview_provider: CompletionProvider | None = None,
+    overview_model: str | None = None,
 ) -> MemoryService | None:
     """从 memory 配置构造服务。
 
     Args:
         config: 已解析的 memory 配置。
         workspace_root: 调用方提供的 workspace 根目录。
+        overview_provider: 宿主显式生成概览时使用的模型调用边界。
+        overview_model: 显式概览请求使用的模型名称。
 
     Returns:
         MemoryService | None: `backend=none` 返回 None；SQLite 后端返回可用服务。
@@ -85,6 +93,9 @@ def build_memory_service_from_config(
     return MemoryService(
         store,
         mirror=mirror,
+        overview_provider=overview_provider,
+        overview_model=overview_model,
+        overview_config=config.overview,
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
 

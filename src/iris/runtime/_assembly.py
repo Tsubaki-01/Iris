@@ -19,6 +19,7 @@ from ..context import (
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
 from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
+from ..providers.protocols import CompletionProvider
 from ..skill import (
     CATALOG_SLOT_NAME,
     LoadSkillTool,
@@ -31,7 +32,7 @@ from ..skill import (
 from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
-from .environment import RuntimeEnvironment, RuntimeProvider
+from .environment import RuntimeEnvironment
 from .runtime import AgentRuntime
 from .tool_bridge import ToolBridge
 
@@ -107,7 +108,7 @@ def assemble_runtime(
     config: AgentConfig,
     *,
     config_path: Path | None,
-    provider: RuntimeProvider | None,
+    provider: CompletionProvider | None,
     memory_service: MemoryService | None,
     api_key: str | None,
     execution_scope: RuntimeExecutionScope,
@@ -129,8 +130,23 @@ def assemble_runtime(
             }
         )
     workspace_root = boundary.workspace_root
+    resolved_provider = (
+        create_provider_client(
+            config.to_model_route(),
+            api_key=api_key,
+            base_url=config.model.base_url,
+            timeout=config.model.timeout,
+        )
+        if provider is None
+        else provider
+    )
     if memory_service is None:
-        memory_service = build_memory_service_from_config(config.memory, workspace_root)
+        memory_service = build_memory_service_from_config(
+            config.memory,
+            workspace_root,
+            overview_provider=resolved_provider,
+            overview_model=config.model.name,
+        )
     context_input = _build_context_input(config, base_dir=base_dir)
     tool_registry = build_tool_registry(
         config.tools, memory_service=memory_service, memory_config=config.memory
@@ -171,18 +187,6 @@ def assemble_runtime(
         tool_registry,
         permission_policy=boundary.permission_policy,
     )
-    resolved_provider: RuntimeProvider
-    if provider is None:
-        client = create_provider_client(
-            config.to_model_route(),
-            api_key=api_key,
-            base_url=config.model.base_url,
-            timeout=config.model.timeout,
-        )
-        resolved_provider = client
-    else:
-        resolved_provider = provider
-
     tool_bridge = ToolBridge(
         tool_view=tool_view,
         tool_executor=tool_executor,

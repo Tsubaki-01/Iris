@@ -15,7 +15,7 @@ import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from ..exceptions import IrisMemoryError
 from ._query import prepare_fts_query, tokenize_text
@@ -42,6 +42,8 @@ from .models import (
 )
 
 # endregion
+
+PublicationT = TypeVar("PublicationT")
 
 
 class SQLiteMemoryStore:
@@ -345,6 +347,17 @@ class SQLiteMemoryStore:
                 return MemoryNamespaceState(namespace, revision, revision)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 正文发布失败", path=str(self.path)) from exc
+
+    def publish_overview(  # noqa: UP047
+        self, namespace: str, publish: Callable[[MemoryNamespaceState], PublicationT]
+    ) -> PublicationT:
+        """串行化完整概览文件的版本比较与发布，不覆盖模型调用。"""
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                return publish(self._read_namespace_state(connection, namespace))
+        except sqlite3.Error as exc:
+            raise IrisMemoryError("SQLite memory 概览发布失败", path=str(self.path)) from exc
 
     def list_items(
         self,

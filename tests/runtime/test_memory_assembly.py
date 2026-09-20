@@ -9,6 +9,7 @@ from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
 from iris.exceptions import IrisConfigError, IrisMemoryError, IrisToolValidationError
 from iris.harness import AgentRunner
 from iris.memory import MemoryConfig, MemoryService, MemoryWriteInput, SQLiteMemoryStore
+from iris.providers import CompletionProvider, ModelRoute
 from iris.runtime import RuntimeFactory
 from iris.tools import ToolExecutionContext
 
@@ -64,9 +65,22 @@ def test_explicit_service_has_priority_over_configuration(
 ) -> None:
     import iris.runtime._assembly as assembly
 
-    service = MemoryService(SQLiteMemoryStore(tmp_path / "explicit.db"))
+    overview_provider = FakeProvider([])
+    overview_config = MemoryConfig().overview
+    service = MemoryService(
+        SQLiteMemoryStore(tmp_path / "explicit.db"),
+        overview_provider=overview_provider,
+        overview_model="independent-model",
+        overview_config=overview_config,
+    )
 
-    def forbidden_config_service(config: MemoryConfig, workspace_root: Path) -> None:
+    def forbidden_config_service(
+        config: MemoryConfig,
+        workspace_root: Path,
+        *,
+        overview_provider: CompletionProvider | None = None,
+        overview_model: str | None = None,
+    ) -> None:
         raise AssertionError("显式 service 不应再构造配置 service")
 
     monkeypatch.setattr(assembly, "build_memory_service_from_config", forbidden_config_service)
@@ -76,8 +90,64 @@ def test_explicit_service_has_priority_over_configuration(
         memory_service=service,
     )
     assert runtime.environment.memory_service is service
+    assert service.overview_provider is overview_provider
+    assert service.overview_model == "independent-model"
+    assert service.overview_config is overview_config
     assert runtime.environment.tool_bridge.tool_view.get("memory_get").service is service
     assert not (tmp_path / ".iris").exists()
+
+
+@pytest.mark.parametrize("injected_provider", [False, True])
+def test_config_service_receives_resolved_provider_before_runtime_is_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, injected_provider: bool
+) -> None:
+    """构造只绑定同一 provider 与概览预算，不发送生成请求。"""
+    import iris.runtime._assembly as assembly
+
+    provider = FakeProvider([])
+    captured: list[tuple[CompletionProvider | None, str | None]] = []
+    original = assembly.build_memory_service_from_config
+
+    def create_provider(
+        model: str | ModelRoute,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> CompletionProvider:
+        assert not injected_provider
+        return provider
+
+    def construct(
+        config: MemoryConfig,
+        workspace_root: Path,
+        *,
+        overview_provider: CompletionProvider | None = None,
+        overview_model: str | None = None,
+    ) -> MemoryService | None:
+        captured.append((overview_provider, overview_model))
+        return original(
+            config,
+            workspace_root,
+            overview_provider=overview_provider,
+            overview_model=overview_model,
+        )
+
+    monkeypatch.setattr(assembly, "create_provider_client", create_provider)
+    monkeypatch.setattr(assembly, "build_memory_service_from_config", construct)
+    runtime = RuntimeFactory.from_config(
+        _config(tmp_path, memory={"backend": "sqlite"}),
+        provider=provider if injected_provider else None,
+    )
+    service = runtime.environment.memory_service
+    assert service is not None
+    assert runtime.environment.provider is provider
+    assert captured == [(provider, "test")]
+    assert service.overview_provider is provider
+    assert service.overview_model == "test"
+    assert service.overview_config is runtime.environment.agent_config.memory.overview
+    assert provider.requests == []
 
 
 def test_memory_builtins_register_default_reads_once_and_only_selected_writes(
@@ -145,7 +215,13 @@ def test_memory_initialization_error_propagates_from_assembly(
 ) -> None:
     import iris.runtime._assembly as assembly
 
-    def fail_memory(config: MemoryConfig, workspace_root: Path) -> None:
+    def fail_memory(
+        config: MemoryConfig,
+        workspace_root: Path,
+        *,
+        overview_provider: CompletionProvider | None = None,
+        overview_model: str | None = None,
+    ) -> None:
         raise IrisMemoryError("memory 初始化失败")
 
     monkeypatch.setattr(assembly, "build_memory_service_from_config", fail_memory)

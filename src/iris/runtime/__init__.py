@@ -16,7 +16,6 @@ from .commit import (
 )
 from .environment import (
     RuntimeEnvironment,
-    RuntimeProvider,
     StreamingRuntimeProvider,
     streaming_provider_for,
 )
@@ -49,7 +48,6 @@ __all__ = [
     "RuntimeEventSink",
     "RuntimeModelStepCommit",
     "RuntimeRunInputCommit",
-    "RuntimeProvider",
     "RuntimeStreamEvent",
     "RuntimeSteeringPort",
     "RuntimeMessageAssembler",

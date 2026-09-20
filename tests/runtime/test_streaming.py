@@ -41,12 +41,12 @@ from iris.message import (
     TextBlock,
     ToolUseBlock,
 )
+from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
     AgentRuntime,
     RuntimeActivationOutcome,
     RuntimeCursor,
     RuntimeEventSink,
-    RuntimeProvider,
     RuntimeStreamEvent,
     RuntimeToolCall,
     RuntimeToolResultCommit,
@@ -281,7 +281,7 @@ class _ClosableStreamingProvider(FakeProvider):
 
 
 def _runtime(
-    provider: RuntimeProvider,
+    provider: CompletionProvider,
     tmp_path: Path,
     *,
     registry: ToolRegistry | None = None,

@@ -16,9 +16,11 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterable, Sequence
 from enum import StrEnum
+from time import perf_counter
 from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
+from ..providers.protocols import CompletionProvider
 from .context import MemoryContextBuilder
 from .files import MemoryFileAccess, freshness_warning
 from .mirror import FileMemoryMirror
@@ -35,10 +37,15 @@ from .models import (
     MemoryItemKind,
     MemoryItemPatch,
     MemoryObserveInput,
+    MemoryOverviewConfig,
+    MemoryOverviewContent,
+    MemoryOverviewDocument,
+    MemoryOverviewGenerationResult,
     MemoryQuery,
     MemorySearchResult,
     MemoryWriteInput,
 )
+from .overview import build_overview_request, complete_overview_content
 from .store import MemoryStore
 
 # endregion
@@ -80,12 +87,18 @@ class MemoryService:
         *,
         mirror: FileMemoryMirror | None = None,
         context_builder: MemoryContextBuilder | None = None,
+        overview_provider: CompletionProvider | None = None,
+        overview_model: str | None = None,
+        overview_config: MemoryOverviewConfig | None = None,
         io_execution_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
     ) -> None:
         """初始化记忆服务。"""
         self.store = store
         self.mirror = mirror
         self.context_builder = context_builder or MemoryContextBuilder()
+        self.overview_provider = overview_provider
+        self.overview_model = overview_model
+        self.overview_config = overview_config or MemoryOverviewConfig()
         self._io_execution_mode = io_execution_mode
 
     @property
@@ -590,6 +603,93 @@ class MemoryService:
             return None
         state = self.store.read_namespace_state(namespace)
         return freshness_warning(state, state.item_revision)
+
+    def load_overviews(self, namespaces: Sequence[str]) -> tuple[MemoryOverviewDocument, ...]:
+        """一次读取已发布概览；缺文件只返回确定的缺产物说明。"""
+        if self.mirror is None:
+            return ()
+        documents: list[MemoryOverviewDocument] = []
+        for namespace in namespaces:
+            published = self.mirror.read_overview(namespace)
+            if published is None:
+                revision = None
+                text = navigation = "尚未生成概览，知识范围未知。"
+                warning = None
+            else:
+                revision, text, navigation = published
+                state = self.store.read_namespace_state(namespace)
+                warning = freshness_warning(state, revision, overview=True)
+            documents.append(
+                MemoryOverviewDocument(
+                    namespace=namespace,
+                    path=self.mirror.document_path(namespace),
+                    source_revision=revision,
+                    text=text,
+                    navigation=navigation,
+                    warning=warning,
+                )
+            )
+        return tuple(documents)
+
+    async def aload_overviews(
+        self, namespaces: Sequence[str]
+    ) -> tuple[MemoryOverviewDocument, ...]:
+        """把全部 namespace 的概览读取放在同一个 async IO job 内。"""
+        return await self.run_async_io(lambda: self.load_overviews(namespaces))
+
+    async def refresh_overview(self, namespace: str) -> MemoryOverviewGenerationResult:
+        """显式生成和发布概览，保留旧完整产物及实际模型用量。"""
+        if self.mirror is None or self.overview_provider is None or self.overview_model is None:
+            raise IrisMemoryError("memory 概览生成依赖未配置", namespace=namespace)
+        started = perf_counter()
+        snapshot = await self.run_async_io(lambda: self.store.read_namespace_snapshot(namespace))
+        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        response = None
+        if snapshot.items:
+            request = build_overview_request(snapshot, self.overview_model, self.overview_config)
+            estimated_tokens = self.overview_provider.estimate_input_tokens(request)
+            if estimated_tokens > self.overview_config.input_budget_tokens:
+                raise IrisMemoryError(
+                    "memory 概览生成输入容量不足，保留最后完整产物",
+                    namespace=namespace,
+                    estimated_tokens=estimated_tokens,
+                    input_budget_tokens=self.overview_config.input_budget_tokens,
+                )
+            response = await self.overview_provider.complete(request)
+            usage = {
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "total_tokens": response.total_tokens,
+            }
+        try:
+            content = (
+                complete_overview_content(response)
+                if response is not None
+                else MemoryOverviewContent(core_facts="", knowledge_scope="当前无记忆。")
+            )
+            published, state = await self.run_async_io(
+                lambda: self.mirror.publish_overview(self.store, snapshot, content)
+            )
+        except IrisMemoryError as exc:
+            exc.context.update(
+                namespace=namespace,
+                source_revision=snapshot.state.item_revision,
+                usage=usage,
+                elapsed_seconds=perf_counter() - started,
+            )
+            raise
+        return MemoryOverviewGenerationResult(
+            namespace=namespace,
+            path=self.mirror.namespace_directory(namespace) / "Memory.md",
+            source_revision=snapshot.state.item_revision,
+            current_revision=state.item_revision,
+            projection_revision=state.projection_revision,
+            item_count=len(snapshot.items),
+            published=published,
+            publication_reason=None if published else "已生成但未发布，已有更新版本",
+            usage=usage,
+            elapsed_seconds=perf_counter() - started,
+        )
 
     def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """召回并构建结构化记忆上下文。

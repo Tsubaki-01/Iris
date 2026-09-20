@@ -38,13 +38,13 @@ from ..lifecycle.models import (
 )
 from ..lifecycle.store import AdmitChildRun, LifecycleStore
 from ..message import TextBlock
+from ..providers import CompletionProvider
 from ..runtime._assembly import (
     RuntimeAssemblyBoundary,
     RuntimeExecutionScope,
     assemble_runtime,
     resolve_runtime_boundary,
 )
-from ..runtime.environment import RuntimeProvider
 from ..tools import ToolErrorInfo, ToolResult
 from ..tools.subagent import (
     ChildWaiting,
@@ -63,7 +63,7 @@ logger = logging.getLogger(__name__)
 class ChildProviderFactory(Protocol):
     """按选中 child 的普通配置构造独立 provider。"""
 
-    def __call__(self, config: AgentConfig, *, config_path: Path) -> RuntimeProvider:
+    def __call__(self, config: AgentConfig, *, config_path: Path) -> CompletionProvider:
         """接收已加载的 child 配置，构造独立 provider。
 
         Args:
@@ -71,7 +71,7 @@ class ChildProviderFactory(Protocol):
             config_path: Child YAML 的声明路径，供 provider 工厂解析相关资源。
 
         Returns:
-            RuntimeProvider: 本次 child 执行使用的 provider。
+            CompletionProvider: 本次 child 执行使用的 provider。
         """
         ...
 

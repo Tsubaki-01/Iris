@@ -52,7 +52,8 @@ from iris.message import (
     Msg,
     ToolUseBlock,
 )
-from iris.runtime import RuntimeCursor, RuntimeProvider, RuntimeStreamEvent
+from iris.providers import CompletionProvider
+from iris.runtime import RuntimeCursor, RuntimeStreamEvent
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import PreparedToolCall, ToolRegistry, ToolResult
 from iris.tools._paths import safe_path_segment
@@ -1486,7 +1487,7 @@ class ChildProviders(ChildProviderFactory):
         self.provider = provider
         self.configs: list[tuple[AgentConfig, Path]] = []
 
-    def __call__(self, config: AgentConfig, *, config_path: Path) -> RuntimeProvider:
+    def __call__(self, config: AgentConfig, *, config_path: Path) -> CompletionProvider:
         self.configs.append((config, config_path))
         return self.provider
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from .models import (
     MemoryActor,
@@ -20,6 +20,8 @@ from .models import (
     MemoryQuery,
     MemorySearchResult,
 )
+
+PublicationT = TypeVar("PublicationT")
 
 
 class MemoryStore(Protocol):
@@ -57,6 +59,11 @@ class MemoryStore(Protocol):
         self, namespace: str, publish: Callable[[MemoryNamespaceSnapshot], None]
     ) -> MemoryNamespaceState:
         """在短写事务内现读快照、发布正文并推进完整投影版本。"""
+
+    def publish_overview(
+        self, namespace: str, publish: Callable[[MemoryNamespaceState], PublicationT]
+    ) -> PublicationT:
+        """在同一短发布事务内读取当前状态并发布已生成概览。"""
 
     def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """按查询条件召回长期记忆。"""

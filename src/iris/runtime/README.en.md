@@ -22,9 +22,16 @@ does not close injected providers, memory, or stores. Root runners prepare autom
 one fixed catalog and connections across runs. Harness prepares children before admission and closes
 their independent resources at WAITING/completion, rebuilding on recovery.
 
+Assembly resolves the provider first, then binds that same instance, `model.name`, and
+`memory.overview` to a service built from configuration for explicit host calls to `refresh_overview()`.
+Construction does not generate an overview. An explicitly injected service keeps its own generation
+dependencies. Runtime still uses the recall and history-snapshot flow below; overviews do not yet
+enter the system message.
+
 ## Dependency direction
 
-`RuntimeProvider` must implement both `complete()` and synchronous `estimate_input_tokens(request)`.
+`iris.providers.CompletionProvider` must implement both `complete()` and synchronous
+`estimate_input_tokens(request)`.
 The latter estimates the complete request after model options and tool schemas are applied. Custom
 providers and test doubles use the same contract. Compaction configuration is carried by
 `RuntimeEnvironment.agent_config.compaction`; no separate environment field is needed.
@@ -152,7 +159,7 @@ cause. These statuses reuse existing identity fields without a separate payload 
 `context.compacted` remains in event history.
 
 `stream_sink=None` preserves the complete-only path exactly: runtime continues to call
-`RuntimeProvider.complete()` with `stream=False`, overriding `request_options`. With a synchronous
+`CompletionProvider.complete()` with `stream=False`, overriding `request_options`. With a synchronous
 `RuntimeEventSink`, runtime
 uses the independent structural `StreamingRuntimeProvider` capability to detect `stream()`.
 Missing capability fails with `PROVIDER_STREAM_ERROR/provider`; runtime neither falls back to
@@ -315,10 +322,11 @@ A `skills.root` escape, missing `skills.require` entry, or name/alias collision 
 ## Public API
 
 Package exports cover `AgentRuntime`, factory/environment, `StreamingRuntimeProvider`,
-`streaming_provider_for()`, `RuntimeEventSink`, `RuntimeStreamEvent`, provider/assembler/tool
+`streaming_provider_for()`, `RuntimeEventSink`, `RuntimeStreamEvent`, assembler/tool
 bridge, `RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
 options/status/results, `run_turn()`, `run_loop()`,
 `resume()`, and old checkpoint helpers do not exist.
+Import the shared non-streaming `CompletionProvider` protocol from `iris.providers`.
 
 ## Verification
 

@@ -7,6 +7,11 @@ Completion calls and normalizes responses and failures back into Iris types. The
 supports both `complete()` and `stream()` for Chat Completion; Responses API, BIDI/realtime,
 injectable HTTP clients, historical adapter APIs, and `close()` are not public capabilities.
 
+Runtime and explicit memory overview generation share `CompletionProvider`, which requires async
+`complete()` and synchronous `estimate_input_tokens(request)`. The protocol lives in
+[protocols.py](protocols.py); custom providers and test doubles implement the same interface.
+Streaming continues to use runtime's independent `StreamingRuntimeProvider` capability.
+
 ## Quick start
 
 ```python
@@ -44,8 +49,8 @@ flowchart LR
 
 ## Public API
 
-The package exports only frozen `ModelRoute`, `parse_model_route()`,
-`create_provider_client()`, and `ProviderClient`.
+The package exports frozen `ModelRoute`, `parse_model_route()`, `create_provider_client()`,
+`ProviderClient`, and the shared `CompletionProvider` protocol.
 
 Built-in Iris provider IDs are `openai`, `anthropic`, and `deepseek`. A custom provider enters the
 registry only when initialized `Config.providers` contains its `base_url`; an API key alone does not

@@ -12,10 +12,12 @@ Example:
 # region imports
 from .client import ProviderClient
 from .factory import ModelRoute, create_provider_client, parse_model_route
+from .protocols import CompletionProvider
 
 # endregion
 
 __all__ = [
+    "CompletionProvider",
     "ModelRoute",
     "ProviderClient",
     "create_provider_client",

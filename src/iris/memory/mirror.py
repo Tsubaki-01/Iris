@@ -1,4 +1,4 @@
-"""SQLite 权威记忆的确定性 Markdown 分类投影。"""
+"""SQLite 权威记忆的确定性 Markdown 分类投影与显式概览发布。"""
 
 from __future__ import annotations
 
@@ -11,15 +11,18 @@ from itertools import groupby
 from pathlib import Path
 
 from ..exceptions import IrisMemoryError
-from .files import BODY_PATHS, namespace_key
+from .files import BODY_PATHS, namespace_key, source_revision
 from .models import (
     MemoryCategory,
     MemoryItem,
     MemoryItemKind,
     MemoryNamespaceSnapshot,
     MemoryNamespaceState,
+    MemoryOverviewContent,
 )
 from .store import MemoryStore
+
+KNOWLEDGE_SCOPE_MARKER = "<!-- iris-memory-knowledge-scope -->"
 
 
 class FileMemoryMirror:
@@ -60,6 +63,62 @@ class FileMemoryMirror:
             items = tuple(item for item in snapshot.items if target_for_item(item) == target)
             content = self._render_body(namespace, snapshot.state.item_revision, target, items)
             self._atomic_replace(f"{prefix}/{target}", content)
+
+    def read_overview(self, namespace: str) -> tuple[int, str, str] | None:
+        """读回规定格式的完整概览和知识范围；缺少文件返回 None。"""
+        path = self.namespace_directory(namespace) / "Memory.md"
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError) as exc:
+            raise IrisMemoryError("memory 概览读取失败", path=str(path)) from exc
+        first_line, _, body = content.partition("\n")
+        revision = source_revision(first_line)
+        facts, marker, navigation = body.partition(KNOWLEDGE_SCOPE_MARKER)
+        scope_header = "\n## 可查询的知识\n\n"
+        if (
+            revision is None
+            or not facts.startswith(f"# Memory：{namespace}\n\n## 核心事实\n\n")
+            or not marker
+            or not navigation.startswith(scope_header)
+            or not navigation[len(scope_header):].strip()
+        ):
+            raise IrisMemoryError("memory 概览格式不完整，请显式刷新概览", path=str(path))
+        return revision, content, navigation.strip() + "\n"
+
+    def publish_overview(
+        self,
+        store: MemoryStore,
+        snapshot: MemoryNamespaceSnapshot,
+        content: MemoryOverviewContent,
+    ) -> tuple[bool, MemoryNamespaceState]:
+        """短发布锁内比较来源版本，原子发布完整的双段概览。"""
+        namespace = snapshot.state.namespace
+        revision = snapshot.state.item_revision
+        rendered = (
+            f"<!-- iris-memory source_revision: {revision} -->\n"
+            f"# Memory：{namespace}\n\n"
+            f"## 核心事实\n\n{content.core_facts.strip()}\n\n"
+            f"{KNOWLEDGE_SCOPE_MARKER}\n"
+            f"## 可查询的知识\n\n{content.knowledge_scope.strip()}\n"
+        )
+
+        def publish(state: MemoryNamespaceState) -> tuple[bool, MemoryNamespaceState]:
+            path = self.namespace_directory(namespace) / "Memory.md"
+            try:
+                with path.open(encoding="utf-8") as previous:
+                    previous_revision = source_revision(previous.readline())
+            except FileNotFoundError:
+                previous_revision = None
+            except (OSError, UnicodeError) as exc:
+                raise IrisMemoryError("memory 概览来源读取失败", path=str(path)) from exc
+            if previous_revision is not None and previous_revision > revision:
+                return False, state
+            self._atomic_replace(f"namespaces/{namespace_key(namespace)}/Memory.md", rendered)
+            return True, state
+
+        return store.publish_overview(namespace, publish)
 
     def _render_body(
         self, namespace: str, revision: int, target: str, items: Sequence[MemoryItem]

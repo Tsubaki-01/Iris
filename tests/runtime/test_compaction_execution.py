@@ -26,7 +26,8 @@ from iris.exceptions import IrisProviderError
 from iris.lifecycle import RuntimeExecutionOptions, SessionCompaction
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock
 from iris.providers import ProviderClient
-from iris.runtime import AgentRuntime, RuntimeActivationOutcome, RuntimeProvider, SteeringInput
+from iris.providers.protocols import CompletionProvider
+from iris.runtime import AgentRuntime, RuntimeActivationOutcome, SteeringInput
 
 
 def _response(text: str) -> LLMResponse:
@@ -60,7 +61,9 @@ class _ThresholdProvider(FakeProvider):
         return self.before
 
 
-def _runtime(provider: RuntimeProvider, *, builder: ContextBuilder | None = None) -> AgentRuntime:
+def _runtime(
+    provider: CompletionProvider, *, builder: ContextBuilder | None = None
+) -> AgentRuntime:
     return build_runtime(
         agent_config=AgentConfig(name="compact", model="openai/gpt-4o-mini", system="规则"),
         context_input=ContextBuildInput(

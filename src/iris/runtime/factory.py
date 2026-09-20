@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import IrisConfigError
+from ..providers.protocols import CompletionProvider
 from ._assembly import RuntimeExecutionScope, assemble_runtime, resolve_runtime_boundary
-from .environment import RuntimeProvider
 from .runtime import AgentRuntime
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ class RuntimeFactory:
         cls,
         path: str | Path,
         *,
-        provider: RuntimeProvider | None = None,
+        provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
@@ -45,7 +45,7 @@ class RuntimeFactory:
 
         Args:
             path (str | Path): Agent YAML 配置文件路径。
-            provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
+            provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
@@ -68,7 +68,7 @@ class RuntimeFactory:
         config: AgentConfig,
         *,
         config_path: Path | None = None,
-        provider: RuntimeProvider | None = None,
+        provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
@@ -77,7 +77,7 @@ class RuntimeFactory:
         Args:
             config (AgentConfig): 已校验的 Agent 配置。
             config_path (Path | None): 配置文件路径；相对它解析 workspace、context 和摘要 prompt。
-            provider (RuntimeProvider | None): 可选 provider 注入；存在时不创建真实 client。
+            provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 

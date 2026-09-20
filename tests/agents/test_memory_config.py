@@ -40,3 +40,23 @@ def test_agent_yaml_rejects_invalid_memory_config(tmp_path: Path, invalid: str) 
     )
     with pytest.raises(IrisConfigError, match="Agent 配置校验失败"):
         load_agent_config(path)
+
+
+def test_agent_yaml_loads_overview_with_existing_recall_and_mirror_options(tmp_path: Path) -> None:
+    """概览仅增加生成配置，YAML 加载仍不装配数据库或模型。"""
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        "name: a\nmodel: openai/test\nsystem: a\nmemory:\n"
+        "  backend: sqlite\n  recall_mode: manual\n  max_query_terms: 128\n"
+        "  mirror:\n    enabled: false\n  overview:\n"
+        "    input_budget_tokens: 2048\n    max_tokens: 256\n    system_budget_ratio: 0.03\n",
+        encoding="utf-8",
+    )
+    config = load_agent_config(path)
+    assert config.memory.overview.input_budget_tokens == 2048
+    assert config.memory.overview.max_tokens == 256
+    assert config.memory.overview.system_budget_ratio == 0.03
+    assert config.memory.recall_mode == "manual"
+    assert config.memory.max_query_terms == 128
+    assert not config.memory.mirror.enabled
+    assert not (tmp_path / ".iris").exists()

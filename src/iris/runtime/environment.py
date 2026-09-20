@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
 from ..memory import MemoryContextBuilder, MemoryService
-from ..message import LLMRequest, LLMResponse, ModelStreamEvent
+from ..message import LLMRequest, ModelStreamEvent
+from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
 from .assembler import RuntimeMessageAssembler
@@ -33,30 +34,6 @@ if TYPE_CHECKING:
     from ..mcp.models import MCPCatalogSnapshot
 
 # endregion
-
-
-class RuntimeProvider(Protocol):
-    """Runtime 调用的 provider 最小协议。
-
-    Runtime 只依赖 provider-neutral 的请求与响应模型，使真实 client 和测试 fake
-    可以在同一运行边界互换。
-
-    Example:
-        response = await provider.complete(request)
-    """
-
-    def estimate_input_tokens(self, request: LLMRequest) -> int:
-        """估算应用模型选项和工具 schema 后的完整输入 token 数。"""
-
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """执行一次非流式 LLM 请求。
-
-        Args:
-            request (LLMRequest): Runtime 组装完成的 provider-neutral 请求。
-
-        Returns:
-            LLMResponse: Provider 归一化后的响应。
-        """
 
 
 @runtime_checkable
@@ -75,12 +52,12 @@ class StreamingRuntimeProvider(Protocol):
 
 
 def streaming_provider_for(
-    provider: RuntimeProvider,
+    provider: CompletionProvider,
 ) -> StreamingRuntimeProvider | None:
     """返回 provider 的独立 streaming capability。
 
     Args:
-        provider (RuntimeProvider): Runtime 当前绑定的 complete capability。
+        provider (CompletionProvider): Runtime 当前绑定的 complete capability。
 
     Returns:
         StreamingRuntimeProvider | None: 可用的 stream capability；缺失时返回 ``None``。
@@ -109,7 +86,7 @@ class RuntimeEnvironment:
     Attributes:
         agent_config (AgentConfig): 已校验的 Agent 配置快照。
         context_input (ContextBuildInput): context 构建输入。
-        provider (RuntimeProvider): provider-neutral 调用边界。
+        provider (CompletionProvider): provider-neutral 调用边界。
         context_builder (ContextBuilder): 固定 context 生成器。
         assembler (RuntimeMessageAssembler): provider 请求装配器。
         tool_bridge (ToolBridge): 工具可见性、预检与执行边界。
@@ -122,7 +99,7 @@ class RuntimeEnvironment:
 
     agent_config: AgentConfig
     context_input: ContextBuildInput
-    provider: RuntimeProvider
+    provider: CompletionProvider
     context_builder: ContextBuilder = field(default_factory=ContextBuilder)
     assembler: RuntimeMessageAssembler = field(default_factory=RuntimeMessageAssembler)
     tool_bridge: ToolBridge = field(default_factory=_default_tool_bridge)
@@ -150,7 +127,6 @@ class RuntimeEnvironment:
 
 __all__ = [
     "RuntimeEnvironment",
-    "RuntimeProvider",
     "StreamingRuntimeProvider",
     "streaming_provider_for",
 ]
