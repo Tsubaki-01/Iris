@@ -362,18 +362,19 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 `StrictUndefined` 和字符上限在渲染时检查。详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
-`initial_session_message_count`。新 run 从 `before_input` 开始，将自动或显式动态 memory 逐条渲染为
-context 消息，连同 BCI 和用户输入通过 `CommitRunInput` 原子归档，并推进至 `before_model`。
-输入提交不占用模型步预算；即使没有记忆结果，也会提交本轮正常输入。provider 失败不会撤销已提交输入。
+`initial_session_message_count`。新 run 在 `before_input` 将 BCI 和用户输入归档；session 首次
+输入还会把实际选定的 `SessionContextWindow` 与输入/checkpoint 原子提交，再进入 `before_model`。
+即使没有消息增量，窗口初始化也推进一次 session revision；provider 失败不撤销已提交输入。
 
-工具循环、HITL resume 和 `before_model` recovery 使用历史中的动态 memory 快照，不再次查询或
-从 options 重渲染。输入提交前中断则允许恢复时重新准备；原始显式 query/results 仍保存在 run options，
-供这一恢复阶段使用。`context.yaml` 的静态 memory 槽位继续作为固定上下文装配，不进入会话历史。
-旧 checkpoint 的 step 0 输入语义不同，恢复边界明确拒绝 v1，不迁移或自动删除旧数据。
+工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，不重新查询或加载更新后的文件。
+成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 8，checkpoint 仍为2，
+旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
-动态 memory 和普通历史一样可被压缩，包括首个模型请求之前；BCI、原始用户输入和最新 steer
-保持既有保护。记忆快照不会因来源是 memory 而额外固定，也不保证压缩后原文继续出现在请求中。
-摘要投影提交后、主响应提交前的恢复使用更新后的 session revision 和同一 pending 模型步。
+记忆读取由模型自主调用 Search/Fetch，结果是普通工具历史，可正常压缩，没有跨轮已读表或
+特殊原文保护。概览指导主题范围，所有 namespace 合计占可用输入预算的2%；没有概览时正常
+聊天但暂不使用长期记忆。静态 `context.yaml` memory 仍为独立固定上下文，不进入会话历史。
+BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的恢复使用新 revision 和同一 pending 步。
 
 `RunUsage` 的 input/output/total 只统计主模型；摘要调用累计在 `usage.compaction`，总消耗由两者
 逐字段相加。摘要 usage-only 提交只推进 run revision，不产生 durable event；commit port 立即

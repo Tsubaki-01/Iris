@@ -20,7 +20,7 @@ from iris.memory import (
     MemoryItemPatch,
     MemoryItemStatus,
     MemoryObserveInput,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
@@ -228,7 +228,7 @@ def test_concurrent_soft_delete_preserves_serialized_facts(
             assert second_operation == "update" and "记忆条目不存在" in str(exc)
             second_result = None
 
-    deleted = second_store.search(MemoryQuery(item_ids=[item.id], include_deleted=True))[0].item
+    deleted = second_store.list_items(["project"], include_deleted=True)[0]
     assert deleted.status == MemoryItemStatus.DELETED
     events = second_store.list_events("project", item_id=item.id)
     assert sum(event.event_type == MemoryEventType.DELETE for event in events) == 1
@@ -237,9 +237,7 @@ def test_concurrent_soft_delete_preserves_serialized_facts(
     else:
         expected_text = "aftertoken" if second_result is not None else "beforetoken"
         assert deleted.text == expected_text
-        results = second_store.search(MemoryQuery(text=expected_text, include_deleted=True))
-        assert [result.item for result in results] == [deleted]
-        assert second_store.search(MemoryQuery(text=expected_text)) == []
+        assert second_store.search(MemorySearchQuery(query=expected_text), ["project"]).items == ()
 
 
 def test_reopening_fts_preserves_existing_and_new_items(tmp_path: Path) -> None:
@@ -256,10 +254,9 @@ def test_reopening_fts_preserves_existing_and_new_items(tmp_path: Path) -> None:
         MemoryWriteInput(namespace=namespace, text="shared preference new", reason="记录新增偏好")
     )
 
-    results = indexed_service.recall(MemoryQuery(namespaces=[namespace], text="shared"))
+    results = indexed_service.search(MemorySearchQuery(query="shared"), [namespace]).items
 
-    assert {result.item.id for result in results} == {old_item.id, new_item.id}
-    assert {result.source for result in results} == {"sqlite_fts"}
+    assert {result.item_id for result in results} == {old_item.id, new_item.id}
 
 
 def test_rebuild_fts_tracks_additions_updates_and_deletions(tmp_path: Path) -> None:
@@ -294,24 +291,22 @@ def test_rebuild_fts_tracks_additions_updates_and_deletions(tmp_path: Path) -> N
     indexed_store = SQLiteMemoryStore(path)
     indexed_service = MemoryService(indexed_store)
 
-    results = indexed_service.recall(MemoryQuery(namespaces=[namespace], text="shared"))
+    results = indexed_service.search(MemorySearchQuery(query="shared"), [namespace]).items
 
-    assert {result.item.id for result in results} == {retained.id, updated.id, added.id}
-    assert {result.source for result in results} == {"sqlite_fts"}
-    assert indexed_service.recall(MemoryQuery(namespaces=[namespace], text="obsolete")) == []
-    all_results = indexed_service.recall(
-        MemoryQuery(namespaces=[namespace], text="shared", include_deleted=True)
-    )
-    assert {result.item.id for result in all_results} == {
-        retained.id,
-        updated.id,
-        added.id,
-        deleted.id,
-    }
+    assert {result.item_id for result in results} == {retained.id, updated.id, added.id}
+    assert indexed_service.search(MemorySearchQuery(query="obsolete"), [namespace]).items == ()
+    with indexed_store._connection() as connection:
+        indexed_ids = {
+            row["item_id"]
+            for row in connection.execute(
+                "SELECT item_id FROM memory_items_fts WHERE memory_items_fts MATCH ?", ('"shared"',)
+            )
+        }
+    assert indexed_ids == {retained.id, updated.id, added.id, deleted.id}
 
 
-def test_fts_search_including_deleted_returns_active_and_deleted_matches(tmp_path: Path) -> None:
-    """包含删除项的召回不会因全文索引中的活跃命中而丢掉删除项。"""
+def test_fts_search_excludes_deleted_while_management_keeps_the_record(tmp_path: Path) -> None:
+    """搜索只返回 active，管理读取保留完整软删除记录。"""
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     service = MemoryService(store)
     namespace = "project"
@@ -323,19 +318,16 @@ def test_fts_search_including_deleted_returns_active_and_deleted_matches(tmp_pat
     )
     service.forget(deleted.id, namespace, reason="撤销偏好")
 
-    results = service.recall(
-        MemoryQuery(namespaces=[namespace], text="shared", include_deleted=True)
-    )
-
-    assert {result.item.id: result.item.status for result in results} == {
+    records = store.list_items([namespace], include_deleted=True)
+    assert {record.id: record.status for record in records} == {
         active.id: MemoryItemStatus.ACTIVE,
         deleted.id: MemoryItemStatus.DELETED,
     }
-    active_results = service.recall(MemoryQuery(namespaces=[namespace], text="shared"))
-    assert [result.item.id for result in active_results] == [active.id]
+    active_results = service.search(MemorySearchQuery(query="shared"), [namespace]).items
+    assert [result.item_id for result in active_results] == [active.id]
 
 
-def test_memory_query_owns_result_limit(tmp_path: Path) -> None:
+def test_search_query_owns_result_limit(tmp_path: Path) -> None:
     """结果条数由每次查询声明。"""
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     for number in range(3):
@@ -344,8 +336,8 @@ def test_memory_query_owns_result_limit(tmp_path: Path) -> None:
             event=MemoryEvent(event_type=MemoryEventType.ADD),
         )
 
-    assert len(store.search(MemoryQuery(text="preference", limit=1))) == 1
-    assert len(store.search(MemoryQuery(text="preference", limit=2))) == 2
+    assert len(store.search(MemorySearchQuery(query="preference", limit=1), ["project"]).items) == 1
+    assert len(store.search(MemorySearchQuery(query="preference", limit=2), ["project"]).items) == 2
 
 
 @pytest.mark.parametrize("operation", ["add", "update", "delete", "promote"])
@@ -400,5 +392,8 @@ def test_item_mutation_failure_rolls_back_fts_revision_and_facts(
     assert store.read_namespace_state("project") == before_state
     assert store.list_events("project") == before_events
     assert store.list_candidates("project") == before_candidates
-    assert [result.item.id for result in store.search(MemoryQuery(text="beforetoken"))] == [item.id]
-    assert store.search(MemoryQuery(text="aftertoken")) == []
+    assert [
+        result.item_id
+        for result in store.search(MemorySearchQuery(query="beforetoken"), ["project"]).items
+    ] == [item.id]
+    assert store.search(MemorySearchQuery(query="aftertoken"), ["project"]).items == ()

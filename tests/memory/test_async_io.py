@@ -9,24 +9,22 @@ from pathlib import Path
 
 import pytest
 
+import iris.memory.sqlite as memory_sqlite
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
     FileMemoryMirror,
     MemoryAccessPolicy,
     MemoryBackend,
     MemoryConfig,
-    MemoryGetTool,
-    MemoryGetToolInput,
+    MemoryFetchTool,
+    MemoryFetchToolInput,
     MemoryIOExecutionMode,
     MemoryItem,
     MemoryItemPatch,
-    MemoryListTool,
-    MemoryListToolInput,
     MemoryOverviewContent,
-    MemoryQuery,
-    MemorySearchResult,
+    MemorySearchQuery,
+    MemorySearchResponse,
     MemorySearchTool,
-    MemorySearchToolInput,
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
@@ -36,9 +34,11 @@ from iris.tools import ToolExecutionContext
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["search", "list"])
 async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_together(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
 ) -> None:
     store = SQLiteMemoryStore(tmp_path / "thread.db")
     service = MemoryService(store, io_execution_mode=MemoryIOExecutionMode.THREAD)
@@ -49,6 +49,8 @@ async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_togeth
     create_threads: list[int] = []
     execute_threads: list[int] = []
     close_threads: list[int] = []
+    result_threads: list[int] = []
+    original_snippet = memory_sqlite.make_snippet
     original_to_thread = asyncio.to_thread
     original_connection = store._connection
 
@@ -70,12 +72,21 @@ async def test_thread_read_uses_one_worker_and_keeps_connection_lifecycle_togeth
             yield opened
         close_threads.append(threading.get_ident())
 
+    def snippet(text: str, terms: frozenset[str]) -> tuple[str, bool]:
+        result_threads.append(threading.get_ident())
+        return original_snippet(text, terms)
+
     monkeypatch.setattr(asyncio, "to_thread", to_thread)
     monkeypatch.setattr(store, "_connection", connection)
+    monkeypatch.setattr(memory_sqlite, "make_snippet", snippet)
 
-    items = await service.alist_items([namespace])
-
-    assert [item.text for item in items] == ["thread item"]
+    if operation == "search":
+        response = await service.asearch(MemorySearchQuery(query="thread"), [namespace])
+        assert [hit.snippet for hit in response.items] == ["thread item"]
+        assert result_threads == create_threads
+    else:
+        items = await service.alist_items([namespace])
+        assert [item.text for item in items] == ["thread item"]
     assert to_thread_calls == 1
     assert len(create_threads) == 1
     assert create_threads == close_threads
@@ -138,14 +149,14 @@ async def test_async_read_preserves_memory_exception_identity(
     service = MemoryService(store, io_execution_mode=mode)
     error = IrisMemoryError("injected memory read failure")
 
-    def fail(query: MemoryQuery) -> list[object]:
-        del query
+    def fail(query: MemorySearchQuery, namespaces: Sequence[str]) -> MemorySearchResponse:
+        del query, namespaces
         raise error
 
     monkeypatch.setattr(store, "search", fail)
 
     with pytest.raises(IrisMemoryError) as captured:
-        await service.arecall(MemoryQuery(namespaces=["project"], text="error"))
+        await service.asearch(MemorySearchQuery(query="error"), ["project"])
 
     assert captured.value is error
 
@@ -215,7 +226,6 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     to_thread_calls = 0
     original_to_thread = asyncio.to_thread
     original_search = store.search
-    original_list = store.list_items
     original_get = store.get_item
 
     def policy(context: ToolExecutionContext) -> MemoryAccessPolicy:
@@ -224,13 +234,9 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
             read_namespaces=[first_namespace, second_namespace],
         )
 
-    def search(query: MemoryQuery) -> list[MemorySearchResult]:
+    def search(query: MemorySearchQuery, namespaces: Sequence[str]) -> MemorySearchResponse:
         store_threads.append(threading.get_ident())
-        return original_search(query)
-
-    def list_items(namespaces: Sequence[str], **kwargs: object) -> list[MemoryItem]:
-        store_threads.append(threading.get_ident())
-        return original_list(namespaces, **kwargs)
+        return original_search(query, namespaces)
 
     def get_item(item_id: str, namespaces: Sequence[str]) -> MemoryItem | None:
         store_threads.append(threading.get_ident())
@@ -247,7 +253,6 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
         return await original_to_thread(function, *args, **kwargs)
 
     monkeypatch.setattr(store, "search", search)
-    monkeypatch.setattr(store, "list_items", list_items)
     monkeypatch.setattr(store, "get_item", get_item)
     monkeypatch.setattr(asyncio, "to_thread", to_thread)
     context = ToolExecutionContext(workspace_root=tmp_path, agent_id="agent-a")
@@ -255,29 +260,22 @@ async def test_memory_tools_keep_policy_on_loop_and_submit_one_job_per_operation
     search_result = await MemorySearchTool(
         service=service,
         access_policy_factory=policy,
-    ).arun(MemorySearchToolInput(query="shared", limit=8), context)
-    list_result = await MemoryListTool(
+    ).arun(MemorySearchQuery(query="shared", limit=8), context)
+    get_result = await MemoryFetchTool(
         service=service,
         access_policy_factory=policy,
-    ).arun(MemoryListToolInput(limit=8), context)
-    get_result = await MemoryGetTool(
-        service=service,
-        access_policy_factory=policy,
-    ).arun(MemoryGetToolInput(item_id=first.id), context)
+    ).arun(MemoryFetchToolInput(item_id=first.id), context)
 
     search_payload = json.loads(search_result.content[0].text)
-    list_payload = json.loads(list_result.content[0].text)
     get_payload = json.loads(get_result.content[0].text)
-    assert {item["id"] for item in search_payload["results"]} == {first.id, second.id}
-    assert {item["id"] for item in list_payload["items"]} == {first.id, second.id}
+    assert {item["item_id"] for item in search_payload["items"]} == {first.id, second.id}
     assert get_payload == {
-        "found": True,
         "item": get_payload["item"],
     }
     assert get_payload["item"]["id"] == first.id
-    assert policy_threads == [loop_thread, loop_thread, loop_thread]
-    assert to_thread_calls == 3
-    assert len(store_threads) == 3
+    assert policy_threads == [loop_thread, loop_thread]
+    assert to_thread_calls == 2
+    assert len(store_threads) == 2
     assert all(thread_id != loop_thread for thread_id in store_threads)
 
 
@@ -285,17 +283,19 @@ class _CustomReadStore:
     def __init__(self) -> None:
         self.search_threads: list[int] = []
 
-    def search(self, query: MemoryQuery) -> list[object]:
-        del query
+    def search(self, query: MemorySearchQuery, namespaces: Sequence[str]) -> MemorySearchResponse:
+        del query, namespaces
         self.search_threads.append(threading.get_ident())
-        return []
+        return MemorySearchResponse((), False)
 
 
 @pytest.mark.asyncio
 async def test_direct_custom_store_remains_inline() -> None:
     store = _CustomReadStore()
     service = MemoryService(store)  # type: ignore[arg-type]
-    assert await service.arecall(MemoryQuery(text="anything")) == []
+    assert await service.asearch(
+        MemorySearchQuery(query="anything"), ["project"]
+    ) == MemorySearchResponse((), False)
     assert store.search_threads == [threading.get_ident()]
 
 

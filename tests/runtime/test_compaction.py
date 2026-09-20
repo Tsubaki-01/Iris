@@ -82,37 +82,6 @@ def test_current_run_without_bci_never_borrows_old_context() -> None:
     assert protected_message_indices(messages, len(messages)) == ()
 
 
-def test_dynamic_memories_can_be_compressed_without_losing_bci_or_user() -> None:
-    """逐条动态快照不占用本轮输入锚点，也不能被误识别为 steer。"""
-    messages = [
-        Msg.user("记忆A", sender="context", metadata={"context_kind": "memory", "item_id": "a"}),
-        Msg.user("记忆B", sender="context", metadata={"context_kind": "memory", "item_id": "b"}),
-        Msg.user("本轮环境", sender="context", metadata={"context_kind": "before_current_input"}),
-        Msg.user("原始问题"),
-        Msg.assistant("处理中"),
-        Msg.user("补充要求"),
-    ]
-
-    protected = protected_message_indices(messages, 0)
-
-    assert protected == (2, 3, 5)
-    projected = project_history(
-        messages, SessionCompaction(summary="历史摘要", covered_message_count=5), protected
-    )
-    assert projected[1:] == [messages[2], messages[3], messages[5]]
-
-
-def test_dynamic_memory_before_user_is_a_valid_compaction_cut() -> None:
-    """没有BCI时，可以仅压缩动态记忆而保留原始问题。"""
-    messages = [
-        Msg.user("记忆" * 600, sender="context", metadata={"context_kind": "memory"}),
-        Msg.user("当前问题"),
-    ]
-
-    assert protected_message_indices(messages, 0) == (1,)
-    assert _select(messages, config=CompactionConfig(input_budget_tokens=1000)) == 1
-
-
 def test_projection_restores_covered_anchors_once_in_original_order() -> None:
     messages = [
         Msg.user("旧历史"),

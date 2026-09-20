@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -34,14 +34,6 @@ class MemoryBackend(StrEnum):
     SQLITE = "sqlite"
 
 
-class MemoryMirrorConfig(BaseModel):
-    """记忆 mirror 配置。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool = True
-
-
 class MemoryConfig(BaseModel):
     """记忆系统声明式配置。"""
 
@@ -54,9 +46,6 @@ class MemoryConfig(BaseModel):
         default_factory=lambda: ["project"]
     )
     write_namespace: str = Field(default="project", pattern=r"\S")
-    recall_mode: Literal["on_turn", "manual"] = "on_turn"
-    max_query_terms: int | None = Field(default=None, gt=0)
-    mirror: MemoryMirrorConfig = Field(default_factory=MemoryMirrorConfig)
     overview: MemoryOverviewConfig = Field(default_factory=MemoryOverviewConfig)
 
 
@@ -86,10 +75,8 @@ def build_memory_service_from_config(
     root = resolve_memory_path(config.root, workspace_root)
     path = resolve_memory_path(config.path, workspace_root)
     store = SQLiteMemoryStore(path)
-    mirror: FileMemoryMirror | None = None
-    if config.mirror.enabled:
-        mirror = FileMemoryMirror(root, workspace_root=workspace_root)
-        mirror.initialize_layout()
+    mirror = FileMemoryMirror(root, workspace_root=workspace_root)
+    mirror.initialize_layout()
     return MemoryService(
         store,
         mirror=mirror,

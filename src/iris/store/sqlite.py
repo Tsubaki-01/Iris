@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v7 的同步 SQLite store。"""
+"""精确 lifecycle schema v8 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ from ..lifecycle.models import (
     RunToolCallRecord,
     RunUsage,
     SessionCompaction,
+    SessionContextWindow,
     SessionSnapshot,
     SubagentRunLink,
     ToolCallPhase,
@@ -91,7 +92,12 @@ from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._compaction import add_compaction_usage, validate_compaction_commit
 from ._serialization import jsonable as _jsonable
-from ._session_history import build_fork_point_page, project_fork_point, validate_fork_source
+from ._session_history import (
+    build_fork_point_page,
+    project_fork_point,
+    validate_context_window_initialization,
+    validate_fork_source,
+)
 from ._sqlite_messages import decode_session_messages
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._subagent import (
@@ -128,6 +134,7 @@ class _SessionMetadata(BaseModel):
     updated_at: datetime | None
     forked_from_run_id: str | None = None
     compaction: SessionCompaction | None = None
+    context_window: SessionContextWindow | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -1368,11 +1375,13 @@ class SQLiteStore:
         )
         cursor = _execute(
             connection,
-            """UPDATE sessions SET revision = ?, compaction_json = ?, updated_at = ?
+            """UPDATE sessions SET revision = ?, compaction_json = ?, context_window_json = ?,
+            updated_at = ?
             WHERE session_id = ? AND revision = ?""",
             (
                 next_revision,
                 _dump_json(command.compaction),
+                _dump_json(command.context_window),
                 command.now.isoformat(),
                 session.session_id,
                 session.revision,
@@ -1401,11 +1410,13 @@ class SQLiteStore:
         session = self._require_history_preconditions(
             connection, run, command.expected_session_revision, operation=operation
         )
-        current_checkpoint = self._require_checkpoint(
-            connection, run.run_id, operation=operation
-        )
+        current_checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
         validate_run_input_transition(current_checkpoint, command.checkpoint)
-        next_revision = session.revision + bool(command.message_delta)
+        validate_context_window_initialization(
+            session.context_window, command.initial_context_window
+        )
+        changes_session = bool(command.message_delta or command.initial_context_window is not None)
+        next_revision = session.revision + changes_session
         _validate_checkpoint_replacement(
             run,
             current_checkpoint,
@@ -1420,13 +1431,19 @@ class SQLiteStore:
             checkpoint_sequence=command.checkpoint.sequence,
             updated_at=command.now,
         )
-        if command.message_delta:
-            self._update_session(connection, session, command.message_delta, command.now)
+        if changes_session:
+            self._update_session(
+                connection,
+                session,
+                command.message_delta,
+                command.now,
+                initial_context_window=command.initial_context_window,
+            )
         self._update_run(connection, run, updated, next_revision)
         self._update_checkpoint(connection, current_checkpoint, command.checkpoint, command.now)
         return RunCommit(
             run=updated,
-            session_revision=next_revision if command.message_delta else None,
+            session_revision=next_revision if changes_session else None,
             checkpoint=command.checkpoint,
         )
 
@@ -2852,6 +2869,8 @@ class SQLiteStore:
         current: _SessionMetadata,
         message_delta: list[Msg],
         updated_at: datetime,
+        *,
+        initial_context_window: SessionContextWindow | None = None,
     ) -> int:
         """CAS 推进 session metadata，并只插入本次 message delta。"""
         next_revision = current.revision + 1
@@ -2859,12 +2878,18 @@ class SQLiteStore:
         cursor = _execute(
             connection,
             """UPDATE sessions
-            SET revision = ?, message_count = ?, updated_at = ?
+            SET revision = ?, message_count = ?, updated_at = ?,
+                context_window_json = COALESCE(?, context_window_json)
             WHERE session_id = ? AND revision = ? AND message_count = ?""",
             (
                 next_revision,
                 next_message_count,
                 updated_at.isoformat(),
+                (
+                    _dump_json(initial_context_window)
+                    if initial_context_window is not None
+                    else None
+                ),
                 current.session_id,
                 current.revision,
                 current.message_count,
@@ -3234,6 +3259,7 @@ class SQLiteStore:
                 ),
                 forked_from_run_id=metadata.forked_from_run_id,
                 compaction=metadata.compaction,
+                context_window=metadata.context_window,
             )
         except (
             ValidationError,
@@ -3260,7 +3286,7 @@ class SQLiteStore:
         """只读取 session CAS metadata、更新时间与直接来源。"""
         row = connection.execute(
             """SELECT session_id, revision, message_count, updated_at, forked_from_run_id,
-                compaction_json
+                compaction_json, context_window_json
             FROM sessions WHERE session_id = ?""",
             (session_id,),
         ).fetchone()
@@ -3413,6 +3439,11 @@ def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:
         compaction=(
             SessionCompaction.model_validate(_load_json(row["compaction_json"]))
             if row["compaction_json"] is not None
+            else None
+        ),
+        context_window=(
+            SessionContextWindow.model_validate(_load_json(row["context_window_json"]))
+            if row["context_window_json"] is not None
             else None
         ),
     )

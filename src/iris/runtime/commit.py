@@ -14,7 +14,13 @@ from typing import Protocol
 
 from ..exceptions import IrisRunConflictError, IrisRunStateError
 from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerprint
-from ..lifecycle import CheckpointResumability, SessionCompaction, SessionSnapshot, TokenUsage
+from ..lifecycle import (
+    CheckpointResumability,
+    SessionCompaction,
+    SessionContextWindow,
+    SessionSnapshot,
+    TokenUsage,
+)
 from ..lifecycle.models import SubagentRunLink
 from ..message import Msg
 from ..tools import PreparedToolCall, ToolEffectGuard, ToolResult
@@ -64,20 +70,22 @@ class ToolCallClaim:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RuntimeRunInputCommit:
-    """首个模型请求前的完整历史输入组提交事实。"""
+    """首个模型请求前的完整历史输入组与首建窗口提交事实。"""
 
     cursor_before: RuntimeCursor
     message_delta: tuple[Msg, ...]
     cursor_after: RuntimeCursor
+    initial_context_window: SessionContextWindow | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RuntimeCompactionCommit:
-    """替换历史投影并保持当前模型步 reservation 的提交事实。"""
+    """替换历史投影、上下文窗口并保持当前模型步 reservation 的提交事实。"""
 
     cursor_before: RuntimeCursor
     expected_session_revision: int
     compaction: SessionCompaction
+    context_window: SessionContextWindow
     before_input_tokens: int
     after_input_tokens: int
 

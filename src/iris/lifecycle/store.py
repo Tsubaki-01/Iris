@@ -32,6 +32,7 @@ from .models import (
     RunToolCallRecord,
     RunUsage,
     SessionCompaction,
+    SessionContextWindow,
     SessionSnapshot,
     SubagentRunLink,
     TokenUsage,
@@ -128,13 +129,14 @@ class ResumeWaitingRun:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CommitRunInput:
-    """原子归档 run 输入组并进入首个模型请求，不消耗模型步。"""
+    """原子归档 run 输入组、首建窗口并进入首个模型请求，不消耗模型步。"""
 
     run_id: str
     expected_run_revision: int
     activation_id: str
     expected_session_revision: int
     message_delta: list[Msg]
+    initial_context_window: SessionContextWindow | None = None
     checkpoint: RunCheckpoint
     now: datetime
 
@@ -162,13 +164,14 @@ class RecordCompactionUsage:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CommitCompaction:
-    """原子替换摘要投影并保存同一执行位置的 checkpoint。"""
+    """原子替换摘要投影与上下文窗口并保存同一执行位置的 checkpoint。"""
 
     run_id: str
     expected_run_revision: int
     activation_id: str
     expected_session_revision: int
     compaction: SessionCompaction
+    context_window: SessionContextWindow
     checkpoint: RunCheckpoint
     before_input_tokens: int
     after_input_tokens: int

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
@@ -13,13 +14,13 @@ from iris.memory import (
     FileMemoryMirror,
     MemoryAccessPolicy,
     MemoryActor,
+    MemoryArtifactRef,
     MemoryConfig,
-    MemoryGetTool,
-    MemoryGetToolInput,
-    MemoryListTool,
-    MemoryListToolInput,
+    MemoryFetchTool,
+    MemoryFetchToolInput,
+    MemoryItemPatch,
+    MemorySearchQuery,
     MemorySearchTool,
-    MemorySearchToolInput,
     MemoryService,
     MemorySourceType,
     MemoryWriteInput,
@@ -34,6 +35,15 @@ from iris.tools.permissions import DefaultPermissionPolicy
 
 def _context(tmp_path: Path, agent_id: str = "agent") -> ToolExecutionContext:
     return ToolExecutionContext(workspace_root=tmp_path, agent_id=agent_id)
+
+
+@pytest.mark.parametrize(
+    "data", [{}, {"item_id": " \n"}, {"item_id": "id", "namespace": "private"}]
+)
+def test_fetch_input_requires_only_a_nonblank_item_id(data: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        MemoryFetchToolInput.model_validate(data)
+    assert MemoryFetchToolInput(item_id="arbitrary-id").item_id == "arbitrary-id"
 
 
 @pytest.mark.asyncio
@@ -53,67 +63,127 @@ async def test_search_ranks_all_read_namespaces_before_limiting(
         access_policy_factory=lambda _: MemoryAccessPolicy(read_namespaces=namespaces),
     )
 
-    result = await tool.arun(MemorySearchToolInput(query="needle", limit=1), _context(tmp_path))
+    result = await tool.arun(MemorySearchQuery(query="needle", limit=1), _context(tmp_path))
 
     payload = json.loads(result.content[0].text)
-    assert [item["id"] for item in payload["results"]] == [relevant.id]
-    assert payload["results"][0]["namespace"] == "project"
+    assert [item["item_id"] for item in payload["items"]] == [relevant.id]
+    assert payload["items"][0]["namespace"] == "project"
+    assert payload["has_more"] is True
+    assert payload["hint"] == "还有候选，可收紧关键词或 categories/kinds 后重试"
 
 
 @pytest.mark.asyncio
-async def test_get_and_list_use_the_bound_namespaces(tmp_path: Path) -> None:
+async def test_fetch_returns_the_current_full_item_and_refreshes_policy(tmp_path: Path) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "read.db"))
-    shared = service.remember(MemoryWriteInput(text="shared note", reason="test"))
-    hidden = service.remember(
-        MemoryWriteInput(namespace="private", text="private note", reason="test")
+    item = service.remember(
+        MemoryWriteInput(
+            text="original needle",
+            reason="seed",
+            source_id="known-source",
+            confidence=0,
+            artifacts=[MemoryArtifactRef(path="absent-attachment.txt", metadata={"name": "资料"})],
+            metadata={"nested": {"names": ["完整", "内容"]}},
+        )
     )
-    policy = default_memory_access_policy_factory(MemoryConfig())
-    get = MemoryGetTool(service=service, access_policy_factory=policy)
-    listing = MemoryListTool(service=service, access_policy_factory=policy)
+    namespace = "project"
+    calls = 0
 
-    found = await get.arun(MemoryGetToolInput(item_id=shared.id), _context(tmp_path, "another"))
-    missing = await get.arun(MemoryGetToolInput(item_id=hidden.id), _context(tmp_path))
-    listed = await listing.arun(MemoryListToolInput(), _context(tmp_path))
+    def policy(_: ToolExecutionContext) -> MemoryAccessPolicy:
+        nonlocal calls
+        calls += 1
+        return MemoryAccessPolicy(read_namespaces=(namespace,))
 
-    assert json.loads(found.content[0].text)["item"]["id"] == shared.id
-    assert json.loads(missing.content[0].text) == {"found": False}
-    assert [item["id"] for item in json.loads(listed.content[0].text)["items"]] == [shared.id]
+    search = MemorySearchTool(service=service, access_policy_factory=policy)
+    fetch = MemoryFetchTool(service=service, access_policy_factory=policy)
+    searched = await search.arun(MemorySearchQuery(query="needle"), _context(tmp_path))
+    assert json.loads(searched.content[0].text)["items"][0]["item_id"] == item.id
+    updated = service.update(
+        item.id, "project", MemoryItemPatch(text="updated body"), reason="edit"
+    )
+    for _ in range(2):
+        found = await fetch.arun(MemoryFetchToolInput(item_id=item.id), _context(tmp_path))
+        assert json.loads(found.content[0].text) == {"item": updated.model_dump(mode="json")}
+    namespace = "private"
+    assert json.loads(
+        (await search.arun(MemorySearchQuery(query="updated"), _context(tmp_path))).content[0].text
+    ) == {"items": [], "has_more": False}
+    with pytest.raises(IrisMemoryError, match="允许读取范围内未找到有效记忆"):
+        await fetch.arun(MemoryFetchToolInput(item_id=item.id), _context(tmp_path))
+    assert calls == 5
 
 
 @pytest.mark.asyncio
-async def test_empty_read_range_returns_no_memory(tmp_path: Path) -> None:
+async def test_fetch_by_known_id_requires_no_previous_search(tmp_path: Path) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "known.db"))
+    item = service.remember(MemoryWriteInput(text="direct body", reason="seed"))
+    fetch = MemoryFetchTool(
+        service=service, access_policy_factory=default_memory_access_policy_factory(MemoryConfig())
+    )
+    result = await fetch.arun(MemoryFetchToolInput(item_id=item.id), _context(tmp_path))
+    assert json.loads(result.content[0].text) == {"item": item.model_dump(mode="json")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["missing", "deleted", "superseded", "outside"])
+async def test_fetch_reports_unavailable_items_through_the_executor(
+    tmp_path: Path, state: str
+) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "unavailable.db"))
+    item = service.remember(
+        MemoryWriteInput(
+            namespace="excluded" if state == "outside" else "project", text="body", reason="seed"
+        )
+    )
+    if state in {"deleted", "superseded"}:
+        service.update(item.id, "project", MemoryItemPatch(status=state), reason="inactive")
+    result = await _executor(service).execute_one(
+        ToolUseBlock(
+            id="fetch",
+            name="memory_fetch",
+            input={"item_id": "missing" if state == "missing" else item.id},
+        ),
+        _context(tmp_path),
+    )
+    assert result.is_error
+    assert result.error is not None
+    assert "允许读取范围内未找到有效记忆" in result.error.message
+
+
+@pytest.mark.asyncio
+async def test_empty_read_range_returns_no_search_hits_and_fetch_error(tmp_path: Path) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "empty.db"))
     item = service.remember(MemoryWriteInput(text="remembered", reason="test"))
 
     def policy(_: ToolExecutionContext) -> MemoryAccessPolicy:
         return MemoryAccessPolicy(read_namespaces=())
 
-    context = _context(tmp_path)
-
-    search = await MemorySearchTool(service=service, access_policy_factory=policy).arun(
-        MemorySearchToolInput(query="remembered"), context
+    result = await MemorySearchTool(service=service, access_policy_factory=policy).arun(
+        MemorySearchQuery(query="remembered"), _context(tmp_path)
     )
-    listed = await MemoryListTool(service=service, access_policy_factory=policy).arun(
-        MemoryListToolInput(), context
-    )
-    found = await MemoryGetTool(service=service, access_policy_factory=policy).arun(
-        MemoryGetToolInput(item_id=item.id), context
-    )
-
-    assert json.loads(search.content[0].text) == {"results": []}
-    assert json.loads(listed.content[0].text) == {"items": []}
-    assert json.loads(found.content[0].text) == {"found": False}
+    assert json.loads(result.content[0].text) == {"items": [], "has_more": False}
+    with pytest.raises(IrisMemoryError, match="允许读取范围内未找到有效记忆"):
+        await MemoryFetchTool(service=service, access_policy_factory=policy).arun(
+            MemoryFetchToolInput(item_id=item.id), _context(tmp_path)
+        )
 
 
-def test_memory_registry_defaults_to_reads_and_can_select_write_tools(tmp_path: Path) -> None:
+def test_memory_registry_defaults_empty_and_uses_shared_query_schema(tmp_path: Path) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "registry.db"))
     policy = default_memory_access_policy_factory(MemoryConfig())
     registry = register_memory_tools(service=service, access_policy_factory=policy)
-    assert {tool.definition.name for tool in registry.view().active_tools} == {
+    assert registry.view().active_tools == []
+    reads = register_memory_tools(
+        service=service, access_policy_factory=policy, tool_names=("memory.search", "memory.fetch")
+    )
+    assert {tool.definition.name for tool in reads.view().active_tools} == {
         "memory_search",
-        "memory_list",
-        "memory_get",
+        "memory_fetch",
     }
+    assert MemorySearchTool.input_type is MemorySearchQuery
+    for tool in reads.view().active_tools:
+        assert tool.definition.capabilities == {ToolCapability.READ}
+        assert tool.definition.max_result_chars == 50000
+        assert "namespaces" not in tool.definition.input_schema["properties"]
     writes = register_memory_tools(
         service=service,
         access_policy_factory=policy,
@@ -126,6 +196,33 @@ def test_memory_registry_defaults_to_reads_and_can_select_write_tools(tmp_path: 
             not {"namespace", "actor", "permission_mode"}
             & definition.input_schema["properties"].keys()
         )
+
+
+@pytest.mark.asyncio
+async def test_fetch_uses_the_ordinary_result_cap_and_keeps_full_json_in_artifact(
+    tmp_path: Path,
+) -> None:
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "artifact.db"))
+    item = service.remember(
+        MemoryWriteInput(text="完整正文 " * 200, reason="seed", metadata={"tail": "保留"})
+    )
+    executor = ToolExecutor(
+        register_memory_tools(
+            service=service,
+            access_policy_factory=default_memory_access_policy_factory(MemoryConfig()),
+            tool_names=("memory.fetch",),
+            max_result_chars=500,
+        )
+    )
+    result = await executor.execute_one(
+        ToolUseBlock(id="fetch", name="memory_fetch", input={"item_id": item.id}),
+        _context(tmp_path),
+    )
+    assert not result.is_error
+    assert result.artifact is not None
+    assert len(result.content[0].text) <= 500
+    payload = json.loads(result.artifact.path.read_text(encoding="utf-8"))
+    assert payload == {"item": item.model_dump(mode="json")}
 
 
 def _executor(service: MemoryService, *, write_namespace: str = "project") -> ToolExecutor:
@@ -179,7 +276,7 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
     assert stored.source_id == "remember"
     assert service.list_events("private")[0].actor is MemoryActor.AGENT
     found = await executor.execute_one(
-        ToolUseBlock(id="get", name="memory_get", input={"item_id": item["id"]}),
+        ToolUseBlock(id="get", name="memory_fetch", input={"item_id": item["id"]}),
         context,
     )
     assert json.loads(found.content[0].text)["item"]["text"] == "prefers bananas"
@@ -201,7 +298,9 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
         ToolUseBlock(id="search", name="memory_search", input={"query": "oranges"}),
         context,
     )
-    assert [entry["id"] for entry in json.loads(search.content[0].text)["results"]] == [item["id"]]
+    assert [entry["item_id"] for entry in json.loads(search.content[0].text)["items"]] == [
+        item["id"]
+    ]
     for call_id, expected in [("forget", True), ("forget-again", False)]:
         forgotten = await executor.execute_one(
             ToolUseBlock(
@@ -303,7 +402,8 @@ async def test_all_write_tools_report_committed_projection_failure(
     item_id = json.loads(remembered.content[0].text)["item"]["id"]
     updated = await executor.execute_one(
         ToolUseBlock(
-            id="update", name="memory_update",
+            id="update",
+            name="memory_update",
             input={"item_id": item_id, "patch": {"text": "current fact"}, "reason": "edit"},
         ),
         context,

@@ -60,6 +60,7 @@ from iris.lifecycle import (
     RunToolCallRecord,
     RunUsage,
     SessionCompaction,
+    SessionContextWindow,
     SessionSnapshot,
     SubagentRunLink,
     SuspendRun,
@@ -200,6 +201,7 @@ def _compaction_command(current: RunCommit, *, count: int = 2) -> CommitCompacti
         activation_id=cast(str, current.run.current_activation_id),
         expected_session_revision=checkpoint.session_revision,
         compaction=SessionCompaction(summary=f"摘要 {count}", covered_message_count=count),
+        context_window=SessionContextWindow(),
         checkpoint=checkpoint.model_copy(
             update={
                 "sequence": checkpoint.sequence + 1,

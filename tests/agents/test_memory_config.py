@@ -1,4 +1,4 @@
-"""Agent YAML 复用 MemoryConfig，不在加载时装配数据库。"""
+"""Agent YAML 复用 MemoryConfig，加载只解析当前合同。"""
 
 from pathlib import Path
 
@@ -20,19 +20,19 @@ def test_agent_yaml_loads_memory_options_without_creating_files(tmp_path: Path) 
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: a\nmodel: openai/test\nsystem: a\nmemory:\n"
-        "  backend: sqlite\n  recall_mode: manual\n  max_query_terms: 128\n"
-        "  read_namespaces: [project, research]\n  write_namespace: research\n",
+        "  backend: sqlite\n  read_namespaces: [project, research]\n"
+        "  write_namespace: research\n",
         encoding="utf-8",
     )
     config = load_agent_config(path)
-    assert config.memory.recall_mode == "manual"
-    assert config.memory.max_query_terms == 128
     assert config.memory.read_namespaces == ["project", "research"]
     assert config.memory.write_namespace == "research"
     assert not (tmp_path / ".iris").exists()
 
 
-@pytest.mark.parametrize("invalid", ["scope: {}", "max_query_terms: 0", "recall_mode: always"])
+@pytest.mark.parametrize(
+    "invalid", ["scope: {}", "max_query_terms: 128", "recall_mode: manual", "mirror: {}"]
+)
 def test_agent_yaml_rejects_invalid_memory_config(tmp_path: Path, invalid: str) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text(
@@ -42,13 +42,11 @@ def test_agent_yaml_rejects_invalid_memory_config(tmp_path: Path, invalid: str) 
         load_agent_config(path)
 
 
-def test_agent_yaml_loads_overview_with_existing_recall_and_mirror_options(tmp_path: Path) -> None:
-    """概览仅增加生成配置，YAML 加载仍不装配数据库或模型。"""
+def test_agent_yaml_loads_overview_budgets_without_side_effects(tmp_path: Path) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: a\nmodel: openai/test\nsystem: a\nmemory:\n"
-        "  backend: sqlite\n  recall_mode: manual\n  max_query_terms: 128\n"
-        "  mirror:\n    enabled: false\n  overview:\n"
+        "  backend: sqlite\n  overview:\n"
         "    input_budget_tokens: 2048\n    max_tokens: 256\n    system_budget_ratio: 0.03\n",
         encoding="utf-8",
     )
@@ -56,7 +54,4 @@ def test_agent_yaml_loads_overview_with_existing_recall_and_mirror_options(tmp_p
     assert config.memory.overview.input_budget_tokens == 2048
     assert config.memory.overview.max_tokens == 256
     assert config.memory.overview.system_budget_ratio == 0.03
-    assert config.memory.recall_mode == "manual"
-    assert config.memory.max_query_terms == 128
-    assert not config.memory.mirror.enabled
     assert not (tmp_path / ".iris").exists()

@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v7 schema 与 session history 的持久化契约测试。"""
+"""Lifecycle SQLite v8 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ _COLUMNS = {
         "updated_at",
         "forked_from_run_id",
         "compaction_json",
+        "context_window_json",
     ],
     "session_messages": ["session_id", "ordinal", "message_json"],
     "agent_runs": [
@@ -148,7 +149,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v7_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v8_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -189,7 +190,7 @@ def test_empty_database_creates_exact_v7_schema_and_reopens(tmp_path: Path) -> N
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 7)]
+    assert identity == [("agent_lifecycle", 8)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
@@ -209,7 +210,7 @@ def test_empty_database_creates_exact_v7_schema_and_reopens(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "kind", ["legacy", "v3", "v4", "v5", "v6", "extra", "missing", "unknown_version"]
+    "kind", ["legacy", "v3", "v4", "v5", "v6", "v7", "extra", "missing", "unknown_version"]
 )
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
@@ -244,6 +245,8 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("UPDATE lifecycle_schema SET version = 5")
             elif kind == "v6":
                 connection.execute("UPDATE lifecycle_schema SET version = 6")
+            elif kind == "v7":
+                connection.execute("UPDATE lifecycle_schema SET version = 7")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()
@@ -441,6 +444,25 @@ def test_invalid_compaction_row_is_a_persistence_error(
         connection.execute(
             "UPDATE sessions SET compaction_json = ? WHERE session_id = 'main'",
             (compaction_json,),
+        )
+    with pytest.raises(IrisRunPersistenceError):
+        SQLiteStore(store.path).load_session("main")
+
+
+@pytest.mark.parametrize(
+    "context_window_json",
+    ["not-json", '{"mode":"partial"}', '{"sources":[{"namespace":"project"}]}'],
+)
+def test_invalid_context_window_row_is_a_persistence_error(
+    tmp_path: Path, context_window_json: str
+) -> None:
+    """窗口 JSON 在 SQLite 读取边界完整解析，错误不成为可用快照。"""
+    store = SQLiteStore(tmp_path / "window-corrupt.db")
+    _complete_history_turn(store, run_id="first", session_id="main")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE sessions SET context_window_json = ? WHERE session_id = 'main'",
+            (context_window_json,),
         )
     with pytest.raises(IrisRunPersistenceError):
         SQLiteStore(store.path).load_session("main")

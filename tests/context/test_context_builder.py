@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from xml.etree import ElementTree
 
 import pytest
@@ -125,3 +126,36 @@ def test_xml_renderer_rejects_unsafe_root_tag() -> None:
             "x><injected",
             [ContextSlot(name="instructions", content="content")],
         )
+
+
+def test_system_addendum_follows_custom_template(tmp_path: Path) -> None:
+    """自定义模板不引用额外 slot 时，窗口文本仍在同一 system 消息中。"""
+    template = tmp_path / "system.j2"
+    template.write_text("{{ slots[0].content }}", encoding="utf-8")
+    output = ContextBuilder().build(
+        ContextBuildInput(
+            system=ContextSection(
+                slots=[ContextSlot(name="instructions", content="基础指令")], template=template
+            )
+        ),
+        system_addendum="记忆概览",
+    )
+    assert output.system.role is Role.SYSTEM
+    assert output.system.text == "基础指令\n\n记忆概览"
+    assert output.memory is None
+
+
+def test_system_max_chars_includes_addendum(tmp_path: Path) -> None:
+    """字符上限拥有最终 system 文本，而不是只限制模板正文。"""
+    template = tmp_path / "system.j2"
+    template.write_text("base", encoding="utf-8")
+    context = ContextBuildInput(
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content="base")],
+            template=template,
+            max_chars=9,
+        )
+    )
+    assert ContextBuilder().build(context, system_addendum="abc").system.text == "base\n\nabc"
+    with pytest.raises(IrisContextError, match="字符上限"):
+        ContextBuilder().build(context, system_addendum="abcd")

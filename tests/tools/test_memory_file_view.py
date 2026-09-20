@@ -151,9 +151,6 @@ async def test_configured_file_tools_read_real_projection_and_report_failed_publ
     assert {tool.name for tool in registry.view().active_tools} == {
         "read_file",
         "grep_search",
-        "memory_search",
-        "memory_list",
-        "memory_get",
     }
     executor = ToolExecutor(registry)
     context = ToolExecutionContext(workspace_root=tmp_path)

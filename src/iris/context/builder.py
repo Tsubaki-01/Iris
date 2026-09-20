@@ -38,9 +38,11 @@ class ContextBuilder:
         self.xml_renderer = xml_renderer or ContextXmlRenderer()
         self.template_renderer = template_renderer or ContextTemplateRenderer()
 
-    def build(self, input_data: ContextBuildInput) -> ContextBuildOutput:
+    def build(
+        self, input_data: ContextBuildInput, *, system_addendum: str = ""
+    ) -> ContextBuildOutput:
         """构建 system、memory 和 current input 前置 context 消息。"""
-        system_text = self.render_section("system", input_data.system)
+        system_text = self.render_section("system", input_data.system, addendum=system_addendum)
         memory_text = self._render_optional_section("memory", input_data.memory)
         return ContextBuildOutput(
             system=Msg.system(system_text),
@@ -80,6 +82,7 @@ class ContextBuilder:
         section: ContextSection,
         *,
         slots: list[ContextSlot] | None = None,
+        addendum: str = "",
     ) -> str:
         """渲染一个已定义的 section，供固定上下文和独立动态消息复用。"""
         enabled_slots = slots if slots is not None else _enabled_slots(section)
@@ -104,6 +107,8 @@ class ContextBuilder:
                 _ROOT_TAGS[section_name],
                 enabled_slots,
             )
+        if addendum:
+            rendered = f"{rendered}\n\n{addendum}"
         _validate_max_chars(
             rendered,
             section_name=section_name,

@@ -30,10 +30,10 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v7
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v8
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
-any write. Old databases are unsupported and must be replaced before creating a new store; the
+any write. Old databases are unsupported; choose a new database path for the new store. The
 constructor never resets or changes that file.
 
 ## Architecture
@@ -67,9 +67,10 @@ history precondition checks only the session revision. Both stores share lifecyc
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
 load/recovery boundaries such as SQLite row decoding; a private store serializer projects durable
-values to JSON. Schema v7 keeps revision,
-message count, update time, nullable `forked_from_run_id`, and the `compaction_json` projection in
-`sessions`; later appends preserve the direct source and summary. Messages append under contiguous ordinals in
+values to JSON. Schema v8 keeps revision,
+message count, update time, nullable `forked_from_run_id`, the `compaction_json` projection, and the
+fixed `context_window_json` in `sessions`; later appends preserve the source, summary, and window.
+Messages append under contiguous ordinals in
 `session_messages`. A non-empty delta serializes and inserts only its own messages while advancing
 metadata with a revision-and-message-count CAS. Full `SessionSnapshot` reads still rebuild and
 validate exact ordinals `1..message_count`.
@@ -95,10 +96,10 @@ PENDING writes check run revision and interaction version; a matching RESOLVED a
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v7. Runs and checkpoints no longer store
+when rows are first loaded. The current database is schema v8. Runs and checkpoints no longer store
 an environment fingerprint; older schemas are not migrated or read.
 
-Schema v7 contains:
+Schema v8 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
@@ -122,13 +123,23 @@ conflict/state errors.
 
 ### Run input archival
 
-`commit_run_input(CommitRunInput)` appends the complete input group and advances the checkpoint
+`commit_run_input(CommitRunInput)` appends the BCI/user input group, initializes the window, and advances the checkpoint
 from `before_input` to `before_model` within one lock or SQLite transaction. It reuses run and
 session revisions, the activation fence, and checkpoint sequence. It consumes no model reservation
 and leaves the step index, usage, and event sequence unchanged. Old commands conflict; SQL failures
-roll back the entire group, so recovery cannot observe partial memory/BCI/user input.
-Checkpoint payload version is `2`; loading an older payload fails. The database structure remains
-lifecycle schema v7.
+roll back the entire group, so recovery cannot observe partial input or a separately updated window.
+Checkpoint payload version remains `2`. Lifecycle schema is now `8`, rejecting older databases
+without migration.
+
+`SessionSnapshot.context_window=None` means uninitialized; an explicit `SessionContextWindow()`
+means initialized with no memory text. The first input must provide its adopted window through
+`initial_context_window`; later inputs must pass `None`. A window stores overview text, its
+full/navigation mode, and namespace/path/revision sources outside message history. Full includes
+core facts and knowledge scope; navigation contains only knowledge scope. Later runs,
+HITL, and recovery continue to read the committed value. Initialization and input share one revision
+increment, including initialization with no messages. That revision binds the checkpoint to the window.
+Sources are historical metadata; current
+runner configuration still determines tool read scope.
 
 ### Summary usage and history projection
 
@@ -139,13 +150,15 @@ model-step budget, session, checkpoint, and event sequence stay unchanged; the r
 the child run.
 
 `commit_compaction(CommitCompaction)` requires `SAFE/before_model` and one pending model-step
-reservation. It atomically replaces `SessionSnapshot.compaction`, advances session/run revisions
+reservation. It atomically replaces `SessionSnapshot.compaction` and the required `context_window`, advances session/run revisions
 and checkpoint sequence, and appends one `context.compacted` event. Raw messages, cursor,
 reservation, and usage stay unchanged. The store checks the selection snapshot's session revision,
 activation fence, cancellation, and advancing coverage. Runtime owns tool-group boundaries and
 token limits. The event contains only the covered count and before/after input estimates.
+Cancellation, failed candidates, and CAS conflicts preserve the old window. A later SQLite write
+failure rolls back the summary and window together.
 
-Recovery after a projection commit but before a main response uses the committed summary and the
+Recovery after a projection commit but before a main response uses the committed summary, window, and the
 same pending reservation. Both mutations require the current revision, so stale command resubmissions conflict;
 it does not promise exactly-once external model billing across process restarts.
 
@@ -154,7 +167,7 @@ it does not promise exactly-once external model billing across process restarts.
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v7-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v8-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -165,7 +178,7 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v7.
+schema identity is lifecycle v8.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
 exact tool-call read.
@@ -211,7 +224,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v7, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v8, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
@@ -248,7 +261,8 @@ The `ForkSession` command carries `source_run_id`, a new `target_session_id`, an
 The new session starts at `revision=0`, with its direct source in `forked_from_run_id`; later
 appends or summary commits advance the revision while preserving the source. Its summary comes
 from the source run's frozen `terminal_compaction`, never the source session's later projection.
-History previews continue to return the raw message prefix.
+The target window is always `None`; its first input obtains a fresh overview. History previews
+continue to return the raw message prefix.
 Message IDs, content blocks, tool references, and metadata remain unchanged, and returned objects
 are isolated from stored messages. Fork does not call providers or tools, copy execution-control
 facts, or occupy a lane. The source session may be running a later turn while an older cutoff is
@@ -259,7 +273,7 @@ prefix and inserts the target once under the same `RLock`. SQLite checks the sou
 target session with its source field, copies messages through `INSERT ... SELECT`, reads the target,
 and commits within one `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
 empty target or partial messages. This operation requires neither the source's current session
-revision nor a free lane. The current schema v7 policy still provides no migration.
+revision nor a free lane. The current schema v8 policy still provides no migration.
 
 Preview and fork raise `IrisRunNotFoundError` for an absent source. A non-terminal or child source,
 or a nonpositive list limit, raises `IrisRunStateError`. An existing target, including an empty

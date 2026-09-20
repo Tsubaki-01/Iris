@@ -22,7 +22,7 @@ root runner 自动管理准备时机，多 run 复用同一固定目录与连接
 
 装配先解析 provider，再把同一实例、`model.name` 和 `memory.overview` 配置绑定到按配置构造的
 memory service，供宿主显式调用 `refresh_overview()`。构造过程不生成概览；显式注入的 service
-保留自己的生成依赖。当前 runtime 继续使用下文的召回与历史快照流程，概览尚未进入 system。
+保留自己的生成依赖。运行时按下文的持久窗口规则将已发布概览加入 system。
 
 ## 依赖方向
 
@@ -59,13 +59,13 @@ result = await runtime.execute(
 事实；调用方必须从 durable store 重载最终 `RunResult`。
 
 所有 activation 都携带原始 `run_input` 与创建 run 时的 `initial_session_message_count`。
-engine 在 `before_input` 准备动态 memory、BCI 和用户输入，通过 `commit_run_input()`
-原子归档后进入 `before_model`，不消耗模型 reservation 或增加 step index。
+engine 在 `before_input` 准备首次窗口、BCI 和用户输入，通过 `commit_run_input()`
+原子保存窗口与输入后进入 `before_model`，不消耗模型 reservation 或增加 step index。
 BCI 只在输入阶段构建；后续步骤及已提交输入的 resume/recover 使用历史，不重复追加或渲染。
 checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_model/step0` 的输入状态。
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
-`commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影。
+`commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影与窗口。
 后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
 每次 `before_model` 在主步骤 reservation 获准后检查完整输入，压缩不额外消耗主步骤预算。
 
@@ -73,8 +73,8 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 
 内部 `compaction.py` 在完整原文上定位本 run 的原始输入、最新已归档 steer 与已注入 BCI。
 历史投影依次放入摘要消息、已覆盖锚点、未覆盖原文；assembler 将固定 system、静态 memory
-放在历史之前。BCI 的 `context_kind=before_current_input` 标记与动态 memory 明确区分；
-动态快照按普通历史压缩，不加入强制保护集合。摘要只在投影时包装一层 `<summary>`，不追加回原文。
+放在历史之前。BCI 用 `context_kind=before_current_input` 标记；Search/Fetch 结果属于普通工具
+历史，不加入强制保护集合。摘要只在投影时包装一层 `<summary>`，不追加回原文。
 切点保持 assistant 的整批 tool calls/results 完整，近期原文是软目标，大组放不下时可以仅留
 较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
 
@@ -101,8 +101,8 @@ response 的 message delta，也不增加主步骤 reservation。
 更短的 request timeout 限制。只对当前失败分块的连接、超时或限流错误重试一次。压缩后重新
 读取 run 剩余时间，不延长原始 deadline。取消沿用原语义，排队 steer 留到既有主响应/工具边界。
 
-压缩一旦开始，失败就结束当前 run；保留原文、上次已提交摘要和已经记录的摘要用量。
-摘要投影已提交但主响应尚未提交时，恢复使用新摘要与同一个 pending reservation；WAITING
+压缩一旦开始，失败就结束当前 run；保留原文、上次已提交摘要与窗口和已经记录的摘要用量。
+摘要投影已提交但主响应尚未提交时，恢复使用新摘要、已提交窗口与同一个 pending reservation；WAITING
 先继续原工具流程，`outcome_ready` 只结算。主 provider 实际超窗不会触发额外压缩重试。
 
 cursor 位置只有：
@@ -218,23 +218,33 @@ thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来
 retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
 引入 delta/merge/lock/hash 模型。
 
-## Memory 召回与历史快照
+## Memory 概览窗口与自主读取
 
-配置启用或宿主注入 memory service 后，默认每个新用户 logical run 在 `before_input` 用当前
-输入自动召回一次。`memory.recall_mode=manual` 关闭自动召回；显式 `memory_results`（包括
-空列表）或 `memory_query` 优先于自动查询，两个显式字段互斥。每个片段一条 `sender=context`
-历史消息，metadata 保存 `context_kind=memory`、`namespace`、`item_id` 和 `truncated`。
-工具循环、同 run 的 steer、HITL resume 与
-已提交输入后的 recover 不再查询，继续重放历史中的快照；普通压缩仍可把原文替换为摘要。
-输入提交前中断则可在恢复时重新准备。新的 run 可指定新的查询或结果。
-`context.yaml` 中的静态 memory slot 保持固定位置，不复制进历史。
-`memory_results` 只处理调用方提供的本地快照；显式 `memory_query` 调用
-`MemoryService.abuild_context()`，自动路径调用 `arecall()` 并形成预算内片段。只有自动路径
-按当前历史投影中相同 item_id、相同渲染原文跳过重复追加；不把摘要/工具输出当原文，也不为
-跳过的条目补查或添加压缩保护。自动配置的词项预算不传给显式查询和工具。
-自动读取失败以带 run_id 的 WARNING 提示并继续；渲染、显式输入和服务初始化错误正常报告。
-配置构造的 SQLite service 会在单个 worker job 中完成建连、
-查询、物化和关闭，runtime 不消费取消后的迟到结果。
+Runtime 在 session 的 `context_window` 尚为 `None` 时，按 `read_namespaces` 的配置顺序
+调用一次 `MemoryService.aload_overviews()`。用包含本次 BCI/user 的完整待发送请求选择窗口，
+将概览、输入与 checkpoint 同次提交，再向 provider 发送。显式空窗口表示已经初始化。
+普通新 run、工具循环、steer、HITL 与输入提交后的 recovery 复用已提交文本；只有新 session
+或成功压缩才采用新版概览。Fork 的目标窗口为 `None`，首输入重新采用。
+
+`full` 包含核心事实与知识范围，`navigation` 仅包含知识范围。全部 namespace、状态警告、
+实际工具指引和包装共享 `floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`
+额度，默认比例为 2%。Provider 对同一完整请求有无概览的估算差额就是开销；原有 system、
+静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
+整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
+普通历史的整体容量继续由原有压缩流程处理。
+
+概览通过 `ContextBuilder.build(system_addendum=...)` 放在 system 模板结果之后，计入 system
+字符上限，不写入消息历史。`context.yaml` 中的静态 memory slot 保持原位置。成功压缩把新摘要、
+实际新窗口、checkpoint 和事件一起提交，随后的主请求立即使用该窗口；失败或取消保留旧窗口。
+
+模型指引以当前概览为长期记忆范围：未提及的主题默认没有，不搜索这些主题；已覆盖且相关时
+按需读取。缺概览或无 mirror 时仍正常聊天，但本窗口不使用长期记忆。程序不执行数据库主题
+拦截；覆盖主题下的 Search/Fetch 可读取当前最新条目。工具说明仅列实际启用的
+`memory_search`/`memory_fetch`，尊重 `include_tools`；仅 Fetch 时按已知 ID 读取。窗口中的
+说明保持稳定，执行时仍使用当前工具注册表和权限。Search/Fetch 结果沿普通工具历史与压缩处理。
+
+配置构造的 SQLite service 在单个 worker job 内读取全部 namespace 的发布物；runtime
+不消费取消后的迟到结果。生成仅由宿主显式调用 `refresh_overview()`，运行时采用过程不生成。
 
 ## Factory
 

@@ -137,7 +137,8 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         checkpoint = self._next_checkpoint(
             cursor=commit.cursor_after,
             usage=self._run.usage,
-            session_revision=self._session_revision + bool(commit.message_delta),
+            session_revision=self._session_revision
+            + bool(commit.message_delta or commit.initial_context_window is not None),
         )
         stored = self._store.commit_run_input(
             CommitRunInput(
@@ -146,6 +147,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 activation_id=self._activation_id,
                 expected_session_revision=self._session_revision,
                 message_delta=list(commit.message_delta),
+                initial_context_window=commit.initial_context_window,
                 checkpoint=checkpoint,
                 now=self._clock(),
             )
@@ -248,6 +250,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 activation_id=self._activation_id,
                 expected_session_revision=commit.expected_session_revision,
                 compaction=commit.compaction,
+                context_window=commit.context_window,
                 checkpoint=checkpoint,
                 before_input_tokens=commit.before_input_tokens,
                 after_input_tokens=commit.after_input_tokens,

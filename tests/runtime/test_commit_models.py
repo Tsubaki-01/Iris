@@ -22,20 +22,15 @@ from iris.runtime import (
 from iris.tools import ToolResult
 
 
-@pytest.mark.parametrize("memory_results", [[], [{"item": {"id": "memory-1"}}]])
-def test_runtime_options_reject_query_and_results_together(
-    memory_results: list[dict[str, object]],
+@pytest.mark.parametrize(
+    "field, value", [("memory_query", {}), ("memory_results", []), ("memory_max_chars", 100)]
+)
+def test_execution_options_reject_removed_memory_injection_fields(
+    field: str, value: object
 ) -> None:
-    """显式空结果也不能与显式查询同时提供。"""
-    with pytest.raises(ValidationError, match="memory_query.*memory_results"):
-        RuntimeExecutionOptions(memory_query={"text": "query"}, memory_results=memory_results)
-
-
-def test_runtime_options_keep_explicit_empty_results() -> None:
-    """空结果快照表示调用方已明确提供零条记忆。"""
-    options = RuntimeExecutionOptions(memory_results=[])
-    assert options.memory_results == []
-    assert options.memory_query is None
+    """长期记忆读取不再通过 run options 注入，旧字段在公开解析边界失败。"""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        RuntimeExecutionOptions.model_validate({field: value})
 
 
 @pytest.mark.parametrize("kind", ["input", "reservation", "model", "tool"])

@@ -266,9 +266,11 @@ class _CountingBuilder(ContextBuilder):
         super().__init__()
         self.count = 0
 
-    def build(self, input_data: ContextBuildInput) -> ContextBuildOutput:
+    def build(
+        self, input_data: ContextBuildInput, *, system_addendum: str = ""
+    ) -> ContextBuildOutput:
         self.count += 1
-        return super().build(input_data)
+        return super().build(input_data, system_addendum=system_addendum)
 
 
 @pytest.mark.asyncio

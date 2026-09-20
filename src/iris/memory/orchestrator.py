@@ -20,13 +20,11 @@ from .models import (
     MemoryCandidate,
     MemoryCandidateStatus,
     MemoryCategory,
-    MemoryContextBundle,
     MemoryEpisode,
     MemoryItem,
     MemoryItemKind,
     MemoryLevel,
     MemoryObserveInput,
-    MemoryQuery,
 )
 from .service import MemoryService
 
@@ -207,9 +205,6 @@ class MemoryOrchestrator:
 
         return self.service.promote_candidates(namespace, promotions())
 
-    def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
-        """复用 MemoryService 构建记忆上下文。"""
-        return self.service.build_context(query, max_chars=max_chars)
 
 
 def _candidate_kind(candidate: MemoryCandidate) -> MemoryItemKind:

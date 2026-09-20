@@ -61,11 +61,11 @@ provider clients, tasks, locks, signals, or callbacks.
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
-`CommitRunInput` / `commit_run_input()` atomically appends dynamic memory, BCI, and user input under
+`CommitRunInput` / `commit_run_input()` atomically appends BCI and user input and initializes the window under
 the existing run/session CAS and activation fence, advancing the checkpoint sequence to
 `before_model`. Only the cursor position changes: step index, usage, and model reservations stay
 unchanged, and no model event is emitted. Replaying an old command conflicts.
-`RunCommit.session_revision` returns the committed revision when raw history or its summary changes;
+`RunCommit.session_revision` returns the committed revision when raw history, its summary, or the window changes;
 it does not contain a full `SessionSnapshot`. Call `load_session()` explicitly when history is
 needed. Stores do not promise successful resubmission of historical commands. State-based
 idempotence for matching answers, cancellation, and child admission follows each mutation's contract.
@@ -79,10 +79,29 @@ Stores validate only the phase, counters, identity, and fence affected by the mu
 typed delta. They do not dump and fully revalidate an unchanged aggregate for a one-field update.
 SQLite rows and checkpoint recovery remain full-validation boundaries, while durable models and
 encoders retain JSON-safe guarantees.
-`SessionSnapshot` exposes `session_id`, CAS `revision`, complete `messages`, nullable `compaction`, and direct
+`SessionSnapshot` exposes `session_id`, CAS `revision`, complete `messages`, nullable `compaction`,
+`context_window`, and direct
 source `forked_from_run_id`; later appends preserve that source. Revision advances once per non-empty
 message delta regardless of its message count. The terminal cutoff lives in `RunRecord` and cannot
 be replaced by the session revision. Persistence ordinals do not enter public models.
+
+### Fixed context window
+
+`SessionSnapshot.context_window: SessionContextWindow | None` is `None` until initialization;
+`SessionContextWindow()` represents an initialized window with no memory text. The window stores
+the adopted `memory_overview`, `mode` (`full` for core facts and knowledge scope, `navigation` for
+knowledge scope only), and a `sources` tuple. Each
+`MemoryOverviewSource` contains `namespace`, `path`, and nullable `source_revision`.
+These sources describe a historical snapshot and do not grant current tool access.
+
+The first `CommitRunInput.initial_context_window` must explicitly provide a window; later inputs
+must pass `None` to retain the adopted text. The input group, window, session revision, and checkpoint
+commit together. Initialization advances the revision once even with no messages; changing both
+messages and the window also advances it only once. Later runs, HITL, and recovery
+reuse that window. Only a successful `CommitCompaction.context_window` replaces it; cancellation,
+failure, and CAS conflicts preserve the previous value. Checkpoint v2 binds the window through the
+session revision without duplicating its text. `RuntimeExecutionOptions` no longer accepts memory
+queries, result snapshots, or character budgets; runtime composition owns reading and selection.
 
 ### Summary state and usage
 
@@ -100,7 +119,8 @@ with the child. Provider totals are preserved without assuming total equals inpu
   changes only run revision and update time, returns no events, and leaves the checkpoint, session,
   and main-step counters unchanged.
 - `CommitCompaction` / `commit_compaction()` requires SAFE/before_model with one pending main step.
-  It atomically replaces the summary, advances session/run revisions and checkpoint sequence, and
+  It atomically replaces the summary and required `context_window`, advances session/run revisions
+  and checkpoint sequence, and
   appends `context.compacted`. Cursor, raw messages, reservation, and usage remain unchanged. The
   event contains only coverage and before/after input estimates.
 
@@ -145,7 +165,8 @@ The store owns source eligibility, pagination parameter checks, and target ident
 The new session starts at `revision=0`, and `forked_from_run_id` records its direct source.
 Inherited messages do not consume revisions; later non-empty appends start at 1 and preserve the
 source. Fork inherits the source run's frozen `terminal_compaction`, not the source session's latest
-summary, without creating a run, activation, checkpoint, tool execution
+summary. The target starts with `context_window=None` and selects a fresh window on its first input.
+Fork does not create a run, activation, checkpoint, tool execution
 fact, interaction, event, or lane, and does not restore the source execution position.
 
 ## Public API

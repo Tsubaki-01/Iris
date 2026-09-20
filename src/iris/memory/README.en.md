@@ -5,27 +5,26 @@
 `iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, L1 episodes,
 candidates, L2 items, audit events, SQLite persistence, human-readable file projections, explicit
 orchestration, and memory tools. SQLite is authoritative; Markdown under
-`.iris/memory/` is a projection for humans.
+`.iris/memory/namespaces/` is a projection for humans.
 
-`AgentConfig.memory` defaults to a disabled backend. Enabling SQLite in `agent.yaml` enables one
-automatic recall per new user run and three read tools for additional model-directed queries.
-Dynamic snapshots enter session history for tool loops and recovery. Static `context.yaml` memory
-slots remain separate.
+`AgentConfig.memory` defaults to a disabled backend. With SQLite enabled, the host explicitly
+publishes an overview, and runtime adopts it for a new session or after successful compaction.
+The model uses the adopted overview and the current question to decide whether to call Search or
+Fetch. Ordinary runs do not automatically search items. Declare every memory tool explicitly:
 
 ```yaml
 memory:
   backend: sqlite
-  # These defaults can be omitted
-  recall_mode: on_turn
   read_namespaces: [project]
   write_namespace: project
-  max_query_terms: null
+tools:
+  builtin: [memory.search, memory.fetch]
 ```
 
-`recall_mode: manual` disables automatic recall while keeping tools and explicit SDK queries.
 An injected `memory_service` in `AgentRunner.from_config*()` takes precedence over the configured
-backend. CLI and child agents use the same assembly path. Each child uses its own memory config
-and effective workspace, without copying the parent's dynamic snapshots or explicit query options.
+backend. CLI and child agents share this assembly path. Each child uses its own read range and
+effective workspace and adopts its own initial overview window. Static `context.yaml` memory slots
+remain separate.
 
 ## Quick start
 
@@ -34,7 +33,7 @@ from pathlib import Path
 
 from iris.memory import (
     MemoryConfig,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryWriteInput,
     build_memory_service_from_config,
 )
@@ -52,11 +51,10 @@ item = service.remember(
         reason="The user stated this explicitly",
     )
 )
-results = service.recall(MemoryQuery(text="concise answers"))
-bundle = service.build_context(
-    MemoryQuery(text="concise answers"),
-    max_chars=1000,
-)
+response = service.search(MemorySearchQuery(query="concise answers"), ["project"])
+for hit in response.items:
+    print(hit.snippet, hit.is_complete)
+current = service.get_item(item.id, ["project"])
 ```
 
 `backend="none"` returns `None` without filesystem effects. Memory root and database paths must
@@ -64,7 +62,7 @@ resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-searc
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
 New databases use schema version 4; older versions are rejected at initialization without migration,
 version overwrite, or deletion. A SQLite service built by
-`build_memory_service_from_config()` runs async IO as one worker job, while synchronous methods
+`build_memory_service_from_config()` runs connection setup, SQL, and result construction in one async worker job, while synchronous methods
 still execute on their caller's thread. Directly constructed services and custom stores default to
 `MemoryIOExecutionMode.INLINE`, so their thread affinity is not changed implicitly.
 
@@ -79,17 +77,18 @@ flowchart LR
     Episode["L1 MemoryEpisode"] --> Orchestrator["explicit MemoryOrchestrator"]
     Orchestrator --> Candidate["MemoryCandidate"]
     Candidate --> Item["L2 MemoryItem"]
-    Query["MemoryQuery"] --> Service
-    Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["before_input automatic recall / explicit input"]
-    Runtime --> History["one history snapshot per fragment"]
+    Query["MemorySearchQuery / item_id"] --> Service
+    Service --> Result["Search snippets / Fetch current record"]
+    Service --> Overview["explicit refresh_overview"]
+    Overview --> Window["adopted system overview window"]
+    Result --> History["ordinary tool-result history"]
 ```
 
 Each workspace has its own database/service. Items use an opaque `namespace` string, defaulting to
 `project`; agents reading that namespace share project memory. Agent, session, and visibility no
 longer form a five-field partition. Different workspaces use different databases.
 
-`MemoryQuery(namespaces=["project", "notes"], text="...")` searches all allowed namespaces in one
+`service.search(MemorySearchQuery(query="..."), ["project", "notes"])` searches allowed namespaces in one
 query and applies the limit after global ranking. `get_item(item_id, namespaces)` and
 `list_items(namespaces)` also accept a combined read range. Writes and candidate operations use one
 namespace. An empty read range returns no items.
@@ -97,7 +96,7 @@ namespace. An empty read range returns no items.
 - `observe()` records an L1 episode and `OBSERVE` event, but no long-term item.
 - `remember()` explicitly creates an L2 item and `ADD` event.
 - `update(item_id, namespace, patch, reason=...)` updates an item without changing its ID.
-- `recall()` returns ranked `MemorySearchResult` objects.
+- `search()` returns `MemorySearchResponse(items, has_more)`, with identity fields and a raw snippet per hit.
 - `forget()` tombstones rather than physically deleting items.
 - `MemoryOrchestrator.observe()` uses injected extraction/classification to create candidates.
 - `process_candidates()` explicitly accepts, rejects, or promotes candidates; the default no-op
@@ -121,49 +120,26 @@ if a later candidate or policy fails, previously committed items are projected b
 propagates. Empty batches do not rebuild, and single-item `promote_candidate()` still refreshes
 the mirror before returning.
 
-`MemoryContextBuilder` preserves result order and fits fragments into `max_chars`, truncating only
-the first fragment when necessary and counting omissions. Prompt fragments keep semantic metadata
-but omit storage source and retrieval score by default.
+### System overview window
 
-Runtime archives dynamic fragments with BCI and user input in `before_input`. Later tool
-steps, HITL, and recovery replay that history without another query; ordinary compaction can still
-replace the raw fragments with a summary.
+On the first session input and successful compaction, runtime loads published overviews and chooses
+full core facts plus knowledge scope, or the complete knowledge scope alone. The selected window is
+committed atomically with the session transition. Tool loops, new runs, HITL, and recovery retain the
+adopted window; failed compaction does not replace it. The overview belongs in system context,
+while Search/Fetch results enter ordinary tool history.
 
-Source precedence is `memory_results` (including an empty list), then `memory_query`, then automatic
-recall; the two explicit fields are mutually exclusive. Automatic recall uses only the current user
-input, not the full transcript. Tool steps, steer input, and recovery do not trigger it again.
-Automatic read failures log a WARNING with the run ID and let the conversation continue. Config,
-initialization, explicit-call, and rendering failures retain their normal error behavior.
+All namespaces, warnings, tool instructions, and wrapping share a budget of
+`floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`, with a default ratio
+of `0.02`. If full content does not fit, runtime tries the complete knowledge scope. If that also
+exceeds its budget, it reports a capacity error instead of cutting topics. Selection estimates actual
+request tokens and retains the complete system character limit.
 
-Only automatic recall suppresses a fragment with the same item ID and exactly the same rendered
-content already visible as a raw memory message. Summaries, static slots, and tool outputs do not
-count as evidence. Result and body budgets apply before deduplication, with no refill query.
-There is no global seen set or raw-content pinning; a compacted fragment can be injected again.
-Explicit queries/results and tool responses are not suppressed. Updates and forgetting affect
-future reads without rewriting historical snapshots.
-
-Use an explicit SDK query to override automatic selection for one run:
-
-```python
-from iris.harness import (
-    AgentRunOptions,
-    AgentRunRequest,
-    AgentRunner,
-    RuntimeExecutionOptions,
-)
-
-runner = AgentRunner.from_config_path(
-    "agent.yaml",
-    memory_service=service,
-)
-query = MemoryQuery(text="previous task")
-result = await runner.start(
-    AgentRunRequest(input="Continue the previous task"),
-    options=AgentRunOptions(
-        runtime=RuntimeExecutionOptions(memory_query=query.model_dump(mode="json"))
-    ),
-)
-```
+Model instructions treat topics absent from the adopted overview as unavailable and do not search
+for them. Without an overview, normal chat continues without long-term-memory reads for this window.
+The host must explicitly generate an overview covering new topics, then adopt it in a new session or
+after successful compaction. Already covered topics may still query current database records. This
+is a model instruction, not a database topic filter. Search does not require a subsequent Fetch.
+Updates and forgetting never rewrite previously saved conversation history.
 
 ## Explicit overview generation
 
@@ -196,75 +172,89 @@ message without scanning items or generating a directory. `MemoryOverviewDocumen
 contains knowledge scope. A service without a mirror returns no documents and rejects refresh as
 missing generation dependencies.
 
-The overview SDK does not yet alter runtime recall or inject the file into system context;
-`system_budget_ratio=0.02` is declared but not yet consumed by main-request window selection.
+Generation budgets are independent of main-request window budgets; `system_budget_ratio=0.02`
+controls the system window selection described above.
 
 ## Public surface
 
-The large `iris.memory` export surface is grouped as follows:
+- Inputs and results: [MemorySearchQuery, MemorySearchHit, and MemorySearchResponse](models.py),
+  plus episode, candidate, item, event, and write/update models.
+- Service and storage: [MemoryService](service.py), [MemoryStore](store.py), and
+  [SQLiteMemoryStore](sqlite.py). Synchronous `search/get_item/list_items` remain available for SDK
+  reads. `asearch/aget_item/alist_items` adapt each complete operation. Writes, event reads, and the
+  extraction SDK remain available.
+- Overview: `MemoryOverviewConfig/Content/Document/GenerationResult`, `refresh_overview()`,
+  `load_overviews()`, and `aload_overviews()`.
+- Configuration: [MemoryConfig](config.py), `build_memory_service_from_config()`, and
+  `resolve_memory_path()`.
+- Explicit extraction: [MemoryOrchestrator](orchestrator.py), extractor/classifier/policy protocols,
+  and rule/no-op defaults.
+- File projections: [FileMemoryMirror](mirror.py) and [MemoryFileAccess](files.py).
+- Tools: [Search/Fetch and Remember/Update/Forget](tools.py), policy factories, and explicit registration.
 
-- models/enums: episode, candidate, item, event, query, search result, and context bundle;
-- service/storage: `MemoryService`, `MemoryStore`, and `SQLiteMemoryStore`;
-- overview: `MemoryOverviewConfig/Content/Document/GenerationResult`, `refresh_overview()`,
-  `load_overviews()`, and `aload_overviews()`;
-- async IO: `MemoryIOExecutionMode`, `arecall()`, `aget_item()`, `alist_items()`, `alist_events()`,
-  `abuild_context()`, `aremember()`, `aupdate()`, and `aforget()`;
-- config: `MemoryConfig` and child models, `build_memory_service_from_config()`, and
-  `resolve_memory_path()`;
-- orchestration: extractor/classifier protocols, policy, orchestrator, and rule/no-op defaults;
-- projection: `FileMemoryMirror` and `MemoryContextBuilder`;
-- tools: search/list/get and remember/update/forget tools, `default_memory_access_policy_factory()`, and
-  `register_memory_tools()`.
-
-The exact set is `src/iris/memory/__init__.py::__all__`. Private SQL helpers, mirror markers, and
-tool-payload helpers are not extension contracts.
-
-`MemoryQuery.limit` or a tool's `limit` determines the result count, independently of the query-term
-budget and injected-body budget. Construct orchestrators explicitly; observation and extraction do
-not run by default.
+The complete export set is [__all__](__init__.py). Private SQL, lexer, and payload helpers are not
+SDK extension protocols.
 
 ### Plain-text search
 
-Index and query preparation share one tokenizer: lowercase ASCII letter/digit runs, adjacent
-bigrams for Chinese runs of at least two characters, and a unigram only for an isolated Chinese
-character. Query terms are unique quoted literals joined with OR, not advanced FTS syntax. Indexing
-retains all terms and their frequencies.
-
-`MemoryQuery.max_query_terms=None` keeps all query terms. An explicit budget B takes floor(B/2)
-distinct terms from the start and the remaining quota from the end, then merges without refilling
-overlap. Tail selection uses the last occurrence positions. It still scans the full input and may
-miss a question in the middle. Empty terms do not return recent items; use `list_items()` for listing.
-FTS matches are candidates rather than verified relevance, and lexical search does not guarantee
-paraphrase recall.
-
-`MemoryConfig.max_query_terms` applies only to automatic recall. Explicit SDK and tool queries do
-not inherit that budget.
-
-`register_memory_tools()` defaults to `memory_search`, `memory_list`, and `memory_get`, all with
-`READ` capability. Agents with memory enabled receive these automatically. Agents that manage
-memory can opt into write tools through the existing builtin configuration:
-
-```yaml
-tools:
-  builtin: [memory.remember, memory.update, memory.forget]
+```python
+query = MemorySearchQuery(
+    query="answer preferences",
+    categories=["user", "feedback"],
+    kinds=["preference", "correction"],
+    limit=8,
+)
+response = await service.asearch(query, ["project"])
 ```
 
-These expose `memory_remember`, `memory_update`, and `memory_forget` with `WRITE` capability and
-the existing permission, claim, and result-commit lifecycle. Writes use one policy-bound namespace
-and the same service as SDK calls. Forget returns the actual soft-delete result. Direct SDK tool
-registration can select builtin names through `register_memory_tools(..., tool_names=[...])`.
+`query` is required. Categories and kinds default to empty, meaning no filter for that dimension.
+The result limit defaults to 8 and accepts `1..100`. Unknown fields are rejected, and namespace is
+not part of model input. Storage filters allowed namespaces, categories/kinds, and active status
+before ranking by BM25 ascending, then updated_at/id descending. It reads `limit + 1`, returns only
+limit hits, and computes `has_more`. Values within one filter dimension are OR; dimensions are AND.
+Only `MemoryItem.text` is indexed. Active L1/L2 items are searchable; episodes, unpromoted candidates,
+and deleted/superseded items are excluded from results.
 
-Tool input cannot override the
-namespace. `MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` binds host-owned read and
-write ranges, defaulting to `project`; an empty read range returns nothing. The default factory uses
-`MemoryConfig.read_namespaces/write_namespace` without partitioning by agent ID. The factory runs
-before each tool execution, and `register_memory_tools()` takes `access_policy_factory`.
-`MemoryQuery`, `memory_search`, and
-`memory_list` all declare a `1..100`
-limit. After raw tool input passes that boundary, it is projected to a trusted `MemoryQuery`
-without repeating the same range validation. Tools evaluate access policy on the event loop, then
-submit one combined query as a single service job. Namespace order does not determine which items
-fill the limit. Explicit search tools use the full query without inheriting the automatic-recall budget.
+Indexing, queries, and raw-text positions use the same lexer: lowercase ASCII letter/digit runs,
+adjacent bigrams for Chinese runs, and a single character only for an isolated Chinese character.
+Punctuation and underscores separate tokens. Query terms are deduplicated in first-occurrence order
+and quoted as literal OR terms. Neither input text nor query terms are truncated; indexing retains
+all terms and frequencies. Empty text, zero terms, no matches, or an empty read range returns
+`MemorySearchResponse((), False)`, never recent items.
+
+Each hit contains exactly `item_id/namespace/category/kind/snippet/is_complete`. Bodies of at most
+300 Python Unicode characters are returned in full. For longer bodies, the first matching token's
+start h gives `start=max(0,min(h-150,len(text)-300))`; the snippet is the exact 300-character slice,
+without ellipses or highlighting. `is_complete` describes body completeness, not verified relevance.
+Identical text under different IDs remains separate.
+
+## Memory tools
+
+`register_memory_tools()` defaults to no tools, and enabling memory does not register any implicitly.
+Explicit `memory.search` and `memory.fetch` declarations expose `memory_search` and `memory_fetch`
+with `READ` capability. Search directly uses `MemorySearchQuery` as its input model and returns
+`items` and `has_more`. Only when more candidates exist does it add the hint
+“还有候选，可收紧关键词或 categories/kinds 后重试”.
+
+Fetch takes one nonblank `item_id`; a known ID can be fetched without a preceding Search. It calls
+current `aget_item()` and returns `{"item": item.model_dump(mode="json")}` with every stored field,
+including complete text, source, metadata, artifact references, status, and timestamps. Attachments
+are not opened. Missing, inactive, and out-of-range items report “允许读取范围内未找到有效记忆”. Repeated
+Fetch calls are not suppressed. Updating an item after Search means a later Fetch returns its new
+value. Ordinary `max_result_chars=50000` and ToolExecutor artifact handling still apply.
+
+Agents that write memory explicitly declare `memory.remember/memory.update/memory.forget`, exposing
+`memory_remember/memory_update/memory_forget`. These retain the normal `WRITE` permission, claim,
+and result-commit flow and share the SDK service. Forget reports whether a soft delete actually
+occurred. A stale projection adds a warning while retaining the committed database success.
+
+`MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` binds host-owned read/write ranges,
+defaulting to `project`. Its factory runs for every tool call; tool input cannot override namespace.
+Policy evaluation stays on the event loop; in THREAD mode, the database operation uses one complete
+service worker job. SDK registration selects builtin names with
+`register_memory_tools(..., tool_names=("memory.search", "memory.fetch"))`.
+
+## File projections and persistence
 
 `FileMemoryMirror.initialize_layout()` only creates directories. Canonical category documents live
 under `namespaces/ns_<base64url of namespace UTF-8>/`, covering User, Feedback, Reference, Tasks,
@@ -280,10 +270,11 @@ an unchanged patch does not rewrite the item, event, or revision. A partially fa
 keeps the database result successful and leaves the projection version behind. Write-tool results
 include a warning; ordinary file tools use `MemoryFileAccess` to report freshness from the actual
 file source revision. Database queries remain available when publication fails. Explicit rebuild
-errors still propagate, with no background retry. `mirror.enabled=false` still disables projection.
+errors still propagate, with no background retry. Configured SQLite services always maintain these
+category projections; a directly constructed SDK service may omit the mirror.
 SQLite uses short-lived connections and wraps storage/JSON failures as `IrisMemoryError`.
-FTS contains all item states, with default queries filtering for active items.
-`MemoryQuery(include_deleted=True)` explicitly includes deleted items through the same search path.
+FTS contains all item states, while Search and Fetch only return active records. Management SDK
+`store.list_items(..., include_deleted=True)` can inspect soft-deleted records.
 Item/index writes are transactional; `rebuild_index()` can rebuild from the authoritative table.
 Public store `list_items()`, `list_events()`, and `list_candidates()` calls reject limits outside
 `1..100` with `IrisMemoryError` instead of silently clamping them. Only `list_items(limit=None)`
@@ -299,15 +290,19 @@ requests a complete mirror projection.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| SDK lifecycle, namespace reads, SQLite search, and context building | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
-| Concurrent promotion, field updates, FTS completeness, and result-count config | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
-| Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
+| SDK lifecycle, namespace reads, and search results | `models.py`, `service.py`, `sqlite.py` | `tests/memory/test_service.py` |
+| Concurrent promotion, field updates, FTS completeness, and search filters | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
+| Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_search.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Namespace snapshots, projection revisions, and atomic replacement | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | Explicit overview generation, loading, and versioned publication | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
 | Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
-| Automatic recall, deduplication, and history recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
+| Overview-window adoption, compaction, and recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
-```bash
-uv run pytest tests/memory tests/runtime/test_execute.py
-uv run ruff check src/iris/memory tests/memory tests/runtime/test_execute.py
+Run targeted tests from the repository root, using a fresh basetemp for each invocation:
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+$memoryTestTemp = "$PWD\tmp\pytest-memory-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff'))"
+uv run pytest tests/memory -p no:cacheprovider --basetemp="$memoryTestTemp"
+uv run ruff check src/iris/memory tests/memory
 ```

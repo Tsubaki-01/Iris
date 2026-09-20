@@ -21,7 +21,6 @@ from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
 from ..providers.protocols import CompletionProvider
-from .context import MemoryContextBuilder
 from .files import MemoryFileAccess, freshness_warning
 from .mirror import FileMemoryMirror
 from .models import (
@@ -29,7 +28,6 @@ from .models import (
     MemoryCandidate,
     MemoryCandidateStatus,
     MemoryCategory,
-    MemoryContextBundle,
     MemoryEpisode,
     MemoryEvent,
     MemoryEventType,
@@ -41,8 +39,8 @@ from .models import (
     MemoryOverviewContent,
     MemoryOverviewDocument,
     MemoryOverviewGenerationResult,
-    MemoryQuery,
-    MemorySearchResult,
+    MemorySearchQuery,
+    MemorySearchResponse,
     MemoryWriteInput,
 )
 from .overview import build_overview_request, complete_overview_content
@@ -70,7 +68,6 @@ class MemoryService:
     Attributes:
         store (MemoryStore): 权威记忆存储实现。
         mirror (FileMemoryMirror | None): 权威数据库的可选文件投影。
-        context_builder (MemoryContextBuilder): 用于组合上下文的辅助类实例。
 
     Example:
         service = MemoryService(store=sqlite_store)
@@ -86,7 +83,6 @@ class MemoryService:
         store: MemoryStore,
         *,
         mirror: FileMemoryMirror | None = None,
-        context_builder: MemoryContextBuilder | None = None,
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
         overview_config: MemoryOverviewConfig | None = None,
@@ -95,7 +91,6 @@ class MemoryService:
         """初始化记忆服务。"""
         self.store = store
         self.mirror = mirror
-        self.context_builder = context_builder or MemoryContextBuilder()
         self.overview_provider = overview_provider
         self.overview_model = overview_model
         self.overview_config = overview_config or MemoryOverviewConfig()
@@ -244,22 +239,17 @@ class MemoryService:
     #         Query & Management Methods
     # ==========================================
     # region
-    def recall(self, query: MemoryQuery) -> list[MemorySearchResult]:
-        """召回长期记忆。
+    def search(
+        self, query: MemorySearchQuery, namespaces: Sequence[str]
+    ) -> MemorySearchResponse:
+        """在调用方绑定的读取范围内搜索当前活跃记忆。"""
+        return self.store.search(query, namespaces)
 
-        将搜索请求直接路由至存储引擎执行。支持基于文本或元数据的高级过滤。
-
-        Args:
-            query (MemoryQuery): 限定搜索范围及条件的聚合参数。
-
-        Returns:
-            list[MemorySearchResult]: 按相关度或时间排序的命中结果。
-        """
-        return self.store.search(query)
-
-    async def arecall(self, query: MemoryQuery) -> list[MemorySearchResult]:
-        """异步适配长期记忆召回。"""
-        return await self.run_async_io(lambda: self.recall(query))
+    async def asearch(
+        self, query: MemorySearchQuery, namespaces: Sequence[str]
+    ) -> MemorySearchResponse:
+        """用一次完整同步操作适配搜索，连接与结果组装留在同一 worker。"""
+        return await self.run_async_io(lambda: self.search(query, namespaces))
 
     def forget(
         self,
@@ -690,29 +680,6 @@ class MemoryService:
             usage=usage,
             elapsed_seconds=perf_counter() - started,
         )
-
-    def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
-        """召回并构建结构化记忆上下文。
-
-        包装 context_builder 以代理执行查询并返回限定字数的大文本。
-
-        Args:
-            query (MemoryQuery): 记忆库检索的检索维度集合。
-            max_chars (int): 限制向模型吐出的拼接字符串最大长度。
-
-        Returns:
-            MemoryContextBundle: 装载核心 prompt 内所需的组合数据块。
-        """
-        return self.context_builder.build(self.recall(query), max_chars=max_chars)
-
-    async def abuild_context(
-        self,
-        query: MemoryQuery,
-        *,
-        max_chars: int,
-    ) -> MemoryContextBundle:
-        """异步适配召回与上下文构建的完整同步操作。"""
-        return await self.run_async_io(lambda: self.build_context(query, max_chars=max_chars))
 
     def _update_candidate_status(
         self,

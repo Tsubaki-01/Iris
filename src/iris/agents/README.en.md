@@ -120,36 +120,37 @@ memory service or tools are created unless configured or explicitly injected:
 ```yaml
 memory:
   backend: sqlite
-  recall_mode: on_turn
   read_namespaces: [project]
   write_namespace: project
-  max_query_terms: null
 tools:
   builtin:
+    - memory.search
+    - memory.fetch
     - memory.remember
     - memory.update
     - memory.forget
 ```
 
-An enabled service automatically registers `memory_search`, `memory_list`, and `memory_get`.
-The example's write tools are optional declarations; none is enabled automatically. The six
-memory builtin names are `memory.search/list/get/remember/update/forget`. `recall_mode: manual`
-disables automatic per-run recall while retaining tools and explicit SDK reads. `max_query_terms`
-applies only to automatic queries; explicit SDK/tool queries do not inherit it. See
-[memory](../memory/README.en.md) for retrieval and budget semantics.
+Enabling a backend does not register tools. Declare `memory.search/fetch/remember/update/forget`
+as needed. The model chooses Search/Fetch using the adopted overview; queries retain all terms.
+The old recall_mode, max_query_terms, and mirror settings are no longer accepted. The host generates
+core facts and knowledge scope explicitly; new sessions and successful compaction adopt an overview
+within 2% of the available input budget across all namespaces. Unmentioned topics are treated as
+absent; without an overview, chat continues without long-term memory use. See
+[memory](../memory/README.en.md) for the complete contract.
 
-Loading YAML does not open a database. Runtime first resolves the effective workspace, then builds
-one service shared by recall and tools. Its default database is `.iris/memory/memory.db` within that
+Loading YAML does not open a database. Runtime first resolves the effective workspace and provider,
+then builds one service shared by overview generation and tools. Its database is `.iris/memory/memory.db` within that
 workspace. Agents in the same project can share the default `project` namespace; different
 workspaces use separate databases. An explicitly injected `memory_service` takes precedence over
 the configured backend. CLI uses the same assembly path. Each child uses its own configuration and
-narrowed effective workspace without inheriting the parent's service or dynamic snapshots.
+narrowed effective workspace and adopts its own window without inheriting the parent's service.
 Initialization failures propagate from assembly.
 
-`build_tool_registry(config, *, memory_service=None, memory_config=None)` adds missing default read
-tools alongside declared builtins before registering Python extensions. Explicit memory builtins
+`build_tool_registry(config, *, memory_service=None, memory_config=None)` registers only declared
+builtins before registering Python extensions. Explicit memory builtins
 require a service. `memory_config` binds read and write namespaces, defaulting to `MemoryConfig()`.
-An explicitly declared default read tool is registered once; other actual name or alias conflicts
+An explicitly declared tool is registered once; actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
 

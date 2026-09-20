@@ -27,6 +27,7 @@ from iris.lifecycle import (
     RunRecord,
     RunToolCallRecord,
     SessionCompaction,
+    SessionContextWindow,
     TokenUsage,
 )
 from iris.message import Msg, ToolUseBlock
@@ -84,6 +85,7 @@ def _store_commit_port(
             cursor_before=initial,
             message_delta=(Msg.user("hello"),),
             cursor_after=before,
+            initial_context_window=SessionContextWindow(),
         )
     )
     port.reserve_model_step(before)
@@ -505,6 +507,7 @@ def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
                 cursor_before=cursor,
                 expected_session_revision=before.revision,
                 compaction=compaction,
+                context_window=SessionContextWindow(),
                 before_input_tokens=80_000,
                 after_input_tokens=20_000,
             )
@@ -550,6 +553,7 @@ def test_compaction_usage_accepts_later_cancellation_and_rejects_projection() ->
                 cursor_before=port.cursor,
                 expected_session_revision=session.revision,
                 compaction=SessionCompaction(summary="摘要", covered_message_count=3),
+                context_window=SessionContextWindow(),
                 before_input_tokens=80_000,
                 after_input_tokens=20_000,
             )

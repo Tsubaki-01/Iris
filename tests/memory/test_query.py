@@ -1,12 +1,8 @@
-"""普通文本词法、词项预算与联合 namespace 检索。"""
-
-from pathlib import Path
+"""索引、查询和原文片段共用完整词法。"""
 
 import pytest
 
-from iris.memory._query import prepare_fts_query, tokenize_text
-from iris.memory.models import MemoryEvent, MemoryEventType, MemoryItem, MemoryQuery
-from iris.memory.sqlite import SQLiteMemoryStore
+from iris.memory._query import iter_token_spans, make_snippet, prepare_fts_query, tokenize_text
 
 
 def test_index_tokenizer_retains_frequency_and_language_boundaries() -> None:
@@ -22,81 +18,36 @@ def test_index_tokenizer_retains_frequency_and_language_boundaries() -> None:
     ]
 
 
+def test_shared_lexer_reports_original_unicode_spans() -> None:
+    assert list(iter_token_spans("🙂中文回答 A_b 中")) == [
+        ("中文", 1, 3),
+        ("文回", 2, 4),
+        ("回答", 3, 5),
+        ("a", 6, 7),
+        ("b", 8, 9),
+        ("中", 10, 11),
+    ]
+
+
 @pytest.mark.parametrize(
-    ("text", "budget", "expected"),
+    ("text", "expected"),
     [
-        ("A B C A D", None, '"a" OR "b" OR "c" OR "d"'),
-        ("A B C A D", 4, '"a" OR "b" OR "c" OR "d"'),
-        ("A B C A D", 3, '"a" OR "d"'),
-        ("A B C A D", 2, '"a" OR "d"'),
-        ("A B C A D", 1, '"d"'),
-        ("A B C D E", 3, '"a" OR "d" OR "e"'),
-        ('"！？_ -', None, ""),
+        ("A B C A D", '"a" OR "b" OR "c" OR "d"'),
+        ('"！？_ -', ""),
+        ("OR NEAR prefix*", '"or" OR "near" OR "prefix"'),
     ],
 )
-def test_query_budget_uses_last_occurrence_and_does_not_refill(
-    text: str, budget: int | None, expected: str
-) -> None:
-    assert prepare_fts_query(text, max_query_terms=budget) == expected
+def test_query_quotes_every_literal_term_once(text: str, expected: str) -> None:
+    assert prepare_fts_query(tokenize_text(text)) == expected
 
 
-def _add(store: SQLiteMemoryStore, text: str, namespace: str = "project") -> MemoryItem:
-    item = MemoryItem(namespace=namespace, text=text)
-    store.add_item(item, event=MemoryEvent(namespace=namespace, event_type=MemoryEventType.ADD))
-    return item
+def test_query_keeps_all_terms_without_a_budget() -> None:
+    terms = [f"term{index}" for index in range(300)]
+    assert prepare_fts_query(tokenize_text(" ".join(terms))) == " OR ".join(
+        f'"{term}"' for term in terms
+    )
 
 
-def test_text_search_handles_chinese_punctuation_and_literal_operators(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db")
-    chinese = _add(store, "中文回答")
-    punctuation = _add(store, 'literal OR "NEAR":prefix')
-    assert store.search(MemoryQuery(text="请用中文回答！"))[0].item.id == chinese.id
-    assert store.search(MemoryQuery(text='"NEAR":prefix OR'))[0].item.id == punctuation.id
-    assert store.search(MemoryQuery(text="！？？_")) == []
-    assert store.search(MemoryQuery()) == []
-    assert store.search(MemoryQuery(text="unmatchedterm")) == []
-
-
-def test_default_query_preserves_middle_terms_and_budget_only_changes_query(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db")
-    text = " ".join(f"term{number}" for number in range(180))
-    item = _add(store, "term90")
-    assert store.search(MemoryQuery(text=text))[0].item.id == item.id
-    assert store.search(MemoryQuery(text=text, max_query_terms=2)) == []
-    indexed = _add(store, text)
-    assert indexed.id in {result.item.id for result in store.search(MemoryQuery(text="term90"))}
-
-
-def test_namespaces_are_combined_before_global_rank_and_limit(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db")
-    _add(store, "needle " + "noise " * 30, "private")
-    best = _add(store, "needle", "project")
-    _add(store, "needle", "excluded")
-    results = store.search(MemoryQuery(namespaces=["private", "project"], text="needle", limit=1))
-    assert [result.item.id for result in results] == [best.id]
-    assert store.get_item(best.id, ["private"]) is None
-    assert store.get_item(best.id, ["private", "project"]) == best
-    latest = _add(store, "latest", "project")
-    assert store.list_items(["private", "project"], limit=1)[0].id == latest.id
-
-
-def test_text_and_explicit_ids_are_intersected(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db")
-    item = _add(store, "needle")
-    other = _add(store, "different")
-    assert store.search(MemoryQuery(text="needle", item_ids=[other.id])) == []
-    assert store.search(MemoryQuery(text="!", item_ids=[item.id])) == []
-    assert store.search(MemoryQuery(text="needle", item_ids=[item.id]))[0].item.id == item.id
-    assert store.search(MemoryQuery(item_ids=[item.id]))[0].item.id == item.id
-
-
-def test_equal_rank_has_stable_order(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "memory.db")
-    for item_id in ["a", "c", "b"]:
-        item = MemoryItem(id=item_id, text="needle", updated_at="2026-09-19T00:00:00")
-        store.add_item(item, event=MemoryEvent(event_type=MemoryEventType.ADD))
-    assert [result.item.id for result in store.search(MemoryQuery(text="needle"))] == [
-        "c",
-        "b",
-        "a",
-    ]
+def test_snippet_uses_lexical_matches_instead_of_substring_prefixes() -> None:
+    text = "needlework " + "🙂" * 400 + " NEEDLE " + "🙂" * 400
+    assert make_snippet(text, {"needle"}) == (text[262:562], False)
