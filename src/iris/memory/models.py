@@ -10,6 +10,7 @@ Example:
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
@@ -177,6 +178,23 @@ class MemoryItem(BaseModel):
         if not value.strip():
             raise ValueError("记忆正文不能为空")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryNamespaceState:
+    """namespace 的条目版本与最后完整正文投影版本。"""
+
+    namespace: str
+    item_revision: int = 0
+    projection_revision: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryNamespaceSnapshot:
+    """同一读事务得到的版本状态与完整 active L2 条目。"""
+
+    state: MemoryNamespaceState
+    items: tuple[MemoryItem, ...]
 
 
 class MemoryCandidate(BaseModel):

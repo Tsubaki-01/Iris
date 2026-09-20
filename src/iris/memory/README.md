@@ -4,7 +4,7 @@
 
 `iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、L1 episode、候选记忆、L2
 长期条目、审计事件、SQLite 存储、文件镜像、显式编排和记忆工具。SQLite 是权威数据源；
-`.iris/memory/` 下的 Markdown/JSON 是便于人工查看的投影。
+`.iris/memory/namespaces/` 下的 Markdown 是便于人工查看的分类投影。
 
 `AgentConfig.memory` 默认关闭后端。在 `agent.yaml` 中启用 SQLite 后，每个新用户 run 默认
 自动召回一次，并提供三个读取工具供模型主动补查。动态快照进入会话历史，工具循环和恢复
@@ -27,7 +27,7 @@ memory 配置和 effective workspace，不复制父 run 的快照或显式查询
 ## 运行要求与快速开始
 
 本包随 Iris 安装，使用标准库 SQLite 和 FTS5。FTS5 是唯一文本检索路径；初始化或查询错误
-报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 2，旧版库
+报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 4，旧版库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
@@ -224,14 +224,22 @@ tools:
 
 ## 文件镜像与持久化
 
-`FileMemoryMirror.initialize_layout()` 创建固定的 `Memory.md`、User、Feedback、Reference、
-Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成功写入 store 后同步镜像；
-`rebuild_from_store()` 可按 namespace 确定性重建 active 条目和最近 100 条事件。
+`FileMemoryMirror.initialize_layout()` 只创建目录。正式正文位于
+`namespaces/ns_<namespace 的 UTF-8 base64url 编码>/`，覆盖 User、Feedback、Reference、
+Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保留原状。
 
-`project_batch()` 会在实例锁内按目标归组，一次读取并在内存中合并每个目标，保留 marker
-之外的手工内容，再通过同目录临时文件原子替换。布局只在成功后记为已初始化；初始化失败
-可以重试。数据库成功后自动投影失败只记录 warning，不把成功写入误报为失败；显式调用
-镜像投影/重建时仍正常报告错误，不启动后台重试。
+每条内容先完整呈现原始 Markdown，再以 `<details>` 折叠展示 ID、来源、时间和其余元数据。
+这些文件只用于人工浏览，不承担条目解析或反向导入协议。数据库写入后，service 调用
+`rebuild_from_store()`，在 `publish_projection()` 的短写事务内读取完整 active L2 快照，
+逐文件原子替换后推进 `projection_revision`。episodes、candidates 和事件仍在 SQLite，
+不追加事件镜像。
+
+`item_revision` 随影响 active L2 的实质变更推进，空 patch 不更新正文、事件或版本。
+条目、FTS、事件、候选晋升和 revision 使用同一 mutation 事务。所有分类文件成功发布后，
+`projection_revision` 才追上条目版本；部分文件失败时数据库结果仍成功，版本差异表明投影
+未完整同步。写工具结果附带 warning；通用文件工具通过 `MemoryFileAccess` 读取正式路径和
+实际文件来源版本，报告陈旧/未同步状态。数据库检索不依赖镜像发布成功。
+显式重建失败仍抛错，不启动后台重试。配置的 `mirror.enabled=false` 仍关闭人工投影。
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
 以及 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
@@ -253,7 +261,7 @@ Tasks、Sessions 等投影结构，不创建数据库。`MemoryService` 在成�
 | SDK 生命周期、namespace 范围、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
 | 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
-| mirror 批处理、重建与原子替换 | `mirror.py` | `tests/memory/test_mirror.py` |
+| namespace 完整快照、投影版本与原子替换 | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | 自动召回、去重与历史恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 

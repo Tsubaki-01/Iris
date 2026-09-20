@@ -190,6 +190,15 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
         """取得宿主为当前调用绑定的读取范围。"""
         return list(self.access_policy_factory(context).read_namespaces)
 
+    async def _write_result(self, namespace: str, payload: dict[str, Any]) -> ToolResult:
+        """数据库提交后把正文未同步状态同时交给模型。"""
+        warning = await self.service.run_async_io(
+            lambda: self.service.projection_warning(namespace)
+        )
+        if warning:
+            payload["warning"] = warning
+        return self._json_result(payload)
+
 
 class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
     """联合搜索允许读取的 namespace。"""
@@ -279,7 +288,7 @@ class MemoryRememberTool(MemoryTool[MemoryRememberToolInput]):
                 source_id=context.call_id,
             )
         )
-        return self._json_result({"item": _item_payload(item)})
+        return await self._write_result(item.namespace, {"item": _item_payload(item)})
 
 
 class MemoryUpdateTool(MemoryTool[MemoryUpdateToolInput]):
@@ -301,7 +310,7 @@ class MemoryUpdateTool(MemoryTool[MemoryUpdateToolInput]):
             actor=MemoryActor.AGENT,
             reason=params.reason,
         )
-        return self._json_result({"item": _item_payload(item)})
+        return await self._write_result(item.namespace, {"item": _item_payload(item)})
 
 
 class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
@@ -316,13 +325,14 @@ class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
         self, params: MemoryForgetToolInput, context: ToolExecutionContext
     ) -> ToolResult:
         """返回数据库是否实际删除条目，不把未命中伪装成删除成功。"""
+        namespace = self.access_policy_factory(context).write_namespace
         deleted = await self.service.aforget(
             params.item_id,
-            self.access_policy_factory(context).write_namespace,
+            namespace,
             actor=MemoryActor.AGENT,
             reason=params.reason,
         )
-        return self._json_result({"deleted": deleted})
+        return await self._write_result(namespace, {"deleted": deleted})
 
 
 MEMORY_TOOL_CLASSES: dict[str, type[MemoryTool[Any]]] = {

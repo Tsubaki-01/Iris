@@ -269,13 +269,56 @@ async def test_write_tool_distinguishes_store_failure_from_mirror_failure(
     if failure == "store":
         monkeypatch.setattr(service.store, "add_item", fail)
     else:
-        monkeypatch.setattr(mirror, "project_batch", fail)
+        monkeypatch.setattr(mirror, "rebuild_from_store", fail)
     result = await _executor(service).execute_one(
         ToolUseBlock(id="write", name="memory_remember", input={"text": "fact", "reason": "seed"}),
         _context(tmp_path),
     )
     assert result.is_error is (failure == "store")
     assert len(service.list_items(["project"])) == (0 if failure == "store" else 1)
+    if failure == "mirror":
+        assert "未同步" in json.loads(result.content[0].text)["warning"]
+
+
+@pytest.mark.asyncio
+async def test_all_write_tools_report_committed_projection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """每个写工具都保留成功结果，并告知正文投影尚未同步。"""
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "write-warning.db"), mirror=mirror)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise IrisMemoryError("projection unavailable")
+
+    monkeypatch.setattr(mirror, "rebuild_from_store", fail)
+    executor = _executor(service)
+    context = _context(tmp_path)
+    remembered = await executor.execute_one(
+        ToolUseBlock(
+            id="remember", name="memory_remember", input={"text": "fact", "reason": "seed"}
+        ),
+        context,
+    )
+    item_id = json.loads(remembered.content[0].text)["item"]["id"]
+    updated = await executor.execute_one(
+        ToolUseBlock(
+            id="update", name="memory_update",
+            input={"item_id": item_id, "patch": {"text": "current fact"}, "reason": "edit"},
+        ),
+        context,
+    )
+    forgotten = await executor.execute_one(
+        ToolUseBlock(
+            id="forget", name="memory_forget", input={"item_id": item_id, "reason": "done"}
+        ),
+        context,
+    )
+    for result in (remembered, updated, forgotten):
+        assert not result.is_error
+        assert "未同步" in json.loads(result.content[0].text)["warning"]
+    assert json.loads(forgotten.content[0].text)["deleted"] is True
+    assert service.get_item(item_id, ["project"]) is None
 
 
 @pytest.mark.asyncio

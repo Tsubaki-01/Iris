@@ -22,7 +22,8 @@ from iris.memory import (
 
 
 def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
-    service = _service(tmp_path)
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
     namespace = "project"
 
     episode = service.observe(
@@ -40,6 +41,7 @@ def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
     assert [(event.event_type, event.episode_id) for event in events] == [
         (MemoryEventType.OBSERVE, episode.id)
     ]
+    assert not mirror.root.exists()
 
 
 def test_remember_recall_and_build_context(tmp_path: Path) -> None:
@@ -121,11 +123,12 @@ def test_update_keeps_identity_refreshes_search_and_relocates_mirror(tmp_path: P
     assert service.get_item(item.id, ["project"]) == updated
     assert service.recall(MemoryQuery(text="bananas")) == []
     assert [result.item.id for result in service.recall(MemoryQuery(text="oranges"))] == [item.id]
-    assert item.id not in (mirror.root / "User/user.md").read_text(encoding="utf-8")
-    assert "updated oranges" in (mirror.root / "Reference/notes.md").read_text(encoding="utf-8")
+    directory = mirror.namespace_directory("project")
+    assert item.id not in (directory / "User/user.md").read_text(encoding="utf-8")
+    assert "updated oranges" in (directory / "Reference/notes.md").read_text(encoding="utf-8")
     assert service.forget(item.id, "project", reason="finished") is True
     assert service.recall(MemoryQuery(text="oranges")) == []
-    assert item.id not in (mirror.root / "Reference/notes.md").read_text(encoding="utf-8")
+    assert item.id not in (directory / "Reference/notes.md").read_text(encoding="utf-8")
 
 
 def test_committed_writes_survive_automatic_mirror_failure_but_explicit_rebuild_raises(
@@ -137,7 +140,6 @@ def test_committed_writes_survive_automatic_mirror_failure_but_explicit_rebuild_
     def fail(*args: object, **kwargs: object) -> None:
         raise IrisMemoryError("mirror unavailable")
 
-    monkeypatch.setattr(mirror, "project_batch", fail)
     monkeypatch.setattr(mirror, "rebuild_from_store", fail)
     with caplog.at_level("WARNING", logger="iris.memory.service"):
         item = service.remember(MemoryWriteInput(text="original text", reason="seed"))

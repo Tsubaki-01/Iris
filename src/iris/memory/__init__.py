@@ -8,6 +8,7 @@ from .config import (
     resolve_memory_path,
 )
 from .context import MEMORY_CONTEXT_WARNING, MemoryContextBuilder
+from .files import MemoryFileAccess, namespace_key
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
@@ -25,6 +26,8 @@ from .models import (
     MemoryItemPatch,
     MemoryItemStatus,
     MemoryLevel,
+    MemoryNamespaceSnapshot,
+    MemoryNamespaceState,
     MemoryObserveInput,
     MemoryQuery,
     MemorySearchResult,
@@ -83,6 +86,7 @@ __all__ = [
     "MemoryEvent",
     "MemoryEventType",
     "MemoryExtractor",
+    "MemoryFileAccess",
     "MemoryItem",
     "MemoryItemKind",
     "MemoryItemPatch",
@@ -90,6 +94,8 @@ __all__ = [
     "MemoryIOExecutionMode",
     "MemoryLevel",
     "MemoryMirrorConfig",
+    "MemoryNamespaceSnapshot",
+    "MemoryNamespaceState",
     "MemoryObserveInput",
     "MemoryOrchestrator",
     "MemoryPolicy",
@@ -123,5 +129,6 @@ __all__ = [
     "build_memory_service_from_config",
     "default_memory_access_policy_factory",
     "register_memory_tools",
+    "namespace_key",
     "resolve_memory_path",
 ]

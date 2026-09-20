@@ -102,7 +102,13 @@ def _register_builtin_tools(
     memory_config: MemoryConfig,
 ) -> None:
     """注册 YAML 声明的内置工具。"""
-    file_service = WorkspaceFileService()
+    file_service = WorkspaceFileService(
+        memory_view=(
+            memory_service.file_access(memory_config.read_namespaces)
+            if memory_service is not None
+            else None
+        )
+    )
     for name in names:
         if name.startswith("file."):
             factory = _BUILTIN_FILE_TOOL_FACTORIES.get(name)

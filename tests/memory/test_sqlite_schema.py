@@ -1,4 +1,4 @@
-"""Memory schema v2 初始化与 FTS 错误边界。"""
+"""Memory schema v4 的 FTS、namespace 版本与初始化失败边界。"""
 
 import sqlite3
 from pathlib import Path
@@ -10,14 +10,24 @@ from iris.memory.models import MemoryQuery
 from iris.memory.sqlite import SQLiteMemoryStore
 
 
-def test_schema_v2_stores_only_namespace_and_reopens(tmp_path: Path) -> None:
+def test_schema_v4_stores_namespaces_fts_and_revisions_and_reopens(tmp_path: Path) -> None:
+    """新结构同时包含 FTS 与版本表，空 namespace 读取不创建状态行。"""
     path = tmp_path / "memory.db"
-    SQLiteMemoryStore(path)
+    store = SQLiteMemoryStore(path)
+    assert store.read_namespace_state("unwritten").item_revision == 0
+    assert store.read_namespace_snapshot("unwritten").items == ()
     with sqlite3.connect(path) as connection:
         version = connection.execute(
             "SELECT value FROM memory_schema WHERE key='schema_version'"
         ).fetchone()
-        assert version == ("2",)
+        assert version == ("4",)
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
+        assert {"memory_items_fts", "memory_namespace_state"} <= tables
+        assert connection.execute("SELECT count(*) FROM memory_namespace_state").fetchone() == (0,)
+        fts_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='memory_items_fts'"
+        ).fetchone()[0]
+        assert "unicode61 remove_diacritics 0" in fts_sql
         for table in ["memory_items", "memory_candidates", "memory_episodes", "memory_events"]:
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             assert "namespace" in columns
@@ -25,11 +35,16 @@ def test_schema_v2_stores_only_namespace_and_reopens(tmp_path: Path) -> None:
     SQLiteMemoryStore(path)
 
 
-def test_schema_v1_is_rejected_without_mutating_the_database(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", ["1", "2", "3", "999", None])
+def test_old_or_missing_schema_version_is_rejected_without_mutating_database(
+    tmp_path: Path, version: str | None
+) -> None:
+    """旧版、未知版本和缺失版本行不会触发迁移或结构写入。"""
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE memory_schema (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        connection.execute("INSERT INTO memory_schema VALUES ('schema_version', '1')")
+        if version is not None:
+            connection.execute("INSERT INTO memory_schema VALUES ('schema_version', ?)", (version,))
         connection.execute("CREATE TABLE old_data (text TEXT)")
         connection.execute("INSERT INTO old_data VALUES ('keep me')")
     before = path.read_bytes()
@@ -38,13 +53,17 @@ def test_schema_v1_is_rejected_without_mutating_the_database(tmp_path: Path) -> 
     assert path.read_bytes() == before
 
 
-def test_fts_initialization_failure_is_explicit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "statement", ["CREATE VIRTUAL TABLE", "CREATE TABLE memory_namespace_state"]
+)
+def test_schema_initialization_failure_is_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statement: str
 ) -> None:
+    """FTS 或 namespace 状态表创建失败时回滚整个新库初始化。"""
     class FailingConnection(sqlite3.Connection):
         def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
-            if "CREATE VIRTUAL TABLE" in sql:
-                raise sqlite3.OperationalError("FTS unavailable")
+            if statement in sql:
+                raise sqlite3.OperationalError("schema unavailable")
             return super().execute(sql, parameters)
 
     def connect(store: SQLiteMemoryStore) -> sqlite3.Connection:
