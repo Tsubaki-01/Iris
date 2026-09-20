@@ -12,7 +12,7 @@ from iris.memory import MemoryConfig
 def test_agent_memory_is_disabled_by_default() -> None:
     config = AgentConfig.model_validate({"name": "a", "model": "openai/test", "system": "a"})
     assert isinstance(config.memory, MemoryConfig)
-    assert config.memory.backend == "none"
+    assert config.memory.enabled is False
     assert config.memory.read_namespaces == ["project"]
 
 
@@ -20,18 +20,27 @@ def test_agent_yaml_loads_memory_options_without_creating_files(tmp_path: Path) 
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: a\nmodel: openai/test\nsystem: a\nmemory:\n"
-        "  backend: sqlite\n  read_namespaces: [project, research]\n"
+        "  enabled: true\n  read_namespaces: [project, research]\n"
         "  write_namespace: research\n",
         encoding="utf-8",
     )
     config = load_agent_config(path)
+    assert config.memory.enabled is True
     assert config.memory.read_namespaces == ["project", "research"]
     assert config.memory.write_namespace == "research"
     assert not (tmp_path / ".iris").exists()
 
 
 @pytest.mark.parametrize(
-    "invalid", ["scope: {}", "max_query_terms: 128", "recall_mode: manual", "mirror: {}"]
+    "invalid",
+    [
+        "backend: none",
+        "backend: sqlite",
+        "scope: {}",
+        "max_query_terms: 128",
+        "recall_mode: manual",
+        "mirror: {}",
+    ],
 )
 def test_agent_yaml_rejects_invalid_memory_config(tmp_path: Path, invalid: str) -> None:
     path = tmp_path / "agent.yaml"
@@ -46,7 +55,7 @@ def test_agent_yaml_loads_overview_budgets_without_side_effects(tmp_path: Path) 
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: a\nmodel: openai/test\nsystem: a\nmemory:\n"
-        "  backend: sqlite\n  overview:\n"
+        "  enabled: true\n  overview:\n"
         "    input_budget_tokens: 2048\n    max_tokens: 256\n    system_budget_ratio: 0.03\n",
         encoding="utf-8",
     )

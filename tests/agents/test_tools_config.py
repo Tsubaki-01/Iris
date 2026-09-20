@@ -7,6 +7,43 @@ import pytest
 import iris.config as iris_config
 from iris.agents import PythonToolsConfig, ToolsConfig, build_tool_registry, load_agent_config
 from iris.exceptions import IrisConfigError
+from iris.memory import MemoryConfig, MemoryService, MemoryTool, SQLiteMemoryStore
+
+
+def test_resolved_memory_service_registers_read_pair_before_selected_tools(tmp_path: Path) -> None:
+    """registry消费有效Service，复用范围工厂，不重新判断来源开关。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
+    config = MemoryConfig(read_namespaces=["notes"], write_namespace="project")
+    registry = build_tool_registry(
+        ToolsConfig(builtin=["file.read", "memory.remember"]),
+        memory_service=service,
+        memory_config=config,
+    )
+    assert [tool.name for tool in registry.view().active_tools] == [
+        "memory_search", "memory_fetch", "read_file", "memory_remember"
+    ]
+    for name in ("memory_search", "memory_fetch", "memory_remember"):
+        tool = registry.get(name)
+        assert isinstance(tool, MemoryTool)
+        assert tool.service is service
+
+
+@pytest.mark.parametrize("name", ["memory.search", "memory.fetch"])
+@pytest.mark.parametrize("with_service", [False, True])
+def test_agent_rejects_manual_memory_read_declarations(
+    tmp_path: Path, name: str, with_service: bool
+) -> None:
+    """旧Agent读声明不能成为自动注册的兼容路径。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db")) if with_service else None
+    with pytest.raises(IrisConfigError, match="memory.enabled"):
+        build_tool_registry(ToolsConfig(builtin=[name]), memory_service=service)
+
+
+@pytest.mark.parametrize("name", ["memory.remember", "memory.update", "memory.forget"])
+def test_memory_writes_require_an_enabled_service(name: str) -> None:
+    """显式写工具在无有效Service时报告配置错误。"""
+    with pytest.raises(IrisConfigError, match="memory.enabled"):
+        build_tool_registry(ToolsConfig(builtin=[name]))
 
 
 def test_build_tool_registry_registers_python_function_refs(

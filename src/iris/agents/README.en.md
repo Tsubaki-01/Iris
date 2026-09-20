@@ -114,25 +114,24 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
-`AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `backend: none`, so no
-memory service or tools are created unless configured or explicitly injected:
+`AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
+Enable it to connect the service, published overview, and both read tools:
 
 ```yaml
 memory:
-  backend: sqlite
+  enabled: true
   read_namespaces: [project]
   write_namespace: project
 tools:
   builtin:
-    - memory.search
-    - memory.fetch
     - memory.remember
     - memory.update
     - memory.forget
 ```
 
-Enabling a backend does not register tools. Declare `memory.search/fetch/remember/update/forget`
-as needed. The model chooses Search/Fetch using the adopted overview; queries retain all terms.
+Enabling memory automatically registers Search/Fetch; declare only the write tools as needed.
+The old `memory.backend` setting and manual `memory.search/fetch` Agent declarations are rejected.
+The model chooses Search/Fetch using the adopted overview; queries retain all terms.
 The old recall_mode, max_query_terms, and mirror settings are no longer accepted. The host generates
 core facts and knowledge scope explicitly; new sessions and successful compaction adopt an overview
 within 2% of the available input budget across all namespaces. Unmentioned topics are treated as
@@ -142,15 +141,20 @@ absent; without an overview, chat continues without long-term memory use. See
 Loading YAML does not open a database. Runtime first resolves the effective workspace and provider,
 then builds one service shared by overview generation and tools. Its database is `.iris/memory/memory.db` within that
 workspace. Agents in the same project can share the default `project` namespace; different
-workspaces use separate databases. An explicitly injected `memory_service` takes precedence over
-the configured backend. CLI uses the same assembly path. Each child uses its own configuration and
+workspaces use separate databases. When enabled, an explicitly injected `memory_service` takes
+precedence over configured construction; when disabled, it is not attached. CLI uses the same assembly path. Each child uses its own configuration and
 narrowed effective workspace and adopts its own window without inheriting the parent's service.
 Initialization failures propagate from assembly.
 
-`build_tool_registry(config, *, memory_service=None, memory_config=None)` registers only declared
-builtins before registering Python extensions. Explicit memory builtins
-require a service. `memory_config` binds read and write namespaces, defaulting to `MemoryConfig()`.
-An explicitly declared tool is registered once; actual name or alias conflicts
+The switch is fixed when constructing the Agent. Rebuild it and start a new session after changing
+the setting; hot switching is not supported. Static context memory and existing history remain.
+`include_tools=False` still controls whether a request sends tool schemas.
+
+`build_tool_registry(config, *, memory_service=None, memory_config=None)` registers Search/Fetch
+when given a resolved service, then declared builtins and Python extensions. Explicit memory writes
+require a service; manual read declarations are rejected at this assembly boundary. `memory_config`
+binds read and write namespaces, defaulting to `MemoryConfig()`; this helper does not recheck enabled.
+Actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
 

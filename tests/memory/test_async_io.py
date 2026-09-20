@@ -14,7 +14,6 @@ from iris.exceptions import IrisMemoryError
 from iris.memory import (
     FileMemoryMirror,
     MemoryAccessPolicy,
-    MemoryBackend,
     MemoryConfig,
     MemoryFetchTool,
     MemoryFetchToolInput,
@@ -99,7 +98,7 @@ async def test_overviews_whole_read_runs_all_namespaces_in_one_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """所有 namespace 的实际概览读取共用一个 worker job。"""
-    service = build_memory_service_from_config(MemoryConfig(backend="sqlite"), tmp_path)
+    service = build_memory_service_from_config(MemoryConfig(enabled=True), tmp_path)
     assert service is not None and service.mirror is not None
     for namespace in ("first", "second"):
         service.remember(MemoryWriteInput(namespace=namespace, text="fact", reason="seed"))
@@ -190,7 +189,7 @@ async def test_cancelled_thread_read_does_not_publish_late_result(tmp_path: Path
 def test_configured_sqlite_uses_thread_but_direct_service_stays_inline(tmp_path: Path) -> None:
     configured = build_memory_service_from_config(
         MemoryConfig(
-            backend=MemoryBackend.SQLITE,
+            enabled=True,
             path=".iris/memory/memory.db",
             root=".iris/memory",
         ),

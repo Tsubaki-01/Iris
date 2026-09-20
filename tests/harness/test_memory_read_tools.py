@@ -11,7 +11,7 @@ import pytest
 from iris.agents import AgentConfig
 from iris.exceptions import IrisMemoryError
 from iris.harness import AgentRunner
-from iris.lifecycle import AgentRunRequest, RunStopReason
+from iris.lifecycle import AgentRunOptions, AgentRunRequest, RunStopReason, RuntimeExecutionOptions
 from iris.memory import (
     FileMemoryMirror,
     MemoryCategory,
@@ -29,9 +29,12 @@ from .fakes import StaticProvider, text_response, tool_response
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("strategy", ["none", "search", "fetch"])
+@pytest.mark.parametrize(
+    ("strategy", "include_tools"),
+    [("none", True), ("search", True), ("fetch", True), ("none", False)],
+)
 async def test_model_controls_search_fetch_and_results_remain_normal_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strategy: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strategy: str, include_tools: bool
 ) -> None:
     """无隐式查询；可直接用片段回答，或在修改后Fetch数据库当前完整记录。"""
     overview_provider = StaticProvider(
@@ -107,23 +110,22 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
             "model": "openai/fake-model",
             "system": "回答项目问题。",
             "permissions": {"workspace": str(tmp_path)},
-            "tools": {
-                "builtin": ["memory.search"]
-                if strategy == "search"
-                else ["memory.search", "memory.fetch"]
-            },
+            "memory": {"enabled": True},
         }
     )
     runner = AgentRunner.from_config(
         config, provider=provider, memory_service=service, store=lifecycle_store
     )
-    first = await runner.start(AgentRunRequest(input="确认项目部署版本", run_id="read-memory"))
+    options = AgentRunOptions(runtime=RuntimeExecutionOptions(include_tools=include_tools))
+    first = await runner.start(
+        AgentRunRequest(input="确认项目部署版本", run_id="read-memory"), options=options
+    )
     assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
-    if strategy == "search":
-        tools = provider.requests[0].tools
-        assert [tool["function"]["name"] for tool in tools] == ["memory_search"]
-        assert "memory_fetch" not in json.dumps(tools, ensure_ascii=False)
-        assert "memory_fetch" not in provider.requests[0].messages[0].text
+    assert [tool["function"]["name"] for tool in provider.requests[0].tools] == (
+        ["memory_search", "memory_fetch"] if include_tools else []
+    )
+    for name in ("memory_search", "memory_fetch"):
+        assert (name in provider.requests[0].messages[0].text) is include_tools
     expected_names = [] if strategy == "none" else ["memory_search"]
     if strategy == "fetch":
         expected_names.append("memory_fetch")
@@ -149,11 +151,84 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     assert session.context_window is not None
     assert "项目部署版本与配置" in provider.requests[0].messages[0].text
     assert all(message.metadata.get("context_kind") != "memory" for message in session.messages)
-    second = await runner.start(AgentRunRequest(input="继续讨论部署", run_id="next-round"))
+    second = await runner.start(
+        AgentRunRequest(input="继续讨论部署", run_id="next-round"), options=options
+    )
     assert second.run.stop_reason is RunStopReason.COMPLETED, second.error
     assert len(queries) == int(strategy != "none")
     replayed = [
         result for message in provider.requests[-1].messages for result in message.tool_results
     ]
     assert replayed == results
+    assert len(overview_provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_config_ignores_injected_service_and_saved_overview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """从配置入口关闭记忆后，真实旧会话保留历史但不带概览或数据库工具。"""
+    context_path = tmp_path / "context.yaml"
+    context_path.write_text(
+        "system:\n  slots:\n    - name: instructions\n      content: 正常回答问题\n"
+        "memory:\n  slots:\n    - name: static\n      content: 静态固定资料\n",
+        encoding="utf-8",
+    )
+    overview_provider = StaticProvider(
+        text_response(json.dumps({"core_facts": "概览专用事实", "knowledge_scope": "项目资料"}))
+    )
+    service = MemoryService(
+        SQLiteMemoryStore(tmp_path / "memory.db"),
+        mirror=FileMemoryMirror(tmp_path / "mirror"),
+        overview_provider=overview_provider,
+        overview_model="fake-model",
+    )
+    item = service.remember(MemoryWriteInput(text="历史条目原文", reason="用户明确保存"))
+    await service.refresh_overview("project")
+    store = SQLiteStore(tmp_path / "lifecycle.db")
+    config = AgentConfig.model_validate(
+        {
+            "name": "reader", "model": "openai/fake-model",
+            "context": {"path": str(context_path)},
+            "permissions": {"workspace": str(tmp_path)},
+            "memory": {"enabled": True},
+        }
+    )
+    first_provider = StaticProvider(
+        tool_response(ToolUseBlock(id="fetch", name="memory_fetch", input={"item_id": item.id})),
+        text_response("已读取"),
+    )
+    first = await AgentRunner.from_config(
+        config, provider=first_provider, memory_service=service, store=store
+    ).start(AgentRunRequest(input="读取项目资料", run_id="enabled"))
+    assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
+    before = store.load_session("default")
+    assert before.context_window is not None
+    assert "概览专用事实" in before.context_window.memory_overview
+    previous_results = [result for message in before.messages for result in message.tool_results]
+    assert len(previous_results) == 1
+
+    def forbidden_memory(*args: object, **kwargs: object) -> None:
+        raise AssertionError("关闭后不应调用宿主记忆服务")
+
+    for method in ("file_access", "aload_overviews", "asearch", "aget_item", "refresh_overview"):
+        monkeypatch.setattr(service, method, forbidden_memory)
+    disabled = config.model_copy(
+        update={"memory": config.memory.model_copy(update={"enabled": False})}
+    )
+    provider = StaticProvider(text_response("关闭后正常聊天"))
+    runner = AgentRunner.from_config(
+        disabled, provider=provider, memory_service=service, store=store
+    )
+    result = await runner.start(AgentRunRequest(input="继续聊天", run_id="disabled"))
+    assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
+    request = provider.requests[0]
+    assert request.tools == []
+    assert "概览专用事实" not in request.messages[0].text
+    assert any("静态固定资料" in message.text for message in request.messages)
+    replayed = [item for message in request.messages for item in message.tool_results]
+    assert replayed == previous_results
+    after = store.load_session("default")
+    assert after.context_window == before.context_window
+    assert after.messages[:len(before.messages)] == before.messages
     assert len(overview_provider.requests) == 1

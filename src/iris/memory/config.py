@@ -4,14 +4,13 @@
 runtime 在确定 effective workspace 后调用服务构造入口。
 
 Example:
-    config = MemoryConfig(backend="sqlite")
+    config = MemoryConfig(enabled=True)
     service = build_memory_service_from_config(config, workspace_root)
 """
 
 # region imports
 from __future__ import annotations
 
-from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -27,19 +26,12 @@ from .sqlite import SQLiteMemoryStore
 # endregion
 
 
-class MemoryBackend(StrEnum):
-    """记忆持久化后端。"""
-
-    NONE = "none"
-    SQLITE = "sqlite"
-
-
 class MemoryConfig(BaseModel):
     """记忆系统声明式配置。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: MemoryBackend = MemoryBackend.NONE
+    enabled: bool = False
     root: str = ".iris/memory"
     path: str = ".iris/memory/memory.db"
     read_namespaces: list[Annotated[str, StringConstraints(pattern=r"\S")]] = Field(
@@ -53,25 +45,29 @@ def build_memory_service_from_config(
     config: MemoryConfig,
     workspace_root: Path,
     *,
+    memory_service: MemoryService | None = None,
     overview_provider: CompletionProvider | None = None,
     overview_model: str | None = None,
 ) -> MemoryService | None:
-    """从 memory 配置构造服务。
+    """按 memory 开关选择宿主服务或构造 SQLite 服务。
 
     Args:
         config: 已解析的 memory 配置。
         workspace_root: 调用方提供的 workspace 根目录。
+        memory_service: 可选宿主服务，开启时原样复用，关闭时不挂载或操作。
         overview_provider: 宿主显式生成概览时使用的模型调用边界。
         overview_model: 显式概览请求使用的模型名称。
 
     Returns:
-        MemoryService | None: `backend=none` 返回 None；SQLite 后端返回可用服务。
+        MemoryService | None: 关闭返回 None；开启时复用注入对象或创建 SQLite 服务。
 
     Raises:
-        IrisConfigError: 当 backend 或 root/path 越界时抛出。
+        IrisConfigError: 构造 SQLite 服务时 root/path 越界。
     """
-    if config.backend == MemoryBackend.NONE:
+    if not config.enabled:
         return None
+    if memory_service is not None:
+        return memory_service
     root = resolve_memory_path(config.root, workspace_root)
     path = resolve_memory_path(config.path, workspace_root)
     store = SQLiteMemoryStore(path)

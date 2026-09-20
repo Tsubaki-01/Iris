@@ -22,10 +22,11 @@ from .test_runner_memory import OverviewService, overview, with_memory
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resume_kind", ["hitl", "recover"])
+@pytest.mark.parametrize("memory_enabled", [False, True])
 async def test_resume_uses_saved_window_without_loading_or_reselecting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_kind: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_kind: str, memory_enabled: bool
 ) -> None:
-    """新runner的更小memory比例不改变已经初始化的旧窗口。"""
+    """恢复保留已初始化窗口；无 Service 时仅屏蔽该窗口的 system 文本。"""
     service = OverviewService(tmp_path / "memory.db")
     registry = ToolRegistry()
     registry.register_function(
@@ -59,7 +60,10 @@ async def test_resume_uses_saved_window_without_loading_or_reselecting(
 
     monkeypatch.setattr(service, "aload_overviews", forbidden)
     provider = StaticProvider(text_response())
-    runtime = with_memory(build_runtime(tmp_path, provider=provider, registry=registry), service)
+    runtime = with_memory(
+        build_runtime(tmp_path, provider=provider, registry=registry),
+        service if memory_enabled else None,
+    )
     memory = runtime.environment.agent_config.memory
     runtime.environment.agent_config = runtime.environment.agent_config.model_copy(
         update={
@@ -84,7 +88,14 @@ async def test_resume_uses_saved_window_without_loading_or_reselecting(
         )
     assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
     assert store.load_session("default").context_window == saved
-    assert provider.requests[0].messages[0].text.endswith(saved.memory_overview)
+    system = provider.requests[0].messages[0].text
+    if memory_enabled:
+        assert system.endswith(saved.memory_overview)
+    else:
+        assert "事实 A" not in system
+        assert "# Memory overview" not in system
+    assert "固定记忆" in provider.requests[0].messages[1].text
+    assert service.reads == [("project",)]
 
 
 @pytest.mark.asyncio

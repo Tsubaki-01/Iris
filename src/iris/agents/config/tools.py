@@ -11,6 +11,8 @@ from ...exceptions import IrisConfigError
 from ...memory import (
     MEMORY_TOOL_CLASSES,
     MemoryConfig,
+    MemoryFetchTool,
+    MemorySearchTool,
     MemoryService,
     default_memory_access_policy_factory,
 )
@@ -57,7 +59,7 @@ def build_tool_registry(
 
     Args:
         config (ToolsConfig): 已校验的工具配置。
-        memory_service: 可选 memory service，绑定显式工具和记忆文件读取范围。
+        memory_service: 来源工厂已解析的服务，存在时自动绑定双读工具及文件读取范围。
         memory_config: 绑定工具的读取范围和单个写入 namespace。
 
     Returns:
@@ -94,7 +96,11 @@ def _register_builtin_tools(
     memory_service: MemoryService | None,
     memory_config: MemoryConfig,
 ) -> None:
-    """注册 YAML 声明的内置工具。"""
+    """先绑定有效记忆服务的双读工具，再注册 YAML 声明的其它内置工具。"""
+    memory_policy = default_memory_access_policy_factory(memory_config)
+    if memory_service is not None:
+        for tool_cls in (MemorySearchTool, MemoryFetchTool):
+            registry.register(tool_cls(service=memory_service, access_policy_factory=memory_policy))
     file_service = WorkspaceFileService(
         memory_view=(
             memory_service.file_access(memory_config.read_namespaces)
@@ -103,7 +109,11 @@ def _register_builtin_tools(
         )
     )
     for name in names:
-        if name.startswith("file."):
+        if name in ("memory.search", "memory.fetch"):
+            raise IrisConfigError(
+                "memory 读取工具由 memory.enabled 自动启用，请移除手工声明", tool=name
+            )
+        elif name.startswith("file."):
             factory = _BUILTIN_FILE_TOOL_FACTORIES.get(name)
             if factory is None:
                 raise IrisConfigError("未知内置工具", tool=name)
@@ -115,11 +125,11 @@ def _register_builtin_tools(
             registry.register(_BUILTIN_WEB_TOOL_CLASSES[name](api_key=api_key))
         elif name in MEMORY_TOOL_CLASSES:
             if memory_service is None:
-                raise IrisConfigError("memory 工具需要启用或注入 memory service", tool=name)
+                raise IrisConfigError("memory 写工具需要开启 memory.enabled", tool=name)
             registry.register(
                 MEMORY_TOOL_CLASSES[name](
                     service=memory_service,
-                    access_policy_factory=default_memory_access_policy_factory(memory_config),
+                    access_policy_factory=memory_policy,
                 )
             )
         else:

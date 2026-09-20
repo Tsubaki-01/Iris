@@ -195,9 +195,13 @@ and the database are outside this file view. Read and grep check the consumed so
 against state observed after reading and include stale warnings, including grep with no matches.
 Missing formal files still report `FILE_NOT_FOUND` with their projection status. Projected content
 can be read; changes go through memory write tools or the SDK. Without a memory service, or with an
-independent SDK service without a mirror, no memory file view is bound. Configured SQLite services
-always provide a mirror. Ordinary workspace files continue to use the existing file rules.
+independent SDK service without a mirror, no memory file view is bound. When `memory.enabled` is on,
+SQLite services constructed from configuration provide a mirror. Ordinary workspace files keep the existing rules.
 The model's `memory_search` / `memory_fetch` tools read SQLite directly and do not depend on projections.
+
+The Agent's memory switch automatically registers these two reads; memory writes remain explicit.
+Standalone SDK `register_memory_tools()` still defaults to an empty selection; see
+[memory](../memory/README.en.md).
 
 `register_file_tools()` registers, in stable order, `read_file`, `list_files`, `grep_search`,
 `write_file`, and `edit_file`, injecting one shared `WorkspaceFileService`.

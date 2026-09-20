@@ -140,13 +140,13 @@ def assemble_runtime(
         if provider is None
         else provider
     )
-    if memory_service is None:
-        memory_service = build_memory_service_from_config(
-            config.memory,
-            workspace_root,
-            overview_provider=resolved_provider,
-            overview_model=config.model.name,
-        )
+    memory_service = build_memory_service_from_config(
+        config.memory,
+        workspace_root,
+        memory_service=memory_service,
+        overview_provider=resolved_provider,
+        overview_model=config.model.name,
+    )
     context_input = _build_context_input(config, base_dir=base_dir)
     tool_registry = build_tool_registry(
         config.tools, memory_service=memory_service, memory_config=config.memory

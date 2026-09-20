@@ -22,10 +22,13 @@ does not close injected providers, memory, or stores. Root runners prepare autom
 one fixed catalog and connections across runs. Harness prepares children before admission and closes
 their independent resources at WAITING/completion, rebuilding on recovery.
 
-Assembly resolves the provider first, then binds that same instance, `model.name`, and
-`memory.overview` to a service built from configuration for explicit host calls to `refresh_overview()`.
-Construction does not generate an overview. An explicitly injected service keeps its own generation
-dependencies. Runtime adds published overviews to the system message using the durable window rules below.
+Assembly resolves the provider first, then lets the memory factory handle `memory.enabled`.
+Disabled memory does not attach even an injected service. When enabled, injection takes precedence;
+otherwise the factory builds a SQLite service with the resolved provider, model name, and overview
+configuration. A resolved service automatically provides Search/Fetch; write tools remain explicit.
+Construction does not generate an overview: the host calls `refresh_overview()` explicitly, and an
+injected service keeps its own generation dependencies. The switch is fixed at construction;
+rebuild the Agent and start a new session after changing it.
 
 ## Dependency direction
 
@@ -251,12 +254,20 @@ delta/merge/lock/hash model.
 
 ## Memory overview windows and model-directed reads
 
-When a session's `context_window` is `None`, runtime calls `MemoryService.aload_overviews()` once in
+When an effective memory service exists and a session's `context_window` is `None`, runtime calls
+`MemoryService.aload_overviews()` once in
 configured `read_namespaces` order. Selection uses the complete pending request, including this input's
 BCI/user messages. The overview, input, and checkpoint commit together before the provider call.
-An explicit empty window is already initialized. Later runs, tool loops, steer, HITL, and recovery
-after the input commit reuse saved text. A new session or successful compaction adopts current
+An explicit empty window is already initialized. With a service, later runs, tool loops, steer, HITL,
+and recovery after the input commit reuse saved text. A new session or successful compaction adopts current
 overviews. Fork starts the target with `context_window=None` and adopts on its first input.
+
+When `RuntimeEnvironment.memory_service is None`, the shared request builder passes an empty
+`system_addendum`, even if the session retains a previous overview. Ordinary requests and recovery
+do not read or rewrite that window or advance the session revision just to suppress it. Static memory,
+BCI, and ordinary history, including prior tool results, remain available. Successful compaction
+commits the new summary and an empty window in the existing transaction. Failure preserves the previous
+summary and window, while subsequent requests without a service continue to omit the overview.
 
 `full` includes core facts and knowledge scope; `navigation` includes only knowledge scope.
 All namespaces, status warnings, actual tool guidance, and wrappers share

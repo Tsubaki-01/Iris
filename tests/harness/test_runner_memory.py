@@ -68,8 +68,8 @@ def overview(text: str, *, revision: int | None = 1) -> MemoryOverviewDocument:
     )
 
 
-def with_memory(runtime: AgentRuntime, service: MemoryService) -> AgentRuntime:
-    """保留静态memory和BCI，以检查新概览不混入这两个历史位置。"""
+def with_memory(runtime: AgentRuntime, service: MemoryService | None) -> AgentRuntime:
+    """保留静态 memory 和 BCI，可选绑定独立的长期记忆服务。"""
     runtime.environment.memory_service = service
     runtime.environment.context_input = runtime.environment.context_input.model_copy(
         update={
@@ -176,6 +176,51 @@ async def test_same_window_keeps_old_overview_and_new_session_loads_current(
     assert provider.requests[0].messages[0].text == provider.requests[1].messages[0].text
     assert "事实 B" in provider.requests[2].messages[0].text
     assert lifecycle_store.load_session("new").context_window.sources[0].source_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_disabled_memory_omits_saved_overview_but_keeps_static_memory_and_history(
+    tmp_path: Path, lifecycle_store: LifecycleStore
+) -> None:
+    """新 runtime 不绑定 Service 时仅屏蔽 system 概览，已有窗口及普通历史不变。"""
+    service = OverviewService(tmp_path / "memory.db", "只在启用时显示的长期记忆")
+    registry = ToolRegistry()
+    registry.register_function(lambda: "此前的普通工具结果", name="read", description="读取资料")
+    initial_provider = StaticProvider(
+        tool_response(ToolUseBlock(id="saved-read", name="read", input={})), text_response()
+    )
+    first = await AgentRunner(
+        runtime=with_memory(
+            build_runtime(tmp_path, provider=initial_provider, registry=registry), service
+        ),
+        store=lifecycle_store,
+    ).start(AgentRunRequest(input="保留已有工具历史"))
+    assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
+    before = lifecycle_store.load_session("default")
+    assert "只在启用时显示的长期记忆" in before.context_window.memory_overview
+    provider = StaticProvider(text_response())
+    result = await AgentRunner(
+        runtime=with_memory(build_runtime(tmp_path, provider=provider), None),
+        store=lifecycle_store,
+    ).start(AgentRunRequest(input="关闭后继续聊天"))
+    assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
+    request = provider.requests[0]
+    assert "只在启用时显示的长期记忆" not in request.messages[0].text
+    assert "# Memory overview" not in request.messages[0].text
+    assert request.messages[1].text == initial_provider.requests[0].messages[1].text
+    assert request.messages[1].role == "user"
+    assert request.messages[1].sender == "context"
+    assert "固定记忆" in request.messages[1].text
+    assert any(
+        "此前的普通工具结果" in block.content
+        for message in request.messages
+        for block in message.tool_results
+    )
+    after = lifecycle_store.load_session("default")
+    assert after.context_window == before.context_window
+    assert after.messages[: len(before.messages)] == before.messages
+    assert after.revision == before.revision + 2
+    assert service.reads == [("project",)]
 
 
 @pytest.mark.asyncio

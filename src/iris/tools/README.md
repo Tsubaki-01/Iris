@@ -274,8 +274,12 @@ Agent 装配在 memory service 提供文件视图时，将 `read_namespaces` 对
 `read_file` 和 `grep_search` 在内容读取后检查来源版本并附陈旧提示；grep 无命中时也会
 显示已遍历投影的未同步状态。正式文件尚不存在时仍返回 `FILE_NOT_FOUND`，并附投影状态。
 投影内容可以读取，修改通过 memory 写工具或 SDK 完成。没有 memory service 或独立 SDK
-未提供 mirror 时不绑定这个文件视图；配置启用 SQLite 时始终提供镜像。普通 workspace 文件
-继续使用原文件规则。模型的 `memory_search` / `memory_fetch` 直接读取 SQLite，不依赖文件投影。
+未提供 mirror 时不绑定这个文件视图；`memory.enabled` 开启并由配置构造 SQLite 服务时始终
+提供镜像。普通 workspace 文件继续使用原文件规则。模型的 `memory_search` / `memory_fetch`
+直接读取 SQLite，不依赖文件投影。
+
+Agent 的统一开关会自动注册这两个读取工具；记忆写工具仍须显式配置。独立SDK的
+`register_memory_tools()` 保持显式选择、默认空注册，详见 [memory](../memory/README.md)。
 
 文件工具位于 `iris.tools.builtin.file`，也从 `iris.tools` 顶层导出输入模型、`FileTool`、`WorkspaceFileService`、`FILE_TOOL_CLASSES` 和 `register_file_tools()`。
 
