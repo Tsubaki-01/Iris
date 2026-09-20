@@ -18,7 +18,7 @@ def protected_message_indices(
 ) -> tuple[int, ...]:
     """定位本 run 已归档的 BCI、原始 input 和最新普通用户 steer。
 
-    输入阶段按动态 memory、BCI（可选）、input 一次归档；run 起点之前的 context 不属于
+    输入阶段按 BCI（可选）、input 一次归档；run 起点之前的 context 不属于
     当前任务。工具结果虽然也使用 user role，但不能被当作 steer。
     """
     if initial_session_message_count == len(messages):
@@ -26,9 +26,8 @@ def protected_message_indices(
 
     original_input = initial_session_message_count
     protected: set[int] = set()
-    while messages[original_input].sender == "context":
-        if messages[original_input].metadata.get("context_kind") == "before_current_input":
-            protected.add(original_input)
+    if messages[original_input].metadata.get("context_kind") == "before_current_input":
+        protected.add(original_input)
         original_input += 1
     protected.add(original_input)
 

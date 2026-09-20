@@ -59,9 +59,9 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
 `CommitRunInput` / `commit_run_input()` 在既有 run/session CAS 和 activation fence 下原子追加
-动态 memory、BCI、用户输入，并推进 checkpoint sequence 到 `before_model`。只改变 cursor
+BCI、用户输入并初始化上下文窗口，推进 checkpoint sequence 到 `before_model`。只改变 cursor
 位置，不改变 step index、usage 或 model reservation，也不追加模型事件。重复旧 command 冲突。
-`RunCommit.session_revision` 只在 mutation 改变原文或摘要投影时返回提交后的 revision，不携带完整
+`RunCommit.session_revision` 只在 mutation 改变原文、摘要投影或上下文窗口时返回提交后的 revision，不携带完整
 `SessionSnapshot`；需要 history 时显式调用 `load_session()`。Store 不承诺历史 command 原样
 重交成功；已有相同回答、取消和 child admission 的业务状态幂等按各 mutation 契约保留。
 Run 状态 mutation 按各自契约携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
@@ -71,9 +71,25 @@ WAITING 已保存相同回答时返回当前事实与空 events，不同回答�
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
 checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable model/encoder 保证。
-`SessionSnapshot` 公开 `session_id`、CAS `revision`、完整 `messages`、可空 `compaction` 和直接来源
+`SessionSnapshot` 公开 `session_id`、CAS `revision`、完整 `messages`、可空 `compaction`、
+`context_window` 和直接来源
 `forked_from_run_id`；后续追加保留来源。revision 每次非空 message delta 只推进一次，与消息条数
 无关。终态截点记录在 `RunRecord`，不能用 session revision 替代；持久化 ordinal 不进入公共模型。
+
+### 固定上下文窗口
+
+`SessionSnapshot.context_window: SessionContextWindow | None` 为 `None` 时尚未初始化；
+`SessionContextWindow()` 则表示已初始化、没有 memory 文本。窗口保存实际采用的 `memory_overview`、
+`mode`（`full` 为核心事实与知识范围，`navigation` 为仅知识范围）和 `sources` tuple。
+每个 `MemoryOverviewSource` 包含
+`namespace`、`path`、可空 `source_revision`；来源只解释历史快照，不赋予当前工具读取权限。
+
+`CommitRunInput.initial_context_window` 首次必须显式传窗口，之后必须为 `None`，以保留已采用文本。
+输入组、窗口、session revision 和 checkpoint 同事务提交；空消息初始化仍推进一次 revision，
+消息与窗口一起变化也只推进一次。
+后续 run、HITL 和恢复复用该窗口；只有成功的 `CommitCompaction.context_window` 会替换它。
+取消、失败或 CAS 冲突均保留旧窗口。Checkpoint v2 通过 session revision 绑定窗口，不复制其正文。
+`RuntimeExecutionOptions` 不再接受 memory 查询、结果快照或字符预算，读取与选择由 runtime 装配负责。
 
 ### 摘要状态与用量
 
@@ -89,7 +105,8 @@ input+output。
 - `RecordCompactionUsage` / `record_compaction_usage()`：每份 response 返回后保存用量；只推进
   run revision 和更新时间，返回空 events，不改变 checkpoint、session 或主步骤。
 - `CommitCompaction` / `commit_compaction()`：在 SAFE/before_model 且已有一个 pending 主步骤时，
-  原子替换摘要、推进 session/run revision 和 checkpoint sequence，并追加 `context.compacted`。
+  原子替换摘要与必传的 `context_window`、推进 session/run revision 和 checkpoint sequence，
+  并追加 `context.compacted`。
   Cursor、原文、主 reservation 与 usage 保持不变。事件仅含覆盖长度和前后输入估算。
 
 两者沿用 active fence 和 CAS，旧 revision 重交会冲突；不承诺跨进程外部模型调用的 exactly-once 计费。
@@ -126,7 +143,8 @@ fork，截点不随新消息增长。来源资格、分页参数与目标 identi
 `source_run_id`、`target_session_id` 和 `now`。
 新 session 的 `revision=0`，`forked_from_run_id` 指向直接来源；继承消息不占用新 revision，
 后续非空追加从 1 开始且保留来源。Fork 同时继承来源 run 冻结的 `terminal_compaction`，
-不读取来源 session 的最新摘要。Fork 不创建 run、activation、checkpoint、
+不读取来源 session 的最新摘要。目标 `context_window=None`，第一条输入选择新的窗口。
+Fork 不创建 run、activation、checkpoint、
 tool execution fact、interaction、event 或 lane，也不恢复源执行位置。
 
 ## 公开接口

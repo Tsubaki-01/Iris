@@ -1,3 +1,5 @@
+"""记忆配置只接受概览与 namespace 的当前合同。"""
+
 from __future__ import annotations
 
 import pytest
@@ -9,7 +11,10 @@ from iris.memory import MemoryConfig
 @pytest.mark.parametrize(
     "config",
     [
-        {"mirror": {"mode": "minimal"}},
+        {"mirror": {"enabled": False}},
+        {"recall_mode": "on_turn"},
+        {"max_query_terms": None},
+        {"max_query_terms": 128},
         {"write_policy": {"mode": "sdk_only"}},
         {"orchestrator": {"enabled": True}},
         {"scope": {"collection": "default"}},
@@ -21,39 +26,25 @@ def test_memory_config_rejects_settings_without_behavior(config: dict[str, objec
         MemoryConfig.model_validate(config)
 
 
-def test_memory_defaults_share_project_and_keep_query_budget_optional() -> None:
+def test_memory_defaults_share_project() -> None:
     config = MemoryConfig()
     assert config.read_namespaces == ["project"]
     assert config.write_namespace == "project"
-    assert config.recall_mode == "on_turn"
-    assert config.max_query_terms is None
     assert config.path == ".iris/memory/memory.db"
 
 
-@pytest.mark.parametrize("budget", [0, -1])
-def test_memory_query_budget_requires_a_positive_count(budget: int) -> None:
-    with pytest.raises(ValidationError):
-        MemoryConfig(max_query_terms=budget)
-
-
-def test_memory_can_choose_manual_recall_and_separate_namespaces() -> None:
+def test_memory_can_choose_separate_read_and_write_namespaces() -> None:
     config = MemoryConfig(
-        recall_mode="manual",
         read_namespaces=["project", "research/private"],
         write_namespace="research/private",
-        max_query_terms=128,
     )
-    assert config.recall_mode == "manual"
     assert config.read_namespaces == ["project", "research/private"]
     assert config.write_namespace == "research/private"
 
 
 def test_memory_overview_defaults_keep_generation_and_window_budgets_separate() -> None:
-    """显式概览声明完整预算，尚未改变已有召回配置。"""
+    """生成输入、生成输出和主请求采用预算分别配置。"""
     config = MemoryConfig()
     assert config.overview.input_budget_tokens == 96000
     assert config.overview.max_tokens == 1024
     assert config.overview.system_budget_ratio == 0.02
-    assert config.recall_mode == "on_turn"
-    assert config.max_query_terms is None
-    assert config.mirror.enabled

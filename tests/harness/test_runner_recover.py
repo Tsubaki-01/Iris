@@ -26,6 +26,7 @@ from iris.lifecycle import (
     RunLimits,
     RunStopReason,
     SessionCompaction,
+    SessionContextWindow,
     TokenUsage,
     ToolCallPhase,
 )
@@ -85,6 +86,7 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
             cursor_before=port.cursor,
             expected_session_revision=session.revision,
             compaction=summary,
+            context_window=SessionContextWindow(),
             before_input_tokens=80_000,
             after_input_tokens=20_000,
         )

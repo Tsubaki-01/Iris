@@ -89,6 +89,7 @@ from ._compaction import add_compaction_usage, validate_compaction_commit
 from ._session_history import (
     build_fork_point_page,
     project_fork_point,
+    validate_context_window_initialization,
     validate_fork_source,
 )
 from ._subagent import (
@@ -540,14 +541,24 @@ class InMemoryLifecycleStore:
             return deepcopy(commit)
 
     def commit_run_input(self, command: CommitRunInput) -> RunCommit:
-        """原子保存动态 memory、BCI 与用户输入，不推进模型用量。"""
+        """原子保存首建窗口、BCI 与用户输入，不推进模型用量。"""
         command = deepcopy(command)
         with self._lock:
             run = self._require_active(command)
             session = self._require_history_preconditions(run, command.expected_session_revision)
             current_checkpoint = self._require_checkpoint(run.run_id)
             validate_run_input_transition(current_checkpoint, command.checkpoint)
+            validate_context_window_initialization(
+                session.context_window, command.initial_context_window
+            )
             next_session = self._append_messages(session, command.message_delta)
+            if command.initial_context_window is not None:
+                next_session = next_session.model_copy(
+                    update={
+                        "context_window": command.initial_context_window,
+                        "revision": session.revision + 1,
+                    }
+                )
             self._validate_checkpoint_replacement(
                 run,
                 current_checkpoint,
@@ -568,7 +579,9 @@ class InMemoryLifecycleStore:
             return deepcopy(
                 RunCommit(
                     run=updated,
-                    session_revision=next_session.revision if command.message_delta else None,
+                    session_revision=(
+                        next_session.revision if next_session.revision != session.revision else None
+                    ),
                     checkpoint=command.checkpoint,
                 )
             )
@@ -649,6 +662,7 @@ class InMemoryLifecycleStore:
             next_session = session.model_copy(
                 update={
                     "compaction": command.compaction,
+                    "context_window": command.context_window,
                     "revision": session.revision + 1,
                 }
             )
@@ -1606,6 +1620,7 @@ class InMemoryLifecycleStore:
                 messages=deepcopy(self._sessions[run.session_id].messages[: point.message_count]),
                 forked_from_run_id=run.run_id,
                 compaction=run.terminal_compaction,
+                context_window=None,
             )
             self._sessions[branch.session_id] = branch
             return deepcopy(branch)

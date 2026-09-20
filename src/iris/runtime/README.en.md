@@ -25,8 +25,7 @@ their independent resources at WAITING/completion, rebuilding on recovery.
 Assembly resolves the provider first, then binds that same instance, `model.name`, and
 `memory.overview` to a service built from configuration for explicit host calls to `refresh_overview()`.
 Construction does not generate an overview. An explicitly injected service keeps its own generation
-dependencies. Runtime still uses the recall and history-snapshot flow below; overviews do not yet
-enter the system message.
+dependencies. Runtime adds published overviews to the system message using the durable window rules below.
 
 ## Dependency direction
 
@@ -69,8 +68,8 @@ frozen `RuntimeExecutionOptions`, and a JSON-safe cursor. `RuntimeActivationResu
 fact only; the owner must reload the final `RunResult` from durable storage.
 
 Every activation carries the original `run_input` and `initial_session_message_count` captured
-when the run was created. In `before_input`, the engine prepares dynamic memory, BCI, and user input,
-then archives them atomically through `commit_run_input()` before entering `before_model`. This
+when the run was created. In `before_input`, the engine prepares the initial window, BCI, and user input,
+then saves the window and input atomically through `commit_run_input()` before entering `before_model`. This
 does not consume a model reservation or increment the step index. BCI is built only during input
 preparation; later steps and recovery after the input commit replay history without appending or
 rendering it again. Checkpoint version 2 rejects older checkpoints rather than guessing whether an
@@ -78,7 +77,7 @@ old `before_model/step0` cursor had archived its input.
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
-projection against the session revision used to select its range. It advances session/checkpoint
+projection and context window against the session revision used to select its range. It advances session/checkpoint
 revisions while preserving raw messages, the cursor, and the pending main-model reservation.
 Every `before_model` checks the full input after receiving its main-step reservation; compaction
 does not consume an additional model-step budget slot.
@@ -88,7 +87,7 @@ does not consume an additional model-step budget slot.
 Internal `compaction.py` locates the current run's original input, latest archived steer, and injected
 BCI in complete raw history. Projection orders the summary, covered anchors, and uncovered raw suffix.
 The assembler places fixed system and static memory before history. BCI is marked with
-`context_kind=before_current_input`; dynamic memory is ordinary compressible history and is not
+`context_kind=before_current_input`; Search/Fetch results are ordinary tool history and are not
 pinned. A single `<summary>` wrapper is added only in the projection; summaries never append to raw
 history. Cuts keep each assistant tool
 batch and its results together. Recent retention is a soft target: an oversized group can be summarized
@@ -124,8 +123,8 @@ before the main call; it never extends the original deadline. Cancellation keeps
 meaning, and queued steering waits for the existing main-response/tool boundary.
 
 Once compaction starts, failure ends the current run while preserving raw history, the last
-committed summary, and recorded summary usage. Recovery after the projection but before a main
-response uses the new summary and the same pending reservation. WAITING first resumes its tool
+committed summary and window, and recorded summary usage. Recovery after the projection but before a main
+response uses the new summary, committed window, and the same pending reservation. WAITING first resumes its tool
 flow; `outcome_ready` only settles. Actual main-provider overflow has no extra compact-and-retry path.
 
 Cursor positions are `before_input`, `before_model`, `tool_batch`, and `outcome_ready`.
@@ -250,27 +249,41 @@ Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concu
 conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
 delta/merge/lock/hash model.
 
-## Memory recall and history snapshots
+## Memory overview windows and model-directed reads
 
-A configured or injected memory service defaults to one automatic recall per new user logical run
-in `before_input`, using the current input text. `memory.recall_mode=manual` disables automatic
-recall. Explicit `memory_results` (including an empty list) or `memory_query` overrides that choice;
-the two explicit fields are mutually exclusive. Each fragment becomes a context history message
-marked by `context_kind=memory`, `namespace`, `item_id`, and `truncated`. Tool loops, steer within the
-same run, HITL resume,
-and recovery after the input commit replay those snapshots without another query. Ordinary
-compaction can still replace their original text with a summary. Recovery before input commit may
-prepare again; a new run may specify fresh input. Static memory slots declared in `context.yaml`
-remain fixed sections and are not copied into history. `memory_results` consumes only the local
-snapshot supplied by the caller. Explicit queries await `MemoryService.abuild_context()`; automatic
-recall awaits `arecall()` and then builds budgeted fragments. Only automatic recall suppresses a
-fragment with the same item ID and rendered text already visible as raw memory in projected history.
-Summaries and tool outputs do not count; deduplication adds neither refill queries nor compaction
-protection. Automatic term budgets do not propagate to explicit queries or tools. Automatic read
-failures log a WARNING with the run ID and continue; rendering, explicit-input, and initialization
-failures keep their normal error behavior. A
-configured SQLite service creates, uses, and closes its connection inside one worker job, and the
-runtime does not consume a late result after cancellation.
+When a session's `context_window` is `None`, runtime calls `MemoryService.aload_overviews()` once in
+configured `read_namespaces` order. Selection uses the complete pending request, including this input's
+BCI/user messages. The overview, input, and checkpoint commit together before the provider call.
+An explicit empty window is already initialized. Later runs, tool loops, steer, HITL, and recovery
+after the input commit reuse saved text. A new session or successful compaction adopts current
+overviews. Fork starts the target with `context_window=None` and adopts on its first input.
+
+`full` includes core facts and knowledge scope; `navigation` includes only knowledge scope.
+All namespaces, status warnings, actual tool guidance, and wrappers share
+`floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`, with a default ratio
+of 2%. Cost is the provider's estimate difference between the same complete request with and without
+the overview. Existing system text, static memory, history, and tool schemas are not charged twice.
+If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
+scope together. If that still exceeds the allowance, it reports a capacity error without dropping
+namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
+
+`ContextBuilder.build(system_addendum=...)` appends the adopted overview after system-template output,
+within the system character limit and outside message history. Static `context.yaml` memory keeps
+its original position. Successful compaction commits the new summary, adopted window, checkpoint,
+and event together, and the next main request uses that window immediately. Failure or cancellation
+preserves the previous window.
+
+Instructions define long-term memory scope through the current overview: unmentioned topics are
+treated as absent and are not searched; covered relevant topics may be read as needed. Chat remains
+available without an overview or mirror, but the window does not use long-term memory. There is no
+database topic filter, so Search/Fetch can read current records within covered topics. Guidance lists
+only enabled `memory_search`/`memory_fetch` tools and respects `include_tools`; Fetch alone reads known
+IDs. Window guidance stays fixed while execution uses the current registry and permissions.
+Search/Fetch results follow ordinary tool-history and compaction rules.
+
+A configured SQLite service loads all namespace publications in one worker job. Runtime does not
+consume late results after cancellation. Only explicit host calls to `refresh_overview()` generate
+an overview; adoption does not generate one.
 
 ## Factory
 

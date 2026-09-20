@@ -33,6 +33,7 @@ from iris.lifecycle import (
     RunToolCallRecord,
     RunUsage,
     SessionCompaction,
+    SessionContextWindow,
     SuspendRun,
 )
 from iris.message import Msg, ToolUseBlock
@@ -391,6 +392,7 @@ def test_compaction_write_failures_roll_back_projection_checkpoint_and_event(
             activation_id="current-act",
             expected_session_revision=session.revision,
             compaction=SessionCompaction(summary="之前已完成", covered_message_count=2),
+            context_window=SessionContextWindow(memory_overview="新版概览", mode="full"),
             checkpoint=checkpoint.model_copy(
                 update={
                     "sequence": checkpoint.sequence + 1,
@@ -450,6 +452,7 @@ def test_compaction_write_failures_roll_back_projection_checkpoint_and_event(
         committed = store.commit_compaction(command)
         assert committed.session_revision == before_session.revision + 1
         assert store.load_session("main").compaction == command.compaction
+        assert store.load_session("main").context_window == command.context_window
 
 
 def _create_command() -> CreateRun:

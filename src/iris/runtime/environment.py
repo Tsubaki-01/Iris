@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput
-from ..memory import MemoryContextBuilder, MemoryService
+from ..memory import MemoryService
 from ..message import LLMRequest, ModelStreamEvent
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
@@ -92,7 +92,6 @@ class RuntimeEnvironment:
         tool_bridge (ToolBridge): 工具可见性、预检与执行边界。
         workspace_root (Path): 工具执行使用的 workspace 根路径。
         memory_service (MemoryService | None): 配置构造或宿主注入的可选 memory 服务。
-        memory_context_builder (MemoryContextBuilder): memory context 裁剪器。
         skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
     """
@@ -105,7 +104,6 @@ class RuntimeEnvironment:
     tool_bridge: ToolBridge = field(default_factory=_default_tool_bridge)
     workspace_root: Path = field(default_factory=Path.cwd)
     memory_service: MemoryService | None = None
-    memory_context_builder: MemoryContextBuilder = field(default_factory=MemoryContextBuilder)
     skill_registry: SkillRegistry | None = None
     mcp_manager: MCPManager | None = None
 

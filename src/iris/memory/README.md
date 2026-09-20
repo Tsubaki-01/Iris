@@ -6,23 +6,22 @@
 长期条目、审计事件、SQLite 存储、文件镜像、显式编排和记忆工具。SQLite 是权威数据源；
 `.iris/memory/namespaces/` 下的 Markdown 是便于人工查看的分类投影。
 
-`AgentConfig.memory` 默认关闭后端。在 `agent.yaml` 中启用 SQLite 后，每个新用户 run 默认
-自动召回一次，并提供三个读取工具供模型主动补查。动态快照进入会话历史，工具循环和恢复
-继续使用它；静态 `context.yaml` memory 槽位保持独立。
+`AgentConfig.memory` 默认关闭后端。启用 SQLite 后，宿主显式生成概览，runtime 在新会话
+或成功压缩后采用已发布概览。模型根据当前概览和问题决定是否调用 Search/Fetch，普通 run
+不会自动查询条目。所有记忆工具都通过既有工具声明入口显式选择。
 
 ```yaml
 memory:
   backend: sqlite
-  # 以下是可省略的默认值
-  recall_mode: on_turn
   read_namespaces: [project]
   write_namespace: project
-  max_query_terms: null
+tools:
+  builtin: [memory.search, memory.fetch]
 ```
 
-`recall_mode: manual` 关闭自动召回，保留工具和显式 SDK 查询。`AgentRunner.from_config*()` 的
-显式 `memory_service` 优先于配置后端；CLI 与子 Agent 复用同一装配入口。子 Agent 使用自己的
-memory 配置和 effective workspace，不复制父 run 的快照或显式查询选项。
+`AgentRunner.from_config*()` 的显式 `memory_service` 优先于配置后端；CLI 与子 Agent 复用
+同一装配入口。子 Agent 使用自己的读取范围和 effective workspace，首次采用自己的概览窗口。
+静态 `context.yaml` memory 槽位保持独立。
 
 ## 运行要求与快速开始
 
@@ -35,7 +34,7 @@ from pathlib import Path
 
 from iris.memory import (
     MemoryConfig,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryWriteInput,
     build_memory_service_from_config,
 )
@@ -53,16 +52,15 @@ item = service.remember(
         reason="用户显式说明",
     )
 )
-results = service.recall(MemoryQuery(text="回答偏好"))
-bundle = service.build_context(
-    MemoryQuery(text="回答偏好"),
-    max_chars=1000,
-)
+response = service.search(MemorySearchQuery(query="回答偏好"), ["project"])
+for hit in response.items:
+    print(hit.snippet, hit.is_complete)
+current = service.get_item(item.id, ["project"])
 ```
 
 `backend="none"` 返回 `None` 且不创建文件。memory root 和 database path 必须解析在调用方给定
 的 workspace 内。由 `build_memory_service_from_config()` 构造的 SQLite service 会让 async
-读写在一个 worker job 中完成；同步 `recall()` 等 API 仍在调用线程执行。直接构造
+读写在一个 worker job 中完成，包含连接、SQL 和结果组装；同步 `search()` 等 API 仍在调用线程执行。直接构造
 `MemoryService` 或注入自定义 store 时默认 `MemoryIOExecutionMode.INLINE`，不会静默改变其
 线程亲和性。
 
@@ -77,10 +75,11 @@ flowchart LR
     Episode["L1 MemoryEpisode"] --> Orchestrator["MemoryOrchestrator 显式调用"]
     Orchestrator --> Candidate["MemoryCandidate"]
     Candidate --> Item["L2 MemoryItem"]
-    Query["MemoryQuery"] --> Service
-    Service --> Context["MemoryContextBundle"]
-    Context --> Runtime["before_input 自动召回 / 显式输入"]
-    Runtime --> History["逐片段历史快照"]
+    Query["MemorySearchQuery / item_id"] --> Service
+    Service --> Result["Search 片段 / Fetch 当前记录"]
+    Service --> Overview["显式 refresh_overview"]
+    Overview --> Window["会话采用的 system 概览窗口"]
+    Result --> History["普通工具结果历史"]
 ```
 
 ### Namespace 与项目共享
@@ -89,7 +88,7 @@ flowchart LR
 `project`。同项目 Agent 读取同一空间即可共享资料；不再要求 Agent ID、session、visibility
 等五个字段同时匹配。不同项目使用不同数据库。
 
-`MemoryQuery(namespaces=["project", "notes"], text="...")` 对多个空间做一次联合查询，
+`service.search(MemorySearchQuery(query="..."), ["project", "notes"])` 对多个空间做一次联合查询，
 全局排序后取 limit。`get_item(item_id, namespaces)` 和 `list_items(namespaces)` 也接受联合
 读取范围；写入、更新、删除和候选操作绑定单个 namespace。空读取集合不返回任何条目。
 
@@ -98,7 +97,7 @@ flowchart LR
 - `observe()` 保存 L1 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
 - `remember()` 显式写入 L2 `MemoryItem` 与 `ADD` 事件。
 - `update(item_id, namespace, patch, reason=...)` 更新同一条目并记录 `UPDATE`，ID 保持不变。
-- `recall()` 返回带排序分数和来源的 `MemorySearchResult`。
+- `search()` 返回 `MemorySearchResponse(items, has_more)`，每个命中只含定位字段和原文片段。
 - `forget()` 使用 tombstone，不物理删除；默认查询不返回 deleted 条目。
 - `MemoryOrchestrator.observe()` 通过可注入 extractor/classifier 生成候选。
 - `process_candidates()` 才会按 policy 接受、拒绝或晋升候选；默认
@@ -118,48 +117,21 @@ artifacts / metadata 用 `[]` / `{}` 清空。正文、分类、状态和集合�
 晋升；后续候选或策略失败时，已成功提交的条目会在异常传播前统一刷新。空批次不重建镜像，
 单条 `promote_candidate()` 仍在返回前刷新。
 
-### Context 注入
+### System 概览窗口
 
-`MemoryContextBuilder` 保持检索顺序，在 `max_chars` 预算内生成
-`MemoryContextBundle.fragments`，必要时只截断首个片段并记录 `omitted_count`。片段保留
-category、kind、level、reason、confidence 和 importance，但不会把 store source 或检索
-score 默认写进 prompt。
+runtime 在会话首次输入和成功压缩时读取已发布概览，选择完整“核心事实＋知识范围”或仅知识
+范围，原子保存为会话窗口。工具循环、新 run、HITL 和恢复沿用已采用窗口；失败的压缩不会
+切换它。概览保存在 system 中，Search/Fetch 的结果作为普通工具历史保存。
 
-动态片段在 runtime 的 `before_input` 阶段与 BCI/用户输入一起归档，之后的工具循环、
-HITL 与恢复重放同一历史，不因不再查询而删除资料。动态原文仍可被普通压缩摘要化。
+全部 namespace 的概览、警告、工具指引和包装共同受
+`floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)` 约束，默认比例
+为 `0.02`。完整内容放不下时使用完整知识范围；知识范围仍超预算则报容量错误，不切断主题。
+窗口选择使用实际请求的 token 估算，并保留完整 system 的字符上限。
 
-来源优先级是 `memory_results`（包括空列表）→ `memory_query` → 默认自动召回；两个显式
-字段互斥。自动查询只用当前用户输入文本，同一 run 的工具 step、steer 和恢复不再自动检索。
-自动读取失败通过带 run_id 的 WARNING 提示后继续对话；配置、初始化、显式调用和渲染错误
-正常报告，不把它们当成正常无命中。
-
-自动路径按候选条数和正文预算形成片段，再与当前可见历史的 memory 原文比较：相同 item_id
-且实际渲染内容完全相同时跳过，否则追加。摘要、静态 memory 和工具结果不作为去重证据。
-不建立全局 seen 表或原文保护，不在去重后补查凑满预算；原文已压缩时可以重新注入。
-显式 query/results 和主动工具结果不受自动去重抑制。条目更新或 forget 不回写历史快照。
-
-需要覆盖本轮自动选择时，通过 SDK 显式指定查询：
-
-```python
-from iris.harness import (
-    AgentRunOptions,
-    AgentRunRequest,
-    AgentRunner,
-    RuntimeExecutionOptions,
-)
-
-runner = AgentRunner.from_config_path(
-    "agent.yaml",
-    memory_service=service,
-)
-query = MemoryQuery(text="上次任务")
-result = await runner.start(
-    AgentRunRequest(input="继续上次任务"),
-    options=AgentRunOptions(
-        runtime=RuntimeExecutionOptions(memory_query=query.model_dump(mode="json"))
-    ),
-)
-```
+模型指引将概览未提及的主题默认视为不存在，不查询这些主题。没有概览时正常聊天，但本窗口
+暂不使用长期记忆。新主题须先由宿主显式生成概览，再在新会话或成功压缩后采用；已有主题
+仍可查询数据库中的最新条目。主题约束由模型遵循，数据库不增加主题拦截，也不要求每次
+Search 都继续 Fetch。更新或忘记条目不会回写已经保存的会话历史。
 
 ## 显式生成概览
 
@@ -186,71 +158,74 @@ documents = await service.aload_overviews(["project"])
 `MemoryOverviewDocument.navigation` 表示知识范围节。无 mirror 的直接 SDK 返回空 documents，
 refresh 报生成依赖未配置。
 
-当前概览 SDK 不改变既有 runtime 召回行为，也未把文件加入 system；配置中的
-`system_budget_ratio=0.02` 尚未用于主请求窗口计算。
+概览生成预算独立于主请求窗口预算；`system_budget_ratio=0.02` 用于上述 system 窗口选择。
 
 ## 公开接口分组
 
-`iris.memory` 顶层导出较大，按能力分为：
-
-- 模型与枚举：`MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、
-  `MemoryEvent`、`MemoryQuery`、`MemorySearchResult`、`MemoryContextBundle` 等；
+- 输入与结果：[MemorySearchQuery、MemorySearchHit、MemorySearchResponse](models.py)，以及
+  `MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、`MemoryEvent` 和写入/更新模型。
+- 服务与存储：[MemoryService](service.py)、[MemoryStore](store.py)、[SQLiteMemoryStore](sqlite.py)。
+  同步 `search/get_item/list_items` 保留 SDK 管理读取；`asearch/aget_item/alist_items` 是完整操作
+  的 async 适配。写入、事件读取与提炼 SDK 继续可用。
 - 概览：`MemoryOverviewConfig/Content/Document/GenerationResult`，以及
-  `refresh_overview()`、`load_overviews()`、`aload_overviews()`；
-- 服务与协议：`MemoryService`、`MemoryStore`、`SQLiteMemoryStore`；
-- async IO：`MemoryIOExecutionMode`，以及 `arecall()`、`aget_item()`、`alist_items()`、
-  `alist_events()`、`abuild_context()`、`aremember()`、`aupdate()`、`aforget()`；
-- 配置：`MemoryConfig` 及其子配置、`build_memory_service_from_config()`、
-  `resolve_memory_path()`；
-- 编排：`MemoryExtractor`、`MemoryClassifier`、`MemoryPolicy`、`MemoryOrchestrator` 及默认
-  rule/no-op 实现；
-- 投影：`FileMemoryMirror`、`MemoryContextBuilder`；
-- 工具：`MemorySearchTool`、`MemoryListTool`、`MemoryGetTool`、`MemoryRememberTool`、
-  `MemoryUpdateTool`、`MemoryForgetTool`、
-  `default_memory_access_policy_factory()` 与 `register_memory_tools()`。
+  `refresh_overview()`、`load_overviews()`、`aload_overviews()`。
+- 配置：[MemoryConfig](config.py)、`build_memory_service_from_config()`、`resolve_memory_path()`。
+- 显式提炼：[MemoryOrchestrator](orchestrator.py)、extractor/classifier/policy 及 rule/no-op 实现。
+- 文件投影：[FileMemoryMirror](mirror.py)、[MemoryFileAccess](files.py)。
+- 工具：[Search/Fetch 与 Remember/Update/Forget](tools.py)、访问策略工厂和显式注册函数。
 
-完整导出集合以 `src/iris/memory/__init__.py` 的 `__all__` 为准。以下内部细节不构成推荐扩展
-接口：SQLite 私有 SQL helper、mirror marker 格式和工具 payload helper。
-
-返回数量由 `MemoryQuery.limit` 或工具输入的 `limit` 决定；它与查询词项预算、注入正文预算
-分别约束不同内容。编排器仍须显式构造，默认不会运行观察/提炼流程。
+完整导出以 [__all__](__init__.py) 为准。私有 SQL、词法和 payload helper 不构成 SDK 扩展协议。
 
 ### 普通文本检索
 
-索引和 query 使用同一词法：ASCII 英文/数字连续串小写化，连续中文按相邻双字拆分，只有
-独立单字才保留单字。例如“中文回答”得到“中文、文回、回答”。查询词项去重并作字面量 OR，
-不接受高级 FTS 表达式。索引保留全部词项及频次。
+```python
+query = MemorySearchQuery(
+    query="中文回答偏好",
+    categories=["user", "feedback"],
+    kinds=["preference", "correction"],
+    limit=8,
+)
+response = await service.asearch(query, ["project"])
+```
 
-`MemoryQuery.max_query_terms` 默认 `None`，保留全文。显式设为 B 后，超限时选首部
-floor(B/2) 项和尾部余下配额的不同项，再合并去重、不回填；尾部按最后出现位置选取。
-该上限只约束最终词项数，仍需扫描全文；首尾预算可能漏掉中部问题。空词项不返回最近条目，
-列举请调用 `list_items()`。FTS 命中不等于相关性已确认，词法查询也不保证同义改写召回。
-`MemoryConfig.max_query_terms` 只用于自动召回，不会给显式 SDK 或工具查询附加隐形预算。
+`query` 必填；categories/kinds 默认空，表示不限制该维度；limit 默认为 8，范围 `1..100`。
+未知字段报错，模型输入中没有 namespace。store 先按允许 namespace、category/kind 和 active
+状态过滤，再按 BM25 升序、updated_at/id 降序取 `limit + 1`，只返回前 limit 条并计算
+`has_more`。同一维度的过滤值为 OR，不同维度为 AND。索引只包含 `MemoryItem.text`；active
+L1/L2 item 均可搜索，episode、未晋升 candidate、deleted/superseded 不进入结果。
+
+索引、查询和原文定位共用词法：ASCII 字母数字连续串小写化，连续中文取相邻双字，仅孤立
+汉字保留单字；标点和下划线分隔词项。查询词项按首次出现顺序去重，以字面量 OR 检索，
+不截断 query、不设置词项预算；索引保留完整词项频次。空文本、零词项、无命中或空范围
+返回 `MemorySearchResponse((), False)`，不会返回最近条目。
+
+命中只含 `item_id/namespace/category/kind/snippet/is_complete`。正文不超过 300 个 Python
+Unicode 字符时全文返回；超过时取首个匹配词起点 h，用
+`start=max(0,min(h-150,len(text)-300))` 返回连续 300 字符原文，不加省略号或高亮。
+`is_complete` 仅说明正文是否完整，不代表命中已经核实。不同 ID 的相同正文分别保留。
 
 ## Memory 工具
 
-`register_memory_tools()` 默认注册 `memory_search`、`memory_list` 与 `memory_get`，三者均为
-`READ` 能力。启用 memory 的 Agent 自动获得这三个工具。负责记忆管理的 Agent 再在现有
-`tools.builtin` 中选择写工具：
+`register_memory_tools()` 默认空，Agent 不会因启用 memory 自动获得工具。显式声明
+`memory.search` / `memory.fetch` 后，模型调用名为 `memory_search` / `memory_fetch`，能力为
+`READ`。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和 `has_more`；
+仅有更多候选时附提示“还有候选，可收紧关键词或 categories/kinds 后重试”。
 
-```yaml
-tools:
-  builtin: [memory.remember, memory.update, memory.forget]
-```
+Fetch 输入只有非空白 `item_id`，可直接读取已知 ID，不要求先 Search。它调用当前
+`aget_item()` 并返回 `{"item": item.model_dump(mode="json")}` 的完整记录，包括正文、来源、
+metadata、artifacts 引用和全部状态/时间字段；不会读取附件内容。缺失、非 active 或范围外
+条目报告“允许读取范围内未找到有效记忆”。连续 Fetch 不去重；Search 后修改条目再 Fetch
+会得到新版。输出仍受普通 `max_result_chars=50000` 和 ToolExecutor artifact 机制约束。
 
-它们暴露为 `memory_remember`、`memory_update` 和 `memory_forget`，具有 `WRITE` 能力，沿用
-已有权限确认、claim 和结果提交机制。写入绑定 policy 的一个 write_namespace，SDK 与工具
-使用同一个 service；forget 返回实际软删除结果，不把未找到条目冒充删除成功。
-直接 SDK 注册可用 `register_memory_tools(..., tool_names=[...])` 选择 builtin 名称。
+需要写入的 Agent 显式声明 `memory.remember/memory.update/memory.forget`，对应
+`memory_remember/memory_update/memory_forget`，沿用 `WRITE` 权限、claim 和结果提交路径。
+写工具共享同一 service，forget 返回是否实际完成软删除，镜像未同步时保留数据库成功结果
+并附 warning。
 
-工具输入不能覆盖 namespace。`MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)`
-由宿主绑定读写范围；默认读写 `project`，空读取集合不返回任何条目。
-默认工厂使用 `MemoryConfig.read_namespaces/write_namespace`，不按 Agent ID 重新分区；
-工厂在每次工具执行前调用，`register_memory_tools()` 接收 `access_policy_factory`。
-`MemoryQuery`、`memory_search` 与 `memory_list` 的 `limit` 都声明为 `1..100`；工具输入在 raw
-边界验证后投影为 trusted `MemoryQuery`，不会重复校验相同范围。
-工具先在事件循环取得策略，再以一个 service job 执行联合读取；不逐 namespace 拼接结果，
-配置顺序不决定谁先占满 limit。显式搜索工具保持完整 query，不继承自动召回词项预算。
+`MemoryAccessPolicy(read_namespaces=[...], write_namespace=...)` 由宿主绑定读写范围，默认
+`project`。工厂在每次工具执行时调用，工具参数不能覆盖 namespace。策略计算留在 event loop，
+THREAD 模式下数据库操作通过 service 的一次完整 worker job 执行。SDK 可用
+`register_memory_tools(..., tool_names=("memory.search", "memory.fetch"))` 选择 builtin 名称。
 
 ## 文件镜像与持久化
 
@@ -269,12 +244,14 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 `projection_revision` 才追上条目版本；部分文件失败时数据库结果仍成功，版本差异表明投影
 未完整同步。写工具结果附带 warning；通用文件工具通过 `MemoryFileAccess` 读取正式路径和
 实际文件来源版本，报告陈旧/未同步状态。数据库检索不依赖镜像发布成功。
-显式重建失败仍抛错，不启动后台重试。配置的 `mirror.enabled=false` 仍关闭人工投影。
+显式重建失败仍抛错，不启动后台重试。配置构造的 SQLite service 总是自动维护分类镜像；
+直接构造 SDK service 时可以不传 mirror。
 
 镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
 以及 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
-索引保留全部状态，默认查询过滤为 active；显式 `MemoryQuery(include_deleted=True)` 使用
-相同检索路径读取已删除内容。新增/更新与索引在同一事务内完成，`rebuild_index()` 可从权威表重建。
+索引保留全部状态，Search 和 Fetch 只返回 active；管理 SDK 的
+`store.list_items(..., include_deleted=True)` 可检查软删除记录。新增/更新与索引在同一事务内
+完成，`rebuild_index()` 可从权威表重建。
 公开 store 的 `list_items()`、`list_events()` 与 `list_candidates()` 对非 `1..100` 的 limit
 直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
 
@@ -288,15 +265,19 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| SDK 生命周期、namespace 范围、SQLite 搜索与 context 构建 | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
-| 并发晋升、字段更新、FTS 完整性与查询数量配置 | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
-| async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
+| SDK 生命周期、namespace 范围和搜索结果 | `models.py`, `service.py`, `sqlite.py` | `tests/memory/test_service.py` |
+| 并发晋升、字段更新、FTS 完整性与搜索过滤 | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
+| async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_search.py`, `tests/memory/test_sqlite_query_plan.py` |
 | namespace 完整快照、投影版本与原子替换 | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | 显式概览生成、读回与版本发布 | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
 | 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
-| 自动召回、去重与历史恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
+| 概览窗口采用、压缩与恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
-```bash
-uv run pytest tests/memory tests/runtime/test_execute.py
-uv run ruff check src/iris/memory tests/memory tests/runtime/test_execute.py
+在仓库根目录按本次变更选择精准测试；每次使用新的 basetemp：
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+$memoryTestTemp = "$PWD\tmp\pytest-memory-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff'))"
+uv run pytest tests/memory -p no:cacheprovider --basetemp="$memoryTestTemp"
+uv run ruff check src/iris/memory tests/memory
 ```

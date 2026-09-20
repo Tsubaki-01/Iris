@@ -14,7 +14,12 @@ from iris.runtime import RuntimeFactory
 from iris.tools import ToolExecutionContext
 
 
-def _config(workspace: Path, *, memory: dict[str, object] | None = None) -> AgentConfig:
+def _config(
+    workspace: Path,
+    *,
+    memory: dict[str, object] | None = None,
+    builtin: list[str] | None = None,
+) -> AgentConfig:
     return AgentConfig.model_validate(
         {
             "name": "memory-agent",
@@ -22,6 +27,7 @@ def _config(workspace: Path, *, memory: dict[str, object] | None = None) -> Agen
             "system": "instructions",
             "permissions": {"workspace": str(workspace)},
             "memory": {} if memory is None else memory,
+            "tools": {"builtin": builtin or []},
         }
     )
 
@@ -33,26 +39,26 @@ def test_memory_disabled_creates_no_service_or_tools(tmp_path: Path) -> None:
     assert not (tmp_path / ".iris").exists()
 
 
-@pytest.mark.parametrize("recall_mode", ["on_turn", "manual"])
+@pytest.mark.parametrize("builtin", [[], ["memory.search", "memory.fetch"]])
 def test_yaml_memory_uses_effective_workspace_and_shared_tool_service(
-    tmp_path: Path, recall_mode: str
+    tmp_path: Path, builtin: list[str]
 ) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: memory-agent\nmodel: openai/test\nsystem: instructions\n"
         "permissions:\n  workspace: project\nmemory:\n  backend: sqlite\n"
-        f"  recall_mode: {recall_mode}\n  read_namespaces: [project, research]\n"
-        "  write_namespace: research\n  mirror:\n    enabled: false\n",
+        "  read_namespaces: [project, research]\n  write_namespace: research\n"
+        f"tools:\n  builtin: {builtin}\n",
         encoding="utf-8",
     )
     runtime = RuntimeFactory.from_config_path(path, provider=FakeProvider([]))
     service = runtime.environment.memory_service
     assert service is not None
     assert service.store.path == tmp_path / "project" / ".iris" / "memory" / "memory.db"
-    assert runtime.environment.agent_config.memory.recall_mode == recall_mode
+    assert service.mirror is not None
     assert not (tmp_path / ".iris").exists()
     tools = runtime.environment.tool_bridge.tool_view.active_tools
-    assert {tool.name for tool in tools} == {"memory_search", "memory_list", "memory_get"}
+    assert {tool.name for tool in tools} == {name.replace(".", "_") for name in builtin}
     for tool in tools:
         assert tool.service is service
         policy = tool.access_policy_factory(ToolExecutionContext(workspace_root=tmp_path))
@@ -85,7 +91,7 @@ def test_explicit_service_has_priority_over_configuration(
 
     monkeypatch.setattr(assembly, "build_memory_service_from_config", forbidden_config_service)
     runtime = RuntimeFactory.from_config(
-        _config(tmp_path, memory={"backend": "sqlite"}),
+        _config(tmp_path, memory={"backend": "sqlite"}, builtin=["memory.fetch"]),
         provider=FakeProvider([]),
         memory_service=service,
     )
@@ -93,7 +99,7 @@ def test_explicit_service_has_priority_over_configuration(
     assert service.overview_provider is overview_provider
     assert service.overview_model == "independent-model"
     assert service.overview_config is overview_config
-    assert runtime.environment.tool_bridge.tool_view.get("memory_get").service is service
+    assert runtime.environment.tool_bridge.tool_view.get("memory_fetch").service is service
     assert not (tmp_path / ".iris").exists()
 
 
@@ -150,7 +156,7 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
     assert provider.requests == []
 
 
-def test_memory_builtins_register_default_reads_once_and_only_selected_writes(
+def test_memory_builtins_register_only_selected_reads_and_writes(
     tmp_path: Path,
 ) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
@@ -162,8 +168,6 @@ def test_memory_builtins_register_default_reads_once_and_only_selected_writes(
     assert [tool.name for tool in registry.view().active_tools].count("memory_search") == 1
     assert {tool.name for tool in registry.view().active_tools} == {
         "memory_search",
-        "memory_list",
-        "memory_get",
         "memory_remember",
         "read_file",
     }
@@ -188,7 +192,9 @@ def test_memory_declaration_requires_service_and_preserves_real_name_conflicts(
     monkeypatch.setattr(tools_module, "_import_ref", lambda ref: memory_search)
     with pytest.raises(IrisToolValidationError):
         build_tool_registry(
-            ToolsConfig(python={"functions": ["custom:memory_search"]}),
+            ToolsConfig(
+                builtin=["memory.search"], python={"functions": ["custom:memory_search"]}
+            ),
             memory_service=MemoryService(SQLiteMemoryStore(tmp_path / "memory.db")),
         )
 
@@ -196,13 +202,13 @@ def test_memory_declaration_requires_service_and_preserves_real_name_conflicts(
 def test_project_memory_is_shared_across_agents_and_isolated_by_workspace(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     first = RuntimeFactory.from_config(
-        _config(shared, memory={"backend": "sqlite", "mirror": {"enabled": False}}),
+        _config(shared, memory={"backend": "sqlite"}),
         provider=FakeProvider([]),
     )
     second_config = first.environment.agent_config.model_copy(update={"name": "other-agent"})
     second = RuntimeFactory.from_config(second_config, provider=FakeProvider([]))
     isolated = RuntimeFactory.from_config(
-        _config(tmp_path / "isolated", memory={"backend": "sqlite", "mirror": {"enabled": False}}),
+        _config(tmp_path / "isolated", memory={"backend": "sqlite"}),
         provider=FakeProvider([]),
     )
     item = first.environment.memory_service.remember(MemoryWriteInput(text="shared", reason="test"))
@@ -245,7 +251,7 @@ def test_cli_uses_the_shared_memory_assembly(
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: cli\nmodel: openai/test\nsystem: instructions\n"
-        "memory:\n  backend: sqlite\n  mirror:\n    enabled: false\n",
+        "memory:\n  backend: sqlite\n",
         encoding="utf-8",
     )
     errors: list[str] = []
@@ -269,7 +275,7 @@ def test_child_uses_own_memory_config_and_effective_workspace(
     child_path.write_text(
         "name: child\nmodel: openai/test\nsystem: child\n"
         "permissions:\n  workspace: .\n"
-        + ("memory:\n  backend: sqlite\n  recall_mode: manual\n" if child_enabled else ""),
+        + ("memory:\n  backend: sqlite\n" if child_enabled else ""),
         encoding="utf-8",
     )
     catalog = tmp_path / "catalog.yaml"
@@ -293,7 +299,7 @@ def test_child_uses_own_memory_config_and_effective_workspace(
     if child_enabled:
         assert service is not None
         assert service.store.path == workspace / ".iris" / "memory" / "memory.db"
-        assert child.runtime.environment.agent_config.memory.recall_mode == "manual"
+        assert child.runtime.environment.agent_config.memory.read_namespaces == ["project"]
     else:
         assert service is None
     assert not (tmp_path / ".iris").exists()

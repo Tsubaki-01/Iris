@@ -7,9 +7,11 @@ import asyncio
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from math import floor
 from pathlib import Path
 from typing import Any, cast
 
+from ..context import ContextBuildOutput
 from ..exceptions import (
     HITLCheckpointInvalidError,
     IrisAPIConnectionError,
@@ -30,7 +32,9 @@ from ..hitl import (
 from ..lifecycle import (
     CheckpointResumability,
     RunErrorInfo,
+    RuntimeExecutionOptions,
     SessionCompaction,
+    SessionContextWindow,
     SessionSnapshot,
     TokenUsage,
     ToolErrorPolicy,
@@ -73,7 +77,7 @@ from .commit import (
 )
 from .compaction import project_history, protected_message_indices, select_compaction_end
 from .environment import RuntimeEnvironment, streaming_provider_for
-from .memory_context import prepare_run_memory_messages
+from .memory_context import load_context_windows, select_context_window
 from .models import (
     RuntimeActivationInput,
     RuntimeActivationOutcome,
@@ -852,29 +856,33 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
     ) -> RuntimeCursor | RuntimeActivationResult:
-        """准备动态快照、BCI 和用户输入，在任何模型调用前原子提交。"""
+        """准备首次窗口、BCI 和用户输入，在任何模型调用前原子提交。"""
         snapshot = commits.load_session()
         if snapshot.session_id != activation.session_id:
             raise IrisRunConflictError("commit port 返回了跨 session history")
         try:
-            dynamic_memory = await prepare_run_memory_messages(
-                options=activation.options,
-                memory_service=self.environment.memory_service,
-                memory_context_builder=self.environment.memory_context_builder,
-                context_builder=self.environment.context_builder,
-                config=self.environment.agent_config.memory,
-                run_input=activation.run_input,
-                run_id=activation.run_id,
-                visible_history=project_history(snapshot.messages, snapshot.compaction, ()),
-            )
             before_current_input = self.environment.context_builder.build_before_current_input(
                 self.environment.context_input.before_current_input
             )
             messages = self.environment.assembler.build_turn_messages(
                 before_current_input=before_current_input,
                 current_input=Msg.user(activation.run_input),
-                dynamic_memory=dynamic_memory,
             )
+            initial_window = None
+            if snapshot.context_window is None:
+                if self.environment.memory_service is None:
+                    initial_window = SessionContextWindow()
+                else:
+                    pending_history = [*snapshot.messages, *messages]
+                    protected = protected_message_indices(
+                        pending_history, activation.initial_session_message_count
+                    )
+                    history = project_history(pending_history, snapshot.compaction, protected)
+                    initial_window, _ = await self._adopt_context_window(
+                        history=history,
+                        options=activation.options,
+                        input_budget_tokens=self.environment.agent_config.compaction.input_budget_tokens,
+                    )
         except Exception as exc:
             return _failed_activation(cursor, exc)
 
@@ -891,7 +899,67 @@ class AgentRuntime:
                 cursor_before=cursor,
                 message_delta=tuple(messages),
                 cursor_after=cursor.model_copy(update={"position": "before_model"}),
+                initial_context_window=initial_window,
             )
+        )
+
+    def _build_model_request(
+        self,
+        *,
+        history: list[Msg],
+        options: RuntimeExecutionOptions,
+        context_window: SessionContextWindow,
+    ) -> tuple[LLMRequest, ContextBuildOutput]:
+        """按同一窗口组装完整消息、模型选项和实际工具schema。"""
+        context_input = self.environment.context_input.model_copy(
+            update={"before_current_input": None}
+        )
+        context_output = self.environment.context_builder.build(
+            context_input, system_addendum=context_window.memory_overview
+        )
+        request = self.environment.assembler.build_request(
+            agent_config=self.environment.agent_config,
+            context_output=context_output,
+            history=history,
+            current_input=None,
+        )
+        request = _apply_request_options(request, options.request_options)
+        request = _apply_tool_schemas(
+            request,
+            include_tools=options.include_tools,
+            tool_view=self.environment.tool_bridge.tool_view,
+            provider=self.environment.agent_config.model.provider,
+        )
+        return request, context_output
+
+    async def _adopt_context_window(
+        self,
+        *,
+        history: list[Msg],
+        options: RuntimeExecutionOptions,
+        input_budget_tokens: int,
+    ) -> tuple[SessionContextWindow, LLMRequest]:
+        """只在窗口采用时读取发布物并应用memory专用额度。"""
+        config = self.environment.agent_config
+        candidates = await load_context_windows(
+            memory_service=self.environment.memory_service,
+            namespaces=config.memory.read_namespaces,
+            tool_names=(
+                [tool.name for tool in self.environment.tool_bridge.tool_view.active_tools]
+                if options.include_tools
+                else []
+            ),
+        )
+        return select_context_window(
+            candidates=candidates,
+            build_request=lambda window: self._build_model_request(
+                history=history, options=options, context_window=window
+            )[0],
+            provider=self.environment.provider,
+            memory_budget_tokens=floor(
+                config.compaction.input_budget_tokens * config.memory.overview.system_budget_ratio
+            ),
+            input_budget_tokens=input_budget_tokens,
         )
 
     async def _execute_model_step(
@@ -909,27 +977,15 @@ class AgentRuntime:
         if snapshot.session_id != activation.session_id:
             raise IrisRunConflictError("commit port 返回了跨 session history")
         try:
-            context_input = self.environment.context_input.model_copy(
-                update={"before_current_input": None}
-            )
-            context_output = self.environment.context_builder.build(context_input)
             protected_indices = protected_message_indices(
                 list(snapshot.messages), activation.initial_session_message_count
             )
-            request = self.environment.assembler.build_request(
-                agent_config=self.environment.agent_config,
-                context_output=context_output,
+            request, context_output = self._build_model_request(
                 history=project_history(
                     list(snapshot.messages), snapshot.compaction, protected_indices
                 ),
-                current_input=None,
-            )
-            request = _apply_request_options(request, activation.options.request_options)
-            request = _apply_tool_schemas(
-                request,
-                include_tools=activation.options.include_tools,
-                tool_view=self.environment.tool_bridge.tool_view,
-                provider=self.environment.agent_config.model.provider,
+                options=activation.options,
+                context_window=cast(SessionContextWindow, snapshot.context_window),
             )
 
             def build_request(history: list[Msg]) -> LLMRequest:
@@ -1294,7 +1350,17 @@ class AgentRuntime:
             compaction = SessionCompaction.model_construct(
                 summary=summary, covered_message_count=end
             )
-            candidate = build_request(project_history(messages, compaction, protected_indices))
+            history = project_history(messages, compaction, protected_indices)
+            current_window = cast(SessionContextWindow, snapshot.context_window)
+            if self.environment.memory_service is None and not current_window.memory_overview:
+                next_window = SessionContextWindow()
+                candidate = build_request(history)
+            else:
+                next_window, candidate = await self._adopt_context_window(
+                    history=history,
+                    options=activation.options,
+                    input_budget_tokens=config.trigger_tokens,
+                )
             after = provider.estimate_input_tokens(candidate)
             stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
             if stopped is not None:
@@ -1309,6 +1375,7 @@ class AgentRuntime:
                     cursor_before=cursor,
                     expected_session_revision=snapshot.revision,
                     compaction=compaction,
+                    context_window=next_window,
                     before_input_tokens=before,
                     after_input_tokens=after,
                 )

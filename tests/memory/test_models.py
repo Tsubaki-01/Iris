@@ -5,7 +5,6 @@ from pydantic import ValidationError
 
 from iris.memory.models import (
     MemoryCandidate,
-    MemoryContextFragment,
     MemoryEpisode,
     MemoryEvent,
     MemoryItem,
@@ -13,7 +12,7 @@ from iris.memory.models import (
     MemoryObserveInput,
     MemoryOverviewConfig,
     MemoryOverviewContent,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryWriteInput,
 )
 
@@ -27,7 +26,7 @@ from iris.memory.models import (
         (MemoryCandidate, {"text": "candidate", "reason": "reason", "episode_ids": ["e"]}),
         (MemoryObserveInput, {}),
         (MemoryWriteInput, {"text": "item", "reason": "reason"}),
-        (MemoryQuery, {}),
+        (MemorySearchQuery, {"query": "fact"}),
     ],
 )
 def test_models_reject_removed_scope_instead_of_defaulting_to_project(
@@ -37,27 +36,36 @@ def test_models_reject_removed_scope_instead_of_defaulting_to_project(
         model(**data, scope={"workspace_id": "workspace", "agent_id": "agent"})
 
 
-def test_query_defaults_and_budget_boundary() -> None:
-    query = MemoryQuery()
-    assert query.namespaces == ["project"]
-    assert query.max_query_terms is None
-    for changes in [{"namespaces": []}, {"namespaces": [" "]}, {"max_query_terms": 0}]:
-        with pytest.raises(ValidationError):
-            MemoryQuery(**changes)
-    assert MemoryQuery(max_query_terms=1).max_query_terms == 1
+def test_search_query_defaults_and_empty_query_are_explicit() -> None:
+    """搜索的唯一输入不携带宿主作用域；空文本由搜索返回空结果。"""
+    query = MemorySearchQuery(query="")
+    assert query.categories == []
+    assert query.kinds == []
+    assert query.limit == 8
+    assert MemorySearchQuery(query="fact", limit=1).limit == 1
+    assert MemorySearchQuery(query="fact", limit=100).limit == 100
 
 
-def test_context_fragment_carries_namespace() -> None:
-    fragment = MemoryContextFragment(
-        item_id="i",
-        namespace="project",
-        text="text",
-        category="user",
-        kind="note",
-        level="l2",
-        warning="warning",
-    )
-    assert fragment.namespace == "project"
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"query": None},
+        {"query": "fact", "limit": 0},
+        {"query": "fact", "limit": 101},
+        {"query": "fact", "categories": ["invalid"]},
+        {"query": "fact", "kinds": ["invalid"]},
+        {"query": "fact", "namespaces": ["project"]},
+        {"query": "fact", "max_query_terms": 64},
+        {"query": "fact", "item_ids": ["item"]},
+        {"query": "fact", "include_deleted": True},
+        {"query": "fact", "text": "fact"},
+    ],
+)
+def test_search_query_rejects_invalid_or_removed_inputs(data: dict[str, object]) -> None:
+    """范围与过滤字段只由唯一公共模型校验。"""
+    with pytest.raises(ValidationError):
+        MemorySearchQuery.model_validate(data)
 
 
 @pytest.mark.parametrize("field", ["text", "category", "kind", "status", "artifacts", "metadata"])

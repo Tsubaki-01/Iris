@@ -231,7 +231,7 @@ class AgentConfig(BaseModel):
         skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
         mcp (AgentMCPConfig | None): 可选的外部 MCP 文件引用与本地策略。
         compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
-        memory (MemoryConfig): 长期记忆后端、召回方式与读写 namespace。
+        memory (MemoryConfig): 长期记忆后端、概览预算与读写 namespace。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         session (SessionConfig): 会话配置。

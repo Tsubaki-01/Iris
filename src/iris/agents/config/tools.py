@@ -57,7 +57,7 @@ def build_tool_registry(
 
     Args:
         config (ToolsConfig): 已校验的工具配置。
-        memory_service: 可选 memory service；存在时自动注册三个读取工具。
+        memory_service: 可选 memory service，绑定显式工具和记忆文件读取范围。
         memory_config: 绑定工具的读取范围和单个写入 namespace。
 
     Returns:
@@ -67,16 +67,9 @@ def build_tool_registry(
         IrisConfigError: 工具名称或 Python 引用无法解析时抛出。
     """
     registry = ToolRegistry()
-    builtin_names = list(config.builtin)
-    if memory_service is not None:
-        builtin_names.extend(
-            name
-            for name in ("memory.search", "memory.list", "memory.get")
-            if name not in builtin_names
-        )
     _register_builtin_tools(
         registry,
-        builtin_names,
+        list(config.builtin),
         memory_service=memory_service,
         memory_config=memory_config or MemoryConfig(),
     )

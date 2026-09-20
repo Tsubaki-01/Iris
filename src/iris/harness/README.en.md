@@ -414,24 +414,23 @@ later renders on the same runtime can see file edits. `StrictUndefined` and char
 checked during rendering. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
-`initial_session_message_count` from the durable run. A new run starts at `before_input`, renders
-automatic or explicit dynamic memory as one context message per fragment, then atomically archives those
-messages with BCI and user input through `CommitRunInput` before advancing to `before_model`.
-This input commit consumes no model-step budget. Empty memory results still commit normal run
-input, and provider failure does not undo committed input.
+`initial_session_message_count` from the durable run. At `before_input`, a new run archives BCI and
+user input. The first session input also atomically commits the selected `SessionContextWindow`
+with input and checkpoint before advancing to `before_model`. Window initialization advances the
+session revision once even without a message delta; provider failure does not undo committed input.
 
-Tool loops, HITL resume, and `before_model` recovery reuse dynamic memory snapshots from history
-without querying again or re-rendering options. An interruption before the input commit permits
-preparation to run again; raw explicit queries/results remain in run options for that recovery
-stage. Static memory slots from `context.yaml` remain fixed context and do not enter session
-history. Old checkpoints use different step-zero input semantics: recovery explicitly rejects v1
-without migration or automatic data deletion.
+Tool loops, later runs, HITL, and recovery replay the committed overview without re-querying or
+reloading updated files. Successful compaction replaces summary and window in the same transaction;
+failure retains the old state. Fork targets start without an adopted window and choose one at their
+first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
+uses schema 8 while checkpoint version stays 2; old formats are rejected without migration or cleanup.
 
-Dynamic memory can be compacted like ordinary history, including before the first model request.
-BCI, original user input, and the latest steer retain their existing protection. Memory snapshots
-receive no additional pinning, so compaction need not preserve their original text in requests.
-Recovery after a projection commit but before the main response uses the new session revision and
-the same pending model step.
+Models choose Search/Fetch themselves. Results enter ordinary tool history and may be compacted,
+with no cross-turn seen registry or special text pinning. The overview defines topic scope within
+2% of the available input budget across namespaces; without one, ordinary chat continues without
+long-term memory use. Static `context.yaml` memory stays independent and outside session history.
+BCI, original user input, and latest steer keep their existing protection; recovery after compaction
+uses the new revision and the same pending model step.
 
 `RunUsage` input/output/total fields count only the main model. Summary calls accumulate under
 `usage.compaction`; add the corresponding fields for combined consumption. A summary usage-only

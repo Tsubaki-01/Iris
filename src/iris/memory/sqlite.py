@@ -4,7 +4,7 @@ SQLite 是长期记忆的权威存储；schema v4 保留 FTS5 并保存 namespac
 
 Example:
     store = SQLiteMemoryStore(".iris/memory/memory.db")
-    results = store.search(MemoryQuery(text="用户偏好"))
+    results = store.search(MemorySearchQuery(query="用户偏好"), ["project"])
 """
 
 # region imports
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from ..exceptions import IrisMemoryError
-from ._query import prepare_fts_query, tokenize_text
+from ._query import make_snippet, prepare_fts_query, tokenize_text
 from .models import (
     MemoryActor,
     MemoryArtifactRef,
@@ -35,8 +35,9 @@ from .models import (
     MemoryLevel,
     MemoryNamespaceSnapshot,
     MemoryNamespaceState,
-    MemoryQuery,
-    MemorySearchResult,
+    MemorySearchHit,
+    MemorySearchQuery,
+    MemorySearchResponse,
     MemorySourceType,
     _now_iso,
 )
@@ -300,12 +301,40 @@ class SQLiteMemoryStore:
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 读取失败", path=str(self.path)) from exc
 
-    def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
-        """文本只走 FTS；没有文本时只接受显式 ID 过滤。"""
-        if query.text:
-            expression = prepare_fts_query(query.text, max_query_terms=query.max_query_terms)
-            return self._search_fts(query, expression) if expression else []
-        return self._search_ids(query) if query.item_ids else []
+    def search(
+        self, query: MemorySearchQuery, namespaces: Sequence[str]
+    ) -> MemorySearchResponse:
+        """在允许范围内用完整词法检索，并以多读一条判断剩余候选。"""
+        terms = tokenize_text(query.query)
+        if not namespaces or not terms:
+            return MemorySearchResponse((), False)
+        clause, params = _query_clause(query, namespaces, item_alias="i")
+        sql = f"""
+            SELECT i.*, bm25(memory_items_fts) AS rank
+            FROM memory_items_fts
+            JOIN memory_items i ON i.id = memory_items_fts.item_id
+            WHERE memory_items_fts MATCH ? AND {clause}
+            ORDER BY rank ASC, i.updated_at DESC, i.id DESC
+            LIMIT ?
+        """
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    sql, [prepare_fts_query(terms), *params, query.limit + 1]
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc
+        query_terms = frozenset(terms)
+        hits: list[MemorySearchHit] = []
+        for row in rows[: query.limit]:
+            item = _row_to_item(row)
+            snippet, is_complete = make_snippet(item.text, query_terms)
+            hits.append(
+                MemorySearchHit(
+                    item.id, item.namespace, item.category, item.kind, snippet, is_complete
+                )
+            )
+        return MemorySearchResponse(tuple(hits), len(rows) > query.limit)
 
     def read_namespace_state(self, namespace: str) -> MemoryNamespaceState:
         """读取 namespace 的当前条目与完整投影版本。"""
@@ -917,55 +946,14 @@ class SQLiteMemoryStore:
             (item.id, " ".join(tokenize_text(item.text))),
         )
 
-    def _search_fts(self, query: MemoryQuery, expression: str) -> list[MemorySearchResult]:
-        """在联合 namespace 内按 BM25 全局排序后应用 limit。"""
-        clause, params = _query_clause(query, item_alias="i")
-        sql = f"""
-            SELECT i.*, bm25(memory_items_fts) AS rank
-            FROM memory_items_fts
-            JOIN memory_items i ON i.id = memory_items_fts.item_id
-            WHERE memory_items_fts MATCH ? AND {clause}
-            ORDER BY rank ASC, i.updated_at DESC, i.id DESC
-            LIMIT ?
-        """
-        try:
-            with self._connection() as connection:
-                rows = connection.execute(sql, [expression, *params, query.limit]).fetchall()
-        except sqlite3.Error as exc:
-            raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc
-        return [
-            MemorySearchResult(
-                item=_row_to_item(row),
-                score=float(row["rank"]),
-                source="sqlite_fts",
-                matched_text=row["text"],
-            )
-            for row in rows
-        ]
 
-    def _search_ids(self, query: MemoryQuery) -> list[MemorySearchResult]:
-        """显式 ID 筛选不承担文本检索或隐式最近条目召回。"""
-        clause, params = _query_clause(query)
-        sql = f"SELECT * FROM memory_items WHERE {clause} ORDER BY updated_at DESC, id DESC LIMIT ?"
-        try:
-            with self._connection() as connection:
-                rows = connection.execute(sql, [*params, query.limit]).fetchall()
-        except sqlite3.Error as exc:
-            raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc
-        return [
-            MemorySearchResult(item=_row_to_item(row), matched_text=row["text"]) for row in rows
-        ]
-
-
-def _query_clause(query: MemoryQuery, *, item_alias: str = "") -> tuple[str, list[Any]]:
+def _query_clause(
+    query: MemorySearchQuery, namespaces: Sequence[str], *, item_alias: str = ""
+) -> tuple[str, list[Any]]:
     """生成查询 SQL 条件。"""
-    clause, params = _namespaces_clause(query.namespaces, alias=item_alias)
-    if not query.include_deleted:
-        clause += f" AND {_column('status', item_alias)} = ?"
-        params.append(MemoryItemStatus.ACTIVE.value)
-    if query.item_ids:
-        clause += f" AND {_column('id', item_alias)} IN ({_placeholders(query.item_ids)})"
-        params.extend(query.item_ids)
+    clause, params = _namespaces_clause(namespaces, alias=item_alias)
+    clause += f" AND {_column('status', item_alias)} = ?"
+    params.append(MemoryItemStatus.ACTIVE.value)
     if query.categories:
         clause += f" AND {_column('category', item_alias)} IN ({_placeholders(query.categories)})"
         params.extend(category.value for category in query.categories)

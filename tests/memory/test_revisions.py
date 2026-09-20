@@ -19,7 +19,7 @@ from iris.memory import (
     MemoryItemStatus,
     MemoryLevel,
     MemoryObserveInput,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
@@ -60,7 +60,7 @@ def test_namespace_revision_tracks_effective_l2_changes_only(tmp_path: Path) -> 
 
 
 def test_namespace_snapshot_excludes_inactive_and_non_l2_items(tmp_path: Path) -> None:
-    """正文快照仅含 active L2，而基线查询仍能读取 active L1 item。"""
+    """正文快照仅含 active L2，搜索也能读取 active L1 item。"""
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     episodic = MemoryItem(text="episodic marker", level=MemoryLevel.EPISODIC)
     for item in (
@@ -72,7 +72,10 @@ def test_namespace_snapshot_excludes_inactive_and_non_l2_items(tmp_path: Path) -
     snapshot = store.read_namespace_snapshot("project")
     assert snapshot.items == ()
     assert snapshot.state.item_revision == 0
-    assert [result.item.id for result in store.search(MemoryQuery(text="marker"))] == [episodic.id]
+    assert [
+        result.item_id
+        for result in store.search(MemorySearchQuery(query="marker"), ["project"]).items
+    ] == [episodic.id]
 
 
 def test_partial_publication_leaves_database_committed_and_projection_stale(
@@ -98,10 +101,11 @@ def test_partial_publication_leaves_database_committed_and_projection_stale(
     updated = service.update(item.id, "project", MemoryItemPatch(text="aftertoken"), reason="edit")
     state = store.read_namespace_state("project")
     assert service.get_item(item.id, ["project"]) == updated
-    assert [result.item.id for result in service.recall(MemoryQuery(text="aftertoken"))] == [
-        item.id
-    ]
-    assert service.recall(MemoryQuery(text="beforetoken")) == []
+    assert [
+        result.item_id
+        for result in service.search(MemorySearchQuery(query="aftertoken"), ["project"]).items
+    ] == [item.id]
+    assert service.search(MemorySearchQuery(query="beforetoken"), ["project"]).items == ()
     assert (state.item_revision, state.projection_revision) == (2, 1)
     view = service.file_access(["project"])
     assert view is not None

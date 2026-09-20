@@ -15,14 +15,11 @@ from iris.context import ContextSection, ContextSlot
 from iris.harness import AgentRunner, SessionHistory
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import (
-    AgentRunOptions,
     AgentRunRequest,
     LifecycleStore,
     RunEventKind,
     RunStopReason,
-    RuntimeExecutionOptions,
 )
-from iris.memory import MemoryItem, MemorySearchResult
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -193,11 +190,24 @@ async def test_recover_after_projection_commit_reuses_summary_reservation_and_fo
     tmp_path: Path, compaction_store: LifecycleStore
 ) -> None:
     """step0 主响应前崩溃复用摘要，后续原会话更新不会改变旧 run 的 fork。"""
+    from .test_runner_memory import OverviewService, overview
+
     await _seed_history(tmp_path, compaction_store)
     provider = CompactionProvider()
     provider.block_main = True
+    service = OverviewService(tmp_path / "memory.db", "压缩时采用的概览")
+    runtime = _runtime(tmp_path, provider)
+    runtime.environment.memory_service = service
+    memory = runtime.environment.agent_config.memory
+    runtime.environment.agent_config = runtime.environment.agent_config.model_copy(
+        update={
+            "memory": memory.model_copy(
+                update={"overview": memory.overview.model_copy(update={"system_budget_ratio": 0.5})}
+            )
+        }
+    )
     running = asyncio.create_task(
-        AgentRunner(runtime=_runtime(tmp_path, provider), store=compaction_store).start(
+        AgentRunner(runtime=runtime, store=compaction_store).start(
             AgentRunRequest(input="继续原任务", run_id="crashed")
         )
     )
@@ -210,23 +220,32 @@ async def test_recover_after_projection_commit_reuses_summary_reservation_and_fo
     before = compaction_store.load_session("default")
     crashed = compaction_store.load_run("crashed")
     assert before.compaction is not None
+    assert "压缩时采用的概览" in before.context_window.memory_overview
     assert len(before.messages) == 4
     assert before.messages[-2].metadata["context_kind"] == "before_current_input"
     assert before.messages[-1].text == "继续原任务"
     assert crashed is not None and crashed.current_activation_id is not None
     assert crashed.usage.model_steps_reserved == 1
     assert crashed.usage.model_steps_committed == 0
+    service.documents = (overview("恢复时不应重新采用", revision=2),)
     resumed_provider = CompactionProvider(text_response("新" * 900))
+    resumed_runtime = _runtime(tmp_path, resumed_provider)
+    resumed_runtime.environment.memory_service = service
     recovered = await AgentRunner(
-        runtime=_runtime(tmp_path, resumed_provider), store=compaction_store
+        runtime=resumed_runtime, store=compaction_store
     ).recover("crashed", expected_activation_id=crashed.current_activation_id)
 
     assert recovered.run.stop_reason is RunStopReason.COMPLETED, recovered.error
     assert resumed_provider.summary_requests == []
     assert len(resumed_provider.requests) == 1
     assert before.compaction.summary in resumed_provider.requests[0].messages[1].text
+    assert resumed_provider.requests[0].messages[0].text.endswith(
+        before.context_window.memory_overview
+    )
+    assert service.reads == [("project",)]
     restored = compaction_store.load_session("default")
     assert restored.compaction == before.compaction
+    assert restored.context_window == before.context_window
     assert sum(message.text == "继续原任务" for message in restored.messages) == 1
     assert sum("本轮有效环境" in message.text for message in restored.messages) == 1
     assert recovered.run.usage.compaction.total_tokens == 11
@@ -246,6 +265,7 @@ async def test_recover_after_projection_commit_reuses_summary_reservation_and_fo
     branch = SessionHistory(compaction_store).fork("crashed")
     assert branch.compaction == before.compaction
     assert branch.messages == restored.messages
+    assert branch.context_window is None
 
 
 @pytest.mark.asyncio
@@ -296,40 +316,39 @@ async def test_sqlite_projection_write_failure_preserves_old_summary_and_never_s
 
 
 @pytest.mark.asyncio
-async def test_first_request_can_compact_dynamic_memory_but_keeps_bci_and_user(
+async def test_compaction_adopts_overview_outside_raw_history(
     tmp_path: Path, compaction_store: LifecycleStore
 ) -> None:
-    """动态记忆先归档再普通压缩，不占用 BCI 与原始用户输入的保护位置。"""
-    provider = CompactionProvider(text_response())
-    memory_text = "可压缩的动态资料" * 160
-    memory = MemorySearchResult(
-        item=MemoryItem(
-            id="long-memory",
-            namespace="project",
-            text=memory_text,
-        )
-    )
-    result = await AgentRunner(runtime=_runtime(tmp_path, provider), store=compaction_store).start(
-        AgentRunRequest(input="保留原始问题", run_id="memory-compaction"),
-        options=AgentRunOptions(
-            runtime=RuntimeExecutionOptions(memory_results=[memory.model_dump(mode="json")])
-        ),
-    )
+    """概览在压缩提交后进入system，原始历史继续只含普通消息。"""
+    from .test_runner_memory import OverviewService
 
+    await _seed_history(tmp_path, compaction_store)
+    provider = CompactionProvider(text_response())
+    runtime = _runtime(tmp_path, provider)
+    runtime.environment.memory_service = OverviewService(tmp_path / "memory.db", "新概览事实")
+    memory = runtime.environment.agent_config.memory
+    runtime.environment.agent_config = runtime.environment.agent_config.model_copy(
+        update={
+            "memory": memory.model_copy(
+                update={"overview": memory.overview.model_copy(update={"system_budget_ratio": 0.5})}
+            )
+        }
+    )
+    result = await AgentRunner(runtime=runtime, store=compaction_store).start(
+        AgentRunRequest(input="保留原始问题", run_id="memory-compaction")
+    )
     assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
     assert len(provider.summary_requests) == len(provider.requests) == 1
     request = provider.requests[0]
-    assert any(message.text.startswith("<summary>") for message in request.messages)
-    assert all(memory_text not in message.text for message in request.messages)
-    assert sum("本轮有效环境" in message.text for message in request.messages) == 1
-    assert sum(message.text == "保留原始问题" for message in request.messages) == 1
     session = compaction_store.load_session("default")
     assert session.compaction is not None
-    assert session.compaction.covered_message_count == 1
-    assert session.messages[0].metadata["context_kind"] == "memory"
-    assert memory_text in session.messages[0].text
-    assert session.messages[1].metadata["context_kind"] == "before_current_input"
-    assert session.messages[2].text == "保留原始问题"
+    assert session.context_window is not None
+    assert "新概览事实" in session.context_window.memory_overview
+    assert request.messages[0].text.endswith(session.context_window.memory_overview)
+    assert not any(message.metadata.get("context_kind") == "memory" for message in session.messages)
+    assert all("新概览事实" not in message.text for message in session.messages)
+    assert sum("本轮有效环境" in message.text for message in request.messages) == 1
+    assert sum(message.text == "保留原始问题" for message in request.messages) == 1
 
 
 @pytest.mark.asyncio

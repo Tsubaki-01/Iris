@@ -90,12 +90,13 @@ slot. During `build()`, empty optional sections do not touch a configured templa
 `ContextBuildInput.with_memory_slots()` returns a copy with runtime slots appended; it does not
 mutate the loaded object and creates an empty memory section when needed.
 
-Long-term memory results should first become `MemoryContextBundle`, then be mapped by runtime to
-fixed-name context slots. Prompt-facing attributes retain category/kind/level semantics but should
-not expose retrieval score or storage source.
+Runtime passes the adopted memory overview through `ContextBuilder.build(..., system_addendum=...)`.
+The addendum follows the complete default XML or custom-template output, before the system
+`max_chars` check. Templates need no new slot, and the result remains one system message.
+Runtime/lifecycle owns overview loading, selection, and persistence; this package renders the supplied
+text. Static `context.yaml` memory and `with_memory_slots()` remain independent capabilities.
 
-Runtime uses `ContextBuilder.render_section()` to render each dynamic fragment as a separate history
-message instead of adding it to the fixed memory section. BCI messages produced by `build()` carry
+BCI messages produced by `build()` carry
 `metadata.context_kind=before_current_input` so compaction can identify the original input group.
 `build_before_current_input(section)` prepares BCI on its own for input archival, without rendering
 fixed context sections until the model request.

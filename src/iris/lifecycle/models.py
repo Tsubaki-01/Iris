@@ -258,26 +258,11 @@ class RuntimeExecutionOptions(_FrozenModel):
     request_options: dict[str, Any] = Field(default_factory=dict)
     tool_timeout_seconds: float | None = Field(default=None, gt=0)
     tool_error_policy: ToolErrorPolicy = ToolErrorPolicy.RETURN_TO_MODEL
-    memory_query: dict[str, Any] | None = None
-    memory_results: list[dict[str, Any]] | None = None
-    memory_max_chars: int = Field(default=4000, gt=0)
 
     @field_validator("request_options")
     @classmethod
     def _validate_request_options(cls, value: dict[str, Any]) -> dict[str, Any]:
         return validate_json_safe(value, field_name="request_options")
-
-    @field_validator("memory_query", "memory_results")
-    @classmethod
-    def _validate_memory_snapshots(cls, value: Any, info: ValidationInfo) -> Any:
-        return validate_json_safe(value, field_name=str(info.field_name))
-
-    @model_validator(mode="after")
-    def _validate_memory_source(self) -> RuntimeExecutionOptions:
-        """一次调用只能显式选择查询或结果快照。"""
-        if self.memory_query is not None and self.memory_results is not None:
-            raise ValueError("memory_query 与 memory_results 不能同时提供")
-        return self
 
 
 class AgentRunOptions(_FrozenModel):
@@ -300,6 +285,22 @@ class SessionCompaction(_FrozenModel):
 
     summary: str = Field(pattern=r"\S")
     covered_message_count: int = Field(gt=0)
+
+
+class MemoryOverviewSource(_FrozenModel):
+    """已采用概览的来源快照，仅解释文本来源，不授予工具权限。"""
+
+    namespace: str
+    path: str
+    source_revision: int | None = None
+
+
+class SessionContextWindow(_FrozenModel):
+    """一次 session 上下文窗口固定采用的 memory 文本与来源。"""
+
+    memory_overview: str = ""
+    mode: Literal["full", "navigation"] = "navigation"
+    sources: tuple[MemoryOverviewSource, ...] = ()
 
 
 class RunUsage(_FrozenModel):
@@ -557,12 +558,13 @@ class RunControlSnapshot(_FrozenModel):
 
 
 class SessionSnapshot(_FrozenModel):
-    """一个 session 的消息历史与 CAS revision。"""
+    """一个 session 的消息历史、固定上下文窗口与 CAS revision。"""
 
     session_id: str
     revision: int = Field(default=0, ge=0)
     messages: list[Msg] = Field(default_factory=list)
     compaction: SessionCompaction | None = None
+    context_window: SessionContextWindow | None = None
     forked_from_run_id: str | None = None
 
     @field_validator("session_id")
@@ -803,6 +805,7 @@ __all__ = [
     "AgentRunOptions",
     "AgentRunRequest",
     "CheckpointResumability",
+    "MemoryOverviewSource",
     "RecoveryDisposition",
     "RunCheckpoint",
     "RunControlSnapshot",
@@ -821,6 +824,7 @@ __all__ = [
     "RuntimeExecutionOptions",
     "SessionSnapshot",
     "SessionCompaction",
+    "SessionContextWindow",
     "TokenUsage",
     "ToolCallPhase",
     "ToolErrorPolicy",

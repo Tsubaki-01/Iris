@@ -1,11 +1,12 @@
 """项目记忆的读写工具。
 
-默认注册 search/list/get；remember/update/forget 由宿主显式选择，使用既有 WRITE 执行路径。
+Search/Fetch 与写工具均由宿主显式声明；默认不注册任何工具。
 
 Example:
     registry = register_memory_tools(
         service=service,
         access_policy_factory=policy_factory,
+        tool_names=("memory.search", "memory.fetch"),
     )
 """
 
@@ -18,8 +19,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
+from ..exceptions import IrisMemoryError
 from ..message import TextBlock
 from ..tools import (
     BaseTool,
@@ -37,8 +39,8 @@ from .models import (
     MemoryItem,
     MemoryItemKind,
     MemoryItemPatch,
-    MemoryQuery,
-    MemorySearchResult,
+    MemorySearchHit,
+    MemorySearchQuery,
     MemorySourceType,
     MemoryWriteInput,
 )
@@ -61,40 +63,12 @@ class MemoryAccessPolicy:
     write_namespace: str = "project"
 
 
-class MemorySearchToolInput(BaseModel):
-    """记忆搜索工具输入。"""
+class MemoryFetchToolInput(BaseModel):
+    """按已知条目 ID 获取允许范围内的当前完整记录。"""
 
     model_config = ConfigDict(extra="forbid")
 
-    query: str
-    limit: int = Field(default=8, gt=0, le=100)
-    categories: list[MemoryCategory] = Field(default_factory=list)
-    kinds: list[MemoryItemKind] = Field(default_factory=list)
-
-
-class MemoryListToolInput(BaseModel):
-    """记忆列表工具输入。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    limit: int = Field(default=50, gt=0, le=100)
-    category: MemoryCategory | None = None
-
-
-class MemoryGetToolInput(BaseModel):
-    """记忆读取工具输入。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    item_id: str
-
-    @field_validator("item_id")
-    @classmethod
-    def _validate_item_id(cls, value: str) -> str:
-        """校验 item id 不能为空。"""
-        if not value.strip():
-            raise ValueError("item_id 不能为空")
-        return value
+    item_id: str = Field(pattern=r"\S")
 
 
 class MemoryRememberToolInput(BaseModel):
@@ -200,68 +174,44 @@ class MemoryTool(BaseTool, Generic[InputT]):  # noqa: UP046
         return self._json_result(payload)
 
 
-class MemorySearchTool(MemoryTool[MemorySearchToolInput]):
-    """联合搜索允许读取的 namespace。"""
+class MemorySearchTool(MemoryTool[MemorySearchQuery]):
+    """联合搜索允许读取的 namespace，返回可直接使用的原文片段。"""
 
     name: ClassVar[str] = "memory_search"
-    description: ClassVar[str] = "搜索允许读取的项目记忆"
-    input_type: type[MemorySearchToolInput] = MemorySearchToolInput
+    description: ClassVar[str] = (
+        "搜索允许读取的项目记忆，返回原文片段；需要完整记录时可用 memory_fetch"
+    )
+    input_type: type[MemorySearchQuery] = MemorySearchQuery
 
     async def _impl(
-        self,
-        params: MemorySearchToolInput,
-        context: ToolExecutionContext,
+        self, params: MemorySearchQuery, context: ToolExecutionContext
     ) -> ToolResult:
-        """调用 MemoryService.recall 执行搜索。"""
-        results = await self.service.arecall(
-            MemoryQuery.model_construct(
-                namespaces=self._read_namespaces(context),
-                text=params.query,
-                categories=params.categories,
-                kinds=params.kinds,
-                limit=params.limit,
-            )
-        )
-        return self._json_result({"results": [_result_payload(result) for result in results]})
+        """直接传递已验证查询和本次宿主读取范围。"""
+        response = await self.service.asearch(params, self._read_namespaces(context))
+        payload: dict[str, Any] = {
+            "items": [_hit_payload(hit) for hit in response.items],
+            "has_more": response.has_more,
+        }
+        if response.has_more:
+            payload["hint"] = "还有候选，可收紧关键词或 categories/kinds 后重试"
+        return self._json_result(payload)
 
 
-class MemoryListTool(MemoryTool[MemoryListToolInput]):
-    """联合列出允许读取的 namespace 内的长期记忆。"""
+class MemoryFetchTool(MemoryTool[MemoryFetchToolInput]):
+    """按 ID 获取允许读取范围内的当前活跃记录。"""
 
-    name: ClassVar[str] = "memory_list"
-    description: ClassVar[str] = "列出允许读取的项目记忆"
-    input_type: type[MemoryListToolInput] = MemoryListToolInput
+    name: ClassVar[str] = "memory_fetch"
+    description: ClassVar[str] = "按 item_id 获取一条当前记忆的完整正文和元数据"
+    input_type: type[MemoryFetchToolInput] = MemoryFetchToolInput
 
     async def _impl(
-        self,
-        params: MemoryListToolInput,
-        context: ToolExecutionContext,
+        self, params: MemoryFetchToolInput, context: ToolExecutionContext
     ) -> ToolResult:
-        """调用 MemoryService.list_items 执行列表读取。"""
-        categories = [params.category] if params.category is not None else None
-        items = await self.service.alist_items(
-            self._read_namespaces(context), limit=params.limit, categories=categories
-        )
-        return self._json_result({"items": [_item_payload(item) for item in items]})
-
-
-class MemoryGetTool(MemoryTool[MemoryGetToolInput]):
-    """按 ID 在允许读取的 namespace 中定位记忆。"""
-
-    name: ClassVar[str] = "memory_get"
-    description: ClassVar[str] = "按 id 读取允许范围内的一条项目记忆"
-    input_type: type[MemoryGetToolInput] = MemoryGetToolInput
-
-    async def _impl(
-        self,
-        params: MemoryGetToolInput,
-        context: ToolExecutionContext,
-    ) -> ToolResult:
-        """调用 MemoryService.get_item 读取单条记忆。"""
+        """复用当前记录读取，并将缺失、非活跃和范围外统一报告为读取错误。"""
         item = await self.service.aget_item(params.item_id, self._read_namespaces(context))
-        if item is not None:
-            return self._json_result({"found": True, "item": _item_payload(item)})
-        return self._json_result({"found": False})
+        if item is None:
+            raise IrisMemoryError("允许读取范围内未找到有效记忆", item_id=params.item_id)
+        return self._json_result({"item": item.model_dump(mode="json")})
 
 
 class MemoryRememberTool(MemoryTool[MemoryRememberToolInput]):
@@ -337,8 +287,7 @@ class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
 
 MEMORY_TOOL_CLASSES: dict[str, type[MemoryTool[Any]]] = {
     "memory.search": MemorySearchTool,
-    "memory.list": MemoryListTool,
-    "memory.get": MemoryGetTool,
+    "memory.fetch": MemoryFetchTool,
     "memory.remember": MemoryRememberTool,
     "memory.update": MemoryUpdateTool,
     "memory.forget": MemoryForgetTool,
@@ -365,9 +314,9 @@ def register_memory_tools(
     access_policy_factory: MemoryAccessPolicyFactory,
     registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
-    tool_names: Sequence[str] = ("memory.search", "memory.list", "memory.get"),
+    tool_names: Sequence[str] = (),
 ) -> ToolRegistry:
-    """注册选定记忆工具并返回 registry，默认仅读。
+    """注册选定记忆工具并返回 registry，默认不注册任何工具。
 
     Args:
         service (MemoryService): 供所有记忆工具共享的服务实例。
@@ -412,9 +361,13 @@ def _item_payload(item: MemoryItem) -> dict[str, Any]:
     return payload
 
 
-def _result_payload(result: MemorySearchResult) -> dict[str, Any]:
-    """转换搜索结果为工具输出 payload。"""
-    payload = _item_payload(result.item)
-    payload["score"] = result.score
-    payload["source"] = result.source
-    return payload
+def _hit_payload(hit: MemorySearchHit) -> dict[str, Any]:
+    """将进程内搜索结果投影为固定六字段工具输出。"""
+    return {
+        "item_id": hit.item_id,
+        "namespace": hit.namespace,
+        "category": hit.category.value,
+        "kind": hit.kind.value,
+        "snippet": hit.snippet,
+        "is_complete": hit.is_complete,
+    }

@@ -1071,7 +1071,7 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
             )
         }
         dump = "\n".join(connection.iterdump())
-    assert identity == [("agent_lifecycle", 6)]
+    assert identity == [("agent_lifecycle", 8)]
     expected_tables = {
         "agent_runs",
         "lifecycle_schema",

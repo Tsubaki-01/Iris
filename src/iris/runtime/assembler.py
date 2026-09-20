@@ -31,7 +31,7 @@ class RuntimeMessageAssembler:
     """装配单次 provider 请求前的 runtime messages。
 
     Assembler 只处理顺序和 provider-neutral 请求构造；context 构建、session 读取、
-    memory recall、工具执行和 provider 调用由外层 runtime 阶段负责。
+    窗口概览、工具执行和 provider 调用由外层 runtime 阶段负责。
     """
 
     def build_turn_messages(
@@ -39,22 +39,20 @@ class RuntimeMessageAssembler:
         *,
         before_current_input: Msg | None,
         current_input: Msg | None,
-        dynamic_memory: tuple[Msg, ...] = (),
     ) -> list[Msg]:
         """构建仅属于当前用户 turn 的输入消息。
 
         Args:
             before_current_input (Msg | None): 已构建完成的 BCI 消息。
             current_input (Msg | None): 当前用户输入；continuation step 为空。
-            dynamic_memory (tuple[Msg, ...]): 输入提交阶段准备的独立记忆快照。
 
         Returns:
-            list[Msg]: 按动态记忆、BCI、当前输入排列的独立消息列表。
+            list[Msg]: 按 BCI、当前输入排列的独立消息列表。
         """
         if current_input is None:
             return []
 
-        messages: list[Msg] = list(dynamic_memory)
+        messages: list[Msg] = []
         if before_current_input is not None:
             messages.append(before_current_input)
         messages.append(current_input)

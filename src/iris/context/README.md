@@ -215,15 +215,13 @@ section = ContextSection(
 `memory` 或 `before_current_input` 缺失、为空，或者没有启用的 slot
 时，对应输出为 `None`。这种情况下即使配置的模板不存在，也不会尝试打开或渲染模板。
 
-长期记忆召回结果应先由 `iris.memory.MemoryService.build_context()` 转为
-`MemoryContextBundle`，再由外层 runtime 或调用方映射成 `ContextSlot`。
-XML 标签名仍由 `ContextSlot.name` 决定；推荐对召回片段使用固定
-`name="memory"`，并把 `category`、`kind`、`level` 等记忆语义放入
-`attributes`。`score`、`source` 等召回排序或实现细节不应默认进入
-prompt-facing XML。
+Runtime 通过 `ContextBuilder.build(..., system_addendum=...)` 把已经采用的记忆概览追加到
+system。Addendum 放在默认 XML 或自定义模板的完整渲染结果之后，再检查 system 的
+`max_chars`，所以模板无需声明新 slot，实际输出仍只有一条 system 消息。
+概览读取、选择和持久化由 runtime/lifecycle 负责；本包仅渲染传入文本。
+`context.yaml` 的静态 memory section 和 `with_memory_slots()` 仍可独立使用。
 
-runtime 使用 `ContextBuilder.render_section()` 把每个动态片段单独渲染成历史消息，不把它们
-追加到固定 memory section。`build()` 生成的 BCI 消息带有
+`build()` 生成的 BCI 消息带有
 `metadata.context_kind=before_current_input`，供压缩识别原始输入组；静态 memory 仍保持固定位置。
 `build_before_current_input(section)` 允许 runtime 在输入阶段只构建 BCI，固定上下文留到模型请求时渲染。
 
@@ -349,7 +347,9 @@ class ContextBuilder:
         template_renderer: ContextTemplateRenderer | None = None,
     ) -> None: ...
 
-    def build(self, input_data: ContextBuildInput) -> ContextBuildOutput: ...
+    def build(
+        self, input_data: ContextBuildInput, *, system_addendum: str = ""
+    ) -> ContextBuildOutput: ...
 
 class ContextXmlRenderer:
     def render_section(

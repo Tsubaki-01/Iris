@@ -13,7 +13,7 @@ from iris.memory import (
     MemoryItem,
     MemoryItemPatch,
     MemoryObserveInput,
-    MemoryQuery,
+    MemorySearchQuery,
     MemoryService,
     MemorySourceType,
     MemoryWriteInput,
@@ -44,7 +44,7 @@ def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
     assert not mirror.root.exists()
 
 
-def test_remember_recall_and_build_context(tmp_path: Path) -> None:
+def test_remember_and_search_return_a_complete_short_snippet(tmp_path: Path) -> None:
     service = _service(tmp_path)
     namespace = "project"
 
@@ -55,15 +55,11 @@ def test_remember_recall_and_build_context(tmp_path: Path) -> None:
             reason="explicit user preference",
         )
     )
-    results = service.recall(MemoryQuery(namespaces=[namespace], text="简洁", limit=5))
-    bundle = service.build_context(
-        MemoryQuery(namespaces=[namespace], text="简洁", limit=5), max_chars=100
-    )
-
-    assert [result.item.id for result in results] == [item.id]
-    assert bundle.fragments[0].item_id == item.id
-    assert bundle.fragments[0].namespace == namespace
-    assert bundle.omitted_count == 0
+    results = service.search(MemorySearchQuery(query="简洁", limit=5), [namespace]).items
+    assert [result.item_id for result in results] == [item.id]
+    assert results[0].namespace == namespace
+    assert results[0].snippet == item.text
+    assert results[0].is_complete
 
 
 def test_forget_tombstones_without_leaking_cross_namespace_existence(
@@ -101,7 +97,7 @@ def test_sqlite_search_keeps_full_namespace_isolation(tmp_path: Path) -> None:
         ),
     )
 
-    assert store.search(MemoryQuery(namespaces=[other_namespace], text="agent-a")) == []
+    assert store.search(MemorySearchQuery(query="agent-a"), [other_namespace]).items == ()
 
 
 def _service(tmp_path: Path) -> MemoryService:
@@ -121,13 +117,26 @@ def test_update_keeps_identity_refreshes_search_and_relocates_mirror(tmp_path: P
 
     assert updated.id == item.id
     assert service.get_item(item.id, ["project"]) == updated
-    assert service.recall(MemoryQuery(text="bananas")) == []
-    assert [result.item.id for result in service.recall(MemoryQuery(text="oranges"))] == [item.id]
+    assert service.search(MemorySearchQuery(query="bananas"), ["project"]).items == ()
+    assert [
+        result.item_id
+        for result in service.search(MemorySearchQuery(query="oranges"), ["project"]).items
+    ] == [item.id]
+    assert (
+        service.search(MemorySearchQuery(query="oranges", categories=["user"]), ["project"]).items
+        == ()
+    )
+    assert (
+        service.search(MemorySearchQuery(query="oranges", categories=["reference"]), ["project"])
+        .items[0]
+        .item_id
+        == item.id
+    )
     directory = mirror.namespace_directory("project")
     assert item.id not in (directory / "User/user.md").read_text(encoding="utf-8")
     assert "updated oranges" in (directory / "Reference/notes.md").read_text(encoding="utf-8")
     assert service.forget(item.id, "project", reason="finished") is True
-    assert service.recall(MemoryQuery(text="oranges")) == []
+    assert service.search(MemorySearchQuery(query="oranges"), ["project"]).items == ()
     assert item.id not in (directory / "Reference/notes.md").read_text(encoding="utf-8")
 
 

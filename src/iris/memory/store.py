@@ -17,8 +17,8 @@ from .models import (
     MemoryItemPatch,
     MemoryNamespaceSnapshot,
     MemoryNamespaceState,
-    MemoryQuery,
-    MemorySearchResult,
+    MemorySearchQuery,
+    MemorySearchResponse,
 )
 
 PublicationT = TypeVar("PublicationT")
@@ -65,8 +65,10 @@ class MemoryStore(Protocol):
     ) -> PublicationT:
         """在同一短发布事务内读取当前状态并发布已生成概览。"""
 
-    def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
-        """按查询条件召回长期记忆。"""
+    def search(
+        self, query: MemorySearchQuery, namespaces: Sequence[str]
+    ) -> MemorySearchResponse:
+        """在允许范围内搜索活跃条目，返回原文片段和剩余候选标记。"""
 
     def list_items(
         self,

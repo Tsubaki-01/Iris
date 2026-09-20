@@ -10,7 +10,18 @@ from typing import cast
 
 from ..exceptions import IrisRunStateError
 from ..lifecycle.history import ForkPoint, ForkPointCursor, ForkPointPage
-from ..lifecycle.models import RunPhase, RunRecord, RunStopReason
+from ..lifecycle.models import RunPhase, RunRecord, RunStopReason, SessionContextWindow
+
+
+def validate_context_window_initialization(
+    current: SessionContextWindow | None, initial: SessionContextWindow | None
+) -> None:
+    """首输入必须初始化窗口，后续输入只能复用已初始化窗口。"""
+    if current is None:
+        if initial is None:
+            raise IrisRunStateError("首次输入必须提供 context window")
+    elif initial is not None:
+        raise IrisRunStateError("已有 context window 不能由后续输入替换")
 
 
 def validate_fork_source(run: RunRecord, *, is_child: bool) -> None:

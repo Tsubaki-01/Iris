@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import IrisMemoryError
-from iris.memory.models import MemoryQuery
+from iris.memory.models import MemorySearchQuery
 from iris.memory.sqlite import SQLiteMemoryStore
 
 
@@ -60,6 +60,7 @@ def test_schema_initialization_failure_is_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statement: str
 ) -> None:
     """FTS 或 namespace 状态表创建失败时回滚整个新库初始化。"""
+
     class FailingConnection(sqlite3.Connection):
         def execute(self, sql: str, parameters: object = ()) -> sqlite3.Cursor:
             if statement in sql:
@@ -86,4 +87,4 @@ def test_fts_execution_failure_does_not_fall_back_to_like(tmp_path: Path) -> Non
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP TABLE memory_items_fts")
     with pytest.raises(IrisMemoryError, match="搜索失败"):
-        store.search(MemoryQuery(text="needle"))
+        store.search(MemorySearchQuery(query="needle"), ["project"])

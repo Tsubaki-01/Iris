@@ -39,6 +39,7 @@ from iris.lifecycle import (
     RuntimeExecutionOptions,
     RunToolCallRecord,
     RunUsage,
+    SessionContextWindow,
     ToolCallPhase,
     ToolErrorPolicy,
 )
@@ -1516,6 +1517,7 @@ def _prepare_parent(
             activation_id=command.start_activation_id,
             expected_session_revision=0,
             message_delta=[Msg.user("Parent private history")],
+            initial_context_window=SessionContextWindow(),
             checkpoint=command.initial_checkpoint.model_copy(
                 update={
                     "sequence": 2,
@@ -1639,7 +1641,6 @@ async def test_child_uses_fresh_context_options_and_shared_store(
         limits=RunLimits(max_model_steps=1),
         runtime=RuntimeExecutionOptions(
             request_options={"temperature": 0.1},
-            memory_results=[{"parent-only": True}],
         ),
     )
     prepared = _prepare_parent(runner, selector=selector, options=options)

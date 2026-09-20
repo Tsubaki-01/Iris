@@ -16,11 +16,12 @@ from iris.lifecycle import (
     CheckpointResumability,
     RuntimeExecutionOptions,
     SessionCompaction,
+    SessionContextWindow,
     SessionSnapshot,
     TokenUsage,
 )
 from iris.lifecycle.models import SubagentRunLink
-from iris.memory import MemoryContextBuilder, MemoryService
+from iris.memory import MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
@@ -129,6 +130,9 @@ class FakeRuntimeCommitPort:
         self.model_commits: list[RuntimeModelStepCommit] = []
         self.input_commits: list[RuntimeRunInputCommit] = []
         self.compaction: SessionCompaction | None = None
+        self.context_window: SessionContextWindow | None = (
+            None if activation.cursor.position == "before_input" else SessionContextWindow()
+        )
         self.compaction_usages: list[TokenUsage] = []
         self.compaction_commits: list[RuntimeCompactionCommit] = []
         self.tool_commits: list[RuntimeToolResultCommit] = []
@@ -151,6 +155,7 @@ class FakeRuntimeCommitPort:
             revision=self._revision,
             messages=list(self.messages),
             compaction=self.compaction,
+            context_window=self.context_window,
         )
 
     def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
@@ -160,8 +165,10 @@ class FakeRuntimeCommitPort:
         if commit.cursor_before.position != "before_input":
             raise IrisRunConflictError("输入只能在 before_input 提交")
         self.messages.extend(commit.message_delta)
+        if commit.initial_context_window is not None:
+            self.context_window = commit.initial_context_window
         self.cursor = commit.cursor_after
-        self._revision += 1
+        self._revision += bool(commit.message_delta or commit.initial_context_window is not None)
         self.input_commits.append(commit)
         return self.cursor
 
@@ -207,6 +214,7 @@ class FakeRuntimeCommitPort:
         if commit.expected_session_revision != self._revision:
             raise IrisRunConflictError("fake port 摘要快照 revision 不匹配")
         self.compaction = commit.compaction
+        self.context_window = commit.context_window
         self._revision += 1
         self.compaction_commits.append(commit)
         return self.cursor
@@ -672,7 +680,6 @@ def build_runtime(
     workspace_root: Path | None = None,
     permission_policy: PermissionPolicy | None = None,
     memory_service: MemoryService | None = None,
-    memory_context_builder: MemoryContextBuilder | None = None,
 ) -> AgentRuntime:
     """为测试构造包含一致依赖图的 runtime。"""
     registry = tool_registry or (tool_view.registry if tool_view is not None else ToolRegistry())
@@ -694,6 +701,5 @@ def build_runtime(
         ),
         workspace_root=workspace_root or Path.cwd(),
         memory_service=memory_service,
-        memory_context_builder=memory_context_builder or MemoryContextBuilder(),
     )
     return AgentRuntime(environment)

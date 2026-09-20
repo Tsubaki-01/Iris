@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -25,7 +25,8 @@ CREATE TABLE sessions (
     message_count INTEGER NOT NULL DEFAULT 0 CHECK (message_count >= 0),
     updated_at TEXT NOT NULL,
     forked_from_run_id TEXT REFERENCES agent_runs(run_id),
-    compaction_json TEXT
+    compaction_json TEXT,
+    context_window_json TEXT
 )
 """
 

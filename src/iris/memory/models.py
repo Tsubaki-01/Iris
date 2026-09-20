@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
-from typing import Annotated, Any
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -148,7 +148,7 @@ class MemoryEpisode(BaseModel):
 
 
 class MemoryItem(BaseModel):
-    """L2 长期记忆条目。"""
+    """可记录 L1/L2 级别的长期记忆条目。"""
 
     id: str = Field(default_factory=_new_id)
     namespace: str = Field(default="project", pattern=r"\S")
@@ -281,30 +281,35 @@ class MemoryEvent(BaseModel):
     model_config = {"use_enum_values": False, "extra": "forbid"}
 
 
-class MemoryQuery(BaseModel):
-    """长期记忆召回查询。"""
+class MemorySearchQuery(BaseModel):
+    """SDK 与工具共享的搜索输入，读取范围由调用方单独绑定。"""
 
-    namespaces: list[Annotated[str, Field(pattern=r"\S")]] = Field(
-        default_factory=lambda: ["project"], min_length=1
-    )
-    max_query_terms: int | None = Field(default=None, gt=0)
-    text: str = ""
-    item_ids: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
     categories: list[MemoryCategory] = Field(default_factory=list)
     kinds: list[MemoryItemKind] = Field(default_factory=list)
-    limit: int = Field(default=10, gt=0, le=100)
-    include_deleted: bool = False
-
-    model_config = {"use_enum_values": False, "extra": "forbid"}
+    limit: int = Field(default=8, ge=1, le=100)
 
 
-class MemorySearchResult(BaseModel):
-    """一次召回命中的长期记忆。"""
+@dataclass(frozen=True, slots=True)
+class MemorySearchHit:
+    """一条搜索命中的最小定位信息与原文片段。"""
 
-    item: MemoryItem
-    score: float = 0.0
-    source: str = "sqlite"
-    matched_text: str = ""
+    item_id: str
+    namespace: str
+    category: MemoryCategory
+    kind: MemoryItemKind
+    snippet: str
+    is_complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySearchResponse:
+    """按相关度排序的有限命中，以及是否仍有候选。"""
+
+    items: tuple[MemorySearchHit, ...]
+    has_more: bool
 
 
 class MemoryWriteInput(BaseModel):
@@ -349,31 +354,6 @@ class MemoryObserveInput(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"use_enum_values": False, "extra": "forbid"}
-
-
-class MemoryContextFragment(BaseModel):
-    """构建提示上下文时包含的一条记忆片段。"""
-
-    item_id: str
-    namespace: str = Field(default="project", pattern=r"\S")
-    text: str
-    category: MemoryCategory
-    kind: MemoryItemKind
-    level: MemoryLevel
-    reason: str = ""
-    confidence: float | None = None
-    importance: float | None = None
-    warning: str
-    truncated: bool = False
-
-
-class MemoryContextBundle(BaseModel):
-    """召回后可交给上游 prompt builder 使用的记忆上下文。"""
-
-    fragments: list[MemoryContextFragment] = Field(default_factory=list)
-    total_chars: int = 0
-    omitted_count: int = 0
-    max_chars: int
 
 
 class MemoryOverviewConfig(BaseModel):
