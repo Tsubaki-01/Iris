@@ -107,7 +107,11 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
             "model": "openai/fake-model",
             "system": "回答项目问题。",
             "permissions": {"workspace": str(tmp_path)},
-            "tools": {"builtin": ["memory.search", "memory.fetch"]},
+            "tools": {
+                "builtin": ["memory.search"]
+                if strategy == "search"
+                else ["memory.search", "memory.fetch"]
+            },
         }
     )
     runner = AgentRunner.from_config(
@@ -115,6 +119,11 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     )
     first = await runner.start(AgentRunRequest(input="确认项目部署版本", run_id="read-memory"))
     assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
+    if strategy == "search":
+        tools = provider.requests[0].tools
+        assert [tool["function"]["name"] for tool in tools] == ["memory_search"]
+        assert "memory_fetch" not in json.dumps(tools, ensure_ascii=False)
+        assert "memory_fetch" not in provider.requests[0].messages[0].text
     expected_names = [] if strategy == "none" else ["memory_search"]
     if strategy == "fetch":
         expected_names.append("memory_fetch")
