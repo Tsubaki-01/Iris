@@ -36,6 +36,7 @@ from ..base import (
 from ..permissions import WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
+from ._file_memory import MemoryFileBoundary, MemoryFileView
 from ._file_read import read_text_page
 
 # endregion
@@ -180,13 +181,20 @@ class WorkspaceFileService:
     #                    初始化
     # ==========================================
     # region
-    def __init__(self, workspace_policy: WorkspacePolicy | None = None) -> None:
+    def __init__(
+        self,
+        workspace_policy: WorkspacePolicy | None = None,
+        *,
+        memory_view: MemoryFileView | None = None,
+    ) -> None:
         """创建文件服务实例。
 
         Args:
             workspace_policy (WorkspacePolicy | None): 路径访问策略。为 None 时使用默认策略。
+            memory_view (MemoryFileView | None): 可选记忆投影范围与同步状态视图。
         """
         self.workspace_policy = workspace_policy or WorkspacePolicy()
+        self._memory_boundary = MemoryFileBoundary(memory_view) if memory_view is not None else None
 
     # endregion
 
@@ -194,12 +202,15 @@ class WorkspaceFileService:
     #                路径与读取状态
     # ==========================================
     # region
-    def resolve_path(self, path: str, context: ToolExecutionContext) -> Path:
+    def resolve_path(
+        self, path: str, context: ToolExecutionContext, *, write: bool = False
+    ) -> Path:
         """解析并校验 workspace 内路径。
 
         Args:
             path (str): 用户传入的相对或绝对路径。
             context (ToolExecutionContext): 当前工具执行上下文。
+            write (bool): 是否为写操作；记忆派生文件由 memory 管理接口修改。
 
         Returns:
             Path: 已按 workspace 策略解析的路径。
@@ -207,7 +218,25 @@ class WorkspaceFileService:
         Raises:
             IrisToolValidationError: 当路径越出 workspace 或策略拒绝访问时。
         """
-        return self.workspace_policy.resolve_path(path, workspace_root=context.workspace_root)
+        resolved = self.workspace_policy.resolve_path(path, workspace_root=context.workspace_root)
+        if self._memory_boundary is not None:
+            self._memory_boundary.check(resolved, write=write)
+        return resolved
+
+    def _memory_source(self, path: Path, handle: TextIO) -> int | None:
+        """从同一已打开记忆文件读取来源标记，并回到正文开头。"""
+        boundary = self._memory_boundary
+        if boundary is None or path not in boundary.documents:
+            return None
+        revision = boundary.view.source_revision(handle.readline())
+        handle.seek(0)
+        return revision
+
+    def _memory_warning(self, path: Path, revision: int | None) -> str | None:
+        """在内容读取后取得该投影的陈旧提示。"""
+        if self._memory_boundary is None:
+            return None
+        return self._memory_boundary.warning(path, revision)
 
     def ensure_read_state(self, context: ToolExecutionContext) -> ReadFileState:
         """获取或初始化文件读取状态。
@@ -300,7 +329,9 @@ class WorkspaceFileService:
         workspace_root = context.workspace_root.resolve()
         if root.is_file():
             resolved = root.resolve(strict=False)
-            if self.workspace_policy.is_within_workspace(resolved, workspace_root):
+            if self.workspace_policy.is_within_workspace(resolved, workspace_root) and (
+                self._memory_boundary is None or self._memory_boundary.permits(resolved)
+            ):
                 yield resolved
             return
 
@@ -322,6 +353,10 @@ class WorkspaceFileService:
                         if ignore_directory is not None and ignore_directory(candidate):
                             continue
                         resolved_directory = candidate.resolve(strict=False)
+                        if self._memory_boundary is not None and not self._memory_boundary.permits(
+                            resolved_directory
+                        ):
+                            continue
                         if not self.workspace_policy.is_within_workspace(
                             resolved_directory,
                             workspace_root,
@@ -337,6 +372,10 @@ class WorkspaceFileService:
                     ):
                         continue
                     resolved = candidate.resolve(strict=False)
+                    if self._memory_boundary is not None and not self._memory_boundary.permits(
+                        resolved
+                    ):
+                        continue
                     if not self.workspace_policy.is_within_workspace(resolved, workspace_root):
                         continue
                     if resolved.is_file():
@@ -372,6 +411,7 @@ class WorkspaceFileService:
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
         with self._open_text(params.file_path, context) as (path, handle):
+            source_revision = self._memory_source(path, handle)
             content = read_text_page(
                 handle,
                 offset=offset,
@@ -380,6 +420,20 @@ class WorkspaceFileService:
                 with_line_numbers=params.with_line_numbers,
                 max_chars=max_chars,
             )
+            warning = self._memory_warning(path, source_revision)
+            if warning is not None:
+                prefix = f"{warning}\n\n"
+                if len(prefix) + len(content) > max_chars:
+                    handle.seek(0)
+                    content = read_text_page(
+                        handle,
+                        offset=offset,
+                        column=params.column,
+                        limit=limit,
+                        with_line_numbers=params.with_line_numbers,
+                        max_chars=max_chars - len(prefix),
+                    )
+                content = prefix + content
             stat = os.fstat(handle.fileno())
         return (
             content,
@@ -411,7 +465,11 @@ class WorkspaceFileService:
             UnicodeDecodeError: 文件不是有效 UTF-8 文本。
         """
         with self._open_text(file_path, context) as (path, handle):
+            source_revision = self._memory_source(path, handle)
             text = handle.read()
+            warning = self._memory_warning(path, source_revision)
+            if warning is not None:
+                text = f"{warning}\n\n{text}"
             stat = os.fstat(handle.fileno())
         return text, ReadFileRecord(
             path=path,
@@ -428,7 +486,12 @@ class WorkspaceFileService:
         """统一 workspace 文本读取的路径与文件类型边界。"""
         path = self.resolve_path(file_path, context)
         if not path.exists():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
+            warnings = (
+                self._memory_boundary.projection_warnings(path)
+                if self._memory_boundary is not None
+                else []
+            )
+            raise IrisToolExecutionError("\n".join(["FILE_NOT_FOUND: 文件不存在", *warnings]))
         if not path.is_file():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不是文件")
         with path.open("r", encoding="utf-8") as handle:
@@ -506,10 +569,18 @@ class WorkspaceFileService:
         except re.error as exc:
             raise IrisToolValidationError("invalid regex pattern", pattern=params.pattern) from exc
         if not root.exists():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 路径不存在")
+            missing_warnings = (
+                self._memory_boundary.projection_warnings(root)
+                if self._memory_boundary is not None
+                else []
+            )
+            raise IrisToolExecutionError(
+                "\n".join(["FILE_NOT_FOUND: 路径不存在", *missing_warnings])
+            )
 
         # --- 2. 扫描文本文件 ---
         matches: list[str] = []
+        warnings: dict[str, None] = {}
         workspace_root = context.workspace_root.resolve()
         explicit_artifact_target = ".iris" in root.relative_to(workspace_root).parts
         for path in self.iter_files(
@@ -521,18 +592,37 @@ class WorkspaceFileService:
         ):
             with path.open("r", encoding="utf-8") as handle:
                 try:
+                    source_revision = self._memory_source(path, handle)
                     for line_number, line in enumerate(handle, start=1):
                         line = line.rstrip("\r\n")
                         if regex.search(line):
                             relative = path.relative_to(workspace_root)
                             matches.append(f"{relative}:{line_number}: {line}")
                             if len(matches) >= params.max_results:
-                                return "\n".join(matches)
+                                warning = self._memory_warning(path, source_revision)
+                                if warning is not None:
+                                    warnings[warning] = None
+                                return "\n".join([*warnings, *matches])
+                    warning = self._memory_warning(path, source_revision)
+                    if warning is not None:
+                        warnings[warning] = None
                 except UnicodeDecodeError:
                     continue
 
         # --- 3. 返回匹配 ---
-        return "\n".join(matches)
+        boundary = self._memory_boundary
+        if (
+            boundary is not None
+            and boundary.root.is_relative_to(workspace_root)
+            and (
+                explicit_artifact_target
+                or ".iris" not in boundary.root.relative_to(workspace_root).parts
+            )
+        ):
+            for warning in boundary.projection_warnings(root):
+                if not any(warning in existing for existing in warnings):
+                    warnings[warning] = None
+        return "\n".join([*warnings, *matches])
 
     def write_file(self, params: WriteFileInput, context: ToolExecutionContext) -> str:
         """写入新文件或覆盖已读且未变的已有文件。
@@ -547,7 +637,7 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当已有文件未读或读取后发生变化时。
         """
-        path = self.resolve_path(params.file_path, context)
+        path = self.resolve_path(params.file_path, context, write=True)
         if path.exists():
             self.require_fresh_read(path, context)
         self.atomic_write(path, params.content)
@@ -567,7 +657,7 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当文件不存在、读取状态过期或匹配文本不唯一时。
         """
-        path = self.resolve_path(params.file_path, context)
+        path = self.resolve_path(params.file_path, context, write=True)
         if not path.exists():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
         self.require_fresh_read(path, context)

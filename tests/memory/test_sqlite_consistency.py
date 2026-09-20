@@ -346,3 +346,59 @@ def test_memory_query_owns_result_limit(tmp_path: Path) -> None:
 
     assert len(store.search(MemoryQuery(text="preference", limit=1))) == 1
     assert len(store.search(MemoryQuery(text="preference", limit=2))) == 2
+
+
+@pytest.mark.parametrize("operation", ["add", "update", "delete", "promote"])
+@pytest.mark.parametrize("failure_stage", ["fts", "event"])
+def test_item_mutation_failure_rolls_back_fts_revision_and_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    failure_stage: str,
+) -> None:
+    """索引或事件写入中途失败时，条目、版本、候选与事件一起回滚。"""
+    store = SQLiteMemoryStore(tmp_path / "atomic.db")
+    service = MemoryService(store)
+    item = service.remember(MemoryWriteInput(text="beforetoken", reason="seed"))
+    episode = service.observe(MemoryObserveInput(text="source"))
+    candidate = service.add_candidate(
+        MemoryCandidate(episode_ids=[episode.id], text="aftertoken", reason="candidate")
+    )
+    before_items = store.list_items(["project"], include_deleted=True)
+    before_state = store.read_namespace_state("project")
+    before_events = store.list_events("project")
+    before_candidates = store.list_candidates("project")
+    refresh_fts = store._refresh_fts_row
+    insert_event = store._insert_event
+
+    def fail_after_fts(connection: sqlite3.Connection, current: MemoryItem) -> None:
+        refresh_fts(connection, current)
+        raise sqlite3.OperationalError("injected FTS write failure")
+
+    def fail_after_event(connection: sqlite3.Connection, event: MemoryEvent) -> None:
+        insert_event(connection, event)
+        raise sqlite3.OperationalError("injected event write failure")
+
+    if failure_stage == "fts":
+        monkeypatch.setattr(store, "_refresh_fts_row", fail_after_fts)
+    else:
+        monkeypatch.setattr(store, "_insert_event", fail_after_event)
+
+    with pytest.raises(IrisMemoryError, match="失败"):
+        if operation == "add":
+            service.remember(MemoryWriteInput(text="aftertoken", reason="add"))
+        elif operation == "update":
+            service.update(item.id, "project", MemoryItemPatch(text="aftertoken"), reason="edit")
+        elif operation == "delete":
+            service.forget(item.id, "project", reason="forget")
+        else:
+            service.promote_candidate(
+                candidate.id, "project", kind=MemoryItemKind.NOTE, reason="ok"
+            )
+
+    assert store.list_items(["project"], include_deleted=True) == before_items
+    assert store.read_namespace_state("project") == before_state
+    assert store.list_events("project") == before_events
+    assert store.list_candidates("project") == before_candidates
+    assert [result.item.id for result in store.search(MemoryQuery(text="beforetoken"))] == [item.id]
+    assert store.search(MemoryQuery(text="aftertoken")) == []

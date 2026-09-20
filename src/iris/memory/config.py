@@ -80,7 +80,7 @@ def build_memory_service_from_config(
     store = SQLiteMemoryStore(path)
     mirror: FileMemoryMirror | None = None
     if config.mirror.enabled:
-        mirror = FileMemoryMirror(root)
+        mirror = FileMemoryMirror(root, workspace_root=workspace_root)
         mirror.initialize_layout()
     return MemoryService(
         store,

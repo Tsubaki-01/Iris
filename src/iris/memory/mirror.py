@@ -1,496 +1,131 @@
-"""本地记忆 mirror 文件投影。
+"""SQLite 权威记忆的确定性 Markdown 分类投影。"""
 
-Mirror 是 SQLite 权威数据的只读投影，便于人工审查和 diff；本模块不支持从文件反向导入。
-
-Mirror 文件大致长这样：
-
-```text
-.iris/memory/
-  Memory.md
-  User/
-    user.md
-    profile.json
-    preferences.md
-  Feedback/
-    feedback.md
-    corrections.md
-  Reference/
-    notes.md
-    docs/
-    links.json
-  Tasks/
-    task.md
-    task.json
-    plans/
-  Sessions/
-    session_items.md
-    recent_events.md
-    session_summaries/
-```
-
-`User/user.md`、`User/preferences.md`、`Feedback/feedback.md`、
-`Feedback/corrections.md`、`Reference/notes.md`、`Tasks/task.md`
-与 `Sessions/session_items.md`
-是按记忆类别投影的 Markdown 文件。每条记忆由稳定 marker 包裹，便于后续覆盖更新：
-
-```markdown
-<!-- iris-memory-item:project:mem_123 -->
-### Memory Item mem_123
-
-- id: mem_123
-- category: user
-- kind: preference
-- namespace: project
-- created_at: 2026-06-03T10:00:00
-- updated_at: 2026-06-03T10:00:00
-- confidence: 0.8
-- importance: 0.7
-
-用户偏好简洁中文回答
-<!-- /iris-memory-item:project:mem_123 -->
-```
-
-`Sessions/recent_events.md` 记录每个 namespace 最近 100 条审计事件：
-
-```markdown
-# Recent Memory Events
-
-This file is a generated recent projection. It keeps only the latest 100 events per namespace.
-The complete audit logs shall be subject to SQLite memory_events.
-
-<!-- iris-memory-event:project:evt_123 -->
-### Memory Event evt_123
-
-- id: evt_123
-- event_type: observe
-- actor: agent
-- namespace: project
-- created_at: 2026-06-03T10:00:00
-- reason: user message observed
-<!-- /iris-memory-event:project:evt_123 -->
-```
-
-`Tasks/task.json` 是任务状态的结构化投影：
-
-```json
-{
-  "items": [
-    {
-      "id": "mem_123",
-      "namespace": "project",
-      "text": "阶段二实现 mirror",
-      "metadata": {
-        "stage": 2,
-        "status": "in_progress"
-      },
-      "updated_at": "2026-06-03T10:00:00"
-    }
-  ]
-}
-```
-
-`User/profile.json` 默认是 `{}`，`Reference/links.json` 默认是
-`{"links": []}`；这些 JSON 文件当前只由 mirror 初始化或特定投影逻辑写入。
-
-Example:
-    mirror = FileMemoryMirror(Path(".iris/memory"))
-    mirror.initialize_layout()
-"""
-
-# region imports
 from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from collections.abc import Sequence
+from html import escape
+from itertools import groupby
 from pathlib import Path
-from threading import RLock
-from typing import Any
-from urllib.parse import quote
 
 from ..exceptions import IrisMemoryError
+from .files import BODY_PATHS, namespace_key
 from .models import (
     MemoryCategory,
-    MemoryEvent,
     MemoryItem,
     MemoryItemKind,
-    MemoryItemStatus,
+    MemoryNamespaceSnapshot,
+    MemoryNamespaceState,
 )
 from .store import MemoryStore
 
-# endregion
-
-# ==========================================
-#                 Constants
-# ==========================================
-# region constants
-LAYOUT_DIRECTORIES: tuple[str, ...] = (
-    "User",
-    "Feedback",
-    "Reference",
-    "Reference/docs",
-    "Tasks",
-    "Tasks/plans",
-    "Sessions",
-    "Sessions/session_summaries",
-)
-LAYOUT_FILES: tuple[str, ...] = (
-    "Memory.md",
-    "User/user.md",
-    "User/profile.json",
-    "User/preferences.md",
-    "Feedback/feedback.md",
-    "Feedback/corrections.md",
-    "Reference/notes.md",
-    "Reference/links.json",
-    "Tasks/task.md",
-    "Tasks/task.json",
-    "Sessions/session_items.md",
-    "Sessions/recent_events.md",
-)
-GENERATED_MARKDOWN_FILES: tuple[str, ...] = (
-    "User/user.md",
-    "User/preferences.md",
-    "Feedback/feedback.md",
-    "Feedback/corrections.md",
-    "Reference/notes.md",
-    "Tasks/task.md",
-    "Sessions/session_items.md",
-    "Sessions/recent_events.md",
-)
-GENERATED_ITEM_MARKDOWN_FILES: tuple[str, ...] = tuple(
-    relative_path
-    for relative_path in GENERATED_MARKDOWN_FILES
-    if relative_path != "Sessions/recent_events.md"
-)
-JSON_DEFAULTS: dict[str, dict[str, Any]] = {
-    "User/profile.json": {},
-    "Reference/links.json": {"links": []},
-    "Tasks/task.json": {"items": []},
-}
-RECENT_EVENTS_LIMIT = 100
-RECENT_EVENTS_PATH = "Sessions/recent_events.md"
-RECENT_EVENTS_HEADER = (
-    "# Recent Memory Events\n\n"
-    "This file is a generated recent projection. It keeps only the latest "
-    f"{RECENT_EVENTS_LIMIT} events per namespace.\n"
-    "The complete audit logs shall be subject to SQLite memory_events.\n"
-)
-# endregion
-
 
 class FileMemoryMirror:
-    """将权威记忆数据投影到 `.iris/memory/` 文件树。"""
+    """唯一的记忆文件发布 owner；SQLite 为锁与内容版本提供权威边界。"""
 
-    def __init__(self, root: Path) -> None:
-        """初始化 mirror 根目录。"""
-        self.root = root
-        self._initialized = False
-        self._lock = RLock()
+    def __init__(self, root: Path, *, workspace_root: Path | None = None) -> None:
+        """绑定正文根目录，以及文档相对路径使用的可选 workspace。"""
+        self.root = root.resolve(strict=False)
+        self.workspace_root = workspace_root.resolve(strict=False) if workspace_root else None
 
     def initialize_layout(self) -> None:
-        """创建固定目录和缺失的初始文件。"""
-        with self._lock:
-            if self._initialized:
-                return
-            try:
-                self.root.mkdir(parents=True, exist_ok=True)
-                for directory in LAYOUT_DIRECTORIES:
-                    self._resolve_relative(directory).mkdir(parents=True, exist_ok=True)
-                for relative_path in LAYOUT_FILES:
-                    path = self._resolve_relative(relative_path)
-                    if path.exists():
+        """只初始化目录，正文首次发布仍走 store 的完整事务。"""
+        try:
+            (self.root / "namespaces").mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise IrisMemoryError("memory mirror 初始化失败", root=str(self.root)) from exc
+
+    def namespace_directory(self, namespace: str) -> Path:
+        """返回 namespace 的独立目录，并保留 workspace containment。"""
+        return self._resolve_relative(f"namespaces/{namespace_key(namespace)}")
+
+    def document_path(self, namespace: str, relative_path: str = "Memory.md") -> Path:
+        """返回正式文档的 workspace 相对路径或独立绝对路径。"""
+        path = self._resolve_relative(f"namespaces/{namespace_key(namespace)}/{relative_path}")
+        if self.workspace_root is not None:
+            return path.relative_to(self.workspace_root)
+        return path
+
+    def rebuild_from_store(self, store: MemoryStore, namespace: str) -> MemoryNamespaceState:
+        """在 store 的短发布事务内现读并发布全部分类正文。"""
+        return store.publish_projection(namespace, self._publish_snapshot)
+
+    def _publish_snapshot(self, snapshot: MemoryNamespaceSnapshot) -> None:
+        """发布当前锁内完整快照，每个分类文件携带同一来源版本。"""
+        namespace = snapshot.state.namespace
+        prefix = f"namespaces/{namespace_key(namespace)}"
+        for target in BODY_PATHS:
+            items = tuple(item for item in snapshot.items if target_for_item(item) == target)
+            content = self._render_body(namespace, snapshot.state.item_revision, target, items)
+            self._atomic_replace(f"{prefix}/{target}", content)
+
+    def _render_body(
+        self, namespace: str, revision: int, target: str, items: Sequence[MemoryItem]
+    ) -> str:
+        """渲染分类正文，按 kind 保留所有条目及其完整文本。"""
+        lines = [
+            f"<!-- iris-memory source_revision: {revision} -->",
+            f"# {target}",
+            "",
+            f"- namespace: {namespace}",
+            "",
+        ]
+        if not items:
+            lines.append("当前无记忆。")
+        for kind, members in groupby(items, key=lambda item: item.kind):
+            lines.extend([f"## {kind.value}", ""])
+            for item in members:
+                metadata = item.model_dump(mode="json", exclude={"text"}, exclude_none=True)
+                information = []
+                for name, value in metadata.items():
+                    if name in {"artifacts", "metadata"} and not value:
                         continue
-                    if relative_path == RECENT_EVENTS_PATH:
-                        path.write_text(RECENT_EVENTS_HEADER, encoding="utf-8")
-                    elif relative_path.endswith(".json"):
-                        path.write_text(
-                            _dump_pretty_json(JSON_DEFAULTS.get(relative_path, {})),
-                            encoding="utf-8",
-                        )
-                    else:
-                        path.write_text("", encoding="utf-8")
-                self._ensure_recent_events_header()
-            except OSError as exc:
-                raise IrisMemoryError("memory mirror 初始化失败", root=str(self.root)) from exc
-            self._initialized = True
-
-    def mirror_item(self, item: MemoryItem) -> None:
-        """将一个 active item 投影到对应 Markdown/JSON 文件。"""
-        if item.status != MemoryItemStatus.ACTIVE:
-            return
-        self.project_batch(items=[item])
-
-    def mirror_event(self, event: MemoryEvent) -> None:
-        """将审计事件追加到最近事件 mirror。"""
-        self.project_batch(events=[event])
-
-    def project_batch(
-        self,
-        *,
-        items: Sequence[MemoryItem] = (),
-        events: Sequence[MemoryEvent] = (),
-    ) -> None:
-        """批量投影已提交的记忆对象，并对每个目标只执行一次替换。"""
-        active_items = [item for item in items if item.status == MemoryItemStatus.ACTIVE]
-        if not active_items and not events:
-            return
-        self.initialize_layout()
-        with self._lock:
-            self._project_batch(items=active_items, events=events)
-
-    def rebuild_from_store(self, store: MemoryStore, namespace: str) -> None:
-        """从权威 store 确定性重建 active mirror 文件。"""
-        self.initialize_layout()
-        with self._lock:
-            items = sorted(
-                store.list_items([namespace], limit=None),
-                key=lambda item: (
-                    item.category.value,
-                    item.kind.value,
-                    item.created_at,
-                    item.id,
-                ),
-            )
-            events = sorted(
-                store.list_events(namespace, limit=RECENT_EVENTS_LIMIT),
-                key=lambda event: (event.created_at, event.id),
-            )
-            self._project_batch(items=items, events=events, rebuild_namespace=namespace)
-
-    def _project_batch(
-        self,
-        *,
-        items: Sequence[MemoryItem],
-        events: Sequence[MemoryEvent],
-        rebuild_namespace: str | None = None,
-    ) -> None:
-        """在锁内读取、渲染并原子替换一批目标文件。"""
-        targets = {self._target_for_item(item) for item in items}
-        if any(
-            item.category == MemoryCategory.TASK and item.kind == MemoryItemKind.TASK_STATE
-            for item in items
-        ):
-            targets.add("Tasks/task.json")
-        if events:
-            targets.add(RECENT_EVENTS_PATH)
-        if rebuild_namespace is not None:
-            targets.update(GENERATED_ITEM_MARKDOWN_FILES)
-            targets.add(RECENT_EVENTS_PATH)
-            targets.add("Tasks/task.json")
-
-        existing = {target: self._read_target(target) for target in sorted(targets)}
-        rendered = {
-            target: self._render_target(
-                target,
-                content,
-                items=items,
-                events=events,
-                rebuild_namespace=rebuild_namespace,
-            )
-            for target, content in existing.items()
-        }
-        for target, content in rendered.items():
-            if content != existing[target]:
-                self._atomic_replace(target, content)
+                    display = (
+                        json.dumps(value, ensure_ascii=False, indent=2)
+                        if name in {"artifacts", "metadata"}
+                        else str(value)
+                    )
+                    information.append(f"{name}: {display}")
+                lines.extend(
+                    [
+                        item.text,
+                        "",
+                        "<details>",
+                        "<summary>记录信息</summary>",
+                        "",
+                        "<pre>",
+                        escape("\n".join(information), quote=False),
+                        "</pre>",
+                        "</details>",
+                        "",
+                        "---",
+                        "",
+                    ]
+                )
+        return "\n".join(lines).rstrip() + "\n"
 
     def _resolve_relative(self, relative_path: str) -> Path:
-        """解析系统生成的相对路径，并拒绝逃逸 root。"""
+        """解析生成路径并保留文件副作用前的 root containment。"""
         candidate = Path(relative_path)
         if candidate.is_absolute():
             raise IrisMemoryError("memory mirror 路径必须是相对路径", path=relative_path)
-        root = self.root.resolve(strict=False)
-        resolved = (root / candidate).resolve(strict=False)
+        resolved = (self.root / candidate).resolve(strict=False)
         try:
-            resolved.relative_to(root)
+            resolved.relative_to(self.root)
         except ValueError as exc:
             raise IrisMemoryError("memory mirror 路径不能逃逸 root", path=relative_path) from exc
         return resolved
 
-    def _ensure_recent_events_header(self) -> None:
-        """确保 recent events 文件带有 recent-only 投影说明。"""
-        path = self._resolve_relative(RECENT_EVENTS_PATH)
-        content = path.read_text(encoding="utf-8") if path.exists() else ""
-        if content.startswith(RECENT_EVENTS_HEADER):
-            return
-        stripped = content.lstrip()
-        if stripped.startswith(RECENT_EVENTS_HEADER.rstrip()):
-            path.write_text(_normalize_markdown_content(stripped), encoding="utf-8")
-            return
-        if stripped:
-            path.write_text(
-                _normalize_markdown_content(f"{RECENT_EVENTS_HEADER}\n{stripped}"),
-                encoding="utf-8",
-            )
-            return
-        path.write_text(RECENT_EVENTS_HEADER, encoding="utf-8")
-
-    def _render_item_markdown(self, item: MemoryItem) -> str:
-        """将记忆条目渲染为稳定 Markdown block。"""
-        lines = [
-            f"### Memory Item {item.id}",
-            "",
-            f"- id: {item.id}",
-            f"- category: {item.category.value}",
-            f"- kind: {item.kind.value}",
-            f"- namespace: {item.namespace}",
-            f"- created_at: {item.created_at}",
-            f"- updated_at: {item.updated_at}",
-        ]
-        if item.confidence is not None:
-            lines.append(f"- confidence: {item.confidence}")
-        if item.importance is not None:
-            lines.append(f"- importance: {item.importance}")
-        lines.extend(["", item.text, ""])
-        return "\n".join(lines)
-
-    def _render_event_markdown(self, event: MemoryEvent) -> str:
-        """将审计事件渲染为最近事件 Markdown block。"""
-        lines = [
-            f"### Memory Event {event.id}",
-            "",
-            f"- id: {event.id}",
-            f"- event_type: {event.event_type.value}",
-            f"- actor: {event.actor.value}",
-            f"- namespace: {event.namespace}",
-            f"- created_at: {event.created_at}",
-        ]
-        if event.item_id:
-            lines.append(f"- item_id: {event.item_id}")
-        if event.episode_id:
-            lines.append(f"- episode_id: {event.episode_id}")
-        if event.reason:
-            lines.append(f"- reason: {event.reason}")
-        lines.append("")
-        return "\n".join(lines)
-
-    def _target_for_item(self, item: MemoryItem) -> str:
-        """根据 category/kind 映射 mirror 文件。"""
-        if item.category == MemoryCategory.USER:
-            if item.kind == MemoryItemKind.PREFERENCE:
-                return "User/preferences.md"
-            return "User/user.md"
-        if item.category == MemoryCategory.FEEDBACK:
-            if item.kind == MemoryItemKind.CORRECTION:
-                return "Feedback/corrections.md"
-            return "Feedback/feedback.md"
-        if item.category == MemoryCategory.REFERENCE:
-            return "Reference/notes.md"
-        if item.category == MemoryCategory.TASK:
-            return "Tasks/task.md"
-        return "Sessions/session_items.md"
-
-    def _read_target(self, relative_path: str) -> str:
-        """读取一个投影目标。"""
-        path = self._resolve_relative(relative_path)
-        try:
-            return path.read_text(encoding="utf-8") if path.exists() else ""
-        except OSError as exc:
-            raise IrisMemoryError("memory mirror 读取失败", path=str(path)) from exc
-
-    def _render_target(
-        self,
-        relative_path: str,
-        content: str,
-        *,
-        items: Sequence[MemoryItem],
-        events: Sequence[MemoryEvent],
-        rebuild_namespace: str | None,
-    ) -> str:
-        """在内存中完成一个目标文件的整批渲染。"""
-        if relative_path == "Tasks/task.json":
-            try:
-                return self._render_task_json(content, items, rebuild_namespace=rebuild_namespace)
-            except TypeError as exc:
-                path = self._resolve_relative(relative_path)
-                raise IrisMemoryError(
-                    "memory mirror task.json 写入失败",
-                    path=str(path),
-                ) from exc
-
-        marker_type = "event" if relative_path == RECENT_EVENTS_PATH else "item"
-        rendered = content
-        if rebuild_namespace is not None:
-            rendered = _remove_namespace_markdown_blocks(rendered, marker_type, rebuild_namespace)
-
-        if relative_path == RECENT_EVENTS_PATH:
-            for event in events:
-                rendered = _upsert_markdown_block(
-                    rendered,
-                    event.id,
-                    self._render_event_markdown(event),
-                    marker_type="event",
-                    namespace=event.namespace,
-                )
-            for namespace in _event_namespaces(events):
-                rendered = _trim_recent_events(rendered, namespace)
-            return _normalize_markdown_content(_with_recent_events_header(rendered))
-
-        for item in items:
-            if self._target_for_item(item) != relative_path:
-                continue
-            rendered = _upsert_markdown_block(
-                rendered,
-                item.id,
-                self._render_item_markdown(item),
-                marker_type="item",
-                namespace=item.namespace,
-            )
-        if rebuild_namespace is not None:
-            return _normalize_markdown_content(rendered)
-        return rendered
-
-    def _render_task_json(
-        self,
-        content: str,
-        items: Sequence[MemoryItem],
-        *,
-        rebuild_namespace: str | None,
-    ) -> str:
-        """在内存中更新结构化 task state 投影。"""
-        current = _load_json_object(content)
-        entries = list(current.get("items", []))
-        if rebuild_namespace is not None:
-            entries = [
-                entry
-                for entry in entries
-                if not isinstance(entry, dict) or entry.get("namespace") != rebuild_namespace
-            ]
-        for item in items:
-            if item.category != MemoryCategory.TASK or item.kind != MemoryItemKind.TASK_STATE:
-                continue
-            entries = [
-                entry for entry in entries if isinstance(entry, dict) and entry.get("id") != item.id
-            ]
-            entries.append(
-                {
-                    "id": item.id,
-                    "namespace": item.namespace,
-                    "text": item.text,
-                    "metadata": item.metadata,
-                    "updated_at": item.updated_at,
-                }
-            )
-        current["items"] = sorted(
-            entries,
-            key=lambda entry: (
-                str(entry.get("namespace", "")),
-                str(entry.get("id", "")),
-            ),
-        )
-        return _dump_pretty_json(current)
-
     def _atomic_replace(self, relative_path: str, content: str) -> None:
-        """在目标目录写入临时文件并原子替换投影目标。"""
+        """先写入本次临时文件，再原子替换单份完整文档。"""
         path = self._resolve_relative(relative_path)
         temp_path: Path | None = None
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             descriptor, temp_name = tempfile.mkstemp(
-                dir=path.parent,
-                prefix=f".{path.name}.",
-                suffix=".tmp",
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
             )
             os.close(descriptor)
             temp_path = Path(temp_name)
@@ -506,128 +141,18 @@ class FileMemoryMirror:
                     pass
 
 
-def _namespace_key(namespace: str) -> str:
-    """把不透明 namespace 编码为可逆的 Markdown marker 标识。"""
-    return quote(namespace, safe="")
-
-
-def _wrap_block(marker_type: str, namespace_key: str, entity_id: str, block: str) -> str:
-    """包裹生成内容，便于后续稳定替换。"""
-    return (
-        f"<!-- iris-memory-{marker_type}:{namespace_key}:{entity_id} -->\n"
-        f"{block.rstrip()}\n"
-        f"<!-- /iris-memory-{marker_type}:{namespace_key}:{entity_id} -->"
-    )
-
-
-def _block_pattern(marker_type: str, namespace_key: str, entity_id: str) -> str:
-    """生成匹配指定生成块的正则。"""
-    escaped_namespace_key = re.escape(namespace_key)
-    escaped_id = re.escape(entity_id)
-    return (
-        rf"<!-- iris-memory-{marker_type}:{escaped_namespace_key}:{escaped_id} -->.*?"
-        rf"<!-- /iris-memory-{marker_type}:{escaped_namespace_key}:{escaped_id} -->"
-    )
-
-
-def _namespace_blocks_pattern(marker_type: str, namespace: str) -> str:
-    """生成匹配同一 namespace 下全部生成块的正则。"""
-    escaped_namespace_key = re.escape(_namespace_key(namespace))
-    return (
-        rf"(?:\r?\n)*<!-- iris-memory-{marker_type}:{escaped_namespace_key}:[^>\n]+ -->.*?"
-        rf"<!-- /iris-memory-{marker_type}:{escaped_namespace_key}:[^>\n]+ -->(?:\r?\n)*"
-    )
-
-
-def _upsert_markdown_block(
-    content: str,
-    entity_id: str,
-    block: str,
-    *,
-    marker_type: str,
-    namespace: str,
-) -> str:
-    """在内存文本中替换或追加一个生成块。"""
-    namespace_key = _namespace_key(namespace)
-    pattern = _block_pattern(marker_type, namespace_key, entity_id)
-    generated = _wrap_block(marker_type, namespace_key, entity_id, block)
-    if re.search(pattern, content, flags=re.DOTALL):
-        rendered = re.sub(pattern, lambda _: generated, content, flags=re.DOTALL)
-    else:
-        prefix = content.rstrip()
-        rendered = f"{prefix}\n\n{generated}" if prefix else generated
-    return f"{rendered.rstrip()}\n"
-
-
-def _remove_namespace_markdown_blocks(
-    content: str,
-    marker_type: str,
-    namespace: str,
-) -> str:
-    """从内存文本删除指定 namespace 的全部生成块。"""
-    return re.sub(
-        _namespace_blocks_pattern(marker_type, namespace),
-        lambda _: "\n\n",
-        content,
-        flags=re.DOTALL,
-    )
-
-
-def _trim_recent_events(content: str, namespace: str) -> str:
-    """在内存文本中只保留指定 namespace 的最近事件。"""
-    matches = list(re.finditer(_namespace_blocks_pattern("event", namespace), content, re.DOTALL))
-    overflow = len(matches) - RECENT_EVENTS_LIMIT
-    if overflow <= 0:
-        return content
-    return _remove_spans(content, [match.span() for match in matches[:overflow]])
-
-
-def _event_namespaces(events: Sequence[MemoryEvent]) -> list[str]:
-    """按事件出现顺序返回去重后的 namespace。"""
-    return list(dict.fromkeys(event.namespace for event in events))
-
-
-def _normalize_markdown_content(content: str) -> str:
-    """清理生成块删除后留下的首尾空白。"""
-    stripped = content.strip()
-    return f"{stripped}\n" if stripped else ""
-
-
-def _with_recent_events_header(content: str) -> str:
-    """给 recent events 内容补上固定文件头。"""
-    stripped = content.lstrip()
-    if stripped.startswith(RECENT_EVENTS_HEADER.rstrip()):
-        return stripped
-    if stripped:
-        return f"{RECENT_EVENTS_HEADER}\n{stripped}"
-    return RECENT_EVENTS_HEADER
-
-
-def _remove_spans(content: str, spans: list[tuple[int, int]]) -> str:
-    """按 span 删除文本片段。"""
-    pieces: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        pieces.append(content[cursor:start])
-        cursor = end
-    pieces.append(content[cursor:])
-    return "".join(pieces)
-
-
-def _load_json_object(content: str) -> dict[str, Any]:
-    """读取 JSON object 文本；空文本按空对象处理。"""
-    text = content.strip()
-    if not text:
-        return {}
-    value = json.loads(text)
-    if not isinstance(value, dict):
-        raise TypeError("memory mirror JSON 文件必须是 object")
-    return value
-
-
-def _dump_pretty_json(value: dict[str, Any]) -> str:
-    """序列化人工可读 JSON mirror。"""
-    try:
-        return f"{json.dumps(value, ensure_ascii=False, indent=2)}\n"
-    except TypeError as exc:
-        raise IrisMemoryError("memory mirror JSON 必须可序列化") from exc
+def target_for_item(item: MemoryItem) -> str:
+    """沿用 category/kind 到分类正文的单一映射。"""
+    if item.category == MemoryCategory.USER:
+        return "User/preferences.md" if item.kind == MemoryItemKind.PREFERENCE else "User/user.md"
+    if item.category == MemoryCategory.FEEDBACK:
+        return (
+            "Feedback/corrections.md"
+            if item.kind == MemoryItemKind.CORRECTION
+            else "Feedback/feedback.md"
+        )
+    if item.category == MemoryCategory.REFERENCE:
+        return "Reference/notes.md"
+    if item.category == MemoryCategory.TASK:
+        return "Tasks/task.md"
+    return "Sessions/session_items.md"

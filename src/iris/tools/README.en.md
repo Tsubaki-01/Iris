@@ -188,6 +188,16 @@ changing the capability classifier.
 
 ## Built-in file tools
 
+When a memory service supplies a file view, Agent assembly binds the formal Markdown paths for
+`read_namespaces` to `WorkspaceFileService(memory_view=...)`. Direct access and recursive traversal
+inside that memory root use only the permitted namespaces' formal projections; legacy mixed files
+and the database are outside this file view. Read and grep check the consumed source revision
+against state observed after reading and include stale warnings, including grep with no matches.
+Missing formal files still report `FILE_NOT_FOUND` with their projection status. Projected content
+can be read; changes go through memory write tools or the SDK. With `mirror.enabled=false`, or an
+independent SDK service without a mirror, no memory file view is bound. Ordinary workspace files
+continue to use the existing file rules.
+
 `register_file_tools()` registers, in stable order, `read_file`, `list_files`, `grep_search`,
 `write_file`, and `edit_file`, injecting one shared `WorkspaceFileService`.
 

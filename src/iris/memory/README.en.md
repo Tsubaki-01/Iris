@@ -4,7 +4,7 @@
 
 `iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, L1 episodes,
 candidates, L2 items, audit events, SQLite persistence, human-readable file projections, explicit
-orchestration, and memory tools. SQLite is authoritative; Markdown/JSON under
+orchestration, and memory tools. SQLite is authoritative; Markdown under
 `.iris/memory/` is a projection for humans.
 
 `AgentConfig.memory` defaults to a disabled backend. Enabling SQLite in `agent.yaml` enables one
@@ -62,7 +62,7 @@ bundle = service.build_context(
 `backend="none"` returns `None` without filesystem effects. Memory root and database paths must
 resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
-New databases use schema version 2; older versions are rejected at initialization without migration,
+New databases use schema version 4; older versions are rejected at initialization without migration,
 version overwrite, or deletion. A SQLite service built by
 `build_memory_service_from_config()` runs async IO as one worker job, while synchronous methods
 still execute on their caller's thread. Directly constructed services and custom stores default to
@@ -230,15 +230,22 @@ without repeating the same range validation. Tools evaluate access policy on the
 submit one combined query as a single service job. Namespace order does not determine which items
 fill the limit. Explicit search tools use the full query without inheriting the automatic-recall budget.
 
-`FileMemoryMirror` creates the fixed Memory/User/Feedback/Reference/Tasks/Sessions projection and
-can deterministically rebuild active items plus the most recent 100 events for one namespace. It is not
-an import source or the audit authority. `project_batch()` groups changes by target under an
-instance lock, reads and renders each target once while preserving manual text outside markers, and
-uses a same-directory temporary file for atomic replacement. Layout initialization is cached only
-after success. Automatic projection failure after a successful database write logs a warning while
-preserving the successful result. Explicit mirror projection or rebuild calls still report errors;
-there is no background retry. SQLite uses short-lived connections and
-wraps storage/JSON failures as `IrisMemoryError`.
+`FileMemoryMirror.initialize_layout()` only creates directories. Canonical category documents live
+under `namespaces/ns_<base64url of namespace UTF-8>/`, covering User, Feedback, Reference, Tasks,
+and Sessions. It does not create `Memory.md` or rewrite legacy root files. Each entry keeps its raw
+Markdown first, followed by complete metadata inside `<details>`. These are human-readable views,
+not a record parsing or reverse-import protocol. Episodes, candidates, and events remain in SQLite.
+
+After a committed write, `rebuild_from_store()` uses `publish_projection()` to read a complete active
+L2 snapshot within a short write transaction and atomically replace each category document. Only
+successful publication of every document advances `projection_revision`. `item_revision` advances
+with effective active L2 changes in the same transaction as the item, FTS, events, and promotion;
+an unchanged patch does not rewrite the item, event, or revision. A partially failed publication
+keeps the database result successful and leaves the projection version behind. Write-tool results
+include a warning; ordinary file tools use `MemoryFileAccess` to report freshness from the actual
+file source revision. Database queries remain available when publication fails. Explicit rebuild
+errors still propagate, with no background retry. `mirror.enabled=false` still disables projection.
+SQLite uses short-lived connections and wraps storage/JSON failures as `IrisMemoryError`.
 FTS contains all item states, with default queries filtering for active items.
 `MemoryQuery(include_deleted=True)` explicitly includes deleted items through the same search path.
 Item/index writes are transactional; `rebuild_index()` can rebuild from the authoritative table.
@@ -259,7 +266,7 @@ requests a complete mirror projection.
 | SDK lifecycle, namespace reads, SQLite search, and context building | `models.py`, `service.py`, `sqlite.py`, `context.py` | `tests/memory/test_service.py` |
 | Concurrent promotion, field updates, FTS completeness, and result-count config | `sqlite.py`, `config.py` | `tests/memory/test_sqlite_consistency.py` |
 | Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_sqlite_query_plan.py` |
-| Batched mirror projection, rebuild, and atomic replacement | `mirror.py` | `tests/memory/test_mirror.py` |
+| Namespace snapshots, projection revisions, and atomic replacement | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
 | Automatic recall, deduplication, and history recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 

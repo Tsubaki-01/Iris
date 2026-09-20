@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from .models import (
@@ -15,6 +15,8 @@ from .models import (
     MemoryItem,
     MemoryItemKind,
     MemoryItemPatch,
+    MemoryNamespaceSnapshot,
+    MemoryNamespaceState,
     MemoryQuery,
     MemorySearchResult,
 )
@@ -44,6 +46,17 @@ class MemoryStore(Protocol):
 
     def get_item(self, item_id: str, namespaces: Sequence[str]) -> MemoryItem | None:
         """读取指定 namespace 下的活跃长期记忆条目。"""
+
+    def read_namespace_state(self, namespace: str) -> MemoryNamespaceState:
+        """读取 namespace 的条目版本与完整投影版本。"""
+
+    def read_namespace_snapshot(self, namespace: str) -> MemoryNamespaceSnapshot:
+        """在同一读事务中读取完整 active L2 条目和版本。"""
+
+    def publish_projection(
+        self, namespace: str, publish: Callable[[MemoryNamespaceSnapshot], None]
+    ) -> MemoryNamespaceState:
+        """在短写事务内现读快照、发布正文并推进完整投影版本。"""
 
     def search(self, query: MemoryQuery) -> list[MemorySearchResult]:
         """按查询条件召回长期记忆。"""

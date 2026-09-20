@@ -1,7 +1,9 @@
+"""验证 namespace 独立正文、原子文件替换和受控发布。"""
+
 from __future__ import annotations
 
+import base64
 import os
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -9,193 +11,164 @@ import pytest
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
     FileMemoryMirror,
+    MemoryArtifactRef,
     MemoryCategory,
-    MemoryEvent,
-    MemoryEventType,
-    MemoryItem,
     MemoryItemKind,
+    MemoryItemPatch,
+    MemoryService,
+    MemoryWriteInput,
+    SQLiteMemoryStore,
+    namespace_key,
 )
+from iris.memory.files import BODY_PATHS
 
 
-def test_project_batch_reads_renders_and_replaces_each_target_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_body_preserves_artifact_references_and_saved_business_metadata(tmp_path: Path) -> None:
     mirror = FileMemoryMirror(tmp_path / "mirror")
-    mirror.initialize_layout()
-    target = mirror.root / "User/user.md"
-    target.write_text("  manual note\n", encoding="utf-8")
-    items = [_item("item-a"), _item("item-b")]
-    reads = 0
-    renders = 0
-    replaces = 0
-    original_read = Path.read_text
-    original_render = mirror._render_target
-    original_replace = os.replace
-
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
-        nonlocal reads
-        if path == target:
-            reads += 1
-        return original_read(path, *args, **kwargs)
-
-    def render_target(*args: object, **kwargs: object) -> str:
-        nonlocal renders
-        renders += 1
-        return original_render(*args, **kwargs)
-
-    def replace(
-        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-    ) -> None:
-        nonlocal replaces
-        if Path(destination) == target:
-            replaces += 1
-        original_replace(source, destination)
-
-    monkeypatch.setattr(Path, "read_text", read_text)
-    monkeypatch.setattr(mirror, "_render_target", render_target)
-    monkeypatch.setattr(os, "replace", replace)
-
-    mirror.project_batch(items=items)
-
-    content = original_read(target, encoding="utf-8")
-    assert reads == 1
-    assert renders == 1
-    assert replaces == 1
-    assert content.startswith("  manual note\n")
-    assert "item-a" in content
-    assert "item-b" in content
-
-
-def test_rebuild_reads_store_once_and_preserves_manual_and_other_namespace(
-    tmp_path: Path,
-) -> None:
-    mirror = FileMemoryMirror(tmp_path / "mirror")
-    current_namespace = "研究:中文 / alpha"
-    other_namespace = "研究:中文 / beta"
-    stale = _item("stale", namespace=current_namespace)
-    other = _item("other", namespace=other_namespace)
-    mirror.project_batch(items=[stale, other])
-    target = mirror.root / "User/user.md"
-    target.write_text(
-        f"manual preface\n\n{target.read_text(encoding='utf-8')}",
-        encoding="utf-8",
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    item = service.remember(
+        MemoryWriteInput(
+            text="需求文档已整理",
+            reason="保留交接依据",
+            category=MemoryCategory.TASK,
+            kind=MemoryItemKind.TASK_STATE,
+            confidence=0.9,
+            importance=0.8,
+            artifacts=[
+                MemoryArtifactRef(
+                    path="docs/project-handoff.md",
+                    mime_type="text/markdown",
+                    metadata={"version": 3},
+                )
+            ],
+            metadata={"owner": "maintainer", "stage": "ready"},
+        )
     )
-    replacement = _item("replacement", namespace=current_namespace)
-    event = _event("replacement-event", namespace=current_namespace, item_id=replacement.id)
-    store = _RebuildStore(items=[replacement], events=[event])
-
-    mirror.rebuild_from_store(store, current_namespace)  # type: ignore[arg-type]
-
-    content = target.read_text(encoding="utf-8")
-    assert store.item_reads == 1
-    assert store.event_reads == 1
-    assert "manual preface" in content
-    assert "replacement" in content
-    assert "other" in content
-    assert "stale" not in content
+    body = (mirror.namespace_directory("project") / "Tasks/task.md").read_text(encoding="utf-8")
+    assert item.text in body
+    assert "docs/project-handoff.md" in body and "text/markdown" in body
+    assert '"version": 3' in body
+    assert '"owner": "maintainer"' in body and '"stage": "ready"' in body
+    assert item.created_at in body
+    assert "confidence: 0.9" in body and "importance: 0.8" in body
+    assert body.index(item.text) < body.index("<details>") < body.index(item.id)
+    assert "### Memory Item" not in body
+    assert "</details>\n\n---" in body
 
 
-def test_initialize_retries_after_failure_and_skips_after_success(
+def test_body_keeps_raw_markdown_and_escapes_folded_metadata(tmp_path: Path) -> None:
+    """原文完整保留，元数据的 Markdown/HTML 字符不改变折叠结构。"""
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    text = "# 原标题\n\n- 第一项\n\n```python\nprint('原文')\n```\n"
+    item = service.remember(
+        MemoryWriteInput(
+            text=text,
+            reason="依据 `原文` | <约定>\n下一行",
+            source_id="message<1>",
+            confidence=0,
+            importance=0,
+            metadata={"key": "````\n</details>"},
+        )
+    )
+    body = (mirror.namespace_directory("project") / "User/user.md").read_text(encoding="utf-8")
+    assert text in body
+    assert body.index(text) < body.index("<details>")
+    assert "confidence: 0.0" in body and "importance: 0.0" in body
+    assert "message&lt;1&gt;" in body
+    assert "&lt;约定&gt;" in body
+    assert body.count("</details>") == 1
+    assert item.id in body
+
+
+def test_namespace_layout_keeps_complete_items_and_does_not_touch_legacy_files(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "mirror"
-    mirror = FileMemoryMirror(root)
-    original_mkdir = Path.mkdir
-    root_calls = 0
-    fail = True
-
-    def mkdir(path: Path, *args: object, **kwargs: object) -> None:
-        nonlocal root_calls, fail
-        if path == root:
-            root_calls += 1
-            if fail:
-                fail = False
-                raise OSError("injected init failure")
-        original_mkdir(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "mkdir", mkdir)
-
-    with pytest.raises(IrisMemoryError, match="初始化失败"):
-        mirror.initialize_layout()
-    mirror.initialize_layout()
-    successful_calls = root_calls
-    mirror.initialize_layout()
-
-    assert root_calls == successful_calls
-
-
-def test_atomic_replace_failure_keeps_target_and_removes_temp_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mirror = FileMemoryMirror(tmp_path / "mirror")
-    mirror.initialize_layout()
-    target = mirror.root / "User/user.md"
-    target.write_text("manual note\n", encoding="utf-8")
+    legacy = mirror.root / "User/user.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("existing user notes", encoding="utf-8")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    namespace = "研究:中文 / alpha"
+    first = service.remember(
+        MemoryWriteInput(namespace=namespace, text="完整正文\n第二行", reason="seed")
+    )
+    second = service.remember(
+        MemoryWriteInput(namespace="other", text="another namespace", reason="seed")
+    )
+    directory = mirror.namespace_directory(namespace)
+    assert directory != mirror.namespace_directory("other")
+    key = namespace_key(namespace)[3:]
+    assert base64.urlsafe_b64decode(key + "=" * (-len(key) % 4)).decode("utf-8") == namespace
+    assert all((directory / path).is_file() for path in BODY_PATHS)
+    body = (directory / "User/user.md").read_text(encoding="utf-8")
+    assert body.startswith("<!-- iris-memory source_revision: 1 -->")
+    assert first.id in body and first.text in body and namespace in body
+    assert second.id not in body
+    assert legacy.read_text(encoding="utf-8") == "existing user notes"
+    assert not (directory / "Memory.md").exists()
+    view = service.file_access([namespace])
+    assert view is not None
+    assert set(view.document_paths) == {directory / path for path in ("Memory.md", *BODY_PATHS)}
+
+
+def test_reclassification_and_forget_remove_only_derived_item_text(tmp_path: Path) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    item = service.remember(MemoryWriteInput(text="exact value 42", reason="seed"))
+    directory = mirror.namespace_directory("project")
+    service.update(
+        item.id,
+        "project",
+        MemoryItemPatch(category=MemoryCategory.USER, kind=MemoryItemKind.PREFERENCE),
+        reason="classify",
+    )
+    assert item.id not in (directory / "User/user.md").read_text(encoding="utf-8")
+    assert item.id in (directory / "User/preferences.md").read_text(encoding="utf-8")
+    assert service.forget(item.id, "project", reason="done")
+    assert item.id not in (directory / "User/preferences.md").read_text(encoding="utf-8")
+    state = service.store.read_namespace_state("project")
+    assert state.item_revision == state.projection_revision == 3
+
+
+def test_initial_body_creation_failure_does_not_claim_synced_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"), mirror=mirror)
+    original_replace = mirror._atomic_replace
+    calls = 0
+
+    def replace(relative_path: str, content: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise IrisMemoryError("initial creation failed")
+        original_replace(relative_path, content)
+
+    monkeypatch.setattr(mirror, "_atomic_replace", replace)
+    item = service.remember(MemoryWriteInput(text="saved in SQLite", reason="seed"))
+    state = service.store.read_namespace_state("project")
+    assert service.get_item(item.id, ["project"]) == item
+    assert state.item_revision == 1 and state.projection_revision is None
+    assert "未同步" in service.projection_warning("project")
+
+
+def test_atomic_replace_failure_keeps_target_and_cleans_own_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mirror = FileMemoryMirror(tmp_path / "mirror")
+    store = SQLiteMemoryStore(tmp_path / "memory.db")
+    service = MemoryService(store, mirror=mirror)
+    service.remember(MemoryWriteInput(text="original", reason="seed"))
+    target = mirror.namespace_directory("project") / "User/user.md"
+    before = target.read_text(encoding="utf-8")
 
     def fail_replace(*args: object, **kwargs: object) -> None:
-        del args, kwargs
         raise OSError("injected replace failure")
 
     monkeypatch.setattr(os, "replace", fail_replace)
-
     with pytest.raises(IrisMemoryError, match="写入失败"):
-        mirror.project_batch(items=[_item("item-a")])
-
-    assert target.read_text(encoding="utf-8") == "manual note\n"
+        mirror.rebuild_from_store(store, "project")
+    assert target.read_text(encoding="utf-8") == before
     assert list(target.parent.glob(f".{target.name}.*.tmp")) == []
-
-
-class _RebuildStore:
-    def __init__(self, *, items: list[MemoryItem], events: list[MemoryEvent]) -> None:
-        self.items = items
-        self.events = events
-        self.item_reads = 0
-        self.event_reads = 0
-
-    def list_items(self, namespaces: Sequence[str], **kwargs: object) -> list[MemoryItem]:
-        assert list(namespaces) == [self.items[0].namespace]
-        assert kwargs["limit"] is None
-        self.item_reads += 1
-        return list(self.items)
-
-    def list_events(self, namespace: str, **kwargs: object) -> list[MemoryEvent]:
-        del namespace, kwargs
-        self.event_reads += 1
-        return list(self.events)
-
-
-def _item(
-    item_id: str,
-    *,
-    namespace: str | None = None,
-    category: MemoryCategory = MemoryCategory.USER,
-    kind: MemoryItemKind = MemoryItemKind.NOTE,
-) -> MemoryItem:
-    return MemoryItem(
-        id=item_id,
-        namespace=namespace or "project",
-        text=f"text for {item_id}",
-        category=category,
-        kind=kind,
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-    )
-
-
-def _event(
-    event_id: str,
-    *,
-    namespace: str,
-    item_id: str,
-) -> MemoryEvent:
-    return MemoryEvent(
-        id=event_id,
-        namespace=namespace,
-        event_type=MemoryEventType.ADD,
-        item_id=item_id,
-        created_at="2026-01-01T00:00:00Z",
-    )

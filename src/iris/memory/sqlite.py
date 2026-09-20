@@ -1,6 +1,6 @@
 """SQLite 记忆存储实现。
 
-SQLite 是长期记忆的权威存储；schema v2 用 namespace 隔离，文本统一使用 FTS5。
+SQLite 是长期记忆的权威存储；schema v4 保留 FTS5 并保存 namespace 文件投影版本。
 
 Example:
     store = SQLiteMemoryStore(".iris/memory/memory.db")
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -33,6 +33,8 @@ from .models import (
     MemoryItemPatch,
     MemoryItemStatus,
     MemoryLevel,
+    MemoryNamespaceSnapshot,
+    MemoryNamespaceState,
     MemoryQuery,
     MemorySearchResult,
     MemorySourceType,
@@ -50,7 +52,7 @@ class SQLiteMemoryStore:
     """
 
     def __init__(self, path: str | Path) -> None:
-        """初始化 SQLite store；只接受新空库或 memory schema v2。"""
+        """初始化 SQLite store；只接受新空库或 memory schema v4。"""
         self.path = Path(path)
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,7 +61,7 @@ class SQLiteMemoryStore:
         self.initialize_schema()
 
     def initialize_schema(self) -> None:
-        """创建 schema v2；旧版本在任何结构写入前明确拒绝。"""
+        """创建 schema v4；旧版本在任何结构写入前明确拒绝。"""
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
@@ -75,9 +77,9 @@ class SQLiteMemoryStore:
                     version = connection.execute(
                         "SELECT value FROM memory_schema WHERE key = 'schema_version'"
                     ).fetchone()
-                    if version is None or version["value"] != "2":
+                    if version is None or version["value"] != "4":
                         raise IrisMemoryError(
-                            "SQLite memory 版本不受支持，要求 schema version 2",
+                            "SQLite memory 版本不受支持，要求 schema version 4",
                             path=str(self.path),
                             version=None if version is None else version["value"],
                         )
@@ -178,11 +180,22 @@ class SQLiteMemoryStore:
                     )
                     """)
                 connection.execute(
-                    "INSERT INTO memory_schema (key, value) VALUES ('schema_version', '2')"
+                    "INSERT INTO memory_schema (key, value) VALUES ('schema_version', '4')"
                 )
-                connection.execute(
-                    "CREATE VIRTUAL TABLE memory_items_fts USING fts5(item_id UNINDEXED, text)"
-                )
+                connection.execute("""
+                    CREATE VIRTUAL TABLE memory_items_fts USING fts5(
+                        item_id UNINDEXED,
+                        text,
+                        tokenize='unicode61 remove_diacritics 0'
+                    )
+                    """)
+                connection.execute("""
+                    CREATE TABLE memory_namespace_state (
+                        namespace TEXT PRIMARY KEY,
+                        item_revision INTEGER NOT NULL,
+                        projection_revision INTEGER
+                    )
+                    """)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 初始化失败", path=str(self.path)) from exc
 
@@ -210,7 +223,8 @@ class SQLiteMemoryStore:
             with self._connection() as connection:
                 self._ensure_new_item_id(connection, item)
                 self._upsert_item(connection, item)
-                self._refresh_fts_row(connection, item)
+                if item.level == MemoryLevel.SEMANTIC and item.status == MemoryItemStatus.ACTIVE:
+                    self._advance_item_revision(connection, item.namespace)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 写入失败", path=str(self.path)) from exc
@@ -225,7 +239,7 @@ class SQLiteMemoryStore:
         event: MemoryEvent,
     ) -> MemoryItem:
         """在同一写事务中读取、更新长期记忆条目并记录审计事件。"""
-        updates = patch.model_dump(exclude_unset=True)
+        updates = {field: getattr(patch, field) for field in patch.model_fields_set}
         try:
             with self._connection() as connection:
                 # 读取前取得写事务，避免不同连接用旧快照覆盖彼此的字段修改。
@@ -233,12 +247,15 @@ class SQLiteMemoryStore:
                 current = self._fetch_item(connection, item_id, namespace, include_deleted=False)
                 if current is None:
                     raise IrisMemoryError("记忆条目不存在", item_id=item_id)
-                if not updates:
+                if not updates or all(
+                    getattr(current, key) == value for key, value in updates.items()
+                ):
                     return current
                 updates["updated_at"] = _now_iso()
                 updated = current.model_copy(update=updates)
                 self._upsert_item(connection, updated)
-                self._refresh_fts_row(connection, updated)
+                if updated.level == MemoryLevel.SEMANTIC:
+                    self._advance_item_revision(connection, namespace)
                 self._insert_event(connection, event)
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory item 更新失败", path=str(self.path)) from exc
@@ -261,6 +278,8 @@ class SQLiteMemoryStore:
                     }
                 )
                 self._upsert_item(connection, deleted)
+                if current.level == MemoryLevel.SEMANTIC:
+                    self._advance_item_revision(connection, namespace)
                 self._insert_event(connection, event)
                 return True
         except sqlite3.Error as exc:
@@ -285,6 +304,47 @@ class SQLiteMemoryStore:
             expression = prepare_fts_query(query.text, max_query_terms=query.max_query_terms)
             return self._search_fts(query, expression) if expression else []
         return self._search_ids(query) if query.item_ids else []
+
+    def read_namespace_state(self, namespace: str) -> MemoryNamespaceState:
+        """读取 namespace 的当前条目与完整投影版本。"""
+        try:
+            with self._connection() as connection:
+                return self._read_namespace_state(connection, namespace)
+        except sqlite3.Error as exc:
+            raise IrisMemoryError("SQLite memory 版本读取失败", path=str(self.path)) from exc
+
+    def read_namespace_snapshot(self, namespace: str) -> MemoryNamespaceSnapshot:
+        """在同一读事务内取得完整 active L2 条目及其版本。"""
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN")
+                return self._read_namespace_snapshot(connection, namespace)
+        except sqlite3.Error as exc:
+            raise IrisMemoryError("SQLite memory 快照读取失败", path=str(self.path)) from exc
+
+    def publish_projection(
+        self, namespace: str, publish: Callable[[MemoryNamespaceSnapshot], None]
+    ) -> MemoryNamespaceState:
+        """在短写事务内现读并发布全部正文，成功后推进投影版本。"""
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                snapshot = self._read_namespace_snapshot(connection, namespace)
+                publish(snapshot)
+                revision = snapshot.state.item_revision
+                connection.execute(
+                    """
+                    INSERT INTO memory_namespace_state
+                        (namespace, item_revision, projection_revision)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(namespace) DO UPDATE SET
+                        projection_revision = excluded.projection_revision
+                    """,
+                    (namespace, revision, revision),
+                )
+                return MemoryNamespaceState(namespace, revision, revision)
+        except sqlite3.Error as exc:
+            raise IrisMemoryError("SQLite memory 正文发布失败", path=str(self.path)) from exc
 
     def list_items(
         self,
@@ -471,7 +531,7 @@ class SQLiteMemoryStore:
 
                 self._ensure_new_item_id(connection, item)
                 self._upsert_item(connection, item)
-                self._refresh_fts_row(connection, item)
+                self._advance_item_revision(connection, namespace)
                 self._upsert_candidate(connection, accepted)
                 self._insert_event(connection, add_event)
                 self._insert_event(connection, accept_event)
@@ -488,6 +548,44 @@ class SQLiteMemoryStore:
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _advance_item_revision(self, connection: sqlite3.Connection, namespace: str) -> None:
+        """与有效 L2 写入在同一事务内推进 namespace 版本。"""
+        connection.execute(
+            """
+            INSERT INTO memory_namespace_state (namespace, item_revision, projection_revision)
+            VALUES (?, 1, NULL)
+            ON CONFLICT(namespace) DO UPDATE SET item_revision = item_revision + 1
+            """,
+            (namespace,),
+        )
+
+    def _read_namespace_state(
+        self, connection: sqlite3.Connection, namespace: str
+    ) -> MemoryNamespaceState:
+        """读取当前事务中的版本状态，尚无条目时返回初始版本。"""
+        row = connection.execute(
+            "SELECT item_revision, projection_revision FROM memory_namespace_state "
+            "WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        if row is None:
+            return MemoryNamespaceState(namespace)
+        return MemoryNamespaceState(namespace, row["item_revision"], row["projection_revision"])
+
+    def _read_namespace_snapshot(
+        self, connection: sqlite3.Connection, namespace: str
+    ) -> MemoryNamespaceSnapshot:
+        """在调用方持有的事务内按分类和类型读取全部有效 L2 条目。"""
+        state = self._read_namespace_state(connection, namespace)
+        rows = connection.execute(
+            """
+            SELECT * FROM memory_items WHERE namespace = ? AND status = ? AND level = ?
+            ORDER BY category, kind, created_at, id
+            """,
+            (namespace, MemoryItemStatus.ACTIVE.value, MemoryLevel.SEMANTIC.value),
+        ).fetchall()
+        return MemoryNamespaceSnapshot(state, tuple(_row_to_item(row) for row in rows))
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -624,6 +722,7 @@ class SQLiteMemoryStore:
                 item.deleted_at,
             ),
         )
+        self._refresh_fts_row(connection, item)
 
     def _upsert_candidate(
         self,

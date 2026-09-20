@@ -39,8 +39,10 @@ def test_candidate_batch_rebuilds_once_with_all_committed_items(
                 namespace=namespace, text=f"preference {index}", category=MemoryCategory.USER
             )
         )
-    target = mirror.root / "User/user.md"
-    target.write_text("manual note\n", encoding="utf-8")
+    legacy = mirror.root / "User/user.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("manual note\n", encoding="utf-8")
+    target = mirror.namespace_directory(namespace) / "User/user.md"
     rebuild_item_counts: list[int] = []
     original_rebuild = mirror.rebuild_from_store
     original_promote = store.promote_candidate
@@ -80,7 +82,7 @@ def test_candidate_batch_rebuilds_once_with_all_committed_items(
     items = service.list_items([namespace])
     assert len(items) == committed_count
     content = target.read_text(encoding="utf-8")
-    assert content.startswith("manual note\n")
+    assert legacy.read_text(encoding="utf-8") == "manual note\n"
     assert all(item.text in content for item in items)
     events = service.list_events(namespace)
     assert sum(event.event_type == MemoryEventType.ADD for event in events) == committed_count

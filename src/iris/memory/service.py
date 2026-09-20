@@ -20,6 +20,7 @@ from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
 from .context import MemoryContextBuilder
+from .files import MemoryFileAccess, freshness_warning
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
@@ -134,8 +135,6 @@ class MemoryService:
         )
         stored = self.store.add_episode(episode, event=event)
 
-        self._project_committed(events=[event])
-
         return stored
 
     def remember(self, input: MemoryWriteInput) -> MemoryItem:
@@ -172,7 +171,7 @@ class MemoryService:
         )
         stored = self.store.add_item(item, event=event)
 
-        self._project_committed(items=[stored], events=[event])
+        self._rebuild_committed(stored.namespace)
 
         return stored
 
@@ -432,8 +431,6 @@ class MemoryService:
         )
         stored = self.store.add_candidate(candidate, event=event)
 
-        self._project_committed(events=[event])
-
         return stored
 
     def list_candidates(
@@ -581,6 +578,19 @@ class MemoryService:
     #           Context & Helpers
     # ==========================================
     # region
+    def file_access(self, read_namespaces: Sequence[str]) -> MemoryFileAccess | None:
+        """提供通用文件工具所需的当前只读路径和版本接口。"""
+        if self.mirror is None:
+            return None
+        return MemoryFileAccess(self.mirror.root, tuple(read_namespaces), self.store)
+
+    def projection_warning(self, namespace: str) -> str | None:
+        """返回已保存数据库条目尚未完整投影时的可见说明。"""
+        if self.mirror is None:
+            return None
+        state = self.store.read_namespace_state(namespace)
+        return freshness_warning(state, state.item_revision)
+
     def build_context(self, query: MemoryQuery, *, max_chars: int) -> MemoryContextBundle:
         """召回并构建结构化记忆上下文。
 
@@ -643,22 +653,10 @@ class MemoryService:
             event=event,
         )
 
-        self._project_committed(events=[event])
-
         return stored
 
-    def _project_committed(
-        self, *, items: Sequence[MemoryItem] = (), events: Sequence[MemoryEvent] = ()
-    ) -> None:
-        """已提交的数据库事实不因自动镜像失败而被误报失败。"""
-        if self.mirror is not None:
-            try:
-                self.mirror.project_batch(items=items, events=events)
-            except Exception:
-                logger.warning("memory mirror 自动投影失败；数据库写入已提交", exc_info=True)
-
     def _rebuild_committed(self, namespace: str) -> None:
-        """在需要删除或重新分类旧投影时刷新 namespace，失败仅告警。"""
+        """数据库成功后同步完整正文，失败由版本状态对读取方明示。"""
         if self.mirror is not None:
             try:
                 self.mirror.rebuild_from_store(self.store, namespace)
