@@ -178,9 +178,7 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
     """联合搜索允许读取的 namespace，返回可直接使用的原文片段。"""
 
     name: ClassVar[str] = "memory_search"
-    description: ClassVar[str] = (
-        "搜索允许读取的项目记忆，返回原文片段；需要完整记录时可用 memory_fetch"
-    )
+    description: ClassVar[str] = "搜索允许读取的项目记忆，返回条目 ID、原文片段及是否完整"
     input_type: type[MemorySearchQuery] = MemorySearchQuery
 
     async def _impl(
