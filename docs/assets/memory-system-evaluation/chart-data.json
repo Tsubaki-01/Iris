@@ -1,0 +1,62 @@
+{
+  "as_of": "2026-09-21",
+  "notes": [
+    "冻结实验的只读摘录；开发、留出和离线检索分开绘图。",
+    "source 路径相对仓库根目录，原始记录位于本地研究档案；这里不复制原始答案和日志。",
+    "scores 为任务/场景宏平均，tokens 为在线每完整任务均值，不含概览生成。"
+  ],
+  "query_budget": {
+    "sources": [
+      ".codex/experiment/memory/query-budget/results/quality_raw.jsonl",
+      ".codex/experiment/memory/query-budget/results/quality_summary.csv",
+      ".codex/experiment/memory/query-budget/results/offcenter_summary.csv"
+    ],
+    "metric": "Hit@5 (%)",
+    "columns": ["开头", "正中", "末尾", "25% / 75% 位置"],
+    "positive_evaluations": [144, 144, 144, 288],
+    "rows": [
+      {"label": "完整词法查询", "strategy": "full", "values": [62.5, 62.5, 62.5, 62.5]},
+      {"label": "前 64 词项", "strategy": "terms64", "values": [88.888888888889, 8.333333333333, 8.333333333333, null]},
+      {"label": "前 128 词项", "strategy": "terms128", "values": [80.555555555556, 9.722222222222, 5.555555555556, 9.027777777778]},
+      {"label": "首尾 128 词项", "strategy": "headtail_terms128", "values": [86.111111111111, 5.555555555556, 87.5, 6.25]},
+      {"label": "首中尾 1024 字符", "strategy": "thirds_chars1024", "values": [70.833333333333, 70.833333333333, 73.611111111111, 5.555555555556]}
+    ]
+  },
+  "retrieval": {
+    "sources": [
+      ".codex/experiment/memory/retrieval-quality/stage1/analysis-final/summary.csv",
+      ".codex/experiment/memory/retrieval-quality/stage1/lexical-filter-ablation/test_current_summary.json"
+    ],
+    "selection": {"split": "test", "axis": "input", "group": "current"},
+    "denominators": {"legacy": [36, 6], "supplement": [33, 17]},
+    "rows": [
+      {"label": "FTS top5", "pipeline": "fts_top5", "legacy": [29, 5], "supplement": [27, 16]},
+      {"label": "FTS50 + TF-IDF 保序过滤", "pipeline": "tfidf_preserve_filter_suite", "legacy": [21, 2], "supplement": [21, 5]},
+      {"label": "MiniLM dense（无过滤）", "pipeline": "dense_minilm_top5_raw", "legacy": [16, 6], "supplement": [25, 17]},
+      {"label": "BGE-M3 dense（无过滤）", "pipeline": "dense_bge_m3_top5_raw", "legacy": [17, 6], "supplement": [31, 17]},
+      {"label": "BGE-M3 dense + 过滤", "pipeline": "dense_bge_m3_top5_filter", "legacy": [16, 3], "supplement": [27, 5]},
+      {"label": "FTS20 + BGE 重排/过滤", "pipeline": "rerank_fts_m20_top5_filter", "legacy": [13, 1], "supplement": [24, 4]},
+      {"label": "FTS + MiniLM 混合20 + 重排/过滤", "pipeline": "rerank_minilm_m20_top5_filter", "legacy": [16, 1], "supplement": [27, 4]},
+      {"label": "FTS + BGE-M3 混合20 + 重排/过滤", "pipeline": "rerank_bge_m3_m20_top5_filter", "legacy": [17, 1], "supplement": [27, 5]}
+    ]
+  },
+  "agent_comparison": {
+    "source": ".codex/experiment/memory/search-fetch-optimization/20260921-01/comparison-002.json",
+    "development": [
+      {"label": "A", "tasks": 36, "rounds": 60, "strict_successes": 16, "score_0_5": 3.898148148148148, "online_tokens_per_task": 9824.138888888889, "no_false_claims_zero_rounds": 14},
+      {"label": "B", "tasks": 36, "rounds": 60, "strict_successes": 25, "score_0_5": 4.407407407407407, "online_tokens_per_task": 82781.5, "no_false_claims_zero_rounds": 6},
+      {"label": "C", "tasks": 36, "rounds": 60, "strict_successes": 23, "score_0_5": 4.388888888888889, "online_tokens_per_task": 76195.38888888889, "no_false_claims_zero_rounds": 3},
+      {"label": "D", "tasks": 36, "rounds": 60, "strict_successes": 17, "score_0_5": 3.694444444444444, "online_tokens_per_task": 15679.666666666666, "no_false_claims_zero_rounds": 11},
+      {"label": "D0", "tasks": 36, "rounds": 60, "strict_successes": 17, "score_0_5": 3.5277777777777777, "online_tokens_per_task": 15808.444444444445, "no_false_claims_zero_rounds": 14},
+      {"label": "E", "tasks": 36, "rounds": 60, "strict_successes": 24, "score_0_5": 4.527777777777778, "online_tokens_per_task": 12564.722222222223, "no_false_claims_zero_rounds": 5},
+      {"label": "F", "tasks": 36, "rounds": 60, "strict_successes": 23, "score_0_5": 4.361111111111111, "online_tokens_per_task": 11640.444444444445, "no_false_claims_zero_rounds": 11},
+      {"label": "G", "tasks": 36, "rounds": 60, "strict_successes": 26, "score_0_5": 4.583333333333333, "online_tokens_per_task": 14098.361111111111, "no_false_claims_zero_rounds": 6}
+    ],
+    "holdout": [
+      {"label": "D0", "tasks": 24, "rounds": 36, "strict_successes": 20, "score_0_5": 4.5625, "online_tokens_per_task": 7938.166666666667, "no_false_claims_zero_rounds": 1},
+      {"label": "E", "tasks": 24, "rounds": 36, "strict_successes": 19, "score_0_5": 4.645833333333333, "online_tokens_per_task": 7881.25, "no_false_claims_zero_rounds": 1},
+      {"label": "F", "tasks": 24, "rounds": 36, "strict_successes": 23, "score_0_5": 4.791666666666667, "online_tokens_per_task": 7233.166666666667, "no_false_claims_zero_rounds": 1},
+      {"label": "G", "tasks": 24, "rounds": 36, "strict_successes": 22, "score_0_5": 4.861111111111111, "online_tokens_per_task": 7680.916666666667, "no_false_claims_zero_rounds": 0}
+    ]
+  }
+}
