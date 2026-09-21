@@ -19,6 +19,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
+from ._query import tokenize_text
+
 # endregion
 
 
@@ -287,9 +289,19 @@ class MemorySearchQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str
+    required_terms: list[str] = Field(default_factory=list)
     categories: list[MemoryCategory] = Field(default_factory=list)
     kinds: list[MemoryItemKind] = Field(default_factory=list)
     limit: int = Field(default=8, ge=1, le=100)
+
+    @field_validator("required_terms")
+    @classmethod
+    def _validate_required_terms(cls, value: list[str]) -> list[str]:
+        """在公共查询边界拒绝没有可索引词项的必要词组。"""
+        for phrase in value:
+            if not tokenize_text(phrase):
+                raise ValueError("required_terms 中每个词组必须包含可索引字符")
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +374,7 @@ class MemoryOverviewConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input_budget_tokens: int = Field(default=96000, gt=0)
-    max_tokens: int = Field(default=1024, gt=0)
+    max_tokens: int = Field(default=4096, gt=0)
     system_budget_ratio: float = Field(default=0.02, gt=0, le=1)
 
 

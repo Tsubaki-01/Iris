@@ -178,7 +178,14 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
     """联合搜索允许读取的 namespace，返回可直接使用的原文片段。"""
 
     name: ClassVar[str] = "memory_search"
-    description: ClassVar[str] = "搜索允许读取的项目记忆，返回条目 ID、原文片段及是否完整"
+    description: ClassVar[str] = (
+        "搜索允许读取的记忆，返回条目 ID、原文片段及完整性标记。"
+        "query 拆词后按 OR 匹配，加词不保证收紧。"
+        "可选 required_terms 指定有依据的必要原文词组，各词组与 query 同时满足。"
+        "词组按现有分词进行有序相邻匹配，非逐字匹配；英文忽略大小写。"
+        "categories/kinds 仅在已知存储标签时填写。"
+        "空结果只表示本次查询未命中，可根据证据调整条件。"
+    )
     input_type: type[MemorySearchQuery] = MemorySearchQuery
 
     async def _impl(
@@ -191,7 +198,7 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
             "has_more": response.has_more,
         }
         if response.has_more:
-            payload["hint"] = "还有候选，可收紧关键词或 categories/kinds 后重试"
+            payload["hint"] = "还有候选；这不要求继续查询。"
         return self._json_result(payload)
 
 

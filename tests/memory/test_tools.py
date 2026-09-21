@@ -69,7 +69,7 @@ async def test_search_ranks_all_read_namespaces_before_limiting(
     assert [item["item_id"] for item in payload["items"]] == [relevant.id]
     assert payload["items"][0]["namespace"] == "project"
     assert payload["has_more"] is True
-    assert payload["hint"] == "还有候选，可收紧关键词或 categories/kinds 后重试"
+    assert "不要求继续查询" in payload["hint"]
 
 
 @pytest.mark.asyncio

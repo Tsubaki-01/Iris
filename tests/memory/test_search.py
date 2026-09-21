@@ -62,6 +62,66 @@ def test_no_allowed_namespace_returns_no_memory(tmp_path: Path) -> None:
     assert store.search(MemorySearchQuery(query="needle"), []) == MemorySearchResponse((), False)
 
 
+def test_required_terms_filter_each_result_before_limit_without_relaxing(tmp_path: Path) -> None:
+    """一个正文满足主题 OR 与全部必要词；已有范围、状态和 limit 仍生效。"""
+    store = SQLiteMemoryStore(tmp_path / "required.db")
+    first = _add(store, "alpha east prod")
+    second = _add(store, "beta east prod")
+    _add(store, "alpha east test")
+    _add(store, "beta west prod")
+    _add(store, "gamma east prod")
+    _add(store, "alpha east prod", namespace="private")
+    _add(store, "alpha east prod", status="deleted")
+    _add(store, "alpha west", id="east_prod", metadata={"environment": "east prod"})
+    query = MemorySearchQuery(query="alpha beta", required_terms=["east", "prod"], limit=1)
+    response = store.search(query, ["project"])
+    assert len(response.items) == 1 and response.has_more
+    assert response.items[0].item_id in {first.id, second.id}
+    response = store.search(query.model_copy(update={"limit": 8}), ["project"])
+    assert {hit.item_id for hit in response.items} == {first.id, second.id}
+    assert not response.has_more
+    for impossible in (
+        MemorySearchQuery(query="alpha", required_terms=["absent"]),
+        MemorySearchQuery(query="!!!", required_terms=["east"]),
+    ):
+        assert store.search(impossible, ["project"]) == MemorySearchResponse((), False)
+
+
+@pytest.mark.parametrize(
+    ("phrase", "matching", "nonmatching"),
+    [
+        ("RED, BLUE", "red blue", "red green blue"),
+        ("red blue", "red-blue", "blue red"),
+        ("go go", "go go now", "go now"),
+        ("人人人", "人人人", "人人"),
+        ("账单导出", "账单导出", "账单-导出"),
+        ("中", "中", "中文"),
+    ],
+)
+def test_required_phrase_uses_index_order_and_language_boundaries(
+    tmp_path: Path, phrase: str, matching: str, nonmatching: str
+) -> None:
+    """硬词组匹配的是索引词序列，不是无序词集合或任意子串。"""
+    store = SQLiteMemoryStore(tmp_path / "phrase.db")
+    expected = _add(store, f"needle {matching}")
+    _add(store, f"needle {nonmatching}")
+    response = store.search(MemorySearchQuery(query="needle", required_terms=[phrase]), ["project"])
+    assert [hit.item_id for hit in response.items] == [expected.id]
+
+
+def test_required_phrase_has_no_term_cap_and_does_not_move_the_snippet(tmp_path: Path) -> None:
+    """必要词组完整进入 FTS；摘要仍围绕普通 query，长条目可继续 Fetch。"""
+    store = SQLiteMemoryStore(tmp_path / "long-phrase.db")
+    phrase = " ".join(f"term{index}" for index in range(150))
+    body = "needle " + "🙂" * 400 + " " + phrase
+    expected = _add(store, body)
+    _add(store, "needle " + " ".join(f"term{index}" for index in range(149)))
+    response = store.search(MemorySearchQuery(query="needle", required_terms=[phrase]), ["project"])
+    assert [hit.item_id for hit in response.items] == [expected.id]
+    assert response.items[0].snippet == body[:300]
+    assert not response.items[0].is_complete
+
+
 def test_filtering_precedes_rank_and_limit_with_or_within_each_dimension(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "filters.db")
     _add(store, "needle", namespace="excluded", category="user", kind="fact")
@@ -70,7 +130,11 @@ def test_filtering_precedes_rank_and_limit_with_or_within_each_dimension(tmp_pat
     first = _add(store, "needle " + "noise " * 12, namespace="project", kind="fact")
     second = _add(store, "needle " + "noise " * 30, namespace="private", category="reference")
     query = MemorySearchQuery(
-        query="needle", categories=["user", "reference"], kinds=["fact", "note"], limit=1
+        query="needle",
+        required_terms=["needle"],
+        categories=["user", "reference"],
+        kinds=["fact", "note"],
+        limit=1,
     )
     response = store.search(query, ["private", "project"])
     assert [hit.item_id for hit in response.items] == [first.id]

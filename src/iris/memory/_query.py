@@ -27,9 +27,13 @@ def tokenize_text(text: str) -> list[str]:
     return [term for term, _, _ in iter_token_spans(text)]
 
 
-def prepare_fts_query(terms: Sequence[str]) -> str:
-    """将共享词法结果按首次出现顺序去重，生成字面量 OR 查询。"""
-    return " OR ".join(f'"{term}"' for term in dict.fromkeys(terms))
+def prepare_fts_query(terms: Sequence[str], required_terms: Sequence[str] = ()) -> str:
+    """将普通 OR 查询与有序且保留重复词项的必要词组取交集。"""
+    query = " OR ".join(f'"{term}"' for term in dict.fromkeys(terms))
+    if not required_terms:
+        return query
+    phrases = [f'"{" ".join(tokenize_text(phrase))}"' for phrase in required_terms]
+    return f"({query}) AND " + " AND ".join(phrases)
 
 
 def make_snippet(text: str, query_terms: Set[str]) -> tuple[str, bool]:

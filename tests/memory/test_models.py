@@ -39,11 +39,25 @@ def test_models_reject_removed_scope_instead_of_defaulting_to_project(
 def test_search_query_defaults_and_empty_query_are_explicit() -> None:
     """搜索的唯一输入不携带宿主作用域；空文本由搜索返回空结果。"""
     query = MemorySearchQuery(query="")
+    assert query.required_terms == []
     assert query.categories == []
     assert query.kinds == []
     assert query.limit == 8
     assert MemorySearchQuery(query="fact", limit=1).limit == 1
     assert MemorySearchQuery(query="fact", limit=100).limit == 100
+
+
+def test_search_required_terms_preserve_literal_phrase_input() -> None:
+    """校验只拒绝无索引词的条件，不重写原文或去重词组内部的词。"""
+    query = MemorySearchQuery(query="fact", required_terms=["GO, go", "人人人", "中"])
+    assert query.required_terms == ["GO, go", "人人人", "中"]
+
+
+@pytest.mark.parametrize("phrase", ["", " \n\t ", "---", "🙂", "русский"])
+def test_search_rejects_required_phrases_without_indexable_terms(phrase: str) -> None:
+    """没有可索引内容的硬条件在公共参数边界拒绝。"""
+    with pytest.raises(ValidationError, match="可索引"):
+        MemorySearchQuery(query="fact", required_terms=[phrase])
 
 
 @pytest.mark.parametrize(
@@ -92,7 +106,7 @@ def test_overview_config_keeps_generation_and_window_budgets_separate() -> None:
     """生成输入、生成输出和后续窗口比例各自保留明确默认值。"""
     config = MemoryOverviewConfig()
     assert config.input_budget_tokens == 96000
-    assert config.max_tokens == 1024
+    assert config.max_tokens == 4096
     assert config.system_budget_ratio == 0.02
     assert MemoryOverviewConfig(input_budget_tokens=1, max_tokens=1, system_budget_ratio=1)
 

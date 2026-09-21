@@ -152,7 +152,7 @@ result = await service.refresh_overview("project")
 documents = await service.aload_overviews(["project"])
 ```
 
-`MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 1,024 tokens。完整输入超预算
+`MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 4,096 tokens。完整输入超预算
 就报错，不截断或分批摘要。模型只返回含 `core_facts`、`knowledge_scope` 的 JSON：前者允许
 为空，后者必须非空。只有正常完成并解析成功的结果才发布；异常、截断或文件写失败保留旧文件，
 已知模型 usage 留在错误上下文中。空 active L2 快照不调用模型，直接发布“当前无记忆”。
@@ -164,6 +164,10 @@ documents = await service.aload_overviews(["project"])
 refresh 报生成依赖未配置。
 
 概览生成预算独立于主请求窗口预算；`system_budget_ratio=0.02` 用于上述 system 窗口选择。
+
+历次检索、文件读取和 Search/Fetch 方案的效果与成本见
+[Memory 选型实验对比](../../../docs/memory-system-evaluation.md)。当前采用 G 的必要词组能力，
+继续复用 SQLite FTS，不引入向量库等重组件。
 
 ## 公开接口分组
 
@@ -186,6 +190,7 @@ refresh 报生成依赖未配置。
 ```python
 query = MemorySearchQuery(
     query="中文回答偏好",
+    required_terms=["中文"],
     categories=["user", "feedback"],
     kinds=["preference", "correction"],
     limit=8,
@@ -193,7 +198,8 @@ query = MemorySearchQuery(
 response = await service.asearch(query, ["project"])
 ```
 
-`query` 必填；categories/kinds 默认空，表示不限制该维度；limit 默认为 8，范围 `1..100`。
+`query` 必填；`required_terms` 默认空，表示不额外要求正文词组；categories/kinds 默认空，表示
+不限制该维度；limit 默认为 8，范围 `1..100`。
 未知字段报错，模型输入中没有 namespace。store 先按允许 namespace、category/kind 和 active
 状态过滤，再按 BM25 升序、updated_at/id 降序取 `limit + 1`，只返回前 limit 条并计算
 `has_more`。同一维度的过滤值为 OR，不同维度为 AND。索引只包含 `MemoryItem.text`；active
@@ -204,10 +210,27 @@ L1/L2 item 均可搜索，episode、未晋升 candidate、deleted/superseded 不
 不截断 query、不设置词项预算；索引保留完整词项频次。空文本、零词项、无命中或空范围
 返回 `MemorySearchResponse((), False)`，不会返回最近条目。
 
+`required_terms` 由模型或 SDK 显式指定，同一条正文必须同时匹配普通 query 的 OR 组与每个
+必要词组。每个词组用同一词法转成有序相邻的 FTS phrase，内部不去重。例如：
+
+```text
+query="回滚 阈值", required_terms=["澄港", "账单导出"]
+→ ("回滚" OR "阈值") AND "澄港" AND "账单 单导 导出"
+```
+
+词组之间没有顺序或距离要求；词组内部保留顺序与重复词，如 `go go` 必须有两个连续的 `go`。
+这是分词后的匹配，不是逐字子串匹配：英文大小写不影响结果，中文标点可能改变双字词序列，
+所以“账单-导出”不等同于“账单导出”。必要词组不引入 64/128 词项上限；空白、纯标点等无法
+产生索引词的条件在 `MemorySearchQuery` 校验时报错。普通 query 没有可索引词时仍返回空，
+不支持只给必要词组浏览条目。条件不匹配时不会自动去掉它们或回退；是否调整由调用者决定。
+这复用现有 FTS5 索引，不增加 schema 版本或索引迁移。category/kind 是存储标签，只在已知时
+筛选；正文提及某个名称也不代表其中事实适用于该对象，使用前仍需核对。
+
 命中只含 `item_id/namespace/category/kind/snippet/is_complete`。正文不超过 300 个 Python
 Unicode 字符时全文返回；超过时取首个匹配词起点 h，用
 `start=max(0,min(h-150,len(text)-300))` 返回连续 300 字符原文，不加省略号或高亮。
 `is_complete` 仅说明正文是否完整，不代表命中已经核实。不同 ID 的相同正文分别保留。
+片段位置仍由普通 query 的首个命中词确定，必要词组可能在片段之外；需要其他正文时可 Fetch。
 
 ## Memory 工具
 
@@ -218,7 +241,8 @@ Agent 开启 memory 后自动按 Search、Fetch 的顺序注册两个 `READ` 工
 
 低层 `register_memory_tools()` 仍默认空，SDK 可显式选择 `memory.search/fetch`；退出的是
 Agent 手工读声明。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和
-`has_more`；仅有更多候选时附提示“还有候选，可收紧关键词或 categories/kinds 后重试”。
+`has_more`；仅有更多候选时附提示“还有候选；这不要求继续查询。”。片段足以回答时停止查询，
+仅在必要信息仍缺失时补查；没有新线索时不只换措辞反复搜索。
 
 Fetch 输入只有非空白 `item_id`，可直接读取已知 ID，不要求先 Search。它调用当前
 `aget_item()` 并返回 `{"item": item.model_dump(mode="json")}` 的完整记录，包括正文、来源、

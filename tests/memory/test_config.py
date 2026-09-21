@@ -63,7 +63,7 @@ def test_memory_overview_defaults_keep_generation_and_window_budgets_separate() 
     """生成输入、生成输出和主请求采用预算分别配置。"""
     config = MemoryConfig()
     assert config.overview.input_budget_tokens == 96000
-    assert config.overview.max_tokens == 1024
+    assert config.overview.max_tokens == 4096
     assert config.overview.system_budget_ratio == 0.02
 
 

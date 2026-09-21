@@ -48,6 +48,15 @@ def test_query_keeps_all_terms_without_a_budget() -> None:
     )
 
 
+def test_required_phrases_intersect_the_whole_or_query_and_keep_repeated_tokens() -> None:
+    """必要词组包围整个 OR 查询，中文与英文词组均保留相邻重复词。"""
+    assert (
+        prepare_fts_query(tokenize_text("alpha beta alpha"), ["RED, BLUE", "人人人", "go go"])
+        == '("alpha" OR "beta") AND "red blue" AND "人人 人人" AND "go go"'
+    )
+    assert prepare_fts_query(["alpha", "beta"], []) == '"alpha" OR "beta"'
+
+
 def test_snippet_uses_lexical_matches_instead_of_substring_prefixes() -> None:
     text = "needlework " + "🙂" * 400 + " NEEDLE " + "🙂" * 400
     assert make_snippet(text, {"needle"}) == (text[262:562], False)

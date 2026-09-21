@@ -167,7 +167,7 @@ result = await service.refresh_overview("project")
 documents = await service.aload_overviews(["project"])
 ```
 
-`MemoryOverviewConfig` defaults to a 96,000-token generation input budget and 1,024 output tokens.
+`MemoryOverviewConfig` defaults to a 96,000-token generation input budget and 4,096 output tokens.
 An oversized complete snapshot fails without truncation or batching. One normally completed JSON
 response must contain `core_facts` and `knowledge_scope`; facts may be empty, scope must not be.
 Invalid or incomplete responses and publication errors preserve the previous complete file, with
@@ -205,11 +205,16 @@ controls the system window selection described above.
 The complete export set is [__all__](__init__.py). Private SQL, lexer, and payload helpers are not
 SDK extension protocols.
 
+The [memory evaluation report (Chinese)](../../../docs/memory-system-evaluation.md) compares the
+retrieval, file-reading, and Search/Fetch approaches. Iris adopts G's required-phrase capability while
+keeping SQLite FTS, without adding a vector database or other heavyweight retrieval components.
+
 ### Plain-text search
 
 ```python
 query = MemorySearchQuery(
     query="answer preferences",
+    required_terms=["concise"],
     categories=["user", "feedback"],
     kinds=["preference", "correction"],
     limit=8,
@@ -217,7 +222,8 @@ query = MemorySearchQuery(
 response = await service.asearch(query, ["project"])
 ```
 
-`query` is required. Categories and kinds default to empty, meaning no filter for that dimension.
+`query` is required. `required_terms` defaults to empty, adding no required body phrases.
+Categories and kinds default to empty, meaning no filter for that dimension.
 The result limit defaults to 8 and accepts `1..100`. Unknown fields are rejected, and namespace is
 not part of model input. Storage filters allowed namespaces, categories/kinds, and active status
 before ranking by BM25 ascending, then updated_at/id descending. It reads `limit + 1`, returns only
@@ -232,11 +238,32 @@ and quoted as literal OR terms. Neither input text nor query terms are truncated
 all terms and frequencies. Empty text, zero terms, no matches, or an empty read range returns
 `MemorySearchResponse((), False)`, never recent items.
 
+The model or SDK can supply `required_terms` explicitly. The same item's body must match the ordinary
+query's OR group and every required phrase. Each phrase uses the same lexer and requires its tokens
+to be adjacent and ordered, without deduplicating repetitions. For example:
+
+```text
+query="rollback threshold", required_terms=["Clearport", "billing export"]
+→ ("rollback" OR "threshold") AND "clearport" AND "billing export"
+```
+
+Separate phrases have no relative order or distance requirement; tokens within a phrase do, so
+`go go` requires two consecutive `go` tokens. This is token matching, not a literal substring search.
+English case is ignored, but Chinese punctuation can change the bigram sequence: “账单-导出” does
+not match the phrase “账单导出”. Required phrases have no 64/128-term cap. A phrase with no indexable
+tokens is rejected by `MemorySearchQuery`. An ordinary query with no tokens still returns nothing;
+required phrases alone are not a browsing API. No conditions are silently removed or relaxed when
+there are no matches. This reuses the existing FTS5 index, without a schema or index migration.
+Use category/kind filters only when the stored labels are known. A name appearing in a body does not
+establish that its facts apply to that entity; callers must check applicability.
+
 Each hit contains exactly `item_id/namespace/category/kind/snippet/is_complete`. Bodies of at most
 300 Python Unicode characters are returned in full. For longer bodies, the first matching token's
 start h gives `start=max(0,min(h-150,len(text)-300))`; the snippet is the exact 300-character slice,
 without ellipses or highlighting. `is_complete` describes body completeness, not verified relevance.
 Identical text under different IDs remains separate.
+Snippet placement still follows the first ordinary-query hit. A required phrase may lie outside the
+snippet; Fetch can supply the remaining body when needed.
 
 ## Memory tools
 
@@ -249,7 +276,9 @@ instructions based on the tools actually available.
 Low-level `register_memory_tools()` still defaults to no tools and accepts explicit
 `memory.search/fetch` selection in SDK code. Only manual Agent read declarations have been removed.
 Search directly uses `MemorySearchQuery` as its input and returns `items` and `has_more`. Only when
-more candidates exist does it add the hint “还有候选，可收紧关键词或 categories/kinds 后重试”.
+more candidates exist does it add the hint “还有候选；这不要求继续查询。” Stop when snippets provide
+enough evidence; search again only for missing necessary information, not merely to rephrase a
+query without a new lead.
 
 Fetch takes one nonblank `item_id`; a known ID can be fetched without a preceding Search. It calls
 current `aget_item()` and returns `{"item": item.model_dump(mode="json")}` with every stored field,

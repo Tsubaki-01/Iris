@@ -250,6 +250,11 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 `memory_search`/`memory_fetch`，尊重 `include_tools`；仅 Fetch 时按已知 ID 读取。窗口中的
 说明保持稳定，执行时仍使用当前工具注册表和权限。Search/Fetch 结果沿普通工具历史与压缩处理。
 
+窗口指引要求模型按正文核对事实的适用对象和条件：提及某个对象不代表事实属于它；片段足够
+时停止，仅为缺失的必要信息补查。Search 的参数语义由工具说明提供，支持普通 query 的 OR
+匹配与可选 `required_terms` 必要词组；`has_more` 不要求取全候选。Fetch 用于缺少的正文或
+来源元数据，也可重新核对已知 ID 的当前值；没有新增自动查询或固定搜索次数限制。
+
 配置构造的 SQLite service 在单个 worker job 内读取全部 namespace 的发布物；runtime
 不消费取消后的迟到结果。生成仅由宿主显式调用 `refresh_overview()`，运行时采用过程不生成。
 

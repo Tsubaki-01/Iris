@@ -92,7 +92,7 @@ async def test_generation_uses_complete_active_namespace_and_two_part_overview(
     assert all(
         secret not in source for secret in ("private-secret", "episode-secret", "candidate-secret")
     )
-    assert request.tools == [] and request.max_tokens == 1024
+    assert request.tools == [] and request.max_tokens == 4096
     assert request.model == "fake-model"
     assert result.item_count == 105 and result.source_revision == 105
     assert result.published and result.usage["total_tokens"] == 24

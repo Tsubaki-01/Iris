@@ -32,14 +32,15 @@ async def load_context_windows(
     )
     if "memory_search" in tool_names:
         instructions += (
-            " 可用 memory_search 以普通文本关键词检索，可选 categories/kinds。"
-            "结果只返回候选，has_more 时收紧查询，is_complete 只表示正文是否完整；"
-            "片段充分时可直接使用。"
+            " 可用 memory_search 按需检索。"
+            "使用结果前，按正文确认事实的适用对象和条件，提及对象不代表事实属于它。"
+            "片段足以回答时停止查询；只有必要信息仍缺失时才补查，"
+            "没有新线索时不只换措辞反复搜索。is_complete 只表示正文是否完整。"
         )
     if "memory_fetch" in tool_names:
         instructions += (
             " 可用 memory_fetch 按已知 item_id 读取当前完整记录；"
-            "需要完整记录或来源时再按需读取。"
+            "缺少必要正文或来源元数据，或需重新核对已知条目的当前值时再读取。"
         )
     if "memory_search" not in tool_names and "memory_fetch" not in tool_names:
         instructions += " 当前没有专用数据库读取工具。"

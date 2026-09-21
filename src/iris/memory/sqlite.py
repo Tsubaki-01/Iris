@@ -320,7 +320,8 @@ class SQLiteMemoryStore:
         try:
             with self._connection() as connection:
                 rows = connection.execute(
-                    sql, [prepare_fts_query(terms), *params, query.limit + 1]
+                    sql,
+                    [prepare_fts_query(terms, query.required_terms), *params, query.limit + 1],
                 ).fetchall()
         except sqlite3.Error as exc:
             raise IrisMemoryError("SQLite memory 搜索失败", path=str(self.path)) from exc

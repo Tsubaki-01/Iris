@@ -292,6 +292,13 @@ only enabled `memory_search`/`memory_fetch` tools and respects `include_tools`; 
 IDs. Window guidance stays fixed while execution uses the current registry and permissions.
 Search/Fetch results follow ordinary tool-history and compaction rules.
 
+Window guidance asks the model to verify which entity and conditions each fact applies to; merely
+mentioning an entity is not enough. It stops when snippets suffice and searches again only for
+missing necessary information. The Search tool description owns parameter semantics: ordinary
+query terms use OR, with optional `required_terms` phrases. `has_more` does not require exhausting
+candidates. Fetch supplies missing body text or source metadata and can recheck a known ID's current
+value. This adds neither automatic retrieval nor a fixed number of searches.
+
 A configured SQLite service loads all namespace publications in one worker job. Runtime does not
 consume late results after cancellation. Only explicit host calls to `refresh_overview()` generate
 an overview; adoption does not generate one.

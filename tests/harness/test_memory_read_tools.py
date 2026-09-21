@@ -73,7 +73,12 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
                 ToolUseBlock(
                     id="search-memory",
                     name="memory_search",
-                    input={"query": "deploytoken", "categories": ["reference"], "kinds": ["note"]},
+                    input={
+                        "query": "deploytoken",
+                        "required_terms": ["当前部署版本"],
+                        "categories": ["reference"],
+                        "kinds": ["note"],
+                    },
                 )
             )
         )
@@ -137,6 +142,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     if queries:
         query, namespaces = queries[0]
         assert query.query == "deploytoken" and namespaces == ("project",)
+        assert query.required_terms == ["当前部署版本"]
         hit = json.loads(results[0].content)["items"][0]
         assert hit["item_id"] == item.id and hit["is_complete"]
         assert hit["snippet"] == item.text
