@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from ._query import tokenize_text
@@ -32,13 +32,6 @@ def _new_id() -> str:
 def _now_iso() -> str:
     """生成与现有 SQLite session store 风格一致的时间戳。"""
     return datetime.now().isoformat()
-
-
-class MemoryLevel(StrEnum):
-    """分层记忆级别。"""
-
-    EPISODIC = "l1"
-    SEMANTIC = "l2"
 
 
 class MemoryCategory(StrEnum):
@@ -60,6 +53,7 @@ class MemorySourceType(StrEnum):
     TASK = "task"
     REFERENCE = "reference"
     SDK = "sdk"
+    GENERATION = "generation"
 
 
 class MemoryItemKind(StrEnum):
@@ -81,15 +75,6 @@ class MemoryItemStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
-class MemoryCandidateStatus(StrEnum):
-    """候选记忆状态。"""
-
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    MERGED = "merged"
-
-
 class MemoryEventType(StrEnum):
     """记忆审计事件类型。"""
 
@@ -100,10 +85,8 @@ class MemoryEventType(StrEnum):
     SUPERSEDE = "supersede"
     SEARCH = "search"
     CONTEXT_INCLUDE = "context_include"
-    CANDIDATE_ADD = "candidate_add"
-    CANDIDATE_ACCEPT = "candidate_accept"
-    CANDIDATE_REJECT = "candidate_reject"
-    CANDIDATE_MERGE = "candidate_merge"
+    FLUSH = "flush"
+    DREAM = "dream"
 
 
 class MemoryActor(StrEnum):
@@ -133,38 +116,93 @@ class MemoryArtifactRef(BaseModel):
         return value
 
 
-class MemoryEpisode(BaseModel):
-    """L1 片段记忆，记录一次观察到的事实来源。"""
+class MemoryRecord(BaseModel):
+    """Episode 内具有稳定标识的原始材料记录。"""
 
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(default_factory=_new_id)
+    role: str = "sdk"
+    text: str = ""
+    source_type: MemorySourceType = MemorySourceType.SDK
+    source_id: str = ""
+    occurred_at: str = Field(default_factory=_now_iso)
+    artifacts: tuple[MemoryArtifactRef, ...] = ()
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryEpisode(BaseModel):
+    """有明确材料边界的不可变经历，不代表已经提炼的知识。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(default_factory=_new_id)
     namespace: str = Field(default="project", pattern=r"\S")
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
-    text: str = ""
-    category: MemoryCategory = MemoryCategory.SESSION
-    artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
+    records: tuple[MemoryRecord, ...] = Field(min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
 
-    model_config = {"use_enum_values": False, "extra": "forbid"}
+    @field_validator("records")
+    @classmethod
+    def _unique_record_ids(cls, records: tuple[MemoryRecord, ...]) -> tuple[MemoryRecord, ...]:
+        """材料边界要求原文定位无歧义。"""
+        if len({record.id for record in records}) != len(records):
+            raise ValueError("Episode 内原文记录 ID 必须唯一")
+        return records
+
+
+class MemoryEvidenceRef(BaseModel):
+    """指向经历内原文片段或真实显式写入事件的证据定位。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["episode", "event"]
+    source_id: str = Field(pattern=r"\S")
+    record_id: str | None = None
+    start: int = Field(default=0, ge=0)
+    end: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_locator(self) -> Self:
+        """首次解析时区分原文片段和不可变写入事件定位。"""
+        if self.kind == "episode":
+            if not self.record_id or self.end is None or self.end <= self.start:
+                raise ValueError("Episode 证据必须包含记录 ID 和非空半开区间")
+        elif self.record_id is not None or self.start != 0 or self.end is not None:
+            raise ValueError("Event 证据只使用事件 ID 定位")
+        return self
+
+
+class MemoryObservation(BaseModel):
+    """从材料中提出的不可变观察，整理进度由 store 单独持有。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(default_factory=_new_id)
+    namespace: str = Field(default="project", pattern=r"\S")
+    text: str = Field(pattern=r"\S")
+    applicability: str = ""
+    category: MemoryCategory = MemoryCategory.USER
+    kind: MemoryItemKind = MemoryItemKind.NOTE
+    reason: str = Field(pattern=r"\S")
+    evidence: tuple[MemoryEvidenceRef, ...] = Field(min_length=1)
+    target_item_ids: tuple[str, ...] = ()
+    generation_model: str = ""
+    created_at: str = Field(default_factory=_now_iso)
 
 
 class MemoryItem(BaseModel):
-    """可记录 L1/L2 级别的长期记忆条目。"""
+    """包含当前支持证据的正式长期知识。"""
 
     id: str = Field(default_factory=_new_id)
     namespace: str = Field(default="project", pattern=r"\S")
     text: str
-    level: MemoryLevel = MemoryLevel.SEMANTIC
     category: MemoryCategory = MemoryCategory.USER
     kind: MemoryItemKind = MemoryItemKind.NOTE
     status: MemoryItemStatus = MemoryItemStatus.ACTIVE
-    episode_id: str | None = None
+    superseded_by: str | None = None
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     reason: str = ""
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: tuple[MemoryEvidenceRef, ...] = ()
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
@@ -193,64 +231,30 @@ class MemoryNamespaceState:
 
 @dataclass(frozen=True, slots=True)
 class MemoryNamespaceSnapshot:
-    """同一读事务得到的版本状态与完整 active L2 条目。"""
+    """同一读事务得到的版本状态与完整 active 正式条目。"""
 
     state: MemoryNamespaceState
     items: tuple[MemoryItem, ...]
 
 
-class MemoryCandidate(BaseModel):
-    """从 L1 episode 抽取出的待处理候选记忆。"""
-
-    id: str = Field(default_factory=_new_id)
-    namespace: str = Field(default="project", pattern=r"\S")
-    episode_ids: list[str] = Field(default_factory=list)
-    category: MemoryCategory = MemoryCategory.USER
-    suggested_level: MemoryLevel = MemoryLevel.SEMANTIC
-    text: str
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    importance: float | None = Field(default=None, ge=0.0, le=1.0)
-    reason: str
-    status: MemoryCandidateStatus = MemoryCandidateStatus.PENDING
-    created_at: str = Field(default_factory=_now_iso)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    model_config = {"use_enum_values": False, "extra": "forbid"}
-
-    @field_validator("episode_ids")
-    @classmethod
-    def _validate_episode_ids(cls, value: list[str]) -> list[str]:
-        """校验候选记忆必须可追溯到至少一个 episode。"""
-        if not value:
-            raise ValueError("候选记忆必须包含 episode id")
-        if any(not episode_id.strip() for episode_id in value):
-            raise ValueError("候选记忆 episode id 不能为空")
-        return value
-
-    @field_validator("text", "reason")
-    @classmethod
-    def _validate_required_text(cls, value: str) -> str:
-        """校验候选正文与原因不能为空。"""
-        if not value.strip():
-            raise ValueError("候选记忆正文和原因不能为空")
-        return value
-
-
 class MemoryItemPatch(BaseModel):
-    """长期记忆条目的部分更新，省略字段不修改，仅评分允许显式 null。"""
+    """长期记忆条目的部分更新，省略字段不修改，显式 null 不表示省略。"""
 
     text: str | SkipJsonSchema[None] = Field(default_factory=lambda: None)
     category: MemoryCategory | SkipJsonSchema[None] = Field(default_factory=lambda: None)
     kind: MemoryItemKind | SkipJsonSchema[None] = Field(default_factory=lambda: None)
     status: MemoryItemStatus | SkipJsonSchema[None] = Field(default_factory=lambda: None)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    importance: float | None = Field(default=None, ge=0.0, le=1.0)
     artifacts: list[MemoryArtifactRef] | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    evidence: tuple[MemoryEvidenceRef, ...] | SkipJsonSchema[None] = Field(
+        default_factory=lambda: None
+    )
     metadata: dict[str, Any] | SkipJsonSchema[None] = Field(default_factory=lambda: None)
 
     model_config = {"use_enum_values": False, "extra": "forbid"}
 
-    @field_validator("text", "category", "kind", "status", "artifacts", "metadata", mode="before")
+    @field_validator(
+        "text", "category", "kind", "status", "artifacts", "metadata", "evidence", mode="before"
+    )
     @classmethod
     def _reject_explicit_null(cls, value: Any) -> Any:
         """必需条目字段可省略，但显式 null 不能进入可信 patch。"""
@@ -276,6 +280,10 @@ class MemoryEvent(BaseModel):
     actor: MemoryActor = MemoryActor.SDK
     item_id: str | None = None
     episode_id: str | None = None
+    source_type: MemorySourceType = MemorySourceType.SDK
+    source_id: str = ""
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
     reason: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now_iso)
@@ -332,12 +340,10 @@ class MemoryWriteInput(BaseModel):
     reason: str
     category: MemoryCategory = MemoryCategory.USER
     kind: MemoryItemKind = MemoryItemKind.NOTE
-    episode_id: str | None = None
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     actor: MemoryActor = MemoryActor.SDK
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: tuple[MemoryEvidenceRef, ...] = ()
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -353,14 +359,14 @@ class MemoryWriteInput(BaseModel):
 
 
 class MemoryObserveInput(BaseModel):
-    """写入 L1 观察片段的 SDK 输入。"""
+    """独立 SDK 的经历取材输入。"""
 
     namespace: str = Field(default="project", pattern=r"\S")
     text: str = ""
     source_type: MemorySourceType = MemorySourceType.SDK
     source_id: str = ""
     actor: MemoryActor = MemoryActor.SDK
-    category: MemoryCategory = MemoryCategory.SESSION
+    records: tuple[MemoryRecord, ...] = ()
     reason: str = ""
     artifacts: list[MemoryArtifactRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

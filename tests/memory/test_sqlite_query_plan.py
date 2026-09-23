@@ -17,7 +17,7 @@ from iris.memory import (
     [
         lambda store, namespace, limit: store.list_items([namespace], limit=limit),
         lambda store, namespace, limit: store.list_events(namespace, limit=limit),
-        lambda store, namespace, limit: store.list_candidates(namespace, limit=limit),
+        lambda store, namespace, limit: store.list_observations(namespace, limit=limit),
     ],
 )
 def test_list_methods_reject_out_of_range_limits(

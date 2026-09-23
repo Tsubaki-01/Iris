@@ -11,13 +11,11 @@ import pytest
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
     FileMemoryMirror,
-    MemoryCandidate,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
     MemoryItemPatch,
     MemoryItemStatus,
-    MemoryLevel,
     MemoryObserveInput,
     MemorySearchQuery,
     MemoryService,
@@ -26,15 +24,12 @@ from iris.memory import (
 )
 
 
-def test_namespace_revision_tracks_effective_l2_changes_only(tmp_path: Path) -> None:
-    """实质 L2 变更推进版本，观察、候选、未变化和未命中保持原版本。"""
+def test_namespace_revision_tracks_effective_knowledge_changes_only(tmp_path: Path) -> None:
+    """实质知识变更推进版本，原始经历、未变化和未命中保持原版本。"""
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     service = MemoryService(store)
     assert store.read_namespace_state("project").item_revision == 0
-    episode = service.observe(MemoryObserveInput(text="observation"))
-    service.add_candidate(
-        MemoryCandidate(episode_ids=[episode.id], text="candidate", reason="review")
-    )
+    service.observe(MemoryObserveInput(text="observation"))
     assert store.read_namespace_state("project").item_revision == 0
 
     item = service.remember(MemoryWriteInput(text="first", reason="seed"))
@@ -59,23 +54,22 @@ def test_namespace_revision_tracks_effective_l2_changes_only(tmp_path: Path) -> 
     assert store.read_namespace_state("project").item_revision == 3
 
 
-def test_namespace_snapshot_excludes_inactive_and_non_l2_items(tmp_path: Path) -> None:
-    """正文快照仅含 active L2，搜索也能读取 active L1 item。"""
+def test_namespace_snapshot_and_search_include_only_active_formal_items(tmp_path: Path) -> None:
+    """正文快照和搜索共享 active 正式知识边界。"""
     store = SQLiteMemoryStore(tmp_path / "memory.db")
-    episodic = MemoryItem(text="episodic marker", level=MemoryLevel.EPISODIC)
+    active = MemoryItem(text="active marker")
     for item in (
-        episodic,
+        active,
         MemoryItem(text="deleted marker", status=MemoryItemStatus.DELETED),
         MemoryItem(text="superseded marker", status=MemoryItemStatus.SUPERSEDED),
     ):
         store.add_item(item, event=MemoryEvent(event_type=MemoryEventType.ADD, item_id=item.id))
     snapshot = store.read_namespace_snapshot("project")
-    assert snapshot.items == ()
-    assert snapshot.state.item_revision == 0
+    assert [item.id for item in snapshot.items] == [active.id]
+    assert snapshot.state.item_revision == 3
     assert [
-        result.item_id
-        for result in store.search(MemorySearchQuery(query="marker"), ["project"]).items
-    ] == [episodic.id]
+        hit.item_id for hit in store.search(MemorySearchQuery(query="marker"), ["project"]).items
+    ] == [active.id]
 
 
 def test_partial_publication_leaves_database_committed_and_projection_stale(

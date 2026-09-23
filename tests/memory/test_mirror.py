@@ -32,8 +32,6 @@ def test_body_preserves_artifact_references_and_saved_business_metadata(tmp_path
             reason="保留交接依据",
             category=MemoryCategory.TASK,
             kind=MemoryItemKind.TASK_STATE,
-            confidence=0.9,
-            importance=0.8,
             artifacts=[
                 MemoryArtifactRef(
                     path="docs/project-handoff.md",
@@ -50,7 +48,8 @@ def test_body_preserves_artifact_references_and_saved_business_metadata(tmp_path
     assert '"version": 3' in body
     assert '"owner": "maintainer"' in body and '"stage": "ready"' in body
     assert item.created_at in body
-    assert "confidence: 0.9" in body and "importance: 0.8" in body
+    assert item.evidence[0].source_id in body
+    assert "evidence:" in body
     assert body.index(item.text) < body.index("<details>") < body.index(item.id)
     assert "### Memory Item" not in body
     assert "</details>\n\n---" in body
@@ -66,15 +65,13 @@ def test_body_keeps_raw_markdown_and_escapes_folded_metadata(tmp_path: Path) -> 
             text=text,
             reason="依据 `原文` | <约定>\n下一行",
             source_id="message<1>",
-            confidence=0,
-            importance=0,
             metadata={"key": "````\n</details>"},
         )
     )
     body = (mirror.namespace_directory("project") / "User/user.md").read_text(encoding="utf-8")
     assert text in body
     assert body.index(text) < body.index("<details>")
-    assert "confidence: 0.0" in body and "importance: 0.0" in body
+    assert item.evidence[0].source_id in body
     assert "message&lt;1&gt;" in body
     assert "&lt;约定&gt;" in body
     assert body.count("</details>") == 1

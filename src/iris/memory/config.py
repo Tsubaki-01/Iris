@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..exceptions import IrisConfigError
 from ..providers.protocols import CompletionProvider
+from .generation_models import MemoryGenerationConfig
 from .mirror import FileMemoryMirror
 from .models import MemoryOverviewConfig
 from .service import MemoryIOExecutionMode, MemoryService
@@ -39,6 +40,7 @@ class MemoryConfig(BaseModel):
     )
     write_namespace: str = Field(default="project", pattern=r"\S")
     overview: MemoryOverviewConfig = Field(default_factory=MemoryOverviewConfig)
+    generation: MemoryGenerationConfig = Field(default_factory=MemoryGenerationConfig)
 
 
 def build_memory_service_from_config(
@@ -79,6 +81,9 @@ def build_memory_service_from_config(
         overview_provider=overview_provider,
         overview_model=overview_model,
         overview_config=config.overview,
+        generation_provider=overview_provider,
+        generation_model=overview_model,
+        generation_config=config.generation,
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
 

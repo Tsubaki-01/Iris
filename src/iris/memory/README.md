@@ -2,10 +2,10 @@
 
 # `iris.memory`
 
-`iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、L1 episode、候选记忆、L2
-长期条目、审计事件、SQLite 存储、文件镜像、显式编排和记忆工具。SQLite 是权威数据源；
+`iris.memory` 是 Iris 的本地长期记忆 SDK：它定义项目内 namespace、不可变 Episode、带证据的
+Observation、正式 MemoryItem、变更事件、SQLite 存储、文件镜像、生成阶段和记忆工具。SQLite 是权威数据源；
 `.iris/memory/namespaces/` 下的 Markdown 是便于人工查看的分类投影。`MemoryService` 就是
-记忆管理 SDK，统一提供读写、晋升、投影和显式概览入口。
+记忆管理 SDK，统一提供读写、flush、dreaming、投影和概览入口。
 
 `memory.enabled` 默认 false。开启后，Agent 自动获得 `memory_search`、`memory_fetch`，并在
 新会话或成功压缩后采用已发布概览。模型根据概览和问题按需读取，普通 run 不会自动查询条目；
@@ -24,7 +24,7 @@ memory:
 ## 运行要求与快速开始
 
 本包随 Iris 安装，使用标准库 SQLite 和 FTS5。FTS5 是唯一文本检索路径；初始化或查询错误
-报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 4，旧版库
+报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 5，旧版库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
@@ -72,9 +72,8 @@ flowchart LR
     Service --> Store["MemoryStore"]
     Store --> SQLite["SQLiteMemoryStore 权威数据"]
     Service --> Mirror["FileMemoryMirror 人类可读投影"]
-    Episode["L1 MemoryEpisode"] --> Orchestrator["MemoryOrchestrator 显式调用"]
-    Orchestrator --> Candidate["MemoryCandidate"]
-    Candidate --> Item["L2 MemoryItem"]
+    Episode["MemoryEpisode 原始经历"] -->|flush| Observation["MemoryObservation 带条件的观察"]
+    Observation -->|dreaming| Item["MemoryItem 正式知识"]
     Query["MemorySearchQuery / item_id"] --> Service
     Service --> Result["Search 片段 / Fetch 当前记录"]
     Service --> Overview["显式 refresh_overview"]
@@ -90,32 +89,115 @@ flowchart LR
 
 `service.search(MemorySearchQuery(query="..."), ["project", "notes"])` 对多个空间做一次联合查询，
 全局排序后取 limit。`get_item(item_id, namespaces)` 和 `list_items(namespaces)` 也接受联合
-读取范围；写入、更新、删除和候选操作绑定单个 namespace。空读取集合不返回任何条目。
+读取范围；写入、更新、删除和生成操作绑定单个 namespace。空读取集合不返回任何条目。
 
 ### 记忆生命周期
 
-- `observe()` 保存 L1 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
-- `remember()` 显式写入 L2 `MemoryItem` 与 `ADD` 事件。
+- `observe()` 保存不可变 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
+- `await flush()` 将原文片段提炼为带证据和适用条件的 `MemoryObservation`，同步推进原文游标。
+- `await dream()` 将观察和显式改动整理为正式 `MemoryItem`，可以新增、修改、合并、退役或补充支持。
+- `remember()` 显式写入正式 `MemoryItem` 与 `ADD` 事件，不要求先执行提取。
 - `update(item_id, namespace, patch, reason=...)` 更新同一条目并记录 `UPDATE`，ID 保持不变。
 - `search()` 返回 `MemorySearchResponse(items, has_more)`，每个命中只含定位字段和原文片段。
 - `forget()` 使用 tombstone，不物理删除；默认查询不返回 deleted 条目。
-- `MemoryOrchestrator.observe()` 通过可注入 extractor/classifier 生成候选。
-- `process_candidates()` 才会按 policy 接受、拒绝或晋升候选；默认
-  `NoOpMemoryExtractor` 不产生候选，也不存在后台自动提取。
 
-部分更新中，省略字段表示不修改；`confidence` / `importance` 可用 `null` 清空，
-artifacts / metadata 用 `[]` / `{}` 清空。正文、分类、状态和集合字段不接受显式 `null`。
+Episode 保存具有稳定 ID 的 `records`，原文与 Observation 不随整理而改写；flush 位置和观察的
+处理状态由 store 单独保存。Observation 的适用条件帮助 dreaming 判断，正式 Item 正文包含使用
+该知识所需的条件。Search/Fetch 和概览只读取 active Item，不读取 Episode 或 Observation。
 
-候选晋升在 SQLite 中先取得 `BEGIN IMMEDIATE` 写事务，再读取候选状态；并发或重复晋升
-返回同一条目，只写入一组新增和接受事件。更新和软删除也在读取当前条目前取得写锁，避免
-旧快照覆盖并发更新或重复记录实际删除。不同连接对同一条目不同字段的修改会依次合并。
-条目、候选和事件 ID 在同库所有 namespace
-中全局唯一。
+Flush 先筛选对未来有用的信息，保留偏好、纠正、项目约定、可复用经验和重要待办状态；普通闲聊、
+操作流水和无后续价值的临时要求可以不生成观察。Dreaming 用带角色、时间、元数据的原始证据核对
+提炼稿，再去重、合并为简洁条目。正文允许省略次要细节，只保留防止误用的必要对象和条件；日期、
+版本、来源经过与未执行方案按需保留，完整经历通过证据回查。
+压缩不得补造事实或增强结论：单次经历不自动成为通用规律，明确默认偏好按声明范围保留，未验证
+不写成无效。用户明确要求记录的细节仍需保留；`reason` 只简述保存或整理用途。
+这些是模型的生成要求；JSON schema 校验只检查结构与字段约束，不证明正文的推论成立。
+Flush/dream 请求使用 `temperature=0` 和 `response_format={"type": "json_object"}`，生成 provider
+须支持这两个参数。JSON 输出模式约束响应格式，字段与证据引用仍在既有解析边界检查；不合契约
+的响应不提交，已保存原文仍可重试。低随机性和原文核对都不能保证语义一定正确。
 
-`process_candidates()` 每批只为当前 namespace 重建一次镜像。`MemoryService.promote_candidates()`
-接收 namespace 与按顺序提供 `(candidate_id, kind, reason)` 的 iterable，仍逐项调用 store 的原子
-晋升；后续候选或策略失败时，已成功提交的条目会在异常传播前统一刷新。空批次不重建镜像，
-单条 `promote_candidate()` 仍在返回前刷新。
+`MemoryEvidenceRef` 指向 Episode 内的记录片段或真实显式写入事件。Item 的 `evidence` 表示
+当前正文的支持依据；Observation 的处理结果与 MemoryEvent 保留历史解释。显式修改正文时，
+本次写入事件及本次明确提供的证据替换旧的当前支持；仅改分类或 metadata 时保留原支持。
+写工具记录真实 Agent 和 call ID，不将 Agent 写入声明标为用户确认。
+
+部分更新中，省略字段表示不修改，artifacts / metadata 用 `[]` / `{}` 清空；所有 patch 字段
+不接受显式 `null`。更新和软删除在读取当前条目前取得 `BEGIN IMMEDIATE` 写锁；正文、当前
+证据、事件、待整理改动和 revision 同事务提交。不同连接对同一条目不同字段的修改依次合并。
+
+Flush 原子提交观察和原文进度；空提取也推进已处理区间。Dreaming 在同一快照中读取固定输入、
+关联条目与纠正，模型调用位于事务外，提交时比较 revision 并一次应用整批操作及输入处理结果。
+Flush 请求每个 Episode 只发送一次来源信息与已知的 run outcome，原文片段用短标签关联；
+持久 Episode/Record ID、消息边界计数及块序号留在程序内，工具状态与明确的记忆目标仍提供给模型。
+发给模型的是精简投影：观察和相关条目的判断字段、事件的实际字段变化、短证据标签及原文。
+Episode/Record/Event 的持久定位由程序保留；原文分组与字符区间帮助模型识别重叠证据。
+冲突不消费输入，容量阻塞保留待重试状态。`generation_state()` 可读取积压、阻塞数量与阶段结果。
+模型依赖通过 `generation_provider`、`generation_model` 和 `generation_config` 绑定；独立 SDK
+可显式 `await service.flush("project")`、`await service.dream("project")`。
+
+### 自动生成与后台生命周期
+
+仅开启读取不会产生生成费用。需要自动生成时显式配置：
+
+```yaml
+memory:
+  enabled: true
+  write_namespace: project
+  generation:
+    enabled: true
+    idle_seconds: 300
+```
+
+`generation.enabled` 默认 false。配置构造的服务复用 Agent 已解析的 provider/model，
+无需另一套凭据。注入服务保留自己的生成依赖和预算；自动运行要求 generation provider/model、
+overview provider/model 和 mirror 均已绑定，否则构造 runner 时报告 `IrisConfigError`。
+
+`AgentRunner` 为 root run 管理唯一后台维护任务。admission 成功后、第一条新原文提交前登记
+来源；真实压缩和运行边界捕获新增已提交消息。持续运行的 activation 或 admission 会阻止模型维护；
+它们全部退出且安静达到 `idle_seconds` 后，处理观察、flush 新经历、dreaming 并发布概览。
+新前台输入取消未提交的生成；已经派发的短数据库提交完整收口。`aclose()` 补捕获并等待真实 IO
+完成，保留未处理材料供下次启动。没有轮询、外部 cron 或独立 daemon。
+
+SQLite lifecycle 用持久 source UUID 和本 run 消息范围补捕获，fork 继承前缀不重新学习；
+InMemory lifecycle 只能恢复已写入 memory 库的材料。child 不自动收集内部轨迹，仍可读取和显式写入。
+BCI、reasoning 和记忆读回正文不作为新证据；观察引用具体原文记录及半开字符区间。
+自动采集的 Episode 以顶层 `source_id` 保存 run ID，metadata 保存 lifecycle 来源 ID；
+待处理经历读取用这两个字段关联来源的最终 outcome。
+
+默认 flush/dream 输入预算各为 32,000 tokens，输出各为 4,000 tokens。可在 `generation` 下设置
+`flush_input_budget_tokens`、`flush_output_budget_tokens`、`dream_input_budget_tokens`、
+`dream_output_budget_tokens`。长记录按固定片段消费；dream 以完整比较材料包为单位，放不下则
+保留 blocked 并继续无关输入。依赖知识更新、重建 Agent 后预算改变或显式
+`await service.dream(namespace, retry_blocked=True)` 才重新评估受阻输入。
+
+模型失败后等待下一次活动或重启，不紧密重试。已消费输入不会因投影失败而重新生成；后续维护
+按 projection revision 补分类文件、按 overview revision 补概览。维护用量保存在独立
+`GenerationResult` 中，不计入主 run 的 model steps 或 usage。`generation_state(namespace)` /
+`await ageneration_state(namespace)` 返回 pending/blocked 数量、正式/投影/概览版本及每阶段最近结果。
+Flush 结果的 `consumed_ranges` 给出实际提交的原文区间。
+Dream 结果包含各操作数量、`processed_observations`、`processed_changes` 与 `unchanged`；
+后者统计归入未新增/改写/合并/删除条目的输入数量，补充证据也属于不改正文。
+
+独立 SDK 可手动运行各阶段，阶段调用不要求开启 Agent 自动开关或配置 mirror：
+
+```python
+from pathlib import Path
+from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
+
+service = MemoryService(
+    SQLiteMemoryStore(Path("memory.db")),
+    generation_provider=provider,  # 应用已配置的 CompletionProvider
+    generation_model="your-model",
+)
+service.observe(MemoryObserveInput(text="这个项目以后统一使用 uv 管理依赖。"))
+flushed = await service.flush("project")
+dreamed = await service.dream("project")
+state = service.generation_state("project")
+```
+
+每次 flush/dream 处理一批；`has_more` 表示该阶段仍有 pending 输入。`dream()` 不隐式调用 flush，
+显式 `refresh_overview()` 仍需配置 overview provider/model 与 mirror。后台发布新概览不会热更新
+已采用的会话窗口，仍只在新会话或成功压缩时采用。
 
 ### System 概览窗口
 
@@ -129,7 +211,7 @@ runtime 在会话首次输入和成功压缩时读取已发布概览，选择完
 窗口选择使用实际请求的 token 估算，并保留完整 system 的字符上限。
 
 模型指引将概览未提及的主题默认视为不存在，不查询这些主题。没有概览时正常聊天，但本窗口
-暂不使用长期记忆。新主题须先由宿主显式生成概览，再在新会话或成功压缩后采用；已有主题
+暂不使用长期记忆。新主题须先发布新概览，再在新会话或成功压缩后采用；已有主题
 仍可查询数据库中的最新条目。主题约束由模型遵循，数据库不增加主题拦截，也不要求每次
 Search 都继续 Fetch。更新或忘记条目不会回写已经保存的会话历史。
 
@@ -140,11 +222,11 @@ session 不会强制刷新已采用概览，需要当前概览时开始新会话
 
 ## 显式生成概览
 
-宿主可显式调用 `await service.refresh_overview(namespace)`，把该 namespace 的全部 active L2
+宿主可显式调用 `await service.refresh_overview(namespace)`，把该 namespace 的全部 active 正式
 条目按 category/kind 组织，一次生成“核心事实＋知识范围”，发布到正式目录的 `Memory.md`。
 生成依赖由构造器的 `overview_provider`、`overview_model` 和 `overview_config` 绑定；provider
 遵循 `iris.providers.CompletionProvider`。配置构造的 Agent 使用已解析的主模型 provider，
-显式注入的 service 则保留宿主原配置。构造、聊天、写入、读取都不会自动生成概览。
+显式注入的 service 则保留宿主原配置。构造和读取不调用模型；自动生成由可选的 runner 维护负责。
 
 ```python
 # service 已通过构造器配置概览 provider/model。
@@ -155,7 +237,9 @@ documents = await service.aload_overviews(["project"])
 `MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 4,096 tokens。完整输入超预算
 就报错，不截断或分批摘要。模型只返回含 `core_facts`、`knowledge_scope` 的 JSON：前者允许
 为空，后者必须非空。只有正常完成并解析成功的结果才发布；异常、截断或文件写失败保留旧文件，
-已知模型 usage 留在错误上下文中。空 active L2 快照不调用模型，直接发布“当前无记忆”。
+已知模型 usage 留在错误上下文中。空 active Item 快照不调用模型，直接发布“当前无记忆”。
+概览成功、失败或取消均记录独立 `GenerationResult`，保存已知用量和发布结果，可通过
+`generation_state()` 查看。
 
 生成期间不持发布锁；发布前在短锁中比较来源版本，较旧生成不能覆盖较新概览。条目后来变化
 但尚无较新概览时，结果可发布并标为陈旧。`load_overviews/aload_overviews` 只读取完整新格式；
@@ -172,14 +256,14 @@ refresh 报生成依赖未配置。
 ## 公开接口分组
 
 - 输入与结果：[MemorySearchQuery、MemorySearchHit、MemorySearchResponse](models.py)，以及
-  `MemoryEpisode`、`MemoryCandidate`、`MemoryItem`、`MemoryEvent` 和写入/更新模型。
+  `MemoryEpisode`、`MemoryRecord`、`MemoryObservation`、`MemoryItem`、`MemoryEvidenceRef`、`MemoryEvent`。
 - 服务与存储：[MemoryService](service.py)、[MemoryStore](store.py)、[SQLiteMemoryStore](sqlite.py)。
   同步 `search/get_item/list_items` 保留 SDK 管理读取；`asearch/aget_item/alist_items` 是完整操作
   的 async 适配。写入、事件读取与提炼 SDK 继续可用。
 - 概览：`MemoryOverviewConfig/Content/Document/GenerationResult`，以及
   `refresh_overview()`、`load_overviews()`、`aload_overviews()`。
 - 配置：[MemoryConfig](config.py)、`build_memory_service_from_config()`、`resolve_memory_path()`。
-- 显式提炼：[MemoryOrchestrator](orchestrator.py)、extractor/classifier/policy 及 rule/no-op 实现。
+- 生成：[flush / dream](generation.py)、[阶段模型与配置](generation_models.py)，以及 `generation_state()`。
 - 文件投影：[FileMemoryMirror](mirror.py)、[MemoryFileAccess](files.py)。
 - 工具：[Search/Fetch 与 Remember/Update/Forget](tools.py)、访问策略工厂和显式注册函数。
 
@@ -203,7 +287,7 @@ response = await service.asearch(query, ["project"])
 未知字段报错，模型输入中没有 namespace。store 先按允许 namespace、category/kind 和 active
 状态过滤，再按 BM25 升序、updated_at/id 降序取 `limit + 1`，只返回前 limit 条并计算
 `has_more`。同一维度的过滤值为 OR，不同维度为 AND。索引只包含 `MemoryItem.text`；active
-L1/L2 item 均可搜索，episode、未晋升 candidate、deleted/superseded 不进入结果。
+Item 均可搜索，Episode、Observation、deleted/superseded 不进入结果。
 
 索引、查询和原文定位共用词法：ASCII 字母数字连续串小写化，连续中文取相邻双字，仅孤立
 汉字保留单字；标点和下划线分隔词项。查询词项按首次出现顺序去重，以字面量 OR 检索，
@@ -246,7 +330,7 @@ Agent 手工读声明。Search 直接使用 `MemorySearchQuery` 作为工具输�
 
 Fetch 输入只有非空白 `item_id`，可直接读取已知 ID，不要求先 Search。它调用当前
 `aget_item()` 并返回 `{"item": item.model_dump(mode="json")}` 的完整记录，包括正文、来源、
-metadata、artifacts 引用和全部状态/时间字段；不会读取附件内容。缺失、非 active 或范围外
+当前 evidence、metadata、artifacts 引用和全部状态/时间字段；不会展开原始证据或读取附件内容。缺失、非 active 或范围外
 条目报告“允许读取范围内未找到有效记忆”。连续 Fetch 不去重；Search 后修改条目再 Fetch
 会得到新版。输出仍受普通 `max_result_chars=50000` 和 ToolExecutor artifact 机制约束。
 
@@ -277,30 +361,30 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 
 每条内容先完整呈现原始 Markdown，再以 `<details>` 折叠展示 ID、来源、时间和其余元数据。
 这些文件只用于人工浏览，不承担条目解析或反向导入协议。数据库写入后，service 调用
-`rebuild_from_store()`，在 `publish_projection()` 的短写事务内读取完整 active L2 快照，
-逐文件原子替换后推进 `projection_revision`。episodes、candidates 和事件仍在 SQLite，
+`rebuild_from_store()`，在 `publish_projection()` 的短写事务内读取完整 active Item 快照，
+逐文件原子替换后推进 `projection_revision`。Episode、Observation 和事件仍在 SQLite，
 不追加事件镜像。
 
-`item_revision` 随影响 active L2 的实质变更推进，空 patch 不更新正文、事件或版本。
-条目、FTS、事件、候选晋升和 revision 使用同一 mutation 事务。所有分类文件成功发布后，
+`item_revision` 随正式知识的实质变更推进，空 patch 不更新正文、事件或版本。
+条目、FTS、当前证据、事件、输入处理状态和 revision 使用同一 mutation 事务。所有分类文件成功发布后，
 `projection_revision` 才追上条目版本；部分文件失败时数据库结果仍成功，版本差异表明投影
 未完整同步。写工具结果附带 warning；通用文件工具通过 `MemoryFileAccess` 读取正式路径和
 实际文件来源版本，报告陈旧/未同步状态。数据库检索不依赖镜像发布成功。
-显式重建失败仍抛错，不启动后台重试。配置构造的 SQLite service 总是自动维护分类镜像；
+显式重建失败仍抛错。配置构造的 SQLite service 总是自动维护分类镜像；
 直接构造 SDK service 时可以不传 mirror。
 
-镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 episodes、items、candidates、events
+镜像不是审计权威，也不应被当作反向导入源。SQLite 保存 Episodes、Observations、Items、Events、生成进度
 以及 FTS index；每次操作使用短连接并把 JSON/SQLite 错误包装为 `IrisMemoryError`。
 索引保留全部状态，Search 和 Fetch 只返回 active；管理 SDK 的
 `store.list_items(..., include_deleted=True)` 可检查软删除记录。新增/更新与索引在同一事务内
 完成，`rebuild_index()` 可从权威表重建。
-公开 store 的 `list_items()`、`list_events()` 与 `list_candidates()` 对非 `1..100` 的 limit
+公开 store 的 `list_items()`、`list_events()` 与 `list_observations()` 对非 `1..100` 的 limit
 直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
 
 ## 限制与非目标
 
 - 不提供向量数据库、embedding、语义 reranker 或远程后端。
-- 不自动从 session 消息提取记忆，不启动后台任务。
+- InMemory lifecycle 退出后无法补读未捕获原文；已经捕获的 Episode 仍可由持久 memory store 恢复。
 - namespace 只是库内分组，不另建空间管理服务；不同项目不混在同一个库中。
 
 ## 维护与验证
@@ -308,11 +392,11 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | SDK 生命周期、namespace 范围和搜索结果 | `models.py`, `service.py`, `sqlite.py` | `tests/memory/test_service.py` |
-| 并发晋升、字段更新、FTS 完整性与搜索过滤 | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
+| 并发提交、字段更新、FTS 完整性与搜索过滤 | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
 | async IO、工具联合读取、查询词法与计划 | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_search.py`, `tests/memory/test_sqlite_query_plan.py` |
 | namespace 完整快照、投影版本与原子替换 | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | 显式概览生成、读回与版本发布 | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
-| 候选批次晋升与部分失败刷新 | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
+| Flush / dreaming 与原子输入消费 | `generation.py`, `generation_models.py`, `sqlite.py` | `tests/memory/test_generation.py`, `tests/memory/test_generation_store.py` |
 | 概览窗口采用、压缩与恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
 在仓库根目录按本次变更选择精准测试；每次使用新的 basetemp：

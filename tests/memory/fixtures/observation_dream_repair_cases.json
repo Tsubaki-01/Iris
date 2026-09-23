@@ -1,0 +1,50 @@
+[
+  {
+    "id": "repair_invented_exit_code",
+    "repeats": 1,
+    "records": [
+      {"role": "user", "text": "记录 Nacre 项目这次归档导出的错误，后续从目标目录继续排查。"},
+      {"role": "tool", "text": "归档导出失败：无法写入 /srv/nacre/archive，目标目录只读。", "metadata": {"is_error": true}},
+      {"role": "assistant", "text": "本次导出失败，目前没有修改目标目录，也没有重试。"}
+    ],
+    "drafts": [
+      {
+        "text": "Nacre 项目本次归档导出失败，工具报告退出码 17，无法写入 /srv/nacre/archive，目标目录只读；目前没有修改目标目录，也没有重试。",
+        "applicability": "Nacre 项目本次归档导出",
+        "category": "task",
+        "kind": "task_state",
+        "reason": "保留退出码 17、目录只读的错误和未重试状态，供后续排查。",
+        "evidence": ["e0", "e1", "e2"]
+      }
+    ],
+    "expectations": [
+      "Dream 应根据原始工具记录移除草稿正文和 reason 中补造的退出码 17，不能换成另一个退出码或 HTTP 状态码",
+      "保留 Nacre 归档导出失败、目标路径、目录只读和未修改目录及重试的实际信息，不因草稿有错而丢弃整段有效经历",
+      "is_error=true 只支持工具返回错误；原始材料未给出任何进程退出码"
+    ]
+  },
+  {
+    "id": "repair_mock_as_live_success",
+    "repeats": 1,
+    "records": [
+      {"role": "user", "text": "整理虚构项目 Kestrel 的退款适配器验证进度，下次需要继续完成服务接入。"},
+      {"role": "tool", "text": "本地测试 test_refund_adapter 通过：替身预设响应 refund_complete，断言检查了适配器的状态字段映射。该测试未连接远端服务。"},
+      {"role": "assistant", "text": "目前还没有配置服务账户，也没有发起真实退款请求，实际退款是否成功尚未验证。"}
+    ],
+    "drafts": [
+      {
+        "text": "Kestrel 退款适配器已完成真实服务接入验证，实际退款成功，远端返回 refund_complete，状态字段映射正确。",
+        "applicability": "Kestrel 项目本次退款适配器验证",
+        "category": "task",
+        "kind": "task_state",
+        "reason": "记录真实服务退款成功的验证结论，后续可以直接复用已验证的退款接入。",
+        "evidence": ["e0", "e1", "e2"]
+      }
+    ],
+    "expectations": [
+      "Dream 应把真实服务接入及退款成功的错误结论改回本地替身测试验证了状态字段映射，并说明 refund_complete 是替身预设响应",
+      "正式正文及 reason 均不得保留真实退款成功、远端已返回结果或服务接入已验证的表述",
+      "保留未配置账户、未连接远端服务、未发起真实退款以及实际结果尚未验证的边界，同时保留本地测试已通过的有效结果"
+    ]
+  }
+]

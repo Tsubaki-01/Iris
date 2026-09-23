@@ -188,9 +188,7 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
     )
     input_type: type[MemorySearchQuery] = MemorySearchQuery
 
-    async def _impl(
-        self, params: MemorySearchQuery, context: ToolExecutionContext
-    ) -> ToolResult:
+    async def _impl(self, params: MemorySearchQuery, context: ToolExecutionContext) -> ToolResult:
         """直接传递已验证查询和本次宿主读取范围。"""
         response = await self.service.asearch(params, self._read_namespaces(context))
         payload: dict[str, Any] = {
@@ -264,6 +262,8 @@ class MemoryUpdateTool(MemoryTool[MemoryUpdateToolInput]):
             params.patch,
             actor=MemoryActor.AGENT,
             reason=params.reason,
+            source_type=MemorySourceType.TOOL_EVENT,
+            source_id=context.call_id,
         )
         return await self._write_result(item.namespace, {"item": _item_payload(item)})
 
@@ -286,6 +286,8 @@ class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
             namespace,
             actor=MemoryActor.AGENT,
             reason=params.reason,
+            source_type=MemorySourceType.TOOL_EVENT,
+            source_id=context.call_id,
         )
         return await self._write_result(namespace, {"deleted": deleted})
 
@@ -359,10 +361,6 @@ def _item_payload(item: MemoryItem) -> dict[str, Any]:
         "created_at": item.created_at,
         "updated_at": item.updated_at,
     }
-    if item.confidence is not None:
-        payload["confidence"] = item.confidence
-    if item.importance is not None:
-        payload["importance"] = item.importance
     return payload
 
 

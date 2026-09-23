@@ -36,6 +36,12 @@ def test_observe_writes_episode_and_event_only(tmp_path: Path) -> None:
     )
 
     assert episode.source_id == "msg_1"
+    assert len(episode.records) == 1
+    assert episode.records[0].text == "用户说希望回答更短"
+    assert episode.records[0].source_type is MemorySourceType.MESSAGE
+    assert episode.records[0].source_id == "msg_1"
+    assert service.store.get_episode(episode.id, namespace) == episode
+    assert service.store.list_pending_episodes(namespace)[0].episode == episode
     assert service.list_items([namespace]) == []
     events = service.list_events(namespace)
     assert [(event.event_type, event.episode_id) for event in events] == [

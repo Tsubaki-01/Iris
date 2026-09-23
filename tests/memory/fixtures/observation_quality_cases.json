@@ -1,0 +1,69 @@
+[
+  {
+    "id": "proxy_failure",
+    "repeats": 3,
+    "records": [
+      {"role": "assistant", "text": "建议删除虚拟环境再重装，但尚未执行。"},
+      {"role": "tool", "text": "uv sync 失败：下载超时。", "metadata": {"is_error": true}},
+      {"role": "user", "text": "确认本机代理导致下载失败。取消这次 shell 的 HTTPS_PROXY 后 uv sync 成功；不是重装解决。"},
+      {"role": "tool", "text": "取消 HTTPS_PROXY 后执行 uv sync，退出码 0。"}
+    ],
+    "expectations": [
+      "保留本次代理故障和取消当前 shell 代理后成功的经历",
+      "用户确认的原因与工具实际结果来源可区分",
+      "允许省略未执行的重装建议；若提及，不能断言重装无效或已排除虚拟环境问题",
+      "不能扩大为通常原因、类似故障都能用此方法解决"
+    ]
+  },
+  {
+    "id": "timeout_workaround",
+    "repeats": 1,
+    "records": [
+      {"role": "assistant", "text": "可以尝试重启 Orion 服务，但还没有执行。"},
+      {"role": "tool", "text": "本次批量导入在等待 10 秒后超时，原因尚未定位。"},
+      {"role": "user", "text": "这一次把客户端等待时间改成 60 秒后导入完成了。重启还没试，服务端问题也没有排查，不要认定根因已经解决。"},
+      {"role": "tool", "text": "等待时间 60 秒，本次导入完成，耗时 37 秒。"}
+    ],
+    "expectations": [
+      "保留本次延长客户端等待时间后导入完成的结果；37 秒等次要细节可以省略",
+      "标明这是本次绕过超时而非已验证根因修复",
+      "不能声称重启无效、排除服务端问题或要求以后总用 60 秒"
+    ]
+  },
+  {
+    "id": "one_time",
+    "repeats": 1,
+    "records": [
+      {"role": "user", "text": "只在这一次 Q3 性能报告里，先给结论再给数据。别当成我的永久偏好。"}
+    ],
+    "expectations": ["允许省略一次性格式要求；若保留，限定本次 Q3 报告，不写为跨任务默认偏好"]
+  },
+  {
+    "id": "explicit_preference",
+    "repeats": 1,
+    "records": [
+      {"role": "user", "text": "以后回答我默认使用中文，尽量简洁；需要展开时我会明确要求。"}
+    ],
+    "expectations": ["记录明确的默认偏好和例外，不因只有一次声明而缩成仅本次或忽略"]
+  },
+  {
+    "id": "proposal_only",
+    "repeats": 1,
+    "records": [
+      {"role": "assistant", "text": "也许可以把虚构项目 Orion 的缓存全部换成 Redis，目前只是我的一个备选建议。"},
+      {"role": "user", "text": "先别定方案，我没有接受这个建议，也还没验证它。"}
+    ],
+    "expectations": [
+      "不把 Redis 写成已采用架构或用户偏好",
+      "允许不留条目；若保留，只能是方案尚未确定及未采纳的任务状态"
+    ]
+  },
+  {
+    "id": "scope_split",
+    "repeats": 1,
+    "records": [
+      {"role": "user", "text": "Atlas 的 Linux 开发环境使用 uv；Windows 部署机器暂时仍使用 Poetry。"}
+    ],
+    "expectations": ["保留 Linux 开发和 Windows 部署的不同范围，以及 Windows 暂时状态"]
+  }
+]

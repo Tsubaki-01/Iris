@@ -6,7 +6,7 @@
 Example:
     service = MemoryService(store=sqlite_store)
     episode = service.observe(input_data)
-    candidates = service.list_candidates(namespace)
+    observations = service.store.list_observations(namespace)
 """
 
 # region imports
@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from enum import StrEnum
 from time import perf_counter
 from typing import TypeVar
@@ -22,11 +23,11 @@ from typing import TypeVar
 from ..exceptions import IrisMemoryError
 from ..providers.protocols import CompletionProvider
 from .files import MemoryFileAccess, freshness_warning
+from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
+from .generation_models import GenerationResult, GenerationState, MemoryGenerationConfig
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
-    MemoryCandidate,
-    MemoryCandidateStatus,
     MemoryCategory,
     MemoryEpisode,
     MemoryEvent,
@@ -39,8 +40,10 @@ from .models import (
     MemoryOverviewContent,
     MemoryOverviewDocument,
     MemoryOverviewGenerationResult,
+    MemoryRecord,
     MemorySearchQuery,
     MemorySearchResponse,
+    MemorySourceType,
     MemoryWriteInput,
 )
 from .overview import build_overview_request, complete_overview_content
@@ -86,6 +89,9 @@ class MemoryService:
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
         overview_config: MemoryOverviewConfig | None = None,
+        generation_provider: CompletionProvider | None = None,
+        generation_model: str | None = None,
+        generation_config: MemoryGenerationConfig | None = None,
         io_execution_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
     ) -> None:
         """初始化记忆服务。"""
@@ -94,27 +100,92 @@ class MemoryService:
         self.overview_provider = overview_provider
         self.overview_model = overview_model
         self.overview_config = overview_config or MemoryOverviewConfig()
+        self.generation_provider = generation_provider
+        self.generation_model = generation_model
+        self.generation_config = generation_config or MemoryGenerationConfig()
         self._io_execution_mode = io_execution_mode
+        self._io_tasks: set[asyncio.Task[object]] = set()
+        self._change_listeners: list[Callable[[str], None]] = []
 
     @property
     def io_execution_mode(self) -> MemoryIOExecutionMode:
         """返回 async IO 适配器使用的固定执行模式。"""
         return self._io_execution_mode
 
-    async def run_async_io(self, operation: Callable[[], ResultT]) -> ResultT:
-        """按配置执行完整同步 IO 操作，并保留其返回值和异常。"""
+    async def run_async_io(
+        self, operation: Callable[[], ResultT], *, complete_on_cancel: bool = False
+    ) -> ResultT:
+        """执行完整同步 IO；短提交可要求取消后收取真实回执。
+
+        complete_on_cancel 保留当前 task 的取消状态，由阶段在结果落账后继续传播。
+        """
         if self._io_execution_mode is MemoryIOExecutionMode.THREAD:
-            return await asyncio.to_thread(operation)
+            task = asyncio.create_task(asyncio.to_thread(operation))
+            self._io_tasks.add(task)
+            task.add_done_callback(self._finish_io)
+            while True:
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if not complete_on_cancel or task.cancelled():
+                        raise
         return operation()
+
+    def _finish_io(self, task: asyncio.Task[object]) -> None:
+        """保留取消等待后真实 IO 的生命周期，并回收已完成的结果。"""
+        self._io_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def wait_pending_io(self) -> None:
+        """等待已派发数据库工作真正结束，供维护关闭时调用。"""
+        while self._io_tasks:
+            await asyncio.gather(*tuple(self._io_tasks), return_exceptions=True)
+
+    def add_change_listener(self, callback: Callable[[str], None]) -> None:
+        """订阅新材料和正式写入；回调在实际写入所在线程执行。"""
+        self._change_listeners.append(callback)
+
+    def remove_change_listener(self, callback: Callable[[str], None]) -> None:
+        """释放当前宿主注册的变更回调。"""
+        self._change_listeners.remove(callback)
+
+    def _notify_change(self, namespace: str) -> None:
+        """持久写入后唤醒维护；通知失败不改变已提交写入的结果。"""
+        for callback in tuple(self._change_listeners):
+            try:
+                callback(namespace)
+            except Exception:
+                logger.warning("memory 维护通知失败 namespace=%s", namespace, exc_info=True)
+
+    def generation_state(self, namespace: str) -> GenerationState:
+        """读取生成积压、受阻输入及最近阶段结果。"""
+        state = self.store.generation_state(namespace)
+        if self.mirror is None:
+            return state
+        overview = self.mirror.read_overview(namespace)
+        return replace(state, overview_revision=overview[0] if overview is not None else None)
+
+    async def ageneration_state(self, namespace: str) -> GenerationState:
+        """在一次 IO 内读取生成状态。"""
+        return await self.run_async_io(lambda: self.generation_state(namespace))
+
+    async def flush(self, namespace: str) -> GenerationResult:
+        """从已捕获经历提炼一批观察；正式知识在 dreaming 后才可读取。"""
+        return await flush(self, namespace)
+
+    async def dream(self, namespace: str, *, retry_blocked: bool = False) -> GenerationResult:
+        """将一批观察和显式修改原子整理到正式知识，不隐式执行 flush。"""
+        return await dream(self, namespace, retry_blocked=retry_blocked)
 
     # endregion
 
     # ==========================================
-    #           L1 / L2 Memory Core
+    #           Episode / Item Core
     # ==========================================
     # region
     def observe(self, input: MemoryObserveInput) -> MemoryEpisode:
-        """记录 L1 观察片段，保存临时感知的原始信息。
+        """记录有明确边界的原始经历，留给 flush 提炼。
 
         直接将用户观察或系统事件转为不可变的 Episode 记录。
         同时生成审计追踪事件以记录操作来源与原因。
@@ -129,9 +200,15 @@ class MemoryService:
             namespace=input.namespace,
             source_type=input.source_type,
             source_id=input.source_id,
-            text=input.text,
-            category=input.category,
-            artifacts=input.artifacts,
+            records=input.records
+            or (
+                MemoryRecord(
+                    text=input.text,
+                    source_type=input.source_type,
+                    source_id=input.source_id,
+                    artifacts=tuple(input.artifacts),
+                ),
+            ),
             metadata=input.metadata,
         )
         event = MemoryEvent(
@@ -142,16 +219,16 @@ class MemoryService:
             reason=input.reason,
         )
         stored = self.store.add_episode(episode, event=event)
-
+        self._notify_change(stored.namespace)
         return stored
 
     def remember(self, input: MemoryWriteInput) -> MemoryItem:
-        """写入 L2 长期记忆条目，固化关键知识或意图总结。
+        """显式写入正式知识，并保留本次声明的真实来源。
 
-        用于跨会话的高价值信息持久化，通常在处理完 L1 观察片段后被触发。
+        用于跨会话的高价值信息持久化，不需要先构造观察或调用模型。
 
         Args:
-            input (MemoryWriteInput): 包含作用域、分类及置信度等元数据的写请求。
+            input (MemoryWriteInput): 包含作用域、分类及来源等元数据的写请求。
 
         Returns:
             MemoryItem: 构造完整并被持久化后的权威长期记忆记录。
@@ -161,12 +238,10 @@ class MemoryService:
             text=input.text,
             category=input.category,
             kind=input.kind,
-            episode_id=input.episode_id,
             source_type=input.source_type,
             source_id=input.source_id,
             reason=input.reason,
-            confidence=input.confidence,
-            importance=input.importance,
+            evidence=input.evidence,
             artifacts=input.artifacts,
             metadata=input.metadata,
         )
@@ -176,6 +251,8 @@ class MemoryService:
             actor=input.actor,
             item_id=item.id,
             reason=input.reason,
+            source_type=input.source_type,
+            source_id=input.source_id,
         )
         stored = self.store.add_item(item, event=event)
 
@@ -195,6 +272,8 @@ class MemoryService:
         *,
         actor: MemoryActor = MemoryActor.SDK,
         reason: str,
+        source_type: MemorySourceType = MemorySourceType.SDK,
+        source_id: str = "",
     ) -> MemoryItem:
         """更新同一记忆条目，并重建其 namespace 的派生镜像。
 
@@ -214,6 +293,8 @@ class MemoryService:
             actor=actor,
             item_id=item_id,
             reason=reason,
+            source_type=source_type,
+            source_id=source_id,
         )
         stored = self.store.update_item(item_id, namespace, patch, event=event)
         self._rebuild_committed(namespace)
@@ -227,10 +308,20 @@ class MemoryService:
         *,
         actor: MemoryActor = MemoryActor.SDK,
         reason: str,
+        source_type: MemorySourceType = MemorySourceType.SDK,
+        source_id: str = "",
     ) -> MemoryItem:
         """在一次 async IO 操作中完成更新及派生镜像刷新。"""
         return await self.run_async_io(
-            lambda: self.update(item_id, namespace, patch, actor=actor, reason=reason)
+            lambda: self.update(
+                item_id,
+                namespace,
+                patch,
+                actor=actor,
+                reason=reason,
+                source_type=source_type,
+                source_id=source_id,
+            )
         )
 
     # endregion
@@ -239,9 +330,7 @@ class MemoryService:
     #         Query & Management Methods
     # ==========================================
     # region
-    def search(
-        self, query: MemorySearchQuery, namespaces: Sequence[str]
-    ) -> MemorySearchResponse:
+    def search(self, query: MemorySearchQuery, namespaces: Sequence[str]) -> MemorySearchResponse:
         """在调用方绑定的读取范围内搜索当前活跃记忆。"""
         return self.store.search(query, namespaces)
 
@@ -258,6 +347,8 @@ class MemoryService:
         *,
         actor: MemoryActor = MemoryActor.SDK,
         reason: str,
+        source_type: MemorySourceType = MemorySourceType.SDK,
+        source_id: str = "",
     ) -> bool:
         """删除指定 namespace 下的长期记忆条目。
 
@@ -284,6 +375,8 @@ class MemoryService:
             actor=actor,
             item_id=item_id,
             reason=reason,
+            source_type=source_type,
+            source_id=source_id,
         )
         deleted = self.store.delete_item(item_id, namespace, event=event)
 
@@ -298,10 +391,19 @@ class MemoryService:
         *,
         actor: MemoryActor = MemoryActor.SDK,
         reason: str,
+        source_type: MemorySourceType = MemorySourceType.SDK,
+        source_id: str = "",
     ) -> bool:
         """在一次 async IO 操作中完成软删除及派生镜像刷新。"""
         return await self.run_async_io(
-            lambda: self.forget(item_id, namespace, actor=actor, reason=reason)
+            lambda: self.forget(
+                item_id,
+                namespace,
+                actor=actor,
+                reason=reason,
+                source_type=source_type,
+                source_id=source_id,
+            )
         )
 
     def get_item(self, item_id: str, namespaces: Sequence[str]) -> MemoryItem | None:
@@ -398,186 +500,6 @@ class MemoryService:
     # endregion
 
     # ==========================================
-    #           Candidate Operations
-    # ==========================================
-    # region
-    def add_candidate(
-        self,
-        candidate: MemoryCandidate,
-        *,
-        actor: MemoryActor = MemoryActor.SDK,
-        reason: str = "",
-    ) -> MemoryCandidate:
-        """保存候选记忆并记录审计事件。
-
-        候选态主要用于人类确认或延后批处理固化，防止低置信度信息污染权威记忆。
-
-        Args:
-            candidate (MemoryCandidate): 预生成的候选条目对象。
-            actor (MemoryActor): 触发操作的参与实体。
-            reason (str): 候选写入的补充说明。
-
-        Returns:
-            MemoryCandidate: 包含唯一 ID 的候选对象。
-        """
-        event = MemoryEvent(
-            namespace=candidate.namespace,
-            event_type=MemoryEventType.CANDIDATE_ADD,
-            actor=actor,
-            episode_id=candidate.episode_ids[0],
-            reason=reason or candidate.reason,
-            metadata={
-                "candidate_id": candidate.id,
-                "candidate_status": candidate.status.value,
-                "episode_ids": candidate.episode_ids,
-            },
-        )
-        stored = self.store.add_candidate(candidate, event=event)
-
-        return stored
-
-    def list_candidates(
-        self,
-        namespace: str,
-        *,
-        status: MemoryCandidateStatus | None = None,
-        limit: int = 50,
-    ) -> list[MemoryCandidate]:
-        """列出指定 namespace 下的候选记忆。
-
-        Args:
-            namespace (str): 获取候选态记录的所属范围。
-            status (MemoryCandidateStatus | None): 对记录审核阶段进行过滤。
-            limit (int): 分页最大返回长度。
-
-        Returns:
-            list[MemoryCandidate]: 对应的候选态结果集合。
-        """
-        return self.store.list_candidates(namespace, status=status, limit=limit)
-
-    def promote_candidate(
-        self,
-        candidate_id: str,
-        namespace: str,
-        *,
-        kind: MemoryItemKind,
-        actor: MemoryActor = MemoryActor.SDK,
-        reason: str,
-    ) -> MemoryItem:
-        """原子晋升 pending candidate 为 L2 item。
-
-        Args:
-            candidate_id (str): 目标候选记忆 ID。
-            namespace (str): 候选资源所在隔离范围。
-            kind (MemoryItemKind): 晋升后的长期记忆类型。
-            actor (MemoryActor): 发起晋升操作的参与实体。
-            reason (str): 通过晋升策略的原因。
-
-        Returns:
-            MemoryItem: 晋升后可召回的 L2 item。
-        """
-        return self.promote_candidates(
-            namespace,
-            [(candidate_id, kind, reason)],
-            actor=actor,
-        )[0]
-
-    def promote_candidates(
-        self,
-        namespace: str,
-        promotions: Iterable[tuple[str, MemoryItemKind, str]],
-        *,
-        actor: MemoryActor = MemoryActor.SDK,
-    ) -> list[MemoryItem]:
-        """逐项原子晋升，并统一刷新本批已提交条目的镜像。
-
-        Args:
-            namespace: 本批候选所属的隔离范围。
-            promotions: 按处理顺序提供候选 ID、长期记忆类型和晋升原因。
-            actor: 发起晋升操作的参与实体。
-
-        Returns:
-            list[MemoryItem]: 按输入顺序返回已晋升的条目。
-
-        Raises:
-            IrisMemoryError: store 操作失败；此前成功项仍已提交。自动镜像失败只告警。
-        """
-        items: list[MemoryItem] = []
-        try:
-            for candidate_id, kind, reason in promotions:
-                items.append(
-                    self.store.promote_candidate(
-                        candidate_id, namespace, kind=kind, actor=actor, reason=reason
-                    )
-                )
-        finally:
-            if items:
-                self._rebuild_committed(namespace)
-        return items
-
-    def accept_candidate(
-        self,
-        candidate_id: str,
-        namespace: str,
-        *,
-        actor: MemoryActor = MemoryActor.SDK,
-        reason: str,
-    ) -> MemoryCandidate:
-        """将候选记忆标记为已接受。
-
-        标志候选信息通过评估阶段，允许被视作已验证的知识内容。
-
-        Args:
-            candidate_id (str): 唯一的候选实体标识。
-            namespace (str): 候选资源所在隔离范围。
-            actor (MemoryActor): 发起评估操作对象。
-            reason (str): 批准其通过的特定原因。
-
-        Returns:
-            MemoryCandidate: 状态更新后的全新实体对象。
-        """
-        return self._update_candidate_status(
-            candidate_id,
-            namespace,
-            MemoryCandidateStatus.ACCEPTED,
-            event_type=MemoryEventType.CANDIDATE_ACCEPT,
-            actor=actor,
-            reason=reason,
-        )
-
-    def reject_candidate(
-        self,
-        candidate_id: str,
-        namespace: str,
-        *,
-        actor: MemoryActor = MemoryActor.SDK,
-        reason: str,
-    ) -> MemoryCandidate:
-        """将候选记忆标记为已拒绝。
-
-        丢弃低价值信息或已失效的识别结论。
-
-        Args:
-            candidate_id (str): 唯一的候选实体标识。
-            namespace (str): 候选资源所在隔离范围。
-            actor (MemoryActor): 发起拒绝的执行方。
-            reason (str): 说明信息为何不满足长期记忆要求。
-
-        Returns:
-            MemoryCandidate: 退回并标记丢弃后的实体表示。
-        """
-        return self._update_candidate_status(
-            candidate_id,
-            namespace,
-            MemoryCandidateStatus.REJECTED,
-            event_type=MemoryEventType.CANDIDATE_REJECT,
-            actor=actor,
-            reason=reason,
-        )
-
-    # endregion
-
-    # ==========================================
     #           Context & Helpers
     # ==========================================
     # region
@@ -634,40 +556,70 @@ class MemoryService:
         started = perf_counter()
         snapshot = await self.run_async_io(lambda: self.store.read_namespace_snapshot(namespace))
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-        response = None
-        if snapshot.items:
-            request = build_overview_request(snapshot, self.overview_model, self.overview_config)
-            estimated_tokens = self.overview_provider.estimate_input_tokens(request)
-            if estimated_tokens > self.overview_config.input_budget_tokens:
-                raise IrisMemoryError(
-                    "memory 概览生成输入容量不足，保留最后完整产物",
-                    namespace=namespace,
-                    estimated_tokens=estimated_tokens,
-                    input_budget_tokens=self.overview_config.input_budget_tokens,
-                )
-            response = await self.overview_provider.complete(request)
-            usage = {
-                "input_tokens": response.input_tokens,
-                "output_tokens": response.output_tokens,
-                "total_tokens": response.total_tokens,
-            }
         try:
+            response = None
+            if snapshot.items:
+                request = build_overview_request(
+                    snapshot, self.overview_model, self.overview_config
+                )
+                estimated_tokens = self.overview_provider.estimate_input_tokens(request)
+                if estimated_tokens > self.overview_config.input_budget_tokens:
+                    raise IrisMemoryError(
+                        "memory 概览生成输入容量不足，保留最后完整产物",
+                        namespace=namespace,
+                        estimated_tokens=estimated_tokens,
+                        input_budget_tokens=self.overview_config.input_budget_tokens,
+                    )
+                response = await self.overview_provider.complete(request)
+                usage = {
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                    "total_tokens": response.total_tokens,
+                }
             content = (
                 complete_overview_content(response)
                 if response is not None
                 else MemoryOverviewContent(core_facts="", knowledge_scope="当前无记忆。")
             )
+            await before_generation_commit()
             published, state = await self.run_async_io(
-                lambda: self.mirror.publish_overview(self.store, snapshot, content)
+                lambda: self.mirror.publish_overview(self.store, snapshot, content),
+                complete_on_cancel=True,
             )
-        except IrisMemoryError as exc:
-            exc.context.update(
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, IrisMemoryError):
+                exc.context.update(
+                    namespace=namespace,
+                    source_revision=snapshot.state.item_revision,
+                    usage=usage,
+                    elapsed_seconds=perf_counter() - started,
+                )
+            failure = GenerationResult(
                 namespace=namespace,
-                source_revision=snapshot.state.item_revision,
+                stage="overview",
+                status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
                 usage=usage,
                 elapsed_seconds=perf_counter() - started,
+                error=str(exc) or type(exc).__name__,
+                item_revision=snapshot.state.item_revision,
+            )
+            await self.run_async_io(
+                lambda: self.store.record_generation_result(failure), complete_on_cancel=True
             )
             raise
+        result = GenerationResult(
+            namespace=namespace,
+            stage="overview",
+            status="completed",
+            usage=usage,
+            elapsed_seconds=perf_counter() - started,
+            item_revision=snapshot.state.item_revision,
+            counts={"items": len(snapshot.items), "published": int(published)},
+        )
+        await self.run_async_io(
+            lambda: self.store.record_generation_result(result), complete_on_cancel=True
+        )
+        raise_if_generation_cancelled()
         return MemoryOverviewGenerationResult(
             namespace=namespace,
             path=self.mirror.namespace_directory(namespace) / "Memory.md",
@@ -681,47 +633,6 @@ class MemoryService:
             elapsed_seconds=perf_counter() - started,
         )
 
-    def _update_candidate_status(
-        self,
-        candidate_id: str,
-        namespace: str,
-        status: MemoryCandidateStatus,
-        *,
-        event_type: MemoryEventType,
-        actor: MemoryActor,
-        reason: str,
-    ) -> MemoryCandidate:
-        """更新候选状态并同步审计事件。
-
-        收敛候选接受与拒绝时的底层数据变更以及事件触发复用流程。
-
-        Args:
-            candidate_id (str): 目标候选对象的标识。
-            namespace (str): 所属空间范围。
-            status (MemoryCandidateStatus): 要刷新为的目标态值。
-            event_type (MemoryEventType): 同步写入的对应的事件类型。
-            actor (MemoryActor): 触发操作发起方。
-            reason (str): 操作详细理由。
-
-        Returns:
-            MemoryCandidate: 成功变更状态位后的候选实例对象。
-        """
-        event = MemoryEvent(
-            namespace=namespace,
-            event_type=event_type,
-            actor=actor,
-            reason=reason,
-            metadata={"candidate_id": candidate_id, "candidate_status": status.value},
-        )
-        stored = self.store.update_candidate_status(
-            candidate_id,
-            namespace,
-            status,
-            event=event,
-        )
-
-        return stored
-
     def _rebuild_committed(self, namespace: str) -> None:
         """数据库成功后同步完整正文，失败由版本状态对读取方明示。"""
         if self.mirror is not None:
@@ -733,5 +644,6 @@ class MemoryService:
                     namespace,
                     exc_info=True,
                 )
+        self._notify_change(namespace)
 
     # endregion

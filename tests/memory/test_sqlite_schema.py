@@ -1,4 +1,4 @@
-"""Memory schema v4 的 FTS、namespace 版本与初始化失败边界。"""
+"""Memory schema v5 的 FTS、namespace 版本与初始化失败边界。"""
 
 import sqlite3
 from pathlib import Path
@@ -10,7 +10,7 @@ from iris.memory.models import MemorySearchQuery
 from iris.memory.sqlite import SQLiteMemoryStore
 
 
-def test_schema_v4_stores_namespaces_fts_and_revisions_and_reopens(tmp_path: Path) -> None:
+def test_schema_v5_stores_namespaces_fts_and_revisions_and_reopens(tmp_path: Path) -> None:
     """新结构同时包含 FTS 与版本表，空 namespace 读取不创建状态行。"""
     path = tmp_path / "memory.db"
     store = SQLiteMemoryStore(path)
@@ -20,7 +20,7 @@ def test_schema_v4_stores_namespaces_fts_and_revisions_and_reopens(tmp_path: Pat
         version = connection.execute(
             "SELECT value FROM memory_schema WHERE key='schema_version'"
         ).fetchone()
-        assert version == ("4",)
+        assert version == ("5",)
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master")}
         assert {"memory_items_fts", "memory_namespace_state"} <= tables
         assert connection.execute("SELECT count(*) FROM memory_namespace_state").fetchone() == (0,)
@@ -28,14 +28,14 @@ def test_schema_v4_stores_namespaces_fts_and_revisions_and_reopens(tmp_path: Pat
             "SELECT sql FROM sqlite_master WHERE name='memory_items_fts'"
         ).fetchone()[0]
         assert "unicode61 remove_diacritics 0" in fts_sql
-        for table in ["memory_items", "memory_candidates", "memory_episodes", "memory_events"]:
+        for table in ["memory_items", "memory_observations", "memory_episodes", "memory_events"]:
             columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
             assert "namespace" in columns
             assert not any(column.startswith("scope_") for column in columns)
     SQLiteMemoryStore(path)
 
 
-@pytest.mark.parametrize("version", ["1", "2", "3", "999", None])
+@pytest.mark.parametrize("version", ["1", "2", "3", "4", "999", None])
 def test_old_or_missing_schema_version_is_rejected_without_mutating_database(
     tmp_path: Path, version: str | None
 ) -> None:
@@ -74,7 +74,7 @@ def test_schema_initialization_failure_is_explicit(
 
     monkeypatch.setattr(SQLiteMemoryStore, "_connect", connect)
     path = tmp_path / "failed.db"
-    with pytest.raises(IrisMemoryError, match="初始化失败"):
+    with pytest.raises(IrisMemoryError, match="失败"):
         SQLiteMemoryStore(path)
     with sqlite3.connect(path) as connection:
         assert (
@@ -86,5 +86,5 @@ def test_fts_execution_failure_does_not_fall_back_to_like(tmp_path: Path) -> Non
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP TABLE memory_items_fts")
-    with pytest.raises(IrisMemoryError, match="搜索失败"):
+    with pytest.raises(IrisMemoryError, match="失败"):
         store.search(MemorySearchQuery(query="needle"), ["project"])

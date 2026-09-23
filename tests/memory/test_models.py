@@ -4,11 +4,11 @@ import pytest
 from pydantic import ValidationError
 
 from iris.memory.models import (
-    MemoryCandidate,
     MemoryEpisode,
     MemoryEvent,
     MemoryItem,
     MemoryItemPatch,
+    MemoryObservation,
     MemoryObserveInput,
     MemoryOverviewConfig,
     MemoryOverviewContent,
@@ -21,9 +21,16 @@ from iris.memory.models import (
     ("model", "data"),
     [
         (MemoryItem, {"text": "item"}),
-        (MemoryEpisode, {}),
+        (MemoryEpisode, {"records": [{"role": "user", "text": "材料"}]}),
         (MemoryEvent, {"event_type": "add"}),
-        (MemoryCandidate, {"text": "candidate", "reason": "reason", "episode_ids": ["e"]}),
+        (
+            MemoryObservation,
+            {
+                "text": "观察",
+                "reason": "reason",
+                "evidence": [{"kind": "episode", "source_id": "e", "record_id": "m", "end": 2}],
+            },
+        ),
         (MemoryObserveInput, {}),
         (MemoryWriteInput, {"text": "item", "reason": "reason"}),
         (MemorySearchQuery, {"query": "fact"}),
@@ -89,13 +96,10 @@ def test_patch_rejects_explicit_null_for_non_nullable_item_fields(field: str) ->
         MemoryItemPatch.model_validate({field: None})
 
 
-def test_patch_preserves_omission_and_allows_nullable_scores_to_clear() -> None:
-    """省略、清空评分和清空集合是三种合法且不同的更新。"""
+def test_patch_preserves_omission_and_explicit_evidence_replacement() -> None:
+    """省略证据不修改，显式集合替换当前支持。"""
     assert MemoryItemPatch().model_dump(exclude_unset=True) == {}
-    assert MemoryItemPatch(confidence=None, importance=None).model_dump(exclude_unset=True) == {
-        "confidence": None,
-        "importance": None,
-    }
+    assert MemoryItemPatch(evidence=()).model_dump(exclude_unset=True) == {"evidence": ()}
     assert MemoryItemPatch(artifacts=[], metadata={}).model_dump(exclude_unset=True) == {
         "artifacts": [],
         "metadata": {},

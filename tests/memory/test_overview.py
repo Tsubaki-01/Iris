@@ -11,7 +11,6 @@ import pytest
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
     FileMemoryMirror,
-    MemoryCandidate,
     MemoryCategory,
     MemoryEvent,
     MemoryEventType,
@@ -25,6 +24,8 @@ from iris.memory import (
 )
 from iris.message import LLMRequest, LLMResponse, TextBlock
 
+from .test_search import _flush_observation
+
 
 class _Provider:
     """返回可控的完整文本并保留实际请求。"""
@@ -34,7 +35,9 @@ class _Provider:
         self.estimated_tokens = 20
         self.response = LLMResponse(
             provider="fake",
-            content=[TextBlock(text='{"core_facts":"核心事实","knowledge_scope":"项目资料与用户偏好"}')],
+            content=[
+                TextBlock(text='{"core_facts":"核心事实","knowledge_scope":"项目资料与用户偏好"}')
+            ],
             finish_reason="stop",
             input_tokens=20,
             output_tokens=4,
@@ -76,26 +79,29 @@ async def test_generation_uses_complete_active_namespace_and_two_part_overview(
         )
     service.remember(MemoryWriteInput(namespace="other", text="private-secret", reason="seed"))
     episode = service.observe(MemoryObserveInput(namespace="研究 / A", text="episode-secret"))
-    service.add_candidate(
-        MemoryCandidate(
-            namespace=episode.namespace,
-            episode_ids=[episode.id],
-            text="candidate-secret",
-            reason="review",
-        )
-    )
+    _flush_observation(service.store, episode, text="observation-secret")
     assert provider.requests == []
     result = await service.refresh_overview("研究 / A")
     request = provider.requests[0]
     source = request.messages[1].text
     assert all(f"正文-{index}" in source for index in range(105))
     assert all(
-        secret not in source for secret in ("private-secret", "episode-secret", "candidate-secret")
+        secret not in source
+        for secret in ("private-secret", "episode-secret", "observation-secret")
     )
     assert request.tools == [] and request.max_tokens == 4096
     assert request.model == "fake-model"
     assert result.item_count == 105 and result.source_revision == 105
     assert result.published and result.usage["total_tokens"] == 24
+    saved = next(
+        result
+        for result in service.generation_state("研究 / A").latest_results
+        if result.stage == "overview"
+    )
+    assert saved.status == "completed"
+    assert saved.usage == result.usage
+    assert saved.item_revision == 105
+    assert saved.counts == {"items": 105, "published": 1}
     (document,) = await service.aload_overviews(["研究 / A"])
     assert document.source_revision == 105
     assert "核心事实" in document.text
@@ -154,6 +160,10 @@ async def test_invalid_content_preserves_file_and_usage(tmp_path: Path, payload:
     assert captured.value.context["usage"]["total_tokens"] == 24
     assert first.path.read_text(encoding="utf-8") == before
     assert len(provider.requests) == 2
+    saved = service.generation_state("project").latest_results[0]
+    assert saved.stage == "overview" and saved.status == "failed"
+    assert saved.usage["total_tokens"] == 24
+    assert saved.error
 
 
 @pytest.mark.asyncio
@@ -273,12 +283,16 @@ async def test_older_generation_cannot_overwrite_newer_published_overview(tmp_pa
             started.set()
             await release.wait()
             return provider.response.model_copy(
-                update={"content": [TextBlock(text='{"core_facts":"older",'
-                                              '"knowledge_scope":"项目版本"}')]}
+                update={
+                    "content": [
+                        TextBlock(text='{"core_facts":"older","knowledge_scope":"项目版本"}')
+                    ]
+                }
             )
         return provider.response.model_copy(
-            update={"content": [TextBlock(text='{"core_facts":"newer",'
-                                          '"knowledge_scope":"项目版本"}')]}
+            update={
+                "content": [TextBlock(text='{"core_facts":"newer","knowledge_scope":"项目版本"}')]
+            }
         )
 
     provider.complete = complete
@@ -350,6 +364,10 @@ async def test_provider_failure_preserves_previous_overview_and_propagates_error
         await service.refresh_overview("project")
     assert captured.value is error
     assert result.path.read_text(encoding="utf-8") == before
+    saved = service.generation_state("project").latest_results[0]
+    assert saved.stage == "overview" and saved.status == "failed"
+    assert saved.error == str(error)
+    assert saved.usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 
 @pytest.mark.asyncio
@@ -370,3 +388,6 @@ async def test_overview_publication_failure_keeps_file_and_reports_generation_us
         await service.refresh_overview("project")
     assert captured.value.context["usage"]["total_tokens"] == 24
     assert result.path.read_text(encoding="utf-8") == before
+    saved = service.generation_state("project").latest_results[0]
+    assert saved.stage == "overview" and saved.status == "failed"
+    assert saved.usage["total_tokens"] == 24

@@ -1,4 +1,4 @@
-"""记忆配置只接受概览与 namespace 的当前合同。"""
+"""记忆配置绑定 namespace、概览与生成阶段的当前契约。"""
 
 from __future__ import annotations
 
@@ -65,6 +65,10 @@ def test_memory_overview_defaults_keep_generation_and_window_budgets_separate() 
     assert config.overview.input_budget_tokens == 96000
     assert config.overview.max_tokens == 4096
     assert config.overview.system_budget_ratio == 0.02
+    assert not config.generation.enabled
+    assert config.generation.idle_seconds == 300
+    assert config.generation.flush_input_budget_tokens == 32000
+    assert config.generation.dream_input_budget_tokens == 32000
 
 
 @pytest.mark.parametrize(("enabled", "injected"), [(False, False), (False, True), (True, True)])
@@ -135,6 +139,9 @@ def test_enabled_memory_factory_builds_sqlite_and_binds_generation_dependencies(
     assert service.overview_provider is provider
     assert service.overview_model == "agent-model"
     assert service.overview_config is config.overview
+    assert service.generation_provider is provider
+    assert service.generation_model == "agent-model"
+    assert service.generation_config is config.generation
     assert service.io_execution_mode is MemoryIOExecutionMode.THREAD
     assert provider.mock_calls == []
     assert list(service.mirror.root.rglob("Memory.md")) == []

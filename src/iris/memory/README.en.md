@@ -2,11 +2,11 @@
 
 # `iris.memory`
 
-`iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, L1 episodes,
-candidates, L2 items, audit events, SQLite persistence, human-readable file projections, explicit
-orchestration, and memory tools. SQLite is authoritative; Markdown under
+`iris.memory` is Iris's local long-term-memory SDK. It defines project namespaces, immutable Episodes,
+evidence-backed Observations, formal MemoryItems, change events, SQLite persistence, human-readable
+file projections, generation stages, and memory tools. SQLite is authoritative; Markdown under
 `.iris/memory/namespaces/` is a projection for humans. `MemoryService` is the memory-management SDK
-for reads, writes, promotion, projection, and explicit overview generation.
+for reads, writes, flush, dreaming, projection, and overview generation.
 
 `memory.enabled` defaults to false. Enabling it automatically adds `memory_search` and
 `memory_fetch` and lets the Agent adopt published overviews for a new session or after successful
@@ -62,7 +62,7 @@ enabled, it returns the injected object unchanged or builds a SQLite service if 
 An injected service keeps its store, mirror, provider/model, and IO mode. Configured memory root and
 database paths must resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
-New databases use schema version 4; older versions are rejected at initialization without migration,
+New databases use schema version 5; older versions are rejected at initialization without migration,
 version overwrite, or deletion. A SQLite service built by
 `build_memory_service_from_config()` runs connection setup, SQL, and result construction in one async worker job, while synchronous methods
 still execute on their caller's thread. Directly constructed services and custom stores default to
@@ -77,9 +77,8 @@ flowchart LR
     Service --> Store["MemoryStore"]
     Store --> SQLite["SQLiteMemoryStore authoritative data"]
     Service --> Mirror["FileMemoryMirror human projection"]
-    Episode["L1 MemoryEpisode"] --> Orchestrator["explicit MemoryOrchestrator"]
-    Orchestrator --> Candidate["MemoryCandidate"]
-    Candidate --> Item["L2 MemoryItem"]
+    Episode["MemoryEpisode source material"] -->|flush| Observation["MemoryObservation with conditions"]
+    Observation -->|dreaming| Item["MemoryItem formal knowledge"]
     Query["MemorySearchQuery / item_id"] --> Service
     Service --> Result["Search snippets / Fetch current record"]
     Service --> Overview["explicit refresh_overview"]
@@ -93,35 +92,139 @@ longer form a five-field partition. Different workspaces use different databases
 
 `service.search(MemorySearchQuery(query="..."), ["project", "notes"])` searches allowed namespaces in one
 query and applies the limit after global ranking. `get_item(item_id, namespaces)` and
-`list_items(namespaces)` also accept a combined read range. Writes and candidate operations use one
+`list_items(namespaces)` also accept a combined read range. Writes and generation operations use one
 namespace. An empty read range returns no items.
 
-- `observe()` records an L1 episode and `OBSERVE` event, but no long-term item.
-- `remember()` explicitly creates an L2 item and `ADD` event.
+- `observe()` records an immutable `MemoryEpisode` and `OBSERVE` event, but no long-term item.
+- `await flush()` extracts evidence-backed `MemoryObservation` records and advances source cursors.
+- `await dream()` reconciles observations and explicit changes into formal Items through additions,
+  updates, merges, retirement, or supporting evidence.
+- `remember()` explicitly creates a formal Item and `ADD` event without requiring extraction first.
 - `update(item_id, namespace, patch, reason=...)` updates an item without changing its ID.
 - `search()` returns `MemorySearchResponse(items, has_more)`, with identity fields and a raw snippet per hit.
 - `forget()` tombstones rather than physically deleting items.
-- `MemoryOrchestrator.observe()` uses injected extraction/classification to create candidates.
-- `process_candidates()` explicitly accepts, rejects, or promotes candidates; the default no-op
-  extractor creates none and no background extraction exists.
 
-For partial updates, omitted fields remain unchanged. `confidence` and `importance` accept `null`
-to clear a score; use `[]` and `{}` to clear artifacts and metadata. Text, classification, status,
-and collection fields do not accept explicit `null`.
+Episodes contain source `records` with stable IDs. Their content and Observations stay immutable;
+the store separately maintains flush cursors and observation processing states. Observation
+applicability guides dreaming, while formal Item text includes the conditions needed to use its
+knowledge. Search, Fetch, and overviews read only active Items, not Episodes or Observations.
 
-Candidate promotion acquires a `BEGIN IMMEDIATE` write transaction before reading candidate
-status. Concurrent or repeated promotions return the same item and write only one pair of add and
-accept events. Updates and soft deletes also acquire the write lock before reading the current
-item, preventing stale overwrites and duplicate deletion events. Changes to different fields from
-separate connections merge sequentially. Item, candidate, and event IDs
-are globally unique across namespaces within the database.
+Flush selects information useful for future tasks: preferences, corrections, project conventions,
+reusable experience, and important pending work. Chitchat, routine activity, and temporary requests
+with no future value may produce no observations. Dreaming checks drafts against original evidence
+with roles, timestamps, and metadata, then combines related points into concise Items. Text may omit
+secondary details while retaining the subjects and conditions needed to avoid misuse. Dates, versions,
+attribution history, and untried alternatives are included when useful; evidence links retain the history.
+Compression must not invent facts or strengthen conclusions: one experience does not establish a
+general rule, explicit default preferences retain their scope, and unverified does not mean ineffective.
+Details the user explicitly asks to remember are retained. The `reason` briefly states the purpose of
+recording or consolidating. These are model instructions: JSON schema validation checks structure and
+field constraints, not whether the text's conclusions follow from its evidence.
 
-`process_candidates()` rebuilds the current namespace's mirror once per batch.
-`MemoryService.promote_candidates()` accepts a namespace and an iterable of
-`(candidate_id, kind, reason)` tuples in processing order. Each store promotion remains atomic;
-if a later candidate or policy fails, previously committed items are projected before the error
-propagates. Empty batches do not rebuild, and single-item `promote_candidate()` still refreshes
-the mirror before returning.
+Flush/dream requests use `temperature=0` and `response_format={"type": "json_object"}`; the generation
+provider must support both parameters. JSON mode constrains response format; the existing parsing
+boundary still checks fields and evidence references. Invalid responses are not committed, and saved
+inputs remain available for retry. Low randomness and comparison with original evidence do not
+guarantee semantic correctness.
+
+`MemoryEvidenceRef` points to a record span within an Episode or a real explicit-write event.
+An Item's `evidence` supports its current text; observation resolutions and MemoryEvents retain the
+historical explanation. A semantic text update replaces current support with this write event and
+evidence explicitly supplied by this call. Classification or metadata-only updates keep existing
+support. Write tools record the actual Agent and call ID without claiming user confirmation.
+
+Omitted patch fields remain unchanged. Use `[]` and `{}` to clear artifacts and metadata; all patch
+fields reject explicit `null`. Updates and soft deletes acquire a `BEGIN IMMEDIATE` write lock before
+reading current data. Text, current evidence, events, pending changes, and revision commit together.
+Changes to different fields from separate connections merge sequentially.
+
+Flush atomically commits observations and source progress, including progress for an empty extraction.
+Dreaming reads fixed inputs, related items, and corrections in one snapshot. Model calls run outside
+the transaction; the commit compares revisions and applies the entire plan and input resolutions.
+The Flush request sends source information and the known run outcome once per Episode, linking excerpts
+with short labels. Durable Episode/Record IDs, message boundaries, and block ordinals stay in
+the program; tool status and explicit memory targets remain available to the model.
+The model receives a compact projection of observations, related items, changed event fields, short
+evidence refs, and original excerpts. The program retains durable Episode/Record/Event locators;
+request-local record labels and character spans let the model recognize overlapping evidence.
+Conflicts leave inputs unconsumed. Capacity-blocked inputs remain available for retry.
+`generation_state()` exposes backlog, blocked inputs, and stage results. Configure
+`generation_provider`, `generation_model`, and `generation_config` on the service. Standalone SDK
+callers can explicitly run `await service.flush("project")` and `await service.dream("project")`.
+
+### Automatic generation and background lifecycle
+
+Reading alone does not enable generation costs. Opt in explicitly:
+
+```yaml
+memory:
+  enabled: true
+  write_namespace: project
+  generation:
+    enabled: true
+    idle_seconds: 300
+```
+
+`generation.enabled` defaults to false. Configured services reuse the Agent's resolved provider and
+model. Injected services retain their own generation dependencies and budgets. Automatic operation
+requires generation provider/model, overview provider/model, and a mirror; constructing the runner
+without these dependencies raises `IrisConfigError`.
+
+`AgentRunner` owns one maintenance pipeline for root runs. It registers a source after admission and
+before the first new message, then captures committed suffixes at actual compaction and run boundaries.
+No maintenance model runs while foreground admission or activation remains alive. After all foreground
+work exits and the configured idle interval passes, it processes observations, flushes new material,
+dreams, and publishes an overview. New foreground input cancels uncommitted generation. A dispatched
+short database commit finishes as one unit. `aclose()` captures remaining committed material and waits
+for real IO, retaining pending work for restart. There is no polling, external cron, or daemon.
+
+SQLite lifecycle sources have a persistent UUID and bounded run-message ranges, so restart can capture
+missing suffixes without learning fork history twice. InMemory lifecycle can recover only material
+already captured in the memory store. Child agents retain reading and explicit writes, but their
+internal traces are not automatically collected. BCI, reasoning, and memory readback text are excluded
+from new evidence; observations reference stable records and half-open character ranges.
+An automatically captured Episode keeps the run ID in top-level `source_id` and the lifecycle source
+ID in metadata. Pending-Episode reads use those fields to attach the source's final outcome.
+
+Flush and dream each default to 32,000 input tokens and 4,000 output tokens. Configure these through
+`flush_input_budget_tokens`, `flush_output_budget_tokens`, `dream_input_budget_tokens`, and
+`dream_output_budget_tokens` under `generation`. Flush splits long records into fixed spans. Dream
+budgets complete comparison packages, preserving oversized inputs as blocked while processing
+unrelated work. Dependency changes, a rebuilt Agent with a changed budget, or an explicit
+`await service.dream(namespace, retry_blocked=True)` make blocked inputs eligible again.
+
+Model failures wait for new activity or restart instead of retrying in a tight loop. Projection failures
+do not re-extract consumed material: later maintenance repairs category files by projection revision
+and overviews by overview revision. Maintenance usage is stored in `GenerationResult`, separate from
+foreground run usage and model steps. `generation_state(namespace)` / `await ageneration_state(namespace)`
+reports pending/blocked counts, item/projection/overview revisions, and the latest result per stage.
+Flush results expose exact committed spans in `consumed_ranges`.
+Dream reports operation counts, `processed_observations`, `processed_changes`, and `unchanged`.
+The last count refers to inputs whose target was not added, rewritten, merged, or deleted; supporting
+evidence without a text change is included.
+
+The independent SDK can run each stage explicitly without enabling Agent automation or requiring a
+mirror:
+
+```python
+from pathlib import Path
+from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
+
+service = MemoryService(
+    SQLiteMemoryStore(Path("memory.db")),
+    generation_provider=provider,  # The application's configured CompletionProvider.
+    generation_model="your-model",
+)
+service.observe(MemoryObserveInput(text="This project now uses uv for dependencies."))
+flushed = await service.flush("project")
+dreamed = await service.dream("project")
+state = service.generation_state("project")
+```
+
+Each call processes one batch; `has_more` reports pending inputs for that stage. Dream does not
+implicitly flush. Explicit `refresh_overview()` still requires its own provider/model and mirror.
+Background publication does not replace an adopted session window; adoption remains limited to a new
+session or successful compaction.
 
 ### System overview window
 
@@ -139,7 +242,7 @@ request tokens and retains the complete system character limit.
 
 Model instructions treat topics absent from the adopted overview as unavailable and do not search
 for them. Without an overview, normal chat continues without long-term-memory reads for this window.
-The host must explicitly generate an overview covering new topics, then adopt it in a new session or
+An overview covering new topics must be published, then adopted in a new session or
 after successful compaction. Already covered topics may still query current database records. This
 is a model instruction, not a database topic filter. Search does not require a subsequent Fetch.
 Updates and forgetting never rewrite previously saved conversation history.
@@ -153,13 +256,13 @@ old session does not force a new overview; start a new session to adopt the curr
 
 ## Explicit overview generation
 
-The host can call `await service.refresh_overview(namespace)` to summarize all active L2 items in
+The host can call `await service.refresh_overview(namespace)` to summarize all active formal Items in
 that namespace, grouped by category/kind, into core facts and knowledge scope. The complete result
 is published as `Memory.md` in the canonical namespace directory. Configure `overview_provider`,
 `overview_model`, and `overview_config` on the service; the provider follows
 `iris.providers.CompletionProvider`. Agent configuration binds the resolved main provider, while
-an explicitly injected service keeps its host-supplied configuration. Construction, ordinary chat,
-writes, and reads never trigger generation automatically.
+an explicitly injected service keeps its host-supplied configuration. Construction and reads do not
+call the model; optional runner maintenance owns automatic generation.
 
 ```python
 # The service already has its overview provider/model configured.
@@ -171,8 +274,10 @@ documents = await service.aload_overviews(["project"])
 An oversized complete snapshot fails without truncation or batching. One normally completed JSON
 response must contain `core_facts` and `knowledge_scope`; facts may be empty, scope must not be.
 Invalid or incomplete responses and publication errors preserve the previous complete file, with
-known model usage attached to error context. An empty active L2 snapshot publishes “当前无记忆”
+known model usage attached to error context. An empty active Item snapshot publishes “当前无记忆”
 without a model call.
+Successful, failed, and cancelled overview attempts persist a separate `GenerationResult` with
+their known usage and publication outcome, available through `generation_state()`.
 
 Generation runs outside the publication lock. A short locked source-version comparison prevents an
 older generation from replacing a newer overview. A candidate may still publish behind current
@@ -188,7 +293,7 @@ controls the system window selection described above.
 ## Public surface
 
 - Inputs and results: [MemorySearchQuery, MemorySearchHit, and MemorySearchResponse](models.py),
-  plus episode, candidate, item, event, and write/update models.
+  plus Episode, Record, Observation, Item, EvidenceRef, Event, and write/update models.
 - Service and storage: [MemoryService](service.py), [MemoryStore](store.py), and
   [SQLiteMemoryStore](sqlite.py). Synchronous `search/get_item/list_items` remain available for SDK
   reads. `asearch/aget_item/alist_items` adapt each complete operation. Writes, event reads, and the
@@ -197,8 +302,8 @@ controls the system window selection described above.
   `load_overviews()`, and `aload_overviews()`.
 - Configuration: [MemoryConfig](config.py), `build_memory_service_from_config()`, and
   `resolve_memory_path()`.
-- Explicit extraction: [MemoryOrchestrator](orchestrator.py), extractor/classifier/policy protocols,
-  and rule/no-op defaults.
+- Generation: [flush / dream](generation.py), [stage models and configuration](generation_models.py),
+  and `generation_state()`.
 - File projections: [FileMemoryMirror](mirror.py) and [MemoryFileAccess](files.py).
 - Tools: [Search/Fetch and Remember/Update/Forget](tools.py), policy factories, and explicit registration.
 
@@ -228,7 +333,7 @@ The result limit defaults to 8 and accepts `1..100`. Unknown fields are rejected
 not part of model input. Storage filters allowed namespaces, categories/kinds, and active status
 before ranking by BM25 ascending, then updated_at/id descending. It reads `limit + 1`, returns only
 limit hits, and computes `has_more`. Values within one filter dimension are OR; dimensions are AND.
-Only `MemoryItem.text` is indexed. Active L1/L2 items are searchable; episodes, unpromoted candidates,
+Only `MemoryItem.text` is indexed. Active Items are searchable; Episodes, Observations,
 and deleted/superseded items are excluded from results.
 
 Indexing, queries, and raw-text positions use the same lexer: lowercase ASCII letter/digit runs,
@@ -282,8 +387,8 @@ query without a new lead.
 
 Fetch takes one nonblank `item_id`; a known ID can be fetched without a preceding Search. It calls
 current `aget_item()` and returns `{"item": item.model_dump(mode="json")}` with every stored field,
-including complete text, source, metadata, artifact references, status, and timestamps. Attachments
-are not opened. Missing, inactive, and out-of-range items report “允许读取范围内未找到有效记忆”. Repeated
+including complete text, source, current evidence, metadata, artifact references, status, and timestamps.
+Raw evidence and attachments are not opened. Missing, inactive, and out-of-range items report “允许读取范围内未找到有效记忆”. Repeated
 Fetch calls are not suppressed. Updating an item after Search means a later Fetch returns its new
 value. Ordinary `max_result_chars=50000` and ToolExecutor artifact handling still apply.
 
@@ -314,30 +419,32 @@ service worker job. SDK registration selects builtin names with
 under `namespaces/ns_<base64url of namespace UTF-8>/`, covering User, Feedback, Reference, Tasks,
 and Sessions. It does not create `Memory.md` or rewrite legacy root files. Each entry keeps its raw
 Markdown first, followed by complete metadata inside `<details>`. These are human-readable views,
-not a record parsing or reverse-import protocol. Episodes, candidates, and events remain in SQLite.
+not a record parsing or reverse-import protocol. Episodes, Observations, and Events remain in SQLite.
 
 After a committed write, `rebuild_from_store()` uses `publish_projection()` to read a complete active
-L2 snapshot within a short write transaction and atomically replace each category document. Only
+Item snapshot within a short write transaction and atomically replace each category document. Only
 successful publication of every document advances `projection_revision`. `item_revision` advances
-with effective active L2 changes in the same transaction as the item, FTS, events, and promotion;
+with effective formal-knowledge changes in the same transaction as Items, FTS, current evidence,
+events, and input processing state;
 an unchanged patch does not rewrite the item, event, or revision. A partially failed publication
 keeps the database result successful and leaves the projection version behind. Write-tool results
 include a warning; ordinary file tools use `MemoryFileAccess` to report freshness from the actual
 file source revision. Database queries remain available when publication fails. Explicit rebuild
-errors still propagate, with no background retry. Configured SQLite services always maintain these
+errors still propagate. Configured SQLite services always maintain these
 category projections; a directly constructed SDK service may omit the mirror.
 SQLite uses short-lived connections and wraps storage/JSON failures as `IrisMemoryError`.
 FTS contains all item states, while Search and Fetch only return active records. Management SDK
 `store.list_items(..., include_deleted=True)` can inspect soft-deleted records.
 Item/index writes are transactional; `rebuild_index()` can rebuild from the authoritative table.
-Public store `list_items()`, `list_events()`, and `list_candidates()` calls reject limits outside
+Public store `list_items()`, `list_events()`, and `list_observations()` calls reject limits outside
 `1..100` with `IrisMemoryError` instead of silently clamping them. Only `list_items(limit=None)`
 requests a complete mirror projection.
 
 ## Current limitations
 
 - no vector database, embeddings, semantic reranker, or remote backend;
-- no automatic extraction from session messages or background tasks;
+- InMemory lifecycle cannot recover uncaptured source text after exit; captured Episodes can still
+  be recovered from a persistent memory store;
 - namespaces are database-local grouping strings, not a separate management service.
 
 ## Maintenance
@@ -345,11 +452,11 @@ requests a complete mirror projection.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | SDK lifecycle, namespace reads, and search results | `models.py`, `service.py`, `sqlite.py` | `tests/memory/test_service.py` |
-| Concurrent promotion, field updates, FTS completeness, and search filters | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
+| Concurrent commits, field updates, FTS completeness, and search filters | `sqlite.py`, `_query.py` | `tests/memory/test_sqlite_consistency.py` |
 | Async IO, combined tool reads, query terms, and query plans | `service.py`, `tools.py`, `sqlite.py`, `_query.py` | `tests/memory/test_async_io.py`, `tests/memory/test_tools.py`, `tests/memory/test_query.py`, `tests/memory/test_search.py`, `tests/memory/test_sqlite_query_plan.py` |
 | Namespace snapshots, projection revisions, and atomic replacement | `mirror.py`, `files.py`, `sqlite.py` | `tests/memory/test_mirror.py`, `tests/memory/test_revisions.py` |
 | Explicit overview generation, loading, and versioned publication | `overview.py`, `service.py`, `mirror.py` | `tests/memory/test_overview.py`, `tests/memory/test_async_io.py` |
-| Candidate batch promotion and partial-failure refresh | `orchestrator.py`, `service.py` | `tests/memory/test_orchestrator.py` |
+| Flush / dreaming and atomic input consumption | `generation.py`, `generation_models.py`, `sqlite.py` | `tests/memory/test_generation.py`, `tests/memory/test_generation_store.py` |
 | Overview-window adoption, compaction, and recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
 Run targeted tests from the repository root, using a fresh basetemp for each invocation:

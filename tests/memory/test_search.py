@@ -8,17 +8,28 @@ import pytest
 
 from iris.memory import (
     MemoryArtifactRef,
-    MemoryCandidate,
+    MemoryEpisode,
     MemoryEvent,
     MemoryEventType,
+    MemoryEvidenceRef,
     MemoryItem,
     MemoryItemKind,
+    MemoryObservation,
     MemoryObserveInput,
     MemorySearchHit,
     MemorySearchQuery,
     MemorySearchResponse,
     MemoryService,
+    MemoryStore,
     SQLiteMemoryStore,
+)
+from iris.memory.generation_models import (
+    DreamOperation,
+    DreamPlan,
+    EpisodeSlice,
+    FlushCommit,
+    GenerationResult,
+    ObservationResolution,
 )
 
 
@@ -27,6 +38,32 @@ def _add(store: SQLiteMemoryStore, text: str, **values: Any) -> MemoryItem:
     return store.add_item(
         item, event=MemoryEvent(namespace=item.namespace, event_type=MemoryEventType.ADD)
     )
+
+
+def _flush_observation(
+    store: MemoryStore, episode: MemoryEpisode, *, text: str
+) -> MemoryObservation:
+    """通过真实 flush 事务保存观察，供读取侧契约测试复用。"""
+    record = episode.records[0]
+    observation = MemoryObservation(
+        namespace=episode.namespace,
+        text=text,
+        reason="提炼来源材料",
+        evidence=(
+            MemoryEvidenceRef(
+                kind="episode", source_id=episode.id, record_id=record.id, end=len(record.text)
+            ),
+        ),
+    )
+    assert store.commit_flush(
+        FlushCommit(
+            namespace=episode.namespace,
+            slices=(EpisodeSlice(episode.id, record.id, 0, len(record.text), record.text),),
+            observations=(observation,),
+            result=GenerationResult(namespace=episode.namespace, stage="flush", status="completed"),
+        )
+    )
+    return observation
 
 
 def test_search_returns_only_the_six_hit_fields(tmp_path: Path) -> None:
@@ -144,14 +181,14 @@ def test_filtering_precedes_rank_and_limit_with_or_within_each_dimension(tmp_pat
     assert not response.has_more
 
 
-def test_search_keeps_active_l1_and_l2_but_excludes_other_statuses(tmp_path: Path) -> None:
+def test_search_keeps_active_items_but_excludes_other_statuses(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "active.db")
-    l1 = _add(store, "needle", level="l1")
-    l2 = _add(store, "needle", level="l2")
+    fact = _add(store, "needle", kind="fact")
+    note = _add(store, "needle", kind="note")
     _add(store, "needle", status="deleted")
     _add(store, "needle", status="superseded")
     response = store.search(MemorySearchQuery(query="needle"), ["project"])
-    assert {hit.item_id for hit in response.items} == {l1.id, l2.id}
+    assert {hit.item_id for hit in response.items} == {fact.id, note.id}
 
 
 def test_only_item_text_is_searchable(tmp_path: Path) -> None:
@@ -169,19 +206,41 @@ def test_only_item_text_is_searchable(tmp_path: Path) -> None:
     assert store.search(MemorySearchQuery(query="needle"), ["needle"]).items == ()
 
 
-def test_episode_and_candidate_are_not_searchable_until_promotion(tmp_path: Path) -> None:
-    store = SQLiteMemoryStore(tmp_path / "promotion.db")
+def test_episode_and_observation_are_not_searchable_until_dreaming(tmp_path: Path) -> None:
+    store = SQLiteMemoryStore(tmp_path / "dreaming.db")
     service = MemoryService(store)
     episode = service.observe(MemoryObserveInput(text="needle episode"))
-    candidate = service.add_candidate(
-        MemoryCandidate(episode_ids=[episode.id], text="needle candidate", reason="extract")
-    )
+    observation = _flush_observation(store, episode, text="needle observation")
     query = MemorySearchQuery(query="needle")
     assert service.search(query, ["project"]).items == ()
-    promoted = service.promote_candidate(
-        candidate.id, "project", kind=MemoryItemKind.FACT, reason="reviewed"
+    assert service.get_item(episode.id, ["project"]) is None
+    assert service.get_item(observation.id, ["project"]) is None
+    snapshot = store.read_dream_snapshot("project")
+    assert store.commit_dream(
+        snapshot,
+        DreamPlan(
+            operations=(
+                DreamOperation(
+                    action="add",
+                    new_id="dream-item",
+                    text="needle knowledge",
+                    kind=MemoryItemKind.FACT,
+                    evidence=observation.evidence,
+                    reason="整理完成",
+                ),
+            ),
+            resolutions=(
+                ObservationResolution(
+                    observation_id=observation.id,
+                    item_id="dream-item",
+                    reason="生成正式知识",
+                ),
+            ),
+        ),
+        result=GenerationResult(namespace="project", stage="dream", status="completed"),
     )
-    assert [hit.item_id for hit in service.search(query, ["project"]).items] == [promoted.id]
+    assert [hit.item_id for hit in service.search(query, ["project"]).items] == ["dream-item"]
+    assert service.get_item("dream-item", ["project"]).evidence == observation.evidence
 
 
 def test_query_and_index_keep_terms_beyond_128_and_far_from_both_ends(tmp_path: Path) -> None:

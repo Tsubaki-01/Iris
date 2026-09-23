@@ -16,6 +16,7 @@ from iris.memory import (
     MemoryActor,
     MemoryArtifactRef,
     MemoryConfig,
+    MemoryEvidenceRef,
     MemoryFetchTool,
     MemoryFetchToolInput,
     MemoryItemPatch,
@@ -80,7 +81,6 @@ async def test_fetch_returns_the_current_full_item_and_refreshes_policy(tmp_path
             text="original needle",
             reason="seed",
             source_id="known-source",
-            confidence=0,
             artifacts=[MemoryArtifactRef(path="absent-attachment.txt", metadata={"name": "资料"})],
             metadata={"nested": {"names": ["完整", "内容"]}},
         )
@@ -236,18 +236,16 @@ def _executor(service: MemoryService, *, write_namespace: str = "project") -> To
     return ToolExecutor(registry, permission_policy=DefaultPermissionPolicy(write_mode="allow"))
 
 
-def test_update_schema_distinguishes_optional_fields_from_nullable_scores(tmp_path: Path) -> None:
+def test_update_schema_allows_omission_without_explicit_null(tmp_path: Path) -> None:
     """提供给模型的 schema 允许省略更新字段，不把非 nullable 字段声明为可传 null。"""
     service = MemoryService(SQLiteMemoryStore(tmp_path / "patch-schema.db"))
     schema = _executor(service).registry.get("memory_update").definition.input_schema
     patch = schema["$defs"]["MemoryItemPatch"]
     properties = patch["properties"]
-    for field in ("text", "category", "kind", "status", "artifacts", "metadata"):
+    for field in ("text", "category", "kind", "status", "artifacts", "metadata", "evidence"):
         assert field not in patch.get("required", [])
         assert {"type": "null"} not in properties[field].get("anyOf", [])
         assert "default" not in properties[field]
-    for field in ("confidence", "importance"):
-        assert {"type": "null"} in properties[field]["anyOf"]
 
 
 @pytest.mark.asyncio
@@ -274,7 +272,10 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
     assert stored is not None
     assert stored.source_type is MemorySourceType.TOOL_EVENT
     assert stored.source_id == "remember"
-    assert service.list_events("private")[0].actor is MemoryActor.AGENT
+    remembered_event = service.list_events("private")[0]
+    assert remembered_event.actor is MemoryActor.AGENT
+    assert remembered_event.source_id == "remember"
+    assert stored.evidence == (MemoryEvidenceRef(kind="event", source_id=remembered_event.id),)
     found = await executor.execute_one(
         ToolUseBlock(id="get", name="memory_fetch", input={"item_id": item["id"]}),
         context,
@@ -294,6 +295,15 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
     )
     assert not updated.is_error
     assert json.loads(updated.content[0].text)["item"]["id"] == item["id"]
+    updated_item = service.get_item(item["id"], ["private"])
+    updated_event = service.list_events("private", item_id=item["id"])[0]
+    assert updated_item is not None
+    assert updated_event.source_id == updated_item.source_id == "update"
+    assert updated_event.actor is MemoryActor.AGENT
+    assert updated_item.evidence == (MemoryEvidenceRef(kind="event", source_id=updated_event.id),)
+    assert updated_event.before["evidence"] == [
+        ref.model_dump(mode="json") for ref in stored.evidence
+    ]
     search = await executor.execute_one(
         ToolUseBlock(id="search", name="memory_search", input={"query": "oranges"}),
         context,
@@ -444,28 +454,26 @@ async def test_update_rejects_null_metadata_without_corrupting_saved_item(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_update_can_clear_nullable_scores_without_changing_omitted_fields(
+async def test_metadata_update_preserves_omitted_text_and_current_evidence(
     tmp_path: Path,
 ) -> None:
-    """允许明确清空 nullable 评分，省略的正文与元数据不随之改变。"""
-    service = MemoryService(SQLiteMemoryStore(tmp_path / "clear-scores.db"))
+    """非语义更新保留已有正文与当前支持证据。"""
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "update-metadata.db"))
     item = service.remember(
         MemoryWriteInput(
             text="keep fact",
             metadata={"origin": "user"},
-            confidence=0.8,
-            importance=0.7,
             reason="seed",
         )
     )
     result = await _executor(service).execute_one(
         ToolUseBlock(
-            id="clear-scores",
+            id="update-metadata",
             name="memory_update",
             input={
                 "item_id": item.id,
-                "patch": {"confidence": None, "importance": None},
-                "reason": "clear scores",
+                "patch": {"metadata": {"origin": "user", "reviewed": True}},
+                "reason": "annotate metadata",
             },
         ),
         _context(tmp_path),
@@ -474,5 +482,8 @@ async def test_update_can_clear_nullable_scores_without_changing_omitted_fields(
     assert not result.is_error
     updated = service.get_item(item.id, ["project"])
     assert updated is not None
-    assert updated.confidence is None and updated.importance is None
-    assert updated.text == item.text and updated.metadata == item.metadata
+    assert updated.metadata == {"origin": "user", "reviewed": True}
+    assert updated.text == item.text
+    assert updated.evidence == item.evidence
+    assert updated.source_id == "update-metadata"
+    assert service.list_events("project", item_id=item.id)[0].source_id == updated.source_id

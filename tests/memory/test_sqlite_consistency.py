@@ -11,91 +11,17 @@ import pytest
 
 from iris.exceptions import IrisMemoryError
 from iris.memory import (
-    MemoryCandidate,
-    MemoryCandidateStatus,
     MemoryEvent,
     MemoryEventType,
     MemoryItem,
     MemoryItemKind,
     MemoryItemPatch,
     MemoryItemStatus,
-    MemoryObserveInput,
     MemorySearchQuery,
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
 )
-
-
-def test_concurrent_candidate_promotion_creates_one_item_and_event_pair(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """同一候选的并发晋升返回相同条目且只记录一次晋升。"""
-    first_store = SQLiteMemoryStore(tmp_path / "memory.db")
-    second_store = SQLiteMemoryStore(first_store.path)
-    first_service = MemoryService(first_store)
-    second_service = MemoryService(second_store)
-    namespace = "project"
-    episode = first_service.observe(
-        MemoryObserveInput(namespace=namespace, text="用户偏好简洁回答")
-    )
-    candidate = first_service.add_candidate(
-        MemoryCandidate(
-            namespace=namespace,
-            episode_ids=[episode.id],
-            text=episode.text,
-            reason="明确偏好",
-        )
-    )
-    first_read = Event()
-    release_first = Event()
-    fetch_candidate = first_store._fetch_candidate
-
-    def pause_after_read(
-        connection: sqlite3.Connection,
-        candidate_id: str,
-        candidate_namespace: str,
-    ) -> MemoryCandidate | None:
-        """让另一连接有机会在首次读取后进入晋升流程。"""
-        result = fetch_candidate(connection, candidate_id, candidate_namespace)
-        first_read.set()
-        assert release_first.wait(timeout=5)
-        return result
-
-    monkeypatch.setattr(first_store, "_fetch_candidate", pause_after_read)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(
-            first_service.promote_candidate,
-            candidate.id,
-            namespace,
-            kind=MemoryItemKind.NOTE,
-            reason="确认偏好",
-        )
-        assert first_read.wait(timeout=5)
-        second = executor.submit(
-            second_service.promote_candidate,
-            candidate.id,
-            namespace,
-            kind=MemoryItemKind.NOTE,
-            reason="再次确认偏好",
-        )
-        try:
-            # 正确的事务会让第二个连接等待首个连接提交。
-            second.result(timeout=0.25)
-        except TimeoutError:
-            pass
-        finally:
-            release_first.set()
-        first_item = first.result(timeout=5)
-        second_item = second.result(timeout=5)
-
-    assert first_item.id == second_item.id
-    assert [item.id for item in first_service.list_items([namespace])] == [first_item.id]
-    assert first_service.list_candidates(namespace)[0].status == MemoryCandidateStatus.ACCEPTED
-    event_types = [event.event_type for event in first_service.list_events(namespace)]
-    assert event_types.count(MemoryEventType.ADD) == 1
-    assert event_types.count(MemoryEventType.CANDIDATE_ACCEPT) == 1
 
 
 def test_concurrent_disjoint_item_patches_preserve_both_changes(
@@ -143,7 +69,7 @@ def test_concurrent_disjoint_item_patches_preserve_both_changes(
             second_store.update_item,
             item.id,
             namespace,
-            MemoryItemPatch(importance=0.8),
+            MemoryItemPatch(kind=MemoryItemKind.FACT),
             event=MemoryEvent(
                 namespace=namespace, event_type=MemoryEventType.UPDATE, item_id=item.id
             ),
@@ -160,7 +86,7 @@ def test_concurrent_disjoint_item_patches_preserve_both_changes(
     updated = second_store.get_item(item.id, [namespace])
     assert updated is not None
     assert updated.text == "更新后的内容"
-    assert updated.importance == 0.8
+    assert updated.kind == MemoryItemKind.FACT
     assert len(second_store.list_events(namespace, item_id=item.id)) == 3
 
 
@@ -340,7 +266,7 @@ def test_search_query_owns_result_limit(tmp_path: Path) -> None:
     assert len(store.search(MemorySearchQuery(query="preference", limit=2), ["project"]).items) == 2
 
 
-@pytest.mark.parametrize("operation", ["add", "update", "delete", "promote"])
+@pytest.mark.parametrize("operation", ["add", "update", "delete"])
 @pytest.mark.parametrize("failure_stage", ["fts", "event"])
 def test_item_mutation_failure_rolls_back_fts_revision_and_facts(
     tmp_path: Path,
@@ -348,18 +274,13 @@ def test_item_mutation_failure_rolls_back_fts_revision_and_facts(
     operation: str,
     failure_stage: str,
 ) -> None:
-    """索引或事件写入中途失败时，条目、版本、候选与事件一起回滚。"""
+    """索引或事件写入中途失败时，条目、版本、证据与事件一起回滚。"""
     store = SQLiteMemoryStore(tmp_path / "atomic.db")
     service = MemoryService(store)
     item = service.remember(MemoryWriteInput(text="beforetoken", reason="seed"))
-    episode = service.observe(MemoryObserveInput(text="source"))
-    candidate = service.add_candidate(
-        MemoryCandidate(episode_ids=[episode.id], text="aftertoken", reason="candidate")
-    )
     before_items = store.list_items(["project"], include_deleted=True)
     before_state = store.read_namespace_state("project")
     before_events = store.list_events("project")
-    before_candidates = store.list_candidates("project")
     refresh_fts = store._refresh_fts_row
     insert_event = store._insert_event
 
@@ -383,15 +304,10 @@ def test_item_mutation_failure_rolls_back_fts_revision_and_facts(
             service.update(item.id, "project", MemoryItemPatch(text="aftertoken"), reason="edit")
         elif operation == "delete":
             service.forget(item.id, "project", reason="forget")
-        else:
-            service.promote_candidate(
-                candidate.id, "project", kind=MemoryItemKind.NOTE, reason="ok"
-            )
 
     assert store.list_items(["project"], include_deleted=True) == before_items
     assert store.read_namespace_state("project") == before_state
     assert store.list_events("project") == before_events
-    assert store.list_candidates("project") == before_candidates
     assert [
         result.item_id
         for result in store.search(MemorySearchQuery(query="beforetoken"), ["project"]).items

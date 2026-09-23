@@ -26,7 +26,7 @@ knowledge_scope：概括输入实际包含的全部知识主题，包括核心�
 def build_overview_request(
     snapshot: MemoryNamespaceSnapshot, model: str, config: MemoryOverviewConfig
 ) -> LLMRequest:
-    """将完整 active L2 快照按分类和类型组织成一次无工具生成请求。"""
+    """将完整 active 正式知识按分类和类型组织成一次无工具生成请求。"""
     groups: list[dict[str, object]] = []
     for (category, kind), items in groupby(
         snapshot.items, key=lambda item: (item.category, item.kind)
@@ -41,8 +41,6 @@ def build_overview_request(
                         "text": item.text,
                         "updated_at": item.updated_at,
                         "created_at": item.created_at,
-                        "confidence": item.confidence,
-                        "importance": item.importance,
                         "metadata": item.metadata,
                         "source_type": item.source_type.value,
                         "source_id": item.source_id,
