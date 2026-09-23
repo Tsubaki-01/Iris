@@ -24,11 +24,20 @@ their independent resources at WAITING/completion, rebuilding on recovery.
 
 Assembly resolves the provider first, then lets the memory factory handle `memory.enabled`.
 Disabled memory does not attach even an injected service. When enabled, injection takes precedence;
-otherwise the factory builds a SQLite service with the resolved provider, model name, and overview
-configuration. A resolved service automatically provides Search/Fetch; write tools remain explicit.
-Construction does not generate an overview: the host calls `refresh_overview()` explicitly, and an
-injected service keeps its own generation dependencies. The switch is fixed at construction;
-rebuild the Agent and start a new session after changing it.
+otherwise the factory builds a SQLite service with the resolved provider, model name, overview, and
+generation configuration. A resolved service automatically provides Search/Fetch; write tools remain
+explicit. Construction makes no model calls. Hosts can call `refresh_overview()` explicitly; root runners
+with automatic generation enabled also publish during idle maintenance. Injected services keep their
+own generation dependencies. The switch is fixed at construction; rebuild the Agent and start a new
+session after changing it.
+
+`RuntimeEnvironment.execution_scope` preserves ROOT/CHILD explicitly; root harness owns automatic
+maintenance. Only after `_compact_request()` selects a real compaction range does runtime call the
+optional `RuntimeMemoryCapturePort.request_capture(run_id, through_count)` with the committed message
+boundary. Ordinary requests and early returns without a compressible prefix send no hint. This
+synchronous port waits for neither IO nor memory models and leaves `RuntimeCommitPort` responsible for
+durable execution facts. Harness owns background capture/flush/dream and shutdown. Compaction need not
+wait for newly generated memories; successful compaction adopts only the overview already published.
 
 ## Dependency direction
 

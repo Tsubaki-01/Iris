@@ -95,6 +95,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
 
         async def complete(self, request: LLMRequest) -> LLMResponse:
             if strategy == "fetch" and len(self.requests) == 1:
+
                 def fail_projection(*args: object, **kwargs: object) -> None:
                     raise IrisMemoryError("projection unavailable")
 
@@ -104,6 +105,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
                     "project",
                     MemoryItemPatch(text="deploytoken 当前部署版本 v2", metadata={"version": 2}),
                     reason="部署已更新",
+                    source_id="correction-message",
                 )
             return await super().complete(request)
 
@@ -152,7 +154,8 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         fetched = json.loads(results[1].content)
         assert fetched == {"item": current.model_dump(mode="json")}
         assert fetched["item"]["metadata"] == {"version": 2}
-        assert fetched["item"]["source_id"] == "source-message"
+        assert fetched["item"]["source_id"] == "correction-message"
+        assert current.evidence != item.evidence
         assert "warning" not in fetched
     assert session.context_window is not None
     assert "项目部署版本与配置" in provider.requests[0].messages[0].text
@@ -194,7 +197,8 @@ async def test_disabled_config_ignores_injected_service_and_saved_overview(
     store = SQLiteStore(tmp_path / "lifecycle.db")
     config = AgentConfig.model_validate(
         {
-            "name": "reader", "model": "openai/fake-model",
+            "name": "reader",
+            "model": "openai/fake-model",
             "context": {"path": str(context_path)},
             "permissions": {"workspace": str(tmp_path)},
             "memory": {"enabled": True},
@@ -236,5 +240,5 @@ async def test_disabled_config_ignores_injected_service_and_saved_overview(
     assert replayed == previous_results
     after = store.load_session("default")
     assert after.context_window == before.context_window
-    assert after.messages[:len(before.messages)] == before.messages
+    assert after.messages[: len(before.messages)] == before.messages
     assert len(overview_provider.requests) == 1

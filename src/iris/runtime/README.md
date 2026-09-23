@@ -22,9 +22,17 @@ root runner 自动管理准备时机，多 run 复用同一固定目录与连接
 
 装配先解析 provider，再由 memory 配置工厂统一处理 `memory.enabled`。关闭时不接入服务，
 即使传入 `memory_service` 也不挂载；开启时优先复用注入对象，否则将同一 provider、
-`model.name` 和 `memory.overview` 配置绑定到新建的 SQLite service。有效服务自动提供
-Search/Fetch，写工具仍显式配置。构造过程不生成概览，宿主显式调用 `refresh_overview()`；
-注入服务保留自己的生成依赖。开关在构建时确定，改配置后重建 Agent 并使用新会话。
+`model.name`、`memory.overview` 与 `memory.generation` 配置绑定到新建的 SQLite service。
+有效服务自动提供 Search/Fetch，写工具仍显式配置。构造过程不调用模型；宿主可以显式调用
+`refresh_overview()`，开启自动 generation 的 root runner 也会在空闲时生成。注入服务保留自己的
+生成依赖。开关在构建时确定，改配置后重建 Agent 并使用新会话。
+
+`RuntimeEnvironment.execution_scope` 明确保留 ROOT/CHILD，自动维护由 root harness 独占。
+Runtime 只在 `_compact_request()` 已经选出实际压缩范围后，通过可选
+`RuntimeMemoryCapturePort.request_capture(run_id, through_count)` 通知已提交原文范围。
+普通请求与没有可压缩前缀的早退不会提示；该同步端口不等待 IO 或记忆模型，不改变
+`RuntimeCommitPort` 的持久运行事实职责。后台 capture/flush/dream 和关闭均由 harness 管理，
+当前压缩无需等待新记忆，成功后仍只采用当时已经发布的概览。
 
 ## 依赖方向
 

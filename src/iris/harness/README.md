@@ -369,7 +369,7 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
 不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
-重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 8，checkpoint 仍为2，
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 9，checkpoint 仍为2，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
 新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。
@@ -382,6 +382,30 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 特殊原文保护。概览指导主题范围，所有 namespace 合计占可用输入预算的2%；没有概览时正常
 聊天但暂不使用长期记忆。静态 `context.yaml` memory 仍为独立固定上下文，不进入会话历史。
 BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的恢复使用新 revision 和同一 pending 步。
+
+`memory.generation.enabled: true` 另外启用 root runner 的自动取材和空闲维护，默认关闭。
+构造仅绑定依赖；需要完整的 flush/dream、overview provider/model 和 mirror。配置构造的服务
+复用已经解析的 provider，注入的服务保留自己的生成依赖与预算。后台只写当前 Agent 的
+`write_namespace`，child 不重复学习内部轨迹，仍可使用自己的读取和显式写工具。
+
+私有 [`_memory_maintenance.py`](_memory_maintenance.py) 独占后台生命周期。
+`aprepare()` 即使没有 MCP 也会恢复同源未封口来源、重新评估预算已变化的 blocked 输入。
+root run 首条消息提交前登记来源，以 lifecycle `source_id` 和 run ID 定位；压缩提示、
+WAITING/终态退出和关闭保存尚未捕获的原文后缀。WAITING 不封口，完成、失败、取消及无需
+runtime 的恢复终态都保留真实 outcome。BCI、system/reasoning 不作为材料；Search/Fetch
+读回只保留条目引用，工具调用及结果保留稳定来源。重复提示通过持久水位避免重复经历。
+自动 Episode 的顶层 `source_id` 保存 run ID，metadata 保存 lifecycle `source_id` 与会话边界。
+
+只有前台 admission 和 activation 完整退出后，安静达到 `idle_seconds`（默认 300 秒）才运行
+flush → dream → overview；已有观察优先 dream。新 start/resume/recover 或 managed follow-up
+立即取消计时和后台模型，不等待模型退出才接纳前台。
+已排队 follow-up 在前一 run 的 terminal 事件到自身 admission 之间持有短前台交接凭证，
+避免零空闲等待时被维护抢先；admission 成功、失败或 manager 关闭均释放凭证。
+关闭会等待已派发数据库 IO 真正结束，但不要求全部 pending 生成完，也不关闭宿主注入的
+provider、memory 或 store。
+失败停止本轮，待新活动或下次启动续作；已消费输入的投影失败只补投影，不重复生成知识。
+SQLite lifecycle 可补捕获重启前已提交尾部；InMemory lifecycle 丢失后只能继续处理已经捕获的材料。
+维护 usage 独立记录在 memory 生成结果，不计入 `RunUsage`；新发布概览仍等新窗口或成功压缩采用。
 
 `RunUsage` 的 input/output/total 只统计主模型；摘要调用累计在 `usage.compaction`，总消耗由两者
 逐字段相加。摘要 usage-only 提交只推进 run revision，不产生 durable event；commit port 立即

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -34,6 +35,20 @@ if TYPE_CHECKING:
     from ..mcp.models import MCPCatalogSnapshot
 
 # endregion
+
+
+class RuntimeExecutionScope(StrEnum):
+    """内部执行范围，child 不拥有自动记忆维护或递归委派。"""
+
+    ROOT = "root"
+    CHILD = "child"
+
+
+class RuntimeMemoryCapturePort(Protocol):
+    """Runtime 向 harness 通知可捕获原文的轻量端口。"""
+
+    def request_capture(self, run_id: str, through_count: int) -> None:
+        """合并已提交原文范围，不等待模型或持久 IO。"""
 
 
 @runtime_checkable
@@ -94,6 +109,8 @@ class RuntimeEnvironment:
         memory_service (MemoryService | None): 配置构造或宿主注入的可选 memory 服务。
         skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
+        execution_scope (RuntimeExecutionScope): 明确的 ROOT/CHILD 装配范围。
+        memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
     """
 
     agent_config: AgentConfig
@@ -106,6 +123,8 @@ class RuntimeEnvironment:
     memory_service: MemoryService | None = None
     skill_registry: SkillRegistry | None = None
     mcp_manager: MCPManager | None = None
+    execution_scope: RuntimeExecutionScope = RuntimeExecutionScope.ROOT
+    memory_capture_port: RuntimeMemoryCapturePort | None = None
 
     def __post_init__(self) -> None:
         """归一化工具执行的 workspace 根路径。"""
@@ -125,6 +144,8 @@ class RuntimeEnvironment:
 
 __all__ = [
     "RuntimeEnvironment",
+    "RuntimeExecutionScope",
+    "RuntimeMemoryCapturePort",
     "StreamingRuntimeProvider",
     "streaming_provider_for",
 ]

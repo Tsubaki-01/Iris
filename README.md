@@ -38,8 +38,8 @@ memory:
 ```
 
 开启后自动接入概览和 Search/Fetch 两个读取工具，以 SQLite 保存权威条目，Markdown 提供
-人工可读投影。宿主先显式
-生成包含“核心事实＋可查询知识”的概览；新会话首次输入和成功压缩时采用，全部读取空间
+人工可读投影。概览包含“核心事实＋可查询知识”，可由宿主显式生成或后台维护发布；
+新会话首次输入和成功压缩时采用，全部读取空间
 共用可用输入预算的 2%，会话窗口内保持稳定。没有概览时仍可正常聊天，但不使用长期记忆。
 
 模型根据概览决定是否调用 `memory_search` / `memory_fetch`：Search 返回匹配
@@ -47,5 +47,22 @@ memory:
 进入正常会话历史，静态 `context.yaml` memory 槽位保持独立。
 
 写工具仍需显式声明。开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。
+
+需要自动生成时，额外开启 `memory.generation.enabled`：
+
+```yaml
+memory:
+  enabled: true
+  generation:
+    enabled: true
+    idle_seconds: 30
+```
+
+root run 的已提交经历先保存为 Episode，flush 提炼为带证据的 Observation，dreaming 再统一
+为正式记忆并发布概览。生成在前台空闲时运行，新输入优先；中间观察不参与检索，关闭后保留
+待处理材料。自动生成默认关闭，维护调用的模型用量与主任务分开记录。
+
+本次模型重构使用 memory schema v5 与 lifecycle schema v9；旧数据库会明确拒绝，
+不自动迁移或删除已有数据。
 
 配置、显式概览生成和 SDK 用法见 [`iris.memory`](src/iris/memory/README.md)。

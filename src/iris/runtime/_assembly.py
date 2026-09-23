@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,7 +31,7 @@ from ..skill import (
 from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
-from .environment import RuntimeEnvironment
+from .environment import RuntimeEnvironment, RuntimeExecutionScope
 from .runtime import AgentRuntime
 from .tool_bridge import ToolBridge
 
@@ -41,13 +40,6 @@ if TYPE_CHECKING:
 # endregion
 
 logger = logging.getLogger(__name__)
-
-
-class RuntimeExecutionScope(StrEnum):
-    """内部装配范围，CHILD 不注册递归委派工具。"""
-
-    ROOT = "root"
-    CHILD = "child"
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +192,7 @@ def assemble_runtime(
         memory_service=memory_service,
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
+        execution_scope=execution_scope,
     )
     return AgentRuntime(environment)
 

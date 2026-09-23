@@ -79,6 +79,31 @@ def _runtime(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("triggered", [False, True])
+async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool) -> None:
+    """真实压缩提示引用全部已提交原文，普通模型请求不触发捕获。"""
+    provider = _ThresholdProvider(95000 if triggered else 1, 70000)
+    if not triggered:
+        provider._responses = [_response("主回答")]
+    runtime = _runtime(provider)
+    hints: list[tuple[str, int]] = []
+
+    class CapturePort:
+        """只记录提示，runtime 不等待后台生成。"""
+
+        def request_capture(self, run_id: str, through_count: int) -> None:
+            hints.append((run_id, through_count))
+
+    runtime.environment.memory_capture_port = CapturePort()
+    raw = [Msg.user("旧任务"), Msg.assistant("旧结果")]
+    activation = start_activation(input="当前任务", initial_session_message_count=2)
+    port = FakeRuntimeCommitPort(activation, messages=raw)
+    await runtime.execute(activation, commits=port, cancellation=MutableCancellationSignal())
+    expected_count = len(raw) + len(port.input_commits[0].message_delta)
+    assert hints == ([(activation.run_id, expected_count)] if triggered else [])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("before", "after", "accepted"),
     [

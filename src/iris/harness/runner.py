@@ -18,18 +18,20 @@ import asyncio
 import logging
 import math
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
 from ..agents.config.subagent import load_subagent_catalog
 from ..exceptions import (
     HITLConflictError,
     IrisCancellationRequestedError,
+    IrisConfigError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunObservationTimeoutError,
@@ -98,6 +100,7 @@ from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._events import _RunEventCollector
+from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
@@ -107,6 +110,31 @@ if TYPE_CHECKING:
 # endregion
 
 logger = logging.getLogger(__name__)
+
+
+def _with_memory_foreground[Result, **Parameters](
+    operation: Callable[Concatenate[AgentRunner, Parameters], Awaitable[Result]],
+) -> Callable[Concatenate[AgentRunner, Parameters], Coroutine[Any, Any, Result]]:
+    """将完整 admission/activation 调用划入前台范围，嵌套重派使用计数。"""
+
+    @wraps(operation)
+    async def invoke(
+        self: AgentRunner, *args: Parameters.args, **kwargs: Parameters.kwargs
+    ) -> Result:
+        maintenance = self._memory_maintenance
+        if maintenance is None:
+            return await operation(self, *args, **kwargs)
+        maintenance.foreground_enter()
+        try:
+            await maintenance.prepare()
+            return await operation(self, *args, **kwargs)
+        finally:
+            try:
+                await maintenance.capture_pending()
+            finally:
+                maintenance.foreground_exit()
+
+    return invoke
 
 
 class Clock(Protocol):
@@ -256,23 +284,48 @@ class AgentRunner:
             self._stream_sink = _RuntimeLiveSink(_RunnerPublisherRelay(self))
         self._active: dict[str, ActiveActivation] = {}
         self._subagent_controller: HarnessSubagentController | None = None
+        self._memory_maintenance: MemoryMaintenance | None = None
+        environment = runtime.environment
+        memory_config = environment.agent_config.memory
+        if (
+            environment.execution_scope is RuntimeExecutionScope.ROOT
+            and memory_config.enabled
+            and memory_config.generation.enabled
+        ):
+            service = environment.memory_service
+            if (
+                service is None
+                or service.generation_provider is None
+                or not service.generation_model
+                or service.overview_provider is None
+                or not service.overview_model
+                or service.mirror is None
+            ):
+                raise IrisConfigError("自动记忆生成需要 flush/dream、overview 模型及 mirror")
+            self._memory_maintenance = MemoryMaintenance(
+                service=service, namespace=memory_config.write_namespace, lifecycle_store=store
+            )
+            environment.memory_capture_port = self._memory_maintenance
 
     async def aprepare(self) -> None:
         """准备运行资源；失败后释放资源，必须新建 runner。"""
         if self._closed:
             raise IrisRunStateError("runner 已关闭")
-        if self._prepared:
-            return
-        try:
-            await self.runtime.environment.aprepare()
-            self._prepared = True
-        except BaseException:
-            self._closed = True
+        if not self._prepared:
             try:
-                await self.runtime.environment.aclose()
-            except Exception:
-                logger.exception("MCP 准备失败后的资源关闭失败")
-            raise
+                await self.runtime.environment.aprepare()
+                self._prepared = True
+            except BaseException:
+                self._closed = True
+                try:
+                    if self._memory_maintenance is not None:
+                        await self._memory_maintenance.aclose()
+                    await self.runtime.environment.aclose()
+                except Exception:
+                    logger.exception("MCP 准备失败后的资源关闭失败")
+                raise
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.prepare()
 
     async def aclose(self) -> None:
         """host 等原 start/resume/recover 完整结束后关闭自有环境资源。
@@ -282,9 +335,13 @@ class AgentRunner:
         """
         if self._closed:
             return
-        if self._active:
+        if self._active or (
+            self._memory_maintenance is not None and self._memory_maintenance.foreground_active
+        ):
             raise IrisRunStateError("runner 仍有 active activation，不能关闭")
         self._closed = True
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.aclose()
         await self.runtime.environment.aclose()
 
     @classmethod
@@ -396,6 +453,7 @@ class AgentRunner:
         """原子创建并推进一个 start activation 到 waiting 或 terminal。"""
         return await self._start_managed(request, options=options)
 
+    @_with_memory_foreground
     async def _start_managed(
         self,
         request: AgentRunRequest,
@@ -427,6 +485,8 @@ class AgentRunner:
         await self.aprepare()
         command, cursor = self._build_start_facts(request, options=options)
         created = self.store.create_run(command)
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.register_run(created.run)
         events = self._event_collector(durable_event_callback)
         events.record(created.events)
         if created.run.phase is RunPhase.TERMINAL:
@@ -555,6 +615,7 @@ class AgentRunner:
             response=response,
         )
 
+    @_with_memory_foreground
     async def _resume_managed(
         self,
         run_id: str,
@@ -594,6 +655,8 @@ class AgentRunner:
         run = self.store.load_run(normalized_run_id)
         if run is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized_run_id)
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.register_run(run)
         interaction = self.store.load_interaction(normalized_interaction_id)
         if interaction is None:
             raise IrisRunNotFoundError(
@@ -935,8 +998,11 @@ class AgentRunner:
             and run.current_activation_id == active.activation_id
         ):
             self._interrupt_active(active)
+        if self._memory_maintenance is not None and run.terminal_session_message_count is not None:
+            self._memory_maintenance.request_capture(run.run_id, run.terminal_session_message_count)
         return snapshot_run(run)
 
+    @_with_memory_foreground
     async def cancel(
         self,
         run_id: str,
@@ -970,6 +1036,8 @@ class AgentRunner:
         before = self.store.load_run(normalized)
         if before is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.register_run(before)
         snapshot = self.request_cancel(normalized, reason=reason)
         if snapshot.phase is RunPhase.TERMINAL:
             await self._deliver_events(
@@ -1030,6 +1098,7 @@ class AgentRunner:
                     reason=reason,
                 )
 
+    @_with_memory_foreground
     async def recover(
         self,
         run_id: str,
@@ -1063,6 +1132,8 @@ class AgentRunner:
         run = self.store.load_run(normalized)
         if run is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
+        if self._memory_maintenance is not None:
+            await self._memory_maintenance.register_run(run)
         if run.phase is RunPhase.TERMINAL:
             return self._require_result(normalized)
         if run.phase is RunPhase.WAITING:

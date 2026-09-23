@@ -423,7 +423,7 @@ With an effective runtime memory service, tool loops, later runs, HITL, and reco
 overview without re-querying or reloading updated files. Successful compaction replaces summary and window in the same transaction;
 failure retains the old state. Fork targets start without an adopted window and choose one at their
 first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
-uses schema 8 while checkpoint version stays 2; old formats are rejected without migration or cleanup.
+uses schema 9 while checkpoint version stays 2; old formats are rejected without migration or cleanup.
 
 A new runtime without a memory service omits the saved overview from system messages during ordinary
 requests, HITL, and recovery. This does not mutate the saved window or add a session revision change;
@@ -440,6 +440,38 @@ with no cross-turn seen registry or special text pinning. The overview defines t
 long-term memory use. Static `context.yaml` memory stays independent and outside session history.
 BCI, original user input, and latest steer keep their existing protection; recovery after compaction
 uses the new revision and the same pending model step.
+
+`memory.generation.enabled: true` separately enables automatic capture and idle maintenance for root
+runners; it defaults to false. Construction only binds dependencies. Automatic maintenance requires
+flush/dream and overview providers/models plus a mirror. Config-built services reuse the resolved
+provider; injected services retain their own generation dependencies and budgets. Maintenance writes
+only the Agent's `write_namespace`. Children retain reads and explicit writes but do not automatically
+learn their internal trajectories again.
+
+The private [`_memory_maintenance.py`](_memory_maintenance.py) owns the background lifecycle.
+`aprepare()` restores unsealed sources from the same lifecycle store and reopens blocked inputs whose
+budget changed, independently of MCP preparation. Root runs register their lifecycle source ID and run
+ID before committing their first new message. Compaction hints, WAITING/terminal exits, and close capture
+only the unrecorded suffix. WAITING leaves the source open; completion, failure, cancellation, and
+recovery paths that finish without runtime execution retain the actual outcome. BCI, system/reasoning,
+and memory readback text are excluded; Search/Fetch retain item references, and tool calls/results retain
+stable provenance. Durable watermarks make repeated hints idempotent.
+An automatically captured Episode stores the run ID in top-level `source_id`; its metadata holds the
+lifecycle source ID and session boundaries.
+
+Flush → dream → overview runs only after all foreground admission and activation calls have exited
+and `idle_seconds` has elapsed (300 seconds by default). Pending observations receive dreaming priority.
+New start/resume/recover calls and managed follow-ups cancel the timer and background model work without
+waiting for that model before admitting foreground execution.
+Queued follow-ups hold a short foreground handoff reservation from the preceding terminal event until
+their admission resolves. This preserves priority even with zero idle delay; admission success, failure,
+and manager close release the reservation. Close waits for already-dispatched database
+IO, leaves unfinished durable work pending, and does not close injected providers, memory, or stores.
+A failure stops the cycle until new activity or restart. Projection failures after input consumption
+repair the projection without regenerating knowledge. SQLite lifecycle sources can recover committed
+tails after restart; a lost InMemory lifecycle source can only leave already-captured material available.
+Maintenance usage belongs to memory generation results rather than `RunUsage`. Published overviews still
+wait for a new context window or successful compaction before adoption.
 
 `RunUsage` input/output/total fields count only the main model. Summary calls accumulate under
 `usage.compaction`; add the corresponding fields for combined consumption. A summary usage-only

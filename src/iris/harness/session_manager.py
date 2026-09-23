@@ -701,6 +701,7 @@ class SessionManager:
         self._event_consumer_started = False
         self._steering = _SessionSteeringPort(self)
         self._follow_up_admissions: dict[str, _FollowUpAdmission] = {}
+        self._memory_handoffs: set[str] = set()
         self._tracker_reconcile_task: asyncio.Task[None] | None = None
         self._event_buffer = (
             _SessionEventBuffer(
@@ -1013,6 +1014,8 @@ class SessionManager:
                 else:
                     self._complete_follow_up_success_locked(admission)
             self._fail_items(self._pending.drain_all_pending(), reason="session_closed")
+            for pending_run_id in tuple(self._memory_handoffs):
+                self._release_memory_handoff(pending_run_id)
             self._current_run_id = None
             self._current_task = None
         try:
@@ -1241,8 +1244,10 @@ class SessionManager:
         if self._event_buffer is not None and not self._event_buffer.try_register_run(
             item.run_id, after_sequence=0
         ):
+            self._release_memory_handoff(item.run_id)
             return
         self._pending.pop_follow_up()
+        self._reserve_memory_handoff(item.run_id)
         self._current_run_id = item.run_id
         task, started = self._create_start_task_locked(
             input=item.input,
@@ -1306,6 +1311,7 @@ class SessionManager:
         # pop 兼作幂等闸门：多条结算路径只有第一条能取到它。
         if self._follow_up_admissions.pop(admission.item.submission_id, None) is not admission:
             return
+        self._release_memory_handoff(admission.item.run_id)
         self._cancel_follow_up_helpers(admission)
         self._emit_submission_event(admission.item, "delivered")
 
@@ -1317,6 +1323,7 @@ class SessionManager:
         """
         if self._follow_up_admissions.pop(admission.item.submission_id, None) is not admission:
             return
+        self._release_memory_handoff(admission.item.run_id)
         self._cancel_follow_up_helpers(admission)
         if self._current_task is admission.task and self._current_run_id == admission.item.run_id:
             self._current_task = None
@@ -1379,8 +1386,29 @@ class SessionManager:
 
     def _relay_run_event(self, event: RunEvent) -> None:
         """把 durable ``RunEvent`` 合并为可从 store 补读的 per-run 水位。"""
+        if (
+            event.kind is RunEventKind.RUN_TERMINAL
+            and event.run_id == self._current_run_id
+            and not self._closed
+        ):
+            successor = self._pending.peek_follow_up()
+            if successor is not None:
+                self._reserve_memory_handoff(successor.run_id)
         if self._event_buffer is not None:
             self._event_buffer.observe_run_event(event)
+
+    def _reserve_memory_handoff(self, run_id: str) -> None:
+        """terminal 至后继 admission 之间保留前台优先，不创建第二个维护 owner。"""
+        maintenance = self._runner._memory_maintenance
+        if maintenance is not None and run_id not in self._memory_handoffs:
+            self._memory_handoffs.add(run_id)
+            maintenance.foreground_enter()
+
+    def _release_memory_handoff(self, run_id: str) -> None:
+        """admission 完成、失败或关闭后释放该后继的唯一计数凭证。"""
+        if run_id in self._memory_handoffs:
+            self._memory_handoffs.remove(run_id)
+            self._runner._memory_maintenance.foreground_exit()
 
     def _emit_submission_event(
         self,
