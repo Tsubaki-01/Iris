@@ -6,15 +6,17 @@ import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
+from uuid import UUID, uuid4
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
     component TEXT PRIMARY KEY,
-    version INTEGER NOT NULL
+    version INTEGER NOT NULL,
+    source_id TEXT NOT NULL
 )
 """
 
@@ -216,8 +218,8 @@ def _expected_objects(statements: tuple[str, ...]) -> dict[str, str]:
 _EXPECTED_OBJECTS = _expected_objects(SCHEMA_STATEMENTS)
 
 
-def require_exact_schema(path: str | Path) -> None:
-    """要求文件精确匹配当前 lifecycle schema。"""
+def require_exact_schema(path: str | Path) -> str:
+    """要求文件精确匹配当前 lifecycle schema，并返回持久化来源身份。"""
     resolved = Path(path).resolve()
     uri = f"{resolved.as_uri()}?mode=ro"
     try:
@@ -232,8 +234,10 @@ def require_exact_schema(path: str | Path) -> None:
             ).fetchall()
             actual = {name: _normalize_sql(sql) for name, sql in rows if sql is not None}
             identity = (
-                connection.execute("SELECT component, version FROM lifecycle_schema").fetchall()
-                if "lifecycle_schema" in actual
+                connection.execute(
+                    "SELECT component, version, source_id FROM lifecycle_schema"
+                ).fetchall()
+                if actual == _EXPECTED_OBJECTS
                 else []
             )
     except sqlite3.Error as exc:
@@ -242,12 +246,20 @@ def require_exact_schema(path: str | Path) -> None:
             path=str(resolved),
         ) from exc
 
-    if actual != _EXPECTED_OBJECTS or identity != [("agent_lifecycle", _SCHEMA_VERSION)]:
+    if (
+        actual != _EXPECTED_OBJECTS
+        or len(identity) != 1
+        or identity[0][:2] != ("agent_lifecycle", _SCHEMA_VERSION)
+    ):
         raise IrisLifecycleSchemaError(
             "SQLite 文件不是当前 lifecycle schema",
             path=str(resolved),
             expected_version=_SCHEMA_VERSION,
         )
+    try:
+        return str(UUID(identity[0][2]))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise IrisLifecycleSchemaError("lifecycle SQLite 来源身份无效", path=str(resolved)) from exc
 
 
 def create_schema(connection: sqlite3.Connection) -> None:
@@ -257,8 +269,8 @@ def create_schema(connection: sqlite3.Connection) -> None:
         for statement in SCHEMA_STATEMENTS:
             connection.execute(statement)
         connection.execute(
-            "INSERT INTO lifecycle_schema(component, version) VALUES (?, ?)",
-            ("agent_lifecycle", _SCHEMA_VERSION),
+            "INSERT INTO lifecycle_schema(component, version, source_id) VALUES (?, ?, ?)",
+            ("agent_lifecycle", _SCHEMA_VERSION, str(uuid4())),
         )
         connection.commit()
     except sqlite3.Error:

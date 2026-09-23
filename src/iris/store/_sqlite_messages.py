@@ -19,6 +19,7 @@ def decode_session_messages(
     expected_count: int,
     path: Path,
     operation: str,
+    start_count: int = 0,
 ) -> list[Msg]:
     """在持久化读取边界校验消息数量、连续序号并解码消息。
 
@@ -27,6 +28,7 @@ def decode_session_messages(
         expected_count: 对应 session metadata 或终态截点中的消息数。
         path: 用于错误上下文的数据库路径。
         operation: 用于错误上下文的 store 操作名。
+        start_count: 区间之前已有的消息数，完整历史与前缀读取使用零。
 
     Returns:
         从 durable rows 独立解码的消息列表。
@@ -38,7 +40,7 @@ def decode_session_messages(
         if len(rows) != expected_count:
             raise ValueError("session message_count 与 row count 不一致")
         messages: list[Msg] = []
-        for expected_ordinal, row in enumerate(rows, start=1):
+        for expected_ordinal, row in enumerate(rows, start=start_count + 1):
             if row["ordinal"] != expected_ordinal:
                 raise ValueError("session message ordinal 不连续")
             payload = json.loads(row["message_json"])

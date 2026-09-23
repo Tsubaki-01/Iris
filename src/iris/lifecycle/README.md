@@ -58,6 +58,15 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
+`source_id` 是只读的来源 UUID：SQLite 数据库重开后保持不变，InMemory 仅在当前实例生命周期内
+稳定。`load_run_message_slice(run_id, after_count=0)` 返回公开的 `RunMessageSlice`，在同一读取
+快照中包含 source/run/session ID、`initial_message_count`、`start_message_count`、
+`end_message_count`、可空 `terminal_message_count` / `outcome` 和 `messages` tuple。
+计数均为 session 累计消息数，返回区间为 `[max(after_count, initial_message_count), end_message_count)`；
+活跃 run 停在已提交末尾，终态 run 停在自己的终态截点。前一轮历史与 fork 继承前缀不作为本 run
+新材料；后续 run 也不会混入。负游标或超过该末尾的游标抛出 `IrisRunStateError`，缺失 run
+抛出 `IrisRunNotFoundError`。该读取只提供来源材料，不生成长期记忆。
+
 `CommitRunInput` / `commit_run_input()` 在既有 run/session CAS 和 activation fence 下原子追加
 BCI、用户输入并初始化上下文窗口，推进 checkpoint sequence 到 `before_model`。只改变 cursor
 位置，不改变 step index、usage 或 model reservation，也不追加模型事件。重复旧 command 冲突。

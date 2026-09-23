@@ -16,7 +16,7 @@ from typing import Protocol
 from ..hitl.models import HumanInteraction, HumanInteractionResponse
 from ..message.message import Msg
 from ..tools.base import ToolResult
-from .history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
+from .history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
 from .models import (
     ActivationKind,
     AgentRunOptions,
@@ -313,6 +313,9 @@ class RunCommit:
 class LifecycleStore(Protocol):
     """Logical run aggregate 的同步 durable boundary。"""
 
+    @property
+    def source_id(self) -> str: ...
+
     def create_run(self, command: CreateRun) -> RunCommit: ...
 
     def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink: ...
@@ -356,6 +359,8 @@ class LifecycleStore(Protocol):
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
+
+    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice: ...
 
     def list_fork_points(
         self,

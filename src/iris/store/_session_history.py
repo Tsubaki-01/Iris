@@ -32,6 +32,22 @@ def validate_fork_source(run: RunRecord, *, is_child: bool) -> None:
         raise IrisRunStateError("fork 来源必须是顶层 run", run_id=run.run_id)
 
 
+def run_message_slice_bounds(
+    run: RunRecord, *, session_message_count: int, after_count: int
+) -> tuple[int, int]:
+    """在来源读取边界校验游标，并限定本 run 的半开消息区间。"""
+    end = (
+        session_message_count
+        if run.terminal_session_message_count is None
+        else run.terminal_session_message_count
+    )
+    if not 0 <= after_count <= end:
+        raise IrisRunStateError(
+            "after_count 必须位于已提交消息范围内", run_id=run.run_id, after_count=after_count
+        )
+    return max(after_count, run.initial_session_message_count), end
+
+
 def project_fork_point(run: RunRecord) -> ForkPoint:
     """将已通过来源筛选的 terminal run 投影为分支点。"""
     return ForkPoint(

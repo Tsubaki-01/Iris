@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v8 的同步 SQLite store。"""
+"""精确 lifecycle schema v9 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
+from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -95,6 +95,7 @@ from ._serialization import jsonable as _jsonable
 from ._session_history import (
     build_fork_point_page,
     project_fork_point,
+    run_message_slice_bounds,
     validate_context_window_initialization,
     validate_fork_source,
 )
@@ -163,7 +164,7 @@ class SQLiteStore:
             if is_empty:
                 with self._connect() as connection:
                     create_schema(connection)
-            require_exact_schema(self.path)
+            self._source_id = require_exact_schema(self.path)
         except IrisLifecycleSchemaError:
             raise
         except (OSError, sqlite3.Error) as exc:
@@ -171,6 +172,11 @@ class SQLiteStore:
                 "无法初始化 lifecycle SQLite store",
                 path=str(self.path),
             ) from exc
+
+    @property
+    def source_id(self) -> str:
+        """返回数据库创建时保存的来源身份，重开数据库保持不变。"""
+        return self._source_id
 
     def load_subagent_link(
         self, parent_run_id: str, parent_tool_call_id: str
@@ -621,6 +627,48 @@ class SQLiteStore:
                 operation="load_session",
             ),
         )
+
+    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice:
+        """在同一只读事务中读取本 run 边界和已提交消息后缀。"""
+        operation = "load_run_message_slice"
+
+        def read(connection: sqlite3.Connection) -> RunMessageSlice:
+            run = self._require_run(connection, run_id, operation=operation)
+            metadata = self._select_session_metadata(
+                connection, run.session_id, operation=operation
+            )
+            if metadata is None:
+                raise IrisRunPersistenceError(
+                    "run 对应的 session 不存在", run_id=run_id, session_id=run.session_id
+                )
+            start, end = run_message_slice_bounds(
+                run, session_message_count=metadata.message_count, after_count=after_count
+            )
+            rows = connection.execute(
+                """SELECT ordinal, message_json FROM session_messages
+                WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal""",
+                (run.session_id, start, end),
+            ).fetchall()
+            messages = decode_session_messages(
+                rows,
+                expected_count=end - start,
+                start_count=start,
+                path=self.path,
+                operation=operation,
+            )
+            return RunMessageSlice(
+                source_id=self.source_id,
+                run_id=run.run_id,
+                session_id=run.session_id,
+                initial_message_count=run.initial_session_message_count,
+                start_message_count=start,
+                end_message_count=end,
+                terminal_message_count=run.terminal_session_message_count,
+                outcome=run.stop_reason,
+                messages=tuple(messages),
+            )
+
+        return self._read(operation, read)
 
     def list_fork_points(
         self,

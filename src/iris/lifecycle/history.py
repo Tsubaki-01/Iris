@@ -50,4 +50,19 @@ class RunHistorySnapshot:
     messages: tuple[Msg, ...]
 
 
-__all__ = ["ForkPoint", "ForkPointCursor", "ForkPointPage", "RunHistorySnapshot"]
+@dataclass(frozen=True, slots=True)
+class RunMessageSlice:
+    """同一读取快照内的 run 新增消息区间，计数均为 session 累计消息数。"""
+
+    source_id: str
+    run_id: str
+    session_id: str
+    initial_message_count: int
+    start_message_count: int
+    end_message_count: int
+    terminal_message_count: int | None
+    outcome: RunStopReason | None
+    messages: tuple[Msg, ...]
+
+
+__all__ = ["ForkPoint", "ForkPointCursor", "ForkPointPage", "RunHistorySnapshot", "RunMessageSlice"]

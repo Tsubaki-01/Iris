@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v8 schema 与 session history 的持久化契约测试。"""
+"""Lifecycle SQLite v9 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ _TABLES = {
 }
 _COLUMNS = {
     "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
-    "lifecycle_schema": ["component", "version"],
+    "lifecycle_schema": ["component", "version", "source_id"],
     "sessions": [
         "session_id",
         "revision",
@@ -149,7 +149,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v8_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v9_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -190,7 +190,7 @@ def test_empty_database_creates_exact_v8_schema_and_reopens(tmp_path: Path) -> N
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 8)]
+    assert identity == [("agent_lifecycle", 9)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
@@ -210,7 +210,7 @@ def test_empty_database_creates_exact_v8_schema_and_reopens(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "kind", ["legacy", "v3", "v4", "v5", "v6", "v7", "extra", "missing", "unknown_version"]
+    "kind", ["legacy", "v3", "v4", "v5", "v6", "v7", "v8", "extra", "missing", "unknown_version"]
 )
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
@@ -247,6 +247,8 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("UPDATE lifecycle_schema SET version = 6")
             elif kind == "v7":
                 connection.execute("UPDATE lifecycle_schema SET version = 7")
+            elif kind == "v8":
+                connection.execute("UPDATE lifecycle_schema SET version = 8")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()

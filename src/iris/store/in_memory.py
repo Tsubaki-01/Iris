@@ -15,6 +15,7 @@ from copy import deepcopy
 from datetime import datetime
 from threading import RLock
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from ..exceptions import (
     IrisRunConflictError,
@@ -28,7 +29,7 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot
+from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -89,6 +90,7 @@ from ._compaction import add_compaction_usage, validate_compaction_commit
 from ._session_history import (
     build_fork_point_page,
     project_fork_point,
+    run_message_slice_bounds,
     validate_context_window_initialization,
     validate_fork_source,
 )
@@ -115,6 +117,7 @@ class InMemoryLifecycleStore:
     """使用 process-local dict 实现完整 ``LifecycleStore`` contract。"""
 
     def __init__(self) -> None:
+        self._source_id = str(uuid4())
         self._lock = RLock()
         self._runs: dict[str, RunRecord] = {}
         self._sessions: dict[str, SessionSnapshot] = {}
@@ -127,6 +130,11 @@ class InMemoryLifecycleStore:
         self._events: dict[str, list[RunEvent]] = {}
         self._results: dict[str, RunResult] = {}
         self._subagent_links: dict[tuple[str, str], SubagentRunLink] = {}
+
+    @property
+    def source_id(self) -> str:
+        """返回此内存实例生命周期内稳定的来源身份。"""
+        return self._source_id
 
     def load_subagent_link(
         self, parent_run_id: str, parent_tool_call_id: str
@@ -1545,6 +1553,26 @@ class InMemoryLifecycleStore:
         """返回 session snapshot；缺失 session 表示 revision 0 的空历史。"""
         with self._lock:
             return deepcopy(self._sessions.get(session_id, SessionSnapshot(session_id=session_id)))
+
+    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice:
+        """在同一锁内取得本 run 已提交消息区间，排除继承前缀与后续 run。"""
+        with self._lock:
+            run = self._require_run(run_id)
+            messages = self._sessions[run.session_id].messages
+            start, end = run_message_slice_bounds(
+                run, session_message_count=len(messages), after_count=after_count
+            )
+            return RunMessageSlice(
+                source_id=self.source_id,
+                run_id=run.run_id,
+                session_id=run.session_id,
+                initial_message_count=run.initial_session_message_count,
+                start_message_count=start,
+                end_message_count=end,
+                terminal_message_count=run.terminal_session_message_count,
+                outcome=run.stop_reason,
+                messages=tuple(deepcopy(messages[start:end])),
+            )
 
     def list_fork_points(
         self,
