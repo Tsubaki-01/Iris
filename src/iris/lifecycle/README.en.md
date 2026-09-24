@@ -62,14 +62,18 @@ provider clients, tasks, locks, signals, or callbacks.
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
 The read-only `source_id` is a source UUID: reopening a SQLite database preserves it, while an
-InMemory identity lasts for one instance. `load_run_message_slice(run_id, after_count=0)` returns
+InMemory identity lasts for one instance. `load_run_message_slice(run_id, after_count=0, *, limit=128)` returns
 the public `RunMessageSlice` in one read snapshot, including source/run/session IDs,
 `initial_message_count`, `start_message_count`, `end_message_count`, nullable
 `terminal_message_count` / `outcome`, and a `messages` tuple. Counts are cumulative session message
 counts. The returned interval is `[max(after_count, initial_message_count), end_message_count)`.
-Active runs end at the committed tail; terminal runs end at their own terminal cutoff. Earlier
-turns, inherited fork history, and later runs are excluded. A negative cursor or one beyond that
-tail raises `IrisRunStateError`; a missing run raises `IrisRunNotFoundError`. This read supplies
+Each page contains at most `limit` messages. `end_message_count` is the page end and can be passed
+as the next `after_count`; `terminal_message_count` remains the full terminal cutoff on every page.
+Active runs never exceed the committed tail, and terminal runs never exceed their own cutoff.
+Fewer than `limit` messages means the snapshot tail has been reached; separate pages do not share
+a fixed snapshot. Earlier turns, inherited fork history, and later runs are excluded. A nonpositive
+`limit`, a negative cursor, or one beyond the run's readable tail raises `IrisRunStateError`;
+a missing run raises `IrisRunNotFoundError`. This read supplies
 source material and does not generate long-term memory.
 
 `CommitRunInput` / `commit_run_input()` atomically appends BCI and user input and initializes the window under

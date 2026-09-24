@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..utils import TemplateRenderer
+from ._generation_worker import check_generation_cancelled
 from ._prompts import render_memory_prompt
 from .models import MemoryNamespaceSnapshot, MemoryOverviewConfig, MemoryOverviewContent
 
@@ -25,6 +26,7 @@ def build_overview_request(
     for (category, kind), items in groupby(
         snapshot.items, key=lambda item: (item.category, item.kind)
     ):
+        check_generation_cancelled()
         groups.append(
             {
                 "category": category.value,

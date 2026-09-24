@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..providers.protocols import CompletionProvider
+from ._generation_worker import check_generation_cancelled
 from ._prompts import render_memory_prompt
 from .generation_models import (
     DreamOperation,
@@ -151,6 +152,7 @@ def _flush_input(
     records: list[dict[str, object]] = []
     context: list[str] = []
     for index, piece in enumerate(slices):
+        check_generation_cancelled()
         progress = progresses_by_episode[piece.episode_id]
         episode = progress.episode
         captured = "lifecycle_source_id" in episode.metadata
@@ -246,6 +248,7 @@ def _select_flush(
 
     for progress in progresses:
         for index in range(progress.cursor.record_index, len(progress.episode.records)):
+            check_generation_cancelled()
             record = progress.episode.records[index]
             start = progress.cursor.text_offset if index == progress.cursor.record_index else 0
             end = len(record.text)
@@ -260,6 +263,7 @@ def _select_flush(
                 return tuple(slices), build(slices)
             low, high = start, end
             while low < high:
+                check_generation_cancelled()
                 middle = (low + high + 1) // 2
                 candidate = EpisodeSlice(
                     piece.episode_id, piece.record_id, start, middle, record.text[start:middle]
@@ -296,13 +300,23 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
         )
         if not progresses:
             return GenerationResult(namespace=namespace, stage="flush", status="empty")
-        prompt = render_memory_prompt(
-            service.prompt_renderer,
-            "memory_flush.j2",
-            {"schema_json": json.dumps(_FlushResponse.model_json_schema(), ensure_ascii=False)},
+        prompt = await service.run_async_io(
+            lambda: render_memory_prompt(
+                service.prompt_renderer,
+                "memory_flush.j2",
+                {"schema_json": json.dumps(_FlushResponse.model_json_schema(), ensure_ascii=False)},
+            )
         )
-        slices, request = _select_flush(
-            namespace, progresses, provider, model, service.generation_config, prompt
+        slices, request = await service.run_async_io(
+            partial(
+                _select_flush,
+                namespace,
+                progresses,
+                provider,
+                model,
+                service.generation_config,
+                prompt,
+            )
         )
         input_ids = tuple(dict.fromkeys(piece.episode_id for piece in slices))
         records = {
@@ -325,7 +339,7 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
         if refs:
             response = await provider.complete(request)
             usage = _usage(response)
-            extracted = _parse(response, _FlushResponse)
+            extracted = await service.run_async_io(partial(_parse, response, _FlushResponse))
         else:
             extracted = _FlushResponse(observations=())
         known_items = {
@@ -499,11 +513,14 @@ def _dream_input(snapshot: DreamSnapshot) -> tuple[dict[str, object], dict[str, 
     }, refs
 
 
-def _with_original_evidence(
+def _prepare_dream_request(
     service: MemoryService,
     snapshot: DreamSnapshot,
-) -> tuple[dict[str, object], dict[str, MemoryEvidenceRef]]:
-    """按引用补充不可变原文；可变知识已经固定在同一 DreamSnapshot 内。"""
+    provider: CompletionProvider,
+    model: str,
+    prompt: str,
+) -> tuple[LLMRequest, dict[str, MemoryEvidenceRef], int]:
+    """在同一同步作业中补充原文、构造请求并估算 token；知识使用固定快照。"""
     source, refs = _dream_input(snapshot)
     episodes = {
         ref.source_id: service.store.get_episode(ref.source_id, snapshot.namespace)
@@ -512,6 +529,7 @@ def _with_original_evidence(
     }
     excerpts: dict[str, dict[str, object]] = {}
     for key, ref in refs.items():
+        check_generation_cancelled()
         if ref.kind == "episode":
             episode = episodes[ref.source_id]
             record = next(record for record in episode.records if record.id == ref.record_id)
@@ -522,7 +540,13 @@ def _with_original_evidence(
                 "metadata": record.metadata,
             }
     source["original_evidence"] = excerpts
-    return source, refs
+    request = _request(
+        model,
+        prompt,
+        source,
+        service.generation_config.dream_output_budget_tokens,
+    )
+    return request, refs, provider.estimate_input_tokens(request)
 
 
 def _bind_plan(
@@ -625,10 +649,12 @@ async def dream(
             return GenerationResult(
                 namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
             )
-        prompt = render_memory_prompt(
-            service.prompt_renderer,
-            "memory_dream.j2",
-            {"schema_json": json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False)},
+        prompt = await service.run_async_io(
+            lambda: render_memory_prompt(
+                service.prompt_renderer,
+                "memory_dream.j2",
+                {"schema_json": json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False)},
+            )
         )
         while True:
             while True:
@@ -644,16 +670,10 @@ async def dream(
                             partial(service.store.record_generation_result, result)
                         )
                     return result
-                source, refs = await service.run_async_io(
-                    partial(_with_original_evidence, service, snapshot)
+                request, refs, estimated_tokens = await service.run_async_io(
+                    partial(_prepare_dream_request, service, snapshot, provider, model, prompt)
                 )
-                request = _request(
-                    model,
-                    prompt,
-                    source,
-                    config.dream_output_budget_tokens,
-                )
-                if provider.estimate_input_tokens(request) <= config.dream_input_budget_tokens:
+                if estimated_tokens <= config.dream_input_budget_tokens:
                     break
                 inputs = [
                     *(("observation", item.id) for item in snapshot.observations),
@@ -686,7 +706,7 @@ async def dream(
                         change_ids=tuple(key for kind, key in selected if kind == "change"),
                     )
                 )
-            if provider.estimate_input_tokens(request) <= config.dream_input_budget_tokens:
+            if estimated_tokens <= config.dream_input_budget_tokens:
                 break
             snapshot = await service.run_async_io(
                 lambda: service.store.read_dream_snapshot(namespace)
@@ -697,7 +717,9 @@ async def dream(
         )
         response = await provider.complete(request)
         usage = _usage(response)
-        plan = _bind_plan(_parse(response, _DreamResponse), snapshot, refs)
+        plan = await service.run_async_io(
+            lambda: _bind_plan(_parse(response, _DreamResponse), snapshot, refs)
+        )
         await before_generation_commit()
         counts: dict[str, int] = dict(Counter(operation.action for operation in plan.operations))
         counts.update(

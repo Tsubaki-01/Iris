@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 
+import iris.memory.generation as memory_generation
+import iris.memory.service as memory_service
 from iris.memory import (
     FileMemoryMirror,
     MemoryIOExecutionMode,
@@ -89,6 +91,76 @@ def _stage_results(service: MemoryService, stage: str) -> list[dict[str, Any]]:
                 "SELECT payload FROM memory_generation_results WHERE stage=?", (stage,)
             )
         ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["flush", "dream", "overview"])
+@pytest.mark.parametrize("boundary", ["template", "prepare", "parse"])
+async def test_slow_generation_processing_leaves_loop_and_foreground_reads_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, boundary: str
+) -> None:
+    """扣住同步生成计算，前台仍能读库并取消等待，迟到结果不消费材料。"""
+    service, provider = _service(tmp_path)
+    item = service.remember(MemoryWriteInput(text="original fact", reason="seed"))
+    service.observe(MemoryObserveInput(text="new source"))
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started = asyncio.Event()
+    release = threading.Event()
+    worker_threads: list[int] = []
+    model_threads: list[int] = []
+    original_complete = provider.complete
+
+    async def complete(request: LLMRequest) -> LLMResponse:
+        model_threads.append(threading.get_ident())
+        return await original_complete(request)
+
+    monkeypatch.setattr(provider, "complete", complete)
+    if boundary == "template":
+        target, attribute = service.prompt_renderer, "render_file"
+        original = service.prompt_renderer.render_file
+    elif boundary == "prepare":
+        target, attribute = provider, "estimate_input_tokens"
+        original = provider.estimate_input_tokens
+    elif stage == "overview":
+        target, attribute = memory_service, "complete_overview_content"
+        original = memory_service.complete_overview_content
+    else:
+        target, attribute = memory_generation, "_parse"
+        original = memory_generation._parse
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        worker_threads.append(threading.get_ident())
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "同步生成计算占用了前台事件循环"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, attribute, slow)
+    operation = {
+        "flush": service.flush,
+        "dream": service.dream,
+        "overview": service.refresh_overview,
+    }[stage]
+    task = asyncio.create_task(operation("project"))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        current = await asyncio.wait_for(service.aget_item(item.id, ["project"]), 1)
+        assert current == item
+        assert not task.done()
+        assert worker_threads and loop_thread not in worker_threads
+        assert all(thread_id == loop_thread for thread_id in model_threads)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await service.wait_pending_io()
+    assert provider.calls == (1 if boundary == "parse" else 0)
+    state = service.generation_state("project")
+    assert state.pending_episodes == state.pending_changes == 1
+    assert service.get_item(item.id, ["project"]) == item
+    assert _stage_results(service, stage)[0]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

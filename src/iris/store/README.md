@@ -27,8 +27,10 @@ constructor 不重置或修改原文件。
 
 两种实现公开只读 `source_id`。SQLite 在 `lifecycle_schema.source_id` 保存创建时生成的 UUID，
 重开同一数据库保持相同身份；InMemory 每个实例生成自己的 UUID。`load_run_message_slice()`
-在同一读快照中返回 run 边界、终态结果和本 run 已提交的消息后缀。SQLite 按 ordinal 范围直接
-查询，InMemory 在同一锁内切片并隔离副本；二者都排除早期轮次、fork 继承前缀和后续 run。
+在同一读快照中返回 run 边界、终态结果和本 run 已提交的有界消息页，默认 `limit=128`。
+SQLite 在同一读事务中按 ordinal 范围取得 run、计数与原始行，释放事务和共享锁后才解码消息；
+InMemory 在同一锁内仅复制本页至多 `limit` 条消息。`end_message_count` 是页末，供下一页
+继续读取；`terminal_message_count` 保留完整终点。二者都排除早期轮次、fork 继承前缀和后续 run。
 消息计数与返回模型详见 [lifecycle 契约](../lifecycle/README.md#store-contract)。
 
 ## 实现架构

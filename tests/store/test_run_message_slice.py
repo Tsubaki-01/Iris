@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from uuid import UUID
 
 import pytest
 
+import iris.store.sqlite as sqlite_module
 from iris.exceptions import IrisRunNotFoundError, IrisRunStateError
 from iris.lifecycle import FinishRun, ForkSession, LifecycleStore, RunRecord, RunStopReason
+from iris.message import Msg
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 
 from .test_lifecycle_store_contract import _NOW, _complete_history_turn
@@ -88,6 +94,46 @@ def test_terminal_slice_stops_before_later_run_and_skips_previous_run(
     assert store.load_run_message_slice("second", 4).messages == ()
 
 
+def test_active_slice_default_page_is_bounded_and_continuous(store: LifecycleStore) -> None:
+    command = replace(
+        _input_command(store),
+        message_delta=[Msg.user(f"message {index}") for index in range(130)],
+    )
+    store.commit_run_input(command)
+
+    first = store.load_run_message_slice(command.run_id)
+    second = store.load_run_message_slice(command.run_id, first.end_message_count)
+    tail = store.load_run_message_slice(command.run_id, second.end_message_count)
+
+    assert (first.start_message_count, first.end_message_count) == (0, 128)
+    assert (second.start_message_count, second.end_message_count) == (128, 130)
+    assert (tail.start_message_count, tail.end_message_count) == (130, 130)
+    assert first.messages + second.messages == tuple(command.message_delta)
+    assert first.terminal_message_count is second.terminal_message_count is None
+    assert tail.messages == ()
+
+
+def test_terminal_slice_pages_keep_full_cutoff_and_exclude_adjacent_runs(
+    store: LifecycleStore,
+) -> None:
+    _complete_history_turn(store, run_id="first", session_id="main")
+    _complete_history_turn(store, run_id="second", session_id="main")
+    expected = tuple(store.load_session("main").messages[2:])
+    _complete_history_turn(store, run_id="third", session_id="main")
+
+    first = store.load_run_message_slice("second", limit=1)
+    second = store.load_run_message_slice("second", first.end_message_count, limit=1)
+    tail = store.load_run_message_slice("second", second.end_message_count, limit=1)
+
+    assert (first.start_message_count, first.end_message_count) == (2, 3)
+    assert (second.start_message_count, second.end_message_count) == (3, 4)
+    assert first.messages + second.messages == expected
+    assert first.terminal_message_count == second.terminal_message_count == 4
+    assert first.outcome is second.outcome is RunStopReason.COMPLETED
+    assert tail.messages == ()
+    assert tail.start_message_count == tail.end_message_count == tail.terminal_message_count == 4
+
+
 def test_fork_inherited_history_is_not_new_source_material(store: LifecycleStore) -> None:
     _complete_history_turn(store, run_id="source", session_id="main")
     store.fork_session(ForkSession(source_run_id="source", target_session_id="branch", now=_NOW))
@@ -113,6 +159,9 @@ def test_source_slice_rejects_invalid_cursor_and_unknown_run(store: LifecycleSto
     for after_count in (-1, 3):
         with pytest.raises(IrisRunStateError):
             store.load_run_message_slice(command.run_id, after_count)
+    for limit in (0, -1):
+        with pytest.raises(IrisRunStateError):
+            store.load_run_message_slice(command.run_id, limit=limit)
 
 
 def test_empty_terminal_run_preserves_zero_cutoff_and_outcome(store: LifecycleStore) -> None:
@@ -176,3 +225,45 @@ def test_sqlite_slice_metadata_and_messages_share_read_snapshot(
     second = store.load_run_message_slice(command.run_id)
     assert second.end_message_count == 2
     assert second.messages == tuple(command.message_delta)
+
+
+def test_sqlite_slice_decoding_releases_store_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "decode-lock.db")
+    command = _input_command(store)
+    store.commit_run_input(command)
+    started = Event()
+    release = Event()
+    original = sqlite_module.decode_session_messages
+
+    def decode(
+        rows: Sequence[sqlite3.Row],
+        *,
+        expected_count: int,
+        path: Path,
+        operation: str,
+        start_count: int = 0,
+    ) -> list[Msg]:
+        started.set()
+        assert release.wait(timeout=5)
+        return original(
+            rows,
+            expected_count=expected_count,
+            path=path,
+            operation=operation,
+            start_count=start_count,
+        )
+
+    monkeypatch.setattr(sqlite_module, "decode_session_messages", decode)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        sliced = executor.submit(store.load_run_message_slice, command.run_id)
+        try:
+            assert started.wait(timeout=2)
+            control = executor.submit(store.load_run_control, command.run_id).result(timeout=2)
+            assert control is not None
+            assert control.run_id == command.run_id
+            assert not sliced.done()
+        finally:
+            release.set()
+        assert sliced.result(timeout=2).messages == tuple(command.message_delta)

@@ -93,7 +93,7 @@ def capture_episode(
                     metadata=metadata,
                 )
             )
-    terminal = messages.terminal_message_count if end == messages.end_message_count else None
+    terminal = messages.terminal_message_count if end == messages.terminal_message_count else None
     updated = source.model_copy(
         update={
             "captured_until": end,

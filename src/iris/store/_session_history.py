@@ -33,9 +33,11 @@ def validate_fork_source(run: RunRecord, *, is_child: bool) -> None:
 
 
 def run_message_slice_bounds(
-    run: RunRecord, *, session_message_count: int, after_count: int
+    run: RunRecord, *, session_message_count: int, after_count: int, limit: int
 ) -> tuple[int, int]:
-    """在来源读取边界校验游标，并限定本 run 的半开消息区间。"""
+    """在来源读取边界校验分页参数，并限定本 run 的半开消息区间。"""
+    if limit <= 0:
+        raise IrisRunStateError("limit 必须大于 0", limit=limit)
     end = (
         session_message_count
         if run.terminal_session_message_count is None
@@ -45,7 +47,8 @@ def run_message_slice_bounds(
         raise IrisRunStateError(
             "after_count 必须位于已提交消息范围内", run_id=run.run_id, after_count=after_count
         )
-    return max(after_count, run.initial_session_message_count), end
+    start = max(after_count, run.initial_session_message_count)
+    return start, min(start + limit, end)
 
 
 def project_fork_point(run: RunRecord) -> ForkPoint:

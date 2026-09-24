@@ -59,10 +59,12 @@ current = service.get_item(item.id, ["project"])
 `build_memory_service_from_config(config, workspace_root, memory_service=...)` 是唯一来源解析入口：
 关闭直接返回 `None`，不解析 memory 路径或创建文件；开启时原样返回注入对象，未注入才构造
 SQLite 服务。注入对象的 store、mirror、provider/model 和 IO 模式保持不变。配置构造时，memory
-root 和 database path 必须位于给定 workspace 内。由该工厂构造的 SQLite service 会让 async
-读写在一个 worker job 中完成，包含连接、SQL 和结果组装；同步 `search()` 等 API 仍在调用线程执行。直接构造
-`MemoryService` 或注入自定义 store 时默认 `MemoryIOExecutionMode.INLINE`，不会静默改变其
-线程亲和性。独立 `MemoryService` 和低层工具注册 SDK 不受 Agent 开关控制。
+root 和 database path 必须位于给定 workspace 内。配置创建的 SQLite 服务使用
+`MemoryIOExecutionMode.THREAD`；直接构造 `MemoryService` 默认 `INLINE`，保留宿主的线程选择。
+THREAD 的 async 读写每次以一个完整作业完成连接、SQL 和结果组装；同步 `search()` 等 API
+仍在调用线程执行。自定义 store 和同步 token 估算器只有在支持跨线程调用时才显式选择 THREAD。
+INLINE 的同步操作仍会占用事件循环，后台维护不会覆盖这个选择。
+独立 `MemoryService` 和低层工具注册 SDK 不受 Agent 开关控制。
 
 ## 架构与数据流
 
@@ -163,6 +165,16 @@ overview provider/model 和 mirror 均已绑定，否则构造 runner 时报告 
 它们全部退出且安静达到 `idle_seconds` 后，处理观察、flush 新经历、dreaming 并发布概览。
 新前台输入取消未提交的生成；已经派发的短数据库提交完整收口。`aclose()` 补捕获并等待真实 IO
 完成，保留未处理材料供下次启动。没有轮询、外部 cron 或独立 daemon。
+
+自动维护为 THREAD 服务持有独立的单线程 worker，只有维护 task 的同步工作进入该队列：
+后台 IO、提示词模板渲染、flush 选材、dream/overview 请求构造、token 估算和响应解析。前台读写、来源登记和
+Capture 仍走原执行路径，不排在后台计算后面；独立 SDK 调用也不隐式创建维护 worker。
+`provider.complete()` 保持在当前事件循环异步调用。取消不强杀线程；选材在记录边界检查
+取消，旧同步作业实际退出前不启动下一轮维护，迟到结果不发起后续模型请求或提交。
+关闭等待真实 IO 和计算完成，然后释放维护 worker。
+Capture 每页最多 128 条消息，页间让出事件循环；游标到达完整终点才封源。SQLite 原始行
+读取后释放事务和 lifecycle 锁，再解码消息。来源登记和返回前 Capture 仍等待持久化；
+专用 worker 隔离后台队列，不消除数据库锁和 CPU 竞争，也不承诺前台零额外延迟。
 
 SQLite lifecycle 用持久 source UUID 和本 run 消息范围补捕获，fork 继承前缀不重新学习；
 InMemory lifecycle 只能恢复已写入 memory 库的材料。child 不自动收集内部轨迹，仍可读取和显式写入。

@@ -9,11 +9,13 @@ from typing import cast
 
 from ..lifecycle import LifecycleStore, RunRecord
 from ..memory import MemoryService
+from ..memory._generation_worker import GenerationWorker
 from ..memory.generation_models import GenerationResult
 from ..memory.mirror import FileMemoryMirror
 from ._memory_capture import capture_episode, capture_source
 
 logger = logging.getLogger(__name__)
+_CAPTURE_BATCH_SIZE = 128
 
 
 class MemoryMaintenance:
@@ -37,6 +39,7 @@ class MemoryMaintenance:
         self._capture_requests: dict[str, int | None] = {}
         self._capture_task: asyncio.Task[None] | None = None
         self._known_runs: dict[str, RunRecord] = {}
+        self._worker = GenerationWorker(on_idle=self._schedule)
 
     @property
     def foreground_active(self) -> bool:
@@ -86,42 +89,49 @@ class MemoryMaintenance:
     async def capture_pending(self) -> None:
         """恢复同源已登记后缀，并补采当前 runner 已知但登记曾失败的 run。"""
         try:
-            await self.service.run_async_io(self._capture_pending_sync)
+            for run in tuple(self._known_runs.values()):
+                await self.register_run(run)
+            sources = await self.service.run_async_io(
+                lambda: self.service.store.list_capture_sources(
+                    self.lifecycle_store.source_id, self.namespace
+                )
+            )
+            for source in sources:
+                await self._capture_source(source.run_id, None)
         except Exception as exc:
             await self._capture_failed(exc)
         self._dirty = True
 
-    def _capture_pending_sync(self) -> None:
-        """一份 worker job 完成来源读取和持久 capture，连接各归原 store 管理。"""
-        for run in tuple(self._known_runs.values()):
-            self.service.store.register_source(
-                capture_source(
-                    run, source_id=self.lifecycle_store.source_id, namespace=self.namespace
-                )
-            )
-            self._known_runs.pop(run.run_id, None)
-        sources = self.service.store.list_capture_sources(
-            self.lifecycle_store.source_id, self.namespace
-        )
-        for source in sources:
-            self._capture_source_sync(source.run_id, None)
+    async def _capture_source(self, run_id: str, through_count: int | None) -> None:
+        """每页独立读取和提交，在页间让出事件循环，不占用后台生成 worker。"""
+        while await self.service.run_async_io(
+            partial(self._capture_source_sync, run_id, through_count)
+        ):
+            await asyncio.sleep(0)
 
-    def _capture_source_sync(self, run_id: str, through_count: int | None) -> None:
-        """读取精确后缀，水位 CAS 防止重复提示创建重复经历。"""
+    def _capture_source_sync(self, run_id: str, through_count: int | None) -> bool:
+        """读取一页精确后缀；返回是否继续，水位 CAS 防止重复经历。"""
         run = self.lifecycle_store.load_run(run_id)
         if run is None:
-            return
+            return False
         source = self.service.store.register_source(
             capture_source(run, source_id=self.lifecycle_store.source_id, namespace=self.namespace)
         )
         if source.terminal_message_count is not None:
-            return
-        messages = self.lifecycle_store.load_run_message_slice(run_id, source.captured_until)
+            return False
+        messages = self.lifecycle_store.load_run_message_slice(
+            run_id, source.captured_until, limit=_CAPTURE_BATCH_SIZE
+        )
         updated, episode = capture_episode(source, messages, through_count=through_count)
         if updated == source:
-            return
-        self.service.store.commit_capture(
+            return False
+        committed = self.service.store.commit_capture(
             updated, expected_captured_until=source.captured_until, episode=episode
+        )
+        return not committed or (
+            updated.terminal_message_count is None
+            and len(messages.messages) == _CAPTURE_BATCH_SIZE
+            and (through_count is None or updated.captured_until < through_count)
         )
 
     async def _drain_capture_requests(self) -> None:
@@ -130,9 +140,7 @@ class MemoryMaintenance:
             while self._capture_requests:
                 run_id, through_count = self._capture_requests.popitem()
                 try:
-                    await self.service.run_async_io(
-                        partial(self._capture_source_sync, run_id, through_count)
-                    )
+                    await self._capture_source(run_id, through_count)
                 except Exception as exc:
                     await self._capture_failed(exc, run_id)
         finally:
@@ -161,6 +169,7 @@ class MemoryMaintenance:
         self._foreground += 1
         self._dirty = True
         self._wake_revision += 1
+        self._worker.cancel()
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
@@ -177,6 +186,7 @@ class MemoryMaintenance:
         if self._closed:
             return
         self._closed = True
+        self._worker.cancel()
         if self._loop is not None:
             self.service.remove_change_listener(self._on_change)
         if self._timer is not None:
@@ -190,6 +200,7 @@ class MemoryMaintenance:
             await self._capture_task
         await self.capture_pending()
         await self.service.wait_pending_io()
+        await self._worker.aclose()
 
     def _on_change(self, namespace: str) -> None:
         """服务写入可在线程中完成，通知回到本 runner 的 event loop。"""
@@ -209,6 +220,7 @@ class MemoryMaintenance:
             or self._loop is None
             or self._foreground
             or self._task is not None
+            or self._worker.busy
             or self._timer is not None
             or not self._dirty
         ):
@@ -234,6 +246,11 @@ class MemoryMaintenance:
         self._schedule()
 
     async def _run_cycle(self) -> None:
+        """隔离本轮维护的同步作业，不把 Capture 或前台调用送进维护队列。"""
+        with self._worker.bind():
+            await self._maintain()
+
+    async def _maintain(self) -> None:
         """先让一批知识整理并发布，再安排下一批待提炼资料。"""
         state = await self.service.ageneration_state(self.namespace)
         if state.pending_observations or state.pending_changes:

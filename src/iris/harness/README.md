@@ -398,13 +398,18 @@ runtime 的恢复终态都保留真实 outcome。BCI、system/reasoning 不作�
 读回只保留条目引用，工具调用及结果保留稳定来源。重复提示通过持久水位避免重复经历。
 自动 Episode 的顶层 `source_id` 保存 run ID，metadata 保存 lifecycle `source_id` 与会话边界。
 
+Capture 每页至多 128 条消息，逐页提交并让出事件循环，只有到达完整终态计数才封源。
+SQLite 在同一事务取原始消息行后释放共享锁，再解码；原文转换不持有 lifecycle 事务。
+
 只有前台 admission 和 activation 完整退出后，安静达到 `idle_seconds`（默认 300 秒）才运行
 flush → dream → overview；已有观察优先 dream。新 start/resume/recover 或 managed follow-up
 立即取消计时和后台模型，不等待模型退出才接纳前台。
+THREAD 服务的维护同步工作使用专用单线程 worker，前台 IO 和 Capture 保持原路径。
+宿主选择 INLINE 时仍在调用线程执行。选材在记录间协作取消，旧同步作业实际退出前不启动新周期。
 已排队 follow-up 在前一 run 的 terminal 事件到自身 admission 之间持有短前台交接凭证，
 避免零空闲等待时被维护抢先；admission 成功、失败或 manager 关闭均释放凭证。
-关闭会等待已派发数据库 IO 真正结束，但不要求全部 pending 生成完，也不关闭宿主注入的
-provider、memory 或 store。
+关闭会等待已派发数据库 IO 与计算真正结束并释放维护 worker，但不要求全部 pending 生成完，
+也不关闭宿主注入的 provider、memory 或 store。
 失败停止本轮，待新活动或下次启动续作；已消费输入的投影失败只补投影，不重复生成知识。
 SQLite lifecycle 可补捕获重启前已提交尾部；InMemory lifecycle 丢失后只能继续处理已经捕获的材料。
 维护 usage 独立记录在 memory 生成结果，不计入 `RunUsage`；新发布概览仍等新窗口或成功压缩采用。

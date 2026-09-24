@@ -63,11 +63,13 @@ An injected service keeps its store, mirror, provider/model, and IO mode. Config
 database paths must resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
 New databases use schema version 5; older versions are rejected at initialization without migration,
-version overwrite, or deletion. A SQLite service built by
-`build_memory_service_from_config()` runs connection setup, SQL, and result construction in one async worker job, while synchronous methods
-still execute on their caller's thread. Directly constructed services and custom stores default to
-`MemoryIOExecutionMode.INLINE`, so their thread affinity is not changed implicitly. Independent
-`MemoryService` and low-level tool-registration SDK calls do not require the Agent switch.
+version overwrite, or deletion. Configured SQLite services use `MemoryIOExecutionMode.THREAD`;
+directly constructed services default to `INLINE`, preserving the host's execution choice.
+Each THREAD async read or write runs connection setup, SQL, and result construction in one worker job.
+Synchronous methods still execute on their caller's thread. Custom stores and synchronous token
+estimators should select THREAD only when they support calls from worker threads. INLINE work still
+occupies the event loop; maintenance does not override this choice. Independent `MemoryService`
+and low-level tool-registration SDK calls do not require the Agent switch.
 
 ## Architecture and lifecycle
 
@@ -182,6 +184,20 @@ work exits and the configured idle interval passes, it processes observations, f
 dreams, and publishes an overview. New foreground input cancels uncommitted generation. A dispatched
 short database commit finishes as one unit. `aclose()` captures remaining committed material and waits
 for real IO, retaining pending work for restart. There is no polling, external cron, or daemon.
+
+Automatic maintenance owns a dedicated single-thread worker for THREAD services. Only the maintenance
+task sends synchronous work there: background IO, prompt rendering, flush selection, dream/overview request construction,
+token estimation, and response parsing. Foreground reads/writes, source registration, and Capture
+retain their existing execution path, so they do not queue behind background computation. Standalone
+SDK calls do not implicitly create a maintenance worker. `provider.complete()` remains async on the
+caller's event loop. Selection checks cancellation between records; no new cycle starts until old
+synchronous jobs have actually exited. Late results do not start another model request or commit.
+Shutdown waits for real IO and computation, then releases the worker.
+Capture reads at most 128 messages per page and yields between pages, sealing only at the full run
+cutoff. SQLite releases its read transaction and lifecycle lock after fetching raw rows, before decoding
+messages. Registration and Capture before a run returns still await durable storage. A dedicated worker
+isolates the background queue, but does not eliminate database locks or CPU contention, nor guarantee
+zero foreground overhead.
 
 SQLite lifecycle sources have a persistent UUID and bounded run-message ranges, so restart can capture
 missing suffixes without learning fork history twice. InMemory lifecycle can recover only material

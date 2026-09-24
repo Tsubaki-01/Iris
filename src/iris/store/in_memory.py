@@ -1554,13 +1554,15 @@ class InMemoryLifecycleStore:
         with self._lock:
             return deepcopy(self._sessions.get(session_id, SessionSnapshot(session_id=session_id)))
 
-    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice:
-        """在同一锁内取得本 run 已提交消息区间，排除继承前缀与后续 run。"""
+    def load_run_message_slice(
+        self, run_id: str, after_count: int = 0, *, limit: int = 128
+    ) -> RunMessageSlice:
+        """在同一锁内复制至多 limit 条本 run 消息，排除继承前缀与后续 run。"""
         with self._lock:
             run = self._require_run(run_id)
             messages = self._sessions[run.session_id].messages
             start, end = run_message_slice_bounds(
-                run, session_message_count=len(messages), after_count=after_count
+                run, session_message_count=len(messages), after_count=after_count, limit=limit
             )
             return RunMessageSlice(
                 source_id=self.source_id,

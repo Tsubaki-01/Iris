@@ -23,6 +23,7 @@ from typing import TypeVar
 from ..exceptions import IrisMemoryError
 from ..providers.protocols import CompletionProvider
 from ..utils import TemplateRenderer
+from ._generation_worker import generation_worker
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
 from .generation_models import GenerationResult, GenerationState, MemoryGenerationConfig
@@ -57,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryIOExecutionMode(StrEnum):
-    """控制完整同步 Memory 操作在 async 调用方中的执行位置。"""
+    """控制同步 Memory IO 与生成计算在 async 调用方中的执行位置。"""
 
     INLINE = "inline"
     THREAD = "thread"
@@ -117,12 +118,15 @@ class MemoryService:
     async def run_async_io(
         self, operation: Callable[[], ResultT], *, complete_on_cancel: bool = False
     ) -> ResultT:
-        """执行完整同步 IO；短提交可要求取消后收取真实回执。
+        """执行同步 IO 或生成计算；短提交可要求取消后收取真实回执。
 
         complete_on_cancel 保留当前 task 的取消状态，由阶段在结果落账后继续传播。
         """
         if self._io_execution_mode is MemoryIOExecutionMode.THREAD:
-            task = asyncio.create_task(asyncio.to_thread(operation))
+            worker = generation_worker.get()
+            task = asyncio.create_task(
+                asyncio.to_thread(operation) if worker is None else worker.run(operation)
+            )
             self._io_tasks.add(task)
             task.add_done_callback(self._finish_io)
             while True:
@@ -140,7 +144,7 @@ class MemoryService:
             task.exception()
 
     async def wait_pending_io(self) -> None:
-        """等待已派发数据库工作真正结束，供维护关闭时调用。"""
+        """等待已派发同步工作真正结束，供维护关闭时调用。"""
         while self._io_tasks:
             await asyncio.gather(*tuple(self._io_tasks), return_exceptions=True)
 
@@ -561,10 +565,14 @@ class MemoryService:
         try:
             response = None
             if snapshot.items:
-                request = build_overview_request(
-                    snapshot, self.overview_model, self.overview_config, self.prompt_renderer
+                request = await self.run_async_io(
+                    lambda: build_overview_request(
+                        snapshot, self.overview_model, self.overview_config, self.prompt_renderer
+                    )
                 )
-                estimated_tokens = self.overview_provider.estimate_input_tokens(request)
+                estimated_tokens = await self.run_async_io(
+                    lambda: self.overview_provider.estimate_input_tokens(request)
+                )
                 if estimated_tokens > self.overview_config.input_budget_tokens:
                     raise IrisMemoryError(
                         "memory 概览生成输入容量不足，保留最后完整产物",
@@ -579,7 +587,7 @@ class MemoryService:
                     "total_tokens": response.total_tokens,
                 }
             content = (
-                complete_overview_content(response)
+                await self.run_async_io(lambda: complete_overview_content(response))
                 if response is not None
                 else MemoryOverviewContent(core_facts="", knowledge_scope="当前无记忆。")
             )

@@ -628,11 +628,13 @@ class SQLiteStore:
             ),
         )
 
-    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice:
-        """在同一只读事务中读取本 run 边界和已提交消息后缀。"""
+    def load_run_message_slice(
+        self, run_id: str, after_count: int = 0, *, limit: int = 128
+    ) -> RunMessageSlice:
+        """在同一事务中读取 run 边界和有界消息行，释放锁后解码消息。"""
         operation = "load_run_message_slice"
 
-        def read(connection: sqlite3.Connection) -> RunMessageSlice:
+        def read(connection: sqlite3.Connection) -> tuple[RunRecord, int, int, list[sqlite3.Row]]:
             run = self._require_run(connection, run_id, operation=operation)
             metadata = self._select_session_metadata(
                 connection, run.session_id, operation=operation
@@ -642,33 +644,37 @@ class SQLiteStore:
                     "run 对应的 session 不存在", run_id=run_id, session_id=run.session_id
                 )
             start, end = run_message_slice_bounds(
-                run, session_message_count=metadata.message_count, after_count=after_count
+                run,
+                session_message_count=metadata.message_count,
+                after_count=after_count,
+                limit=limit,
             )
             rows = connection.execute(
                 """SELECT ordinal, message_json FROM session_messages
                 WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal""",
                 (run.session_id, start, end),
             ).fetchall()
-            messages = decode_session_messages(
-                rows,
-                expected_count=end - start,
-                start_count=start,
-                path=self.path,
-                operation=operation,
-            )
-            return RunMessageSlice(
-                source_id=self.source_id,
-                run_id=run.run_id,
-                session_id=run.session_id,
-                initial_message_count=run.initial_session_message_count,
-                start_message_count=start,
-                end_message_count=end,
-                terminal_message_count=run.terminal_session_message_count,
-                outcome=run.stop_reason,
-                messages=tuple(messages),
-            )
+            return run, start, end, rows
 
-        return self._read(operation, read)
+        run, start, end, rows = self._read(operation, read)
+        messages = decode_session_messages(
+            rows,
+            expected_count=end - start,
+            start_count=start,
+            path=self.path,
+            operation=operation,
+        )
+        return RunMessageSlice(
+            source_id=self.source_id,
+            run_id=run.run_id,
+            session_id=run.session_id,
+            initial_message_count=run.initial_session_message_count,
+            start_message_count=start,
+            end_message_count=end,
+            terminal_message_count=run.terminal_session_message_count,
+            outcome=run.stop_reason,
+            messages=tuple(messages),
+        )
 
     def list_fork_points(
         self,

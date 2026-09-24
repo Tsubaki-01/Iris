@@ -360,7 +360,9 @@ class LifecycleStore(Protocol):
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
 
-    def load_run_message_slice(self, run_id: str, after_count: int = 0) -> RunMessageSlice: ...
+    def load_run_message_slice(
+        self, run_id: str, after_count: int = 0, *, limit: int = 128
+    ) -> RunMessageSlice: ...
 
     def list_fork_points(
         self,

@@ -39,8 +39,11 @@ constructor never resets or changes that file.
 Both implementations expose a read-only `source_id`. SQLite saves a generated UUID in
 `lifecycle_schema.source_id` at creation and preserves it across reopenings; each InMemory instance
 gets its own UUID. `load_run_message_slice()` returns run boundaries, terminal outcome, and the
-run's committed message suffix from one read snapshot. SQLite queries the ordinal range directly;
-InMemory slices and copy-isolates messages under the same lock. Both exclude earlier turns,
+run's bounded page of committed messages from one read snapshot, with `limit=128` by default.
+SQLite reads the run, counts, and raw message rows by ordinal range in one read transaction, then
+decodes messages after releasing the transaction and shared lock. InMemory copies at most `limit`
+messages under the same lock. `end_message_count` is the page end for the next read, while
+`terminal_message_count` retains the full cutoff. Both exclude earlier turns,
 inherited fork history, and later runs. See the [lifecycle contract](../lifecycle/README.en.md#store-contract)
 for message counts and the returned model.
 

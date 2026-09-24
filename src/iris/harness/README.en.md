@@ -461,14 +461,22 @@ stable provenance. Durable watermarks make repeated hints idempotent.
 An automatically captured Episode stores the run ID in top-level `source_id`; its metadata holds the
 lifecycle source ID and session boundaries.
 
+Capture commits pages of at most 128 messages, yielding between pages and sealing only at the full
+terminal cutoff. SQLite fetches raw rows in one transaction, then releases the shared lock before
+decoding; source conversion does not hold a lifecycle transaction.
+
 Flush → dream → overview runs only after all foreground admission and activation calls have exited
 and `idle_seconds` has elapsed (300 seconds by default). Pending observations receive dreaming priority.
 New start/resume/recover calls and managed follow-ups cancel the timer and background model work without
 waiting for that model before admitting foreground execution.
+For THREAD services, synchronous maintenance jobs use a dedicated single-thread worker; foreground IO
+and Capture retain their original path. An injected INLINE choice is preserved. Selection responds to
+cancellation between records, and old synchronous jobs must exit before another cycle starts.
 Queued follow-ups hold a short foreground handoff reservation from the preceding terminal event until
 their admission resolves. This preserves priority even with zero idle delay; admission success, failure,
 and manager close release the reservation. Close waits for already-dispatched database
-IO, leaves unfinished durable work pending, and does not close injected providers, memory, or stores.
+IO and computation, releases the maintenance worker, leaves unfinished durable work pending, and does
+not close injected providers, memory, or stores.
 A failure stops the cycle until new activity or restart. Projection failures after input consumption
 repair the projection without regenerating knowledge. SQLite lifecycle sources can recover committed
 tails after restart; a lost InMemory lifecycle source can only leave already-captured material available.
