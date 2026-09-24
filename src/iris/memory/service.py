@@ -22,6 +22,7 @@ from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
 from ..providers.protocols import CompletionProvider
+from ..utils import TemplateRenderer
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
 from .generation_models import GenerationResult, GenerationState, MemoryGenerationConfig
@@ -103,6 +104,7 @@ class MemoryService:
         self.generation_provider = generation_provider
         self.generation_model = generation_model
         self.generation_config = generation_config or MemoryGenerationConfig()
+        self.prompt_renderer = TemplateRenderer()
         self._io_execution_mode = io_execution_mode
         self._io_tasks: set[asyncio.Task[object]] = set()
         self._change_listeners: list[Callable[[str], None]] = []
@@ -560,7 +562,7 @@ class MemoryService:
             response = None
             if snapshot.items:
                 request = build_overview_request(
-                    snapshot, self.overview_model, self.overview_config
+                    snapshot, self.overview_model, self.overview_config, self.prompt_renderer
                 )
                 estimated_tokens = self.overview_provider.estimate_input_tokens(request)
                 if estimated_tokens > self.overview_config.input_budget_tokens:

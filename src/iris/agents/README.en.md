@@ -188,8 +188,10 @@ system message. Iris provides the previous summary and current history batch in 
 the template needs no data variables. Custom instructions may change the headings and wording.
 Iris still wraps the summary body in `<summary>` when adding it to the main request.
 
-Files use the `iris.context` Jinja2 renderer's native on-demand loading and compiled cache, including
-dynamic include/import/extends. The same runtime detects file edits on the next compaction; all
+Files use the shared [`iris.utils.TemplateRenderer`](../utils/README.md), with Jinja2's native on-demand
+loading and compiled cache, including dynamic include/import/extends. Autoescape is disabled by default;
+XML templates can explicitly use `{% autoescape true %}` or `|e`. Runtime strips leading and trailing
+whitespace from summary instructions. The same runtime detects file edits on the next compaction; all
 batches and retries within one operation reuse the same rendered instructions. Config loading resolves only the path; the
 first compaction reads the file. With the Python SDK, relative paths use the directory of
 `config_path`, or the current working directory when it is omitted.

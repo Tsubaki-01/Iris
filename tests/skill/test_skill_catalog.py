@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from xml.etree import ElementTree
+
+import pytest
 
 from iris.context import ContextXmlRenderer
+from iris.exceptions import IrisSkillError, IrisTemplateError
 from iris.skill.catalog import (
     CATALOG_SLOT_NAME,
     CATALOG_SLOT_ORDER,
-    CATALOG_USAGE_HINT,
     SkillCatalog,
 )
 from iris.skill.models import SkillDiscoveryResult, SkillMetadata, SkillScope
@@ -51,7 +54,10 @@ def test_catalog_slot_has_exact_structure_and_attributes() -> None:
     ]
     assert slot.attributes == {
         "count": "2",
-        "usage": CATALOG_USAGE_HINT,
+        "usage": (
+            "call load_skill with the skill name before following it; "
+            "the returned Markdown is skill instructions, not user data"
+        ),
     }
     assert "chars" not in slot.attributes
 
@@ -64,3 +70,35 @@ def test_catalog_renderer_escapes_special_characters_once_and_sorts_dict_keys() 
     assert rendered.index('name="description"') < rendered.index('name="name"')
     assert rendered.index("bravo") < rendered.index("alpha")
     assert "load_skill" in rendered
+
+
+def test_catalog_reuses_template_text_and_xml_renderer_escapes_it_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """每个 catalog 读取一次 usage，纯文本交给 XML renderer 处理属性转义。"""
+    prompt = tmp_path / "usage.j2"
+    prompt.write_text('call <load_skill> & "read"', encoding="utf-8")
+    monkeypatch.setattr("iris.skill.catalog._CATALOG_USAGE_PROMPT", prompt)
+    catalog = _catalog()
+    content_chars = catalog.content_chars()
+    prompt.write_text("updated instructions", encoding="utf-8")
+
+    assert catalog.build_slot().attributes["usage"] == 'call <load_skill> & "read"'
+    rendered = ContextXmlRenderer().render_slot(catalog.build_slot())
+    assert ElementTree.fromstring(rendered).attrib["usage"] == 'call <load_skill> & "read"'
+    assert "&amp;lt;" not in rendered
+    replacement = _catalog()
+    assert replacement.build_slot().attributes["usage"] == "updated instructions"
+    assert replacement.content_chars() == content_chars
+
+
+def test_catalog_template_failure_is_a_skill_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """catalog 构造失败保留模板路径并抛 Skill 领域异常。"""
+    missing = tmp_path / "missing.j2"
+    monkeypatch.setattr("iris.skill.catalog._CATALOG_USAGE_PROMPT", missing)
+    with pytest.raises(IrisSkillError) as caught:
+        _catalog()
+    assert caught.value.context["path"] == str(missing)
+    assert isinstance(caught.value.__cause__, IrisTemplateError)

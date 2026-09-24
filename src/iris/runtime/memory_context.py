@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
 
 from ..exceptions import IrisContextError
 from ..lifecycle import MemoryOverviewSource, SessionContextWindow
 from ..memory import MemoryService
 from ..message import LLMRequest
 from ..providers.protocols import CompletionProvider
+from ..utils import TemplateRenderer
+from ._prompts import render_prompt
+
+_MEMORY_CONTEXT_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "memory_context.j2"
 
 
 async def load_context_windows(
     *,
+    prompt_renderer: TemplateRenderer,
     memory_service: MemoryService | None,
     namespaces: Sequence[str],
     tool_names: Sequence[str],
@@ -23,28 +30,6 @@ async def load_context_windows(
         return empty, empty
     documents = await memory_service.aload_overviews(namespaces)
 
-    instructions = (
-        "以当前概览为长期记忆范围；没有提及的主题默认没有，不搜索这些主题。"
-        "仅对概览已覆盖且问题需要的主题按需读取，无关问题无需读取。"
-        "没有概览则本窗口暂不使用长期记忆，正常聊天但不查询长期记忆。"
-        "概览或文件未同步的提示不扩展主题范围，也不阻断已覆盖主题的数据库查询；"
-        "概览可能旧于数据库当前记录，不能视为已核实的当前值。"
-    )
-    if "memory_search" in tool_names:
-        instructions += (
-            " 可用 memory_search 按需检索。"
-            "使用结果前，按正文确认事实的适用对象和条件，提及对象不代表事实属于它。"
-            "片段足以回答时停止查询；只有必要信息仍缺失时才补查，"
-            "没有新线索时不只换措辞反复搜索。is_complete 只表示正文是否完整。"
-        )
-    if "memory_fetch" in tool_names:
-        instructions += (
-            " 可用 memory_fetch 按已知 item_id 读取当前完整记录；"
-            "缺少必要正文或来源元数据，或需重新核对已知条目的当前值时再读取。"
-        )
-    if "memory_search" not in tool_names and "memory_fetch" not in tool_names:
-        instructions += " 当前没有专用数据库读取工具。"
-
     sources = tuple(
         MemoryOverviewSource.model_construct(
             namespace=document.namespace,
@@ -53,29 +38,27 @@ async def load_context_windows(
         )
         for document in documents
     )
-    full_parts = ["# Memory overview", instructions]
-    navigation_parts = [
-        "# Memory overview",
-        "本窗口仅载入知识范围，未载入核心事实。",
-        instructions,
-    ]
-    for document in documents:
-        heading = f"## {document.namespace}"
-        warning = f"\n\n{document.warning}" if document.warning else ""
-        full_parts.append(f"{heading}{warning}\n\n{document.text}")
-        navigation_parts.append(f"{heading}{warning}\n\n{document.navigation}")
-    if not documents:
-        navigation_parts.extend(
-            f"## {namespace}\n\n未配置概览发布物，本窗口不使用长期记忆。"
-            for namespace in namespaces
-        )
+    template_context: dict[str, Any] = {
+        "documents": documents,
+        "namespaces": namespaces,
+        "has_memory_search": "memory_search" in tool_names,
+        "has_memory_fetch": "memory_fetch" in tool_names,
+    }
     navigation = SessionContextWindow.model_construct(
-        memory_overview="\n\n".join(navigation_parts), mode="navigation", sources=sources
+        memory_overview=render_prompt(
+            prompt_renderer, _MEMORY_CONTEXT_PROMPT, {**template_context, "mode": "navigation"}
+        ),
+        mode="navigation",
+        sources=sources,
     )
     if all(document.source_revision is None for document in documents):
         return navigation, navigation
     full = SessionContextWindow.model_construct(
-        memory_overview="\n\n".join(full_parts), mode="full", sources=sources
+        memory_overview=render_prompt(
+            prompt_renderer, _MEMORY_CONTEXT_PROMPT, {**template_context, "mode": "full"}
+        ),
+        mode="full",
+        sources=sources,
     )
     return full, navigation
 

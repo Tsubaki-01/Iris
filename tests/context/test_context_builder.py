@@ -159,3 +159,38 @@ def test_system_max_chars_includes_addendum(tmp_path: Path) -> None:
     assert ContextBuilder().build(context, system_addendum="abc").system.text == "base\n\nabc"
     with pytest.raises(IrisContextError, match="字符上限"):
         ContextBuilder().build(context, system_addendum="abcd")
+
+
+@pytest.mark.parametrize("xml", [False, True])
+def test_custom_template_selects_escaping_and_builder_trims_output(
+    tmp_path: Path, xml: bool
+) -> None:
+    """Jinja 默认纯文本，XML 模板自行声明转义，builder 保留首尾裁剪。"""
+    template = tmp_path / "system.j2"
+    body = "{{ slots[0].content }}"
+    if xml:
+        body = "{% autoescape true %}" + body + "{% endautoescape %}"
+    template.write_text("  " + body + "  ", encoding="utf-8")
+    context = ContextBuildInput(
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content='<item>&"')], template=template
+        )
+    )
+    assert ContextBuilder().build(context).system.text == (
+        "&lt;item&gt;&amp;&#34;" if xml else '<item>&"'
+    )
+
+
+def test_custom_template_failure_keeps_context_error_and_section(tmp_path: Path) -> None:
+    """统一读取器的错误由 context 边界附加 section。"""
+    template = tmp_path / "system.j2"
+    template.write_text("{{ missing }}", encoding="utf-8")
+    context = ContextBuildInput(
+        system=ContextSection(
+            slots=[ContextSlot(name="instructions", content="body")], template=template
+        )
+    )
+    with pytest.raises(IrisContextError) as error:
+        ContextBuilder().build(context)
+    assert error.value.context["section"] == "system"
+    assert error.value.context["path"] == str(template)

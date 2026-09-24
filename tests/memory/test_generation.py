@@ -6,10 +6,11 @@ import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from iris.exceptions import IrisMemoryError
+from iris.exceptions import IrisMemoryError, IrisTemplateError
 from iris.memory import (
     MemoryEpisode,
     MemoryGenerationConfig,
@@ -20,8 +21,9 @@ from iris.memory import (
     MemorySourceType,
     MemoryWriteInput,
     SQLiteMemoryStore,
+    _prompts,
 )
-from iris.memory.generation import _flush_input
+from iris.memory.generation import _DreamResponse, _flush_input, _FlushResponse
 from iris.memory.generation_models import EpisodeCursor, EpisodeProgress, EpisodeSlice
 from iris.message import LLMRequest, LLMResponse, TextBlock
 
@@ -194,6 +196,80 @@ async def test_flush_evidence_then_dream_publishes_formal_item(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_generation_prompts_preserve_json_schema_and_original_text(tmp_path: Path) -> None:
+    provider = Provider(flush_one)
+    memory = service(tmp_path, provider)
+    original = '<topic> R&D "原文" {{ untouched }}'
+    memory.observe(MemoryObserveInput(text=original))
+    await memory.flush("project")
+    observation = memory.store.list_observations("project")[0].observation
+    provider.respond = lambda _: {
+        "operations": [],
+        "resolutions": [
+            {"observation_id": observation.id, "target_id": None, "reason": "无新增知识"}
+        ],
+    }
+    await memory.dream("project")
+
+    flush_request, dream_request = provider.requests
+    for request, schema, instruction in (
+        (flush_request, _FlushResponse, "不调用工具"),
+        (dream_request, _DreamResponse, "original_evidence"),
+    ):
+        prompt, schema_json = request.messages[0].text.rsplit("\n", 1)
+        assert json.loads(schema_json) == schema.model_json_schema()
+        assert "&quot;" not in request.messages[0].text
+        assert instruction in prompt
+    assert json.loads(flush_request.messages[1].text)["records"][0]["text"] == original
+    original_evidence = json.loads(dream_request.messages[1].text)["original_evidence"]
+    assert next(iter(original_evidence.values()))["text"] == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["flush", "dream"])
+@pytest.mark.parametrize("template", ["{% invalid %}", "{{ missing }}"])
+async def test_template_failure_does_not_consume_generation_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, template: str
+) -> None:
+    provider = Provider(flush_one)
+    memory = service(tmp_path, provider)
+    memory.observe(MemoryObserveInput(text="保留原文"))
+    if stage == "dream":
+        await memory.flush("project")
+    before = memory.generation_state("project")
+    before_requests = len(provider.requests)
+    template_path = tmp_path / f"memory_{stage}.j2"
+    template_path.write_text(template, encoding="utf-8")
+    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path)
+
+    with pytest.raises(IrisMemoryError) as captured:
+        await (memory.flush("project") if stage == "flush" else memory.dream("project"))
+
+    assert isinstance(captured.value.__cause__, IrisTemplateError)
+    assert captured.value.context["path"] == str(template_path)
+    assert len(provider.requests) == before_requests
+    after = memory.generation_state("project")
+    assert after.pending_episodes == before.pending_episodes
+    assert after.pending_observations == before.pending_observations
+    assert after.item_revision == before.item_revision
+    failed = next(result for result in after.latest_results if result.stage == stage)
+    assert failed.status == "failed"
+    assert memory.list_items(["project"]) == []
+
+
+@pytest.mark.asyncio
+async def test_empty_generation_does_not_read_templates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = Provider(flush_one)
+    memory = service(tmp_path, provider)
+    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path / "missing")
+    assert (await memory.flush("project")).status == "empty"
+    assert (await memory.dream("project")).status == "empty"
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
 async def test_dream_receives_original_attribution_and_tool_metadata(tmp_path: Path) -> None:
     def extract(source: dict[str, object]) -> dict[str, object]:
         response = flush_one(source)
@@ -333,7 +409,11 @@ async def test_large_explicit_change_is_blocked_but_unrelated_small_change_advan
     memory = service(tmp_path, provider, dream_input_budget_tokens=5000)
     memory.remember(MemoryWriteInput(text="large fact " * 2000, reason="大段有效材料"))
     memory.remember(MemoryWriteInput(text="独立的小事实", reason="独立材料"))
-    result = await memory.dream("project")
+    with patch.object(
+        memory.prompt_renderer, "render_file", wraps=memory.prompt_renderer.render_file
+    ) as render:
+        result = await memory.dream("project")
+    assert render.call_count == 1
     assert result.status == "completed" and result.counts["blocked"] == 1
     state = memory.generation_state("project")
     assert state.blocked_changes == 1 and state.pending_changes == 0

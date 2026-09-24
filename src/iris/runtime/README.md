@@ -94,9 +94,15 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 
 摘要指令来自独立 Jinja2 文件，默认使用 [`prompts/compaction.j2`](../prompts/compaction.j2)，
 要求七栏 Markdown、正文跟随对话主要语言。`compaction.prompt` 可以替换指令与输出格式；
-旧摘要与本批历史仍由框架提供。每次压缩操作通过既有模板渲染器取得一次指令，供全部分块
+旧摘要与本批历史仍由框架提供，user 消息的包装文案来自
+[`compaction_input.j2`](../prompts/compaction_input.j2)。每次压缩操作直接通过
+`RuntimeEnvironment.prompt_renderer` 取得一次摘要指令并去除首尾空白，供全部分块
 计量和请求共用；Jinja 复用编译缓存并按 mtime 检测更新，文件修改在下次压缩操作生效。没有标题 parser 或
 格式修复循环。路径配置见 [agents 说明](../agents/README.md#compactionconfig)。
+
+`prompt_renderer` 是环境持有的共享 `iris.utils.TemplateRenderer`，默认关闭自动转义；
+摘要输入中的 JSON、引号和 `<>&` 按原文保留。模板读取或渲染失败在 runtime 边界转换为
+`IrisContextError`，继续使用 `context` 错误来源。
 
 摘要请求复用有效主模型选项，覆盖为非流式、无工具/response schema、输出上限 S，并设置
 `num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空
@@ -247,6 +253,10 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
+
+概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
+通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
+窗口预算仍以实际渲染后准备发送的请求计算。
 
 概览通过 `ContextBuilder.build(system_addendum=...)` 放在 system 模板结果之后，计入 system
 字符上限，不写入消息历史。`context.yaml` 中的静态 memory slot 保持原位置。成功压缩把新摘要、

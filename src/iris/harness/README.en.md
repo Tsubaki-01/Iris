@@ -409,9 +409,11 @@ check. Saved requests, run limits, cursors, call identities, and execution resul
 the original run. Pending tools must satisfy argument and current permission rules. Run records and
 checkpoints do not store an environment fingerprint.
 
-Templates use Jinja's native on-demand loading, compiled cache, and default reload detection;
-later renders on the same runtime can see file edits. `StrictUndefined` and character limits are
-checked during rendering. See [`iris.context`](../context/README.en.md).
+Context and runtime each use the shared [`iris.utils.TemplateRenderer`](../utils/README.md), with
+Jinja's native on-demand loading, compiled cache, and default reload detection. Later renders on the
+same runtime can see file edits. Autoescape is disabled by default; XML templates opt in explicitly.
+`StrictUndefined` applies during rendering, and context character limits apply after complete text
+generation. See [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
 `initial_session_message_count` from the durable run. At `before_input`, a new run archives BCI and

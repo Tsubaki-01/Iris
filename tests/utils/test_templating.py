@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment, FileSystemLoader
 
-from iris.context import ContextTemplateRenderer
-from iris.exceptions import IrisContextError
+from iris.exceptions import IrisTemplateError
+from iris.utils import TemplateRenderer
 
 
 def _rewrite(path: Path, source: str) -> None:
@@ -31,8 +31,8 @@ def test_renderer_reloads_entry_and_nested_dependencies(tmp_path: Path) -> None:
     base.write_text("<root>{% block body %}{% endblock %}</root>", encoding="utf-8")
     body.write_text('{% import "macros.j2" as m %}{{ m.content(value) }}', encoding="utf-8")
     macros.write_text("{% macro content(x) %}old {{ x }}{% endmacro %}", encoding="utf-8")
-    renderer = ContextTemplateRenderer()
-    assert renderer.render_file(main, {"value": "<&>"}) == "<root>old &lt;&amp;&gt;</root>"
+    renderer = TemplateRenderer()
+    assert renderer.render_file(main, {"value": "<&>"}) == "<root>old <&></root>"
     _rewrite(macros, "{% macro content(x) %}new {{ x }}{% endmacro %}")
     assert renderer.render_file(main, {"value": "second"}) == "<root>new second</root>"
     _rewrite(base, "<changed>{% block body %}{% endblock %}</changed>")
@@ -45,7 +45,7 @@ def test_renderer_reloads_entry_and_nested_dependencies(tmp_path: Path) -> None:
 def test_renderer_loads_added_optional_include(tmp_path: Path) -> None:
     main = tmp_path / "main.j2"
     main.write_text('{% include "optional.j2" ignore missing %}base', encoding="utf-8")
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     assert renderer.render_file(main, {}) == "base"
     (tmp_path / "optional.j2").write_text("added ", encoding="utf-8")
     assert renderer.render_file(main, {}) == "added base"
@@ -56,9 +56,9 @@ def test_renderer_loads_dependency_only_when_branch_is_rendered(tmp_path: Path) 
     included = tmp_path / "later.j2"
     main.write_text('{% if use_later %}{% include "later.j2" %}{% endif %}base', encoding="utf-8")
     included.write_text("{% broken syntax %}", encoding="utf-8")
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     assert renderer.render_file(main, {"use_later": False}) == "base"
-    with pytest.raises(IrisContextError):
+    with pytest.raises(IrisTemplateError):
         renderer.render_file(main, {"use_later": True})
     _rewrite(included, "changed ")
     assert renderer.render_file(main, {"use_later": True}) == "changed base"
@@ -68,7 +68,7 @@ def test_renderer_loads_new_preferred_include_candidate(tmp_path: Path) -> None:
     main = tmp_path / "main.j2"
     main.write_text('{% include ["preferred.j2", "fallback.j2"] %}', encoding="utf-8")
     (tmp_path / "fallback.j2").write_text("fallback", encoding="utf-8")
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     assert renderer.render_file(main, {}) == "fallback"
     (tmp_path / "preferred.j2").write_text("preferred", encoding="utf-8")
     assert renderer.render_file(main, {}) == "preferred"
@@ -90,7 +90,7 @@ def test_renderer_accepts_dynamic_template_filenames(
     (tmp_path / "selected.j2").write_text(
         "selected{% macro content() %}macro{% endmacro %}", encoding="utf-8"
     )
-    assert ContextTemplateRenderer().render_file(main, {"selected": "selected.j2"}) == expected
+    assert TemplateRenderer().render_file(main, {"selected": "selected.j2"}) == expected
 
 
 def test_renderer_reuses_compiled_template_with_current_inputs(
@@ -108,16 +108,16 @@ def test_renderer_reuses_compiled_template_with_current_inputs(
         return original(self, environment, template)
 
     monkeypatch.setattr(FileSystemLoader, "get_source", get_source)
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     assert renderer.render_file(main, {"value": "first"}) == "first"
-    assert renderer.render_file(main, {"value": "<&>"}) == "&lt;&amp;&gt;"
-    with pytest.raises(IrisContextError):
+    assert renderer.render_file(main, {"value": "<&>"}) == "<&>"
+    with pytest.raises(IrisTemplateError):
         renderer.render_file(main, {})
     assert loaded == ["main.j2"]
 
 
 def test_renderer_isolates_same_names_in_different_directories(tmp_path: Path) -> None:
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     for name in ("first", "second", "first"):
         directory = tmp_path / name
         directory.mkdir(exist_ok=True)
@@ -134,13 +134,38 @@ def test_renderer_reports_changed_invalid_or_deleted_files(tmp_path: Path, targe
     main.write_text('{% include "body.j2" %}', encoding="utf-8")
     dependency.write_text("original", encoding="utf-8")
     changed = main if target == "entry" else dependency
-    renderer = ContextTemplateRenderer()
+    renderer = TemplateRenderer()
     assert renderer.render_file(main, {}) == "original"
     _rewrite(changed, "{% broken syntax %}")
-    with pytest.raises(IrisContextError):
+    with pytest.raises(IrisTemplateError):
         renderer.render_file(main, {})
     _rewrite(changed, "corrected")
     assert renderer.render_file(main, {}) == "corrected"
     changed.unlink()
-    with pytest.raises(IrisContextError):
+    with pytest.raises(IrisTemplateError):
         renderer.render_file(main, {})
+
+
+def test_template_controls_xml_escaping_without_changing_plain_text(tmp_path: Path) -> None:
+    """同一模板可以明确选择 XML 部分，其他正文保留原文。"""
+    main = tmp_path / "mixed.j2"
+    main.write_text(
+        "{{ value }}|{% autoescape true %}{{ value }}{% endautoescape %}",
+        encoding="utf-8",
+    )
+    assert TemplateRenderer().render_file(main, {"value": '<a>&"'}) == ('<a>&"|&lt;a&gt;&amp;&#34;')
+
+
+def test_renderer_preserves_outer_spaces_and_reports_template_execution_error(
+    tmp_path: Path,
+) -> None:
+    """读取器保留 Jinja 输出，模板表达式错误具有路径和原始异常。"""
+    main = tmp_path / "main.j2"
+    main.write_text("  {{ value }}  ", encoding="utf-8")
+    renderer = TemplateRenderer()
+    assert renderer.render_file(main, {"value": "body"}) == "  body  "
+    _rewrite(main, "{{ 1 / 0 }}")
+    with pytest.raises(IrisTemplateError) as error:
+        renderer.render_file(main, {})
+    assert error.value.context["path"] == str(main)
+    assert isinstance(error.value.__cause__, ZeroDivisionError)

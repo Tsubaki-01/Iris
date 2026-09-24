@@ -90,6 +90,10 @@ Read the relevant files, then report concrete findings.
 {"name": "my-skill"}
 ```
 
+Catalog 的使用指引来自 [`skill_catalog_usage.j2`](../prompts/skill_catalog_usage.j2)。
+`SkillCatalog` 构造时通过 `iris.utils.TemplateRenderer` 读取一次，后续 slot 投影复用这份文案；
+写入默认 XML 的 `usage` 属性时由 `ContextXmlRenderer` 转义。模板失败使用 `IrisSkillError`。
+
 `load_skill` 返回当前 `SKILL.md` 含 frontmatter 的前 1000 行，不重新解析 frontmatter。Discovery 负责配置 root
 与扫描目录边界；实际加载时会重新校验文件仍位于原 Skill 目录内，并由共享文件服务复核
 workspace 边界。模型无需、也不应改用 `file.read` 获取正文。该工具只读取文本：不会执行正文、
@@ -104,6 +108,7 @@ workspace 边界。模型无需、也不应改用 `file.read` 获取正文。该
 自定义 template 分支不会调用默认 XML renderer；template 必须按 slot 名显式消费 catalog：
 
 ```jinja2
+{% autoescape true %}
 {% for slot in slots if slot["name"] == "available_skills" %}
 <available_skills count="{{ slot["attributes"]["count"] }}"
                   usage="{{ slot["attributes"]["usage"] }}">
@@ -115,9 +120,11 @@ workspace 边界。模型无需、也不应改用 `file.read` 获取正文。该
 {% endfor %}
 </available_skills>
 {% endfor %}
+{% endautoescape %}
 ```
 
-Jinja 环境启用 XML autoescape。启用 Skill、发现结果非空且使用自定义 system template 时，
+Jinja 默认关闭自动转义；上例通过模板内的 `autoescape` 块显式启用 XML 转义。
+启用 Skill、发现结果非空且使用自定义 system template 时，
 Factory 会记录 warning；若 template 忽略该 slot，catalog 对模型不可见，但 `load_skill` 仍已注册。
 
 ## 限制与兼容性

@@ -1,0 +1,25 @@
+# Memory overview
+{%- if mode == "navigation" %}
+{{ "\n\n" }}本窗口仅载入知识范围，未载入核心事实。
+{%- endif %}
+{{ "\n\n" }}以当前概览为长期记忆范围；没有提及的主题默认没有，不搜索这些主题。仅对概览已覆盖且问题需要的主题按需读取，无关问题无需读取。没有概览则本窗口暂不使用长期记忆，正常聊天但不查询长期记忆。概览或文件未同步的提示不扩展主题范围，也不阻断已覆盖主题的数据库查询；概览可能旧于数据库当前记录，不能视为已核实的当前值。
+{%- if has_memory_search %}
+ 可用 memory_search 按需检索。使用结果前，按正文确认事实的适用对象和条件，提及对象不代表事实属于它。片段足以回答时停止查询；只有必要信息仍缺失时才补查，没有新线索时不只换措辞反复搜索。is_complete 只表示正文是否完整。
+{%- endif %}
+{%- if has_memory_fetch %}
+ 可用 memory_fetch 按已知 item_id 读取当前完整记录；缺少必要正文或来源元数据，或需重新核对已知条目的当前值时再读取。
+{%- endif %}
+{%- if not has_memory_search and not has_memory_fetch %}
+ 当前没有专用数据库读取工具。
+{%- endif %}
+{%- for document in documents %}
+{{ "\n\n" }}## {{ document.namespace }}
+{%- if document.warning %}
+{{ "\n\n" }}{{ document.warning }}
+{%- endif %}
+{{ "\n\n" }}{{ document.navigation if mode == "navigation" else document.text }}
+{%- else %}
+{%- for namespace in namespaces %}
+{{ "\n\n" }}## {{ namespace }}{{ "\n\n" }}未配置概览发布物，本窗口不使用长期记忆。
+{%- endfor %}
+{%- endfor %}

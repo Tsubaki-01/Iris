@@ -112,10 +112,16 @@ Each batch is measured with the current working summary; unprocessed fragments a
 Summary instructions come from a separate Jinja2 file. The bundled
 [`prompts/compaction.j2`](../prompts/compaction.j2) requests seven Markdown headings with body text in
 the conversation's primary language. `compaction.prompt` can replace the instructions and output
-format; Iris still supplies the previous summary and current history batch. Each compaction obtains
-instructions once through the existing renderer and reuses them for all batch estimates and requests.
+format; Iris still supplies the previous summary and current history batch, with the user-message
+wrapper stored in [`compaction_input.j2`](../prompts/compaction_input.j2). Each compaction obtains
+instructions directly from `RuntimeEnvironment.prompt_renderer`, strips leading and trailing whitespace,
+and reuses them for all batch estimates and requests.
 Jinja reuses compiled templates and detects edits by mtime for the next compaction. There is no heading
 parser or format-repair loop. See [agents](../agents/README.en.md) for path configuration.
+
+The environment holds `prompt_renderer` as a shared `iris.utils.TemplateRenderer` instance. Autoescape
+is disabled by default, preserving JSON, quotes, and `<>&` in summary inputs. Runtime converts template
+loading and rendering failures to `IrisContextError`, retaining the `context` error source.
 
 Summary requests reuse effective main-model options but override streaming, tools, response schema,
 output cap S, and `num_retries=0`. Candidates stay in memory until all batches finish and the caller
@@ -286,6 +292,10 @@ the overview. Existing system text, static memory, history, and tool schemas are
 If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
+
+[`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
+It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
+data. Window budgeting still measures the complete request containing the rendered text.
 
 `ContextBuilder.build(system_addendum=...)` appends the adopted overview after system-template output,
 within the system character limit and outside message history. Static `context.yaml` memory keeps

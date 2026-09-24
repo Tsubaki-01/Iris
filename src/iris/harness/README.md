@@ -358,8 +358,10 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 工具目录不会触发全局配置相等检查。已保存的请求、运行限制、cursor、调用身份和执行结果
 仍来自原 run；待执行工具仍需满足参数与当前权限规则。运行记录和 checkpoint 不保存环境指纹。
 
-模板使用 Jinja 原生按需加载、编译缓存与默认更新检测，同一 runtime 的后续渲染可读到文件修改。
-`StrictUndefined` 和字符上限在渲染时检查。详见 [`iris.context`](../context/README.md)。
+Context 和 runtime 各自使用共享的 [`iris.utils.TemplateRenderer`](../utils/README.md)，
+保留 Jinja 原生按需加载、编译缓存与默认更新检测，同一 runtime 的后续渲染可读到文件修改。
+模板默认关闭自动转义，XML 模板自行声明转义；`StrictUndefined` 在渲染时检查，context
+字符上限在完整文本生成后检查。详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
 `initial_session_message_count`。新 run 在 `before_input` 将 BCI 和用户输入归档；session 首次

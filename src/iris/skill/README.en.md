@@ -95,6 +95,11 @@ contains only `name` and `description`. After selecting an entry, the model call
 {"name": "my-skill"}
 ```
 
+Catalog usage instructions come from [`skill_catalog_usage.j2`](../prompts/skill_catalog_usage.j2).
+`SkillCatalog` reads them once at construction through `iris.utils.TemplateRenderer` and reuses the
+text in subsequent slot projections. `ContextXmlRenderer` escapes the `usage` attribute when building
+default XML output. Template failures raise `IrisSkillError`.
+
 `load_skill` returns the first 1000 lines of current `SKILL.md` text, including frontmatter, without
 parsing frontmatter again. Discovery owns the
 configured root and scan-directory boundaries. At load time, the tool revalidates that the file is
@@ -114,6 +119,7 @@ The custom-template branch does not call the default XML renderer. A template mu
 catalog explicitly by slot name:
 
 ```jinja2
+{% autoescape true %}
 {% for slot in slots if slot["name"] == "available_skills" %}
 <available_skills count="{{ slot["attributes"]["count"] }}"
                   usage="{{ slot["attributes"]["usage"] }}">
@@ -125,9 +131,11 @@ catalog explicitly by slot name:
 {% endfor %}
 </available_skills>
 {% endfor %}
+{% endautoescape %}
 ```
 
-The Jinja environment enables XML autoescape. The factory warns when Skills are enabled, discovery
+Jinja disables autoescape by default; this XML example enables it explicitly in the template.
+The factory warns when Skills are enabled, discovery
 is non-empty, and a custom system template is used. If the template ignores this slot, the catalog
 is invisible to the model even though `load_skill` remains registered.
 

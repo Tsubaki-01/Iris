@@ -112,6 +112,12 @@ Flush 先筛选对未来有用的信息，保留偏好、纠正、项目约定�
 压缩不得补造事实或增强结论：单次经历不自动成为通用规律，明确默认偏好按声明范围保留，未验证
 不写成无效。用户明确要求记录的细节仍需保留；`reason` 只简述保存或整理用途。
 这些是模型的生成要求；JSON schema 校验只检查结构与字段约束，不证明正文的推论成立。
+
+Flush/Dream 的指令分别在 [`memory_flush.j2`](../prompts/memory_flush.j2) 和
+[`memory_dream.j2`](../prompts/memory_dream.j2) 中维护。`MemoryService.prompt_renderer` 持有
+独立的 `iris.utils.TemplateRenderer`，Python 负责准备 schema 和输入数据，模板保留 JSON
+中的引号与 `<>&` 原文。模板读取或渲染失败转换为 `IrisMemoryError`。
+
 Flush/dream 请求使用 `temperature=0` 和 `response_format={"type": "json_object"}`，生成 provider
 须支持这两个参数。JSON 输出模式约束响应格式，字段与证据引用仍在既有解析边界检查；不合契约
 的响应不提交，已保存原文仍可重试。低随机性和原文核对都不能保证语义一定正确。
@@ -227,6 +233,9 @@ session 不会强制刷新已采用概览，需要当前概览时开始新会话
 生成依赖由构造器的 `overview_provider`、`overview_model` 和 `overview_config` 绑定；provider
 遵循 `iris.providers.CompletionProvider`。配置构造的 Agent 使用已解析的主模型 provider，
 显式注入的 service 则保留宿主原配置。构造和读取不调用模型；自动生成由可选的 runner 维护负责。
+
+概览生成指令在 [`memory_overview.j2`](../prompts/memory_overview.j2) 中维护，也通过该 service
+的 `prompt_renderer` 读取。修改指令无需调整 Python 的快照准备、预算或响应解析逻辑。
 
 ```python
 # service 已通过构造器配置概览 provider/model。

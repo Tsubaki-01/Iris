@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..providers.protocols import CompletionProvider
+from ._prompts import render_memory_prompt
 from .generation_models import (
     DreamOperation,
     DreamPlan,
@@ -88,65 +89,6 @@ class _DreamResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operations: tuple[_ProposedOperation, ...]
     resolutions: tuple[_Resolution, ...]
-
-
-_FLUSH_PROMPT = """从本批经历中选择对未来任务有用的信息，忠实压缩为少量观察。
-只返回符合 schema 的 JSON。
-优先保留明确偏好与纠正、项目约定、值得参考的具体经历，以及能跨会话接续的具体任务线索。
-任务线索如外部任务编号、具体阻塞和待验证改动；常规读取、正在整理等执行进度由会话历史保存，不进入记忆。
-普通闲聊、常规操作流水、重复转述和无后续价值的临时要求可省略；不要把“用户要求记录”本身另记一条。
-同一主题的有用信息集中表达，不按每句话或发言角色拆条；没有值得保留的内容时返回 observations: []。
-text 直接写值得记住的要点及防止误用的必要条件，不复述完整过程。日期、版本、来源和备选方案按需保留。
-允许省略次要细节，不允许补造数字、原因或执行状态；工具错误标记本身不能推出退出码。
-保持原意与确定性：建议、已执行和已验证有区别；未验证不等于无效；用户归因不能变成工具证明的原因。
-一次具体经历可以保留为本次经验，不自动提升为通用规律；明确声明的默认偏好即使只说一次也应保留。
-技术经历可简写为“本次在 X 条件下，采取 Y 后得到 Z”，作为参考实例，不自行追加下次应如何处理的指令。
-用户明确约定的未来做法按其范围保留；单次未采用某方案，不意味着该方案无需使用或无效。
-未采用的助手建议通常省略。原文“下载超时；用户说关闭代理后好了，不是重装解决”，
-可记为“本次下载超时，关闭代理后成功；用户归因为代理”，不补成“并非安装问题”。
-applicability 简述必要适用范围，可为空；影响使用的限制也应在 text 中。
-reason 只填保存用途（如“保留排查线索”），不另作因果推断。
-category/kind 按 schema 选择；项目工具约定可归 reference，任务进展归 task，namespace 不是 category。
-episodes 描述经历来源，records.episode_ref 指向对应 episodes.ref。
-records 的 ref 才是本批证据；context 仅供理解，程序注入、既有记忆读回与 reasoning 不作为新事实。
-每条观察至少引用一个支持其正文的 ref。已有写入结果可用于 target_item_ids 对照，不据此跳过其他原文。
-不调用工具，不使用模型外部知识。
-"""
-
-_DREAM_PROMPT = """整理 observations 和 explicit_changes，结合给出的正式 items 与修订 events。
-目标是少量有用、忠实、易于复用的记忆。筛掉无后续价值的观察，合并重复和同一主题的相关要点。
-以 original_evidence 的原始记录及显式 events 核对模型提炼稿，纠正无依据的细节，保留有效知识。
-observations 只是草稿，不是独立证据；text、applicability 中的主张均以原始记录为准。
-原文只报告失败就只保留失败，草稿补出的退出码等数字或诊断结论必须删去，不能因草稿写得确定就沿用。
-text 直接表达值得记住的结论、方法或任务状态，并保留防止误用所必需的对象和条件。
-允许有损压缩：日期、版本、来源经过和未执行方案仅在影响理解、使用或用户明确要求时写入正文。
-保留原意、必要归属和确定性；用户判断不变成已证明事实，未验证不变成无效，局部测试不变成全面成功。
-一次处置成功不代表已排除其他原因；未采用的建议可省略，若保留则仍写未尝试，不替它得出无效结论。
-单次经历不自动成为通用规则；明确的默认偏好按声明范围保留；重复转述不增加独立证据。
-同一主题的零散观察整理成简洁条目；已准确简洁的内容保持原句，仅为去重、必要条件或纠错而改写。
-明确约定已覆盖同一经历的可用信息时，保留约定即可，不因分类不同再写一条等价经验。
-技术经历按“本次条件、实际行动、结果”保留，不自行增添后续处置规则，也不把未采用的方案写成无需或无效。
-例如“本次下载超时，换网络后成功”可以原样记住；改成“下载超时换网络即可解决”改变了含义。
-普通“已读文件、正在处理”的进度不值得独立记忆；未完成状态只有对后续行动有具体帮助才保留。
-reason 只解释保存或整理用途，不再次生成事实结论；没有新增价值时可保持现状。
-只返回符合 schema 的 JSON；所有证据引用使用 evidence 中的 ref 标签。
-explicit_changes 列出待检查的事件 ref；events.changes 给出字段修改前后的值。
-evidence.record 是本次请求内的原文分组，同一分组的区间可能重叠；真实定位由程序保存。
-每个观察必须有且仅有一条 resolution：归入当前条目或本响应新增标签，
-或 target_id=null 并说明忽略原因。
-对于仅有常规读取或正在处理等进度的观察，直接给 target_id=null、reason="普通执行进度"，不生成操作。
-add 使用唯一 new_key，本程序会生成数据库 ID；其它操作 target_id 只能来自本批 items。
-update 保持 ID；merge 选择已有 keeper 为 target_id，merge_ids 指向要合并的其它条目。
-同一项目的同一约定、偏好或状态被纠正时，必须优先 update 原条目，保持其身份。
-不要把同一事实的纠正做成 delete 旧条目再 add 新条目；delete 用于整体已无保留价值的知识。
-同一已有条目只能有一种最终操作，不能同时更新和被合并。
-evidence 给出支持当前最终正文的完整证据集合；旧说法被纠正后不再是新说法的当前支持。
-support 只补充证据不改正文；重复观察可仅归入已有条目，无需膨胀其证据集合。
-删除与失效条目以及显式较新纠正必须参与比较；不能把被忘记的旧事实重新写回。
-明确的新用户要求可以构成新的证据，但不要仅凭旧观察、模型知识或未验证提议反转事实。
-不同适用范围的冲突应保留条件。delete 只用于明确失效或否定，不因长期没检索而删除。
-输入已足够完整且无需改变时 operations 可以为空；所有 explicit_changes 仍表示本批已检查。
-"""
 
 
 def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int) -> LLMRequest:
@@ -289,10 +231,10 @@ def _select_flush(
     provider: CompletionProvider,
     model: str,
     config: MemoryGenerationConfig,
+    prompt: str,
 ) -> tuple[tuple[EpisodeSlice, ...], LLMRequest]:
     """先按记录选片，单条超长才二分截取固定字符区间。"""
     slices: list[EpisodeSlice] = []
-    prompt = _FLUSH_PROMPT + json.dumps(_FlushResponse.model_json_schema(), ensure_ascii=False)
 
     def build(pieces: list[EpisodeSlice]) -> LLMRequest:
         return _request(
@@ -354,8 +296,13 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
         )
         if not progresses:
             return GenerationResult(namespace=namespace, stage="flush", status="empty")
+        prompt = render_memory_prompt(
+            service.prompt_renderer,
+            "memory_flush.j2",
+            {"schema_json": json.dumps(_FlushResponse.model_json_schema(), ensure_ascii=False)},
+        )
         slices, request = _select_flush(
-            namespace, progresses, provider, model, service.generation_config
+            namespace, progresses, provider, model, service.generation_config, prompt
         )
         input_ids = tuple(dict.fromkeys(piece.episode_id for piece in slices))
         records = {
@@ -673,10 +620,17 @@ async def dream(
                 namespace, budget=None if retry_blocked else config.dream_input_budget_tokens
             )
         )
-        while True:
-            snapshot = await service.run_async_io(
-                lambda: service.store.read_dream_snapshot(namespace)
+        snapshot = await service.run_async_io(lambda: service.store.read_dream_snapshot(namespace))
+        if not snapshot.observations and not snapshot.changes:
+            return GenerationResult(
+                namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
             )
+        prompt = render_memory_prompt(
+            service.prompt_renderer,
+            "memory_dream.j2",
+            {"schema_json": json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False)},
+        )
+        while True:
             while True:
                 if not snapshot.observations and not snapshot.changes:
                     result = GenerationResult(
@@ -695,8 +649,7 @@ async def dream(
                 )
                 request = _request(
                     model,
-                    _DREAM_PROMPT
-                    + json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False),
+                    prompt,
                     source,
                     config.dream_output_budget_tokens,
                 )
@@ -735,6 +688,9 @@ async def dream(
                 )
             if provider.estimate_input_tokens(request) <= config.dream_input_budget_tokens:
                 break
+            snapshot = await service.run_async_io(
+                lambda: service.store.read_dream_snapshot(namespace)
+            )
         input_ids = tuple(
             [item.id for item in snapshot.observations]
             + [item.event_id for item in snapshot.changes]

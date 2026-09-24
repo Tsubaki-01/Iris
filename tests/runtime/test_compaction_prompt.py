@@ -101,3 +101,32 @@ async def test_missing_prompt_fails_when_compaction_reads_it(tmp_path: Path) -> 
     assert result.error is not None and result.error.source == "context"
     assert "模板来源" in result.error.message
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("xml", [False, True])
+async def test_compaction_template_uses_plain_text_unless_explicitly_escaped(
+    tmp_path: Path, xml: bool
+) -> None:
+    """摘要指令独立于 ContextBuilder，XML 输出由模板显式选择。"""
+    prompt = tmp_path / "summary.j2"
+    expression = "{{ '<a>&' }}"
+    if xml:
+        expression = "{% autoescape true %}" + expression + "{% endautoescape %}"
+    prompt.write_text("  " + expression + "  ", encoding="utf-8")
+    provider = _PromptProvider(
+        [
+            LLMResponse(provider="fake", finish_reason="stop", content=[TextBlock(text=text)])
+            for text in ("摘要结果", "完成")
+        ]
+    )
+    runtime = RuntimeFactory.from_config(_config(prompt), provider=provider)
+    activation = start_activation(input="新任务", initial_session_message_count=1)
+    commits = FakeRuntimeCommitPort(activation, messages=[Msg.user('原文 <a>&"')])
+    result = await runtime.execute(
+        activation, commits=commits, cancellation=MutableCancellationSignal()
+    )
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    summary = provider.requests[0]
+    assert summary.messages[0].text == ("&lt;a&gt;&amp;" if xml else "<a>&")
+    assert '原文 <a>&"' in summary.messages[1].text

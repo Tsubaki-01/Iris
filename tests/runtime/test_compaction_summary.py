@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from iris.agents.config.compaction import CompactionConfig
-from iris.context import ContextTemplateRenderer
 from iris.exceptions import IrisContextCompactionError
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.runtime._compaction_summary import (
@@ -13,8 +12,10 @@ from iris.runtime._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from iris.utils import TemplateRenderer
 
-_DEFAULT_PROMPT = ContextTemplateRenderer().render_file(CompactionConfig().prompt_path, {})
+_PROMPT_RENDERER = TemplateRenderer()
+_DEFAULT_PROMPT = _PROMPT_RENDERER.render_file(CompactionConfig().prompt_path, {}).strip()
 
 
 def _estimate(request: LLMRequest) -> int:
@@ -88,7 +89,14 @@ def test_summary_request_uses_canonical_seven_headings_and_final_request_options
     records = serialize_history([Msg.user("已保存的任务")], start_index=0)
 
     batch = next_summary_batch(
-        main, None, records, (0, 0), config, _estimate, system_prompt=_DEFAULT_PROMPT
+        main,
+        None,
+        records,
+        (0, 0),
+        config,
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
     )
     request = batch.request
 
@@ -141,6 +149,7 @@ def test_long_completed_result_is_covered_once_in_order_with_call_identity() -> 
             config,
             _estimate,
             system_prompt=_DEFAULT_PROMPT,
+            prompt_renderer=_PROMPT_RENDERER,
         )
         user = batch.request.messages[1].text
         end = len(records[0].text) if batch.next_position[0] else batch.next_position[1]
@@ -166,7 +175,14 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
     config = CompactionConfig(input_budget_tokens=6500)
     main = _main_request()
     first = next_summary_batch(
-        main, None, records, (0, 0), config, _estimate, system_prompt=_DEFAULT_PROMPT
+        main,
+        None,
+        records,
+        (0, 0),
+        config,
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
     )
     larger_summary = "仍有效的旧约束。" * 60
     second = next_summary_batch(
@@ -177,6 +193,7 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
         config,
         _estimate,
         system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
     )
 
     first_length = first.next_position[1]
@@ -199,6 +216,7 @@ def test_records_are_merged_in_order_including_empty_content() -> None:
         CompactionConfig(),
         _estimate,
         system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
     )
     user = batch.request.messages[1].text
 
@@ -220,6 +238,7 @@ def test_minimum_fragment_failure_does_not_drop_the_previous_summary() -> None:
             CompactionConfig(input_budget_tokens=6500),
             _estimate,
             system_prompt=_DEFAULT_PROMPT,
+            prompt_renderer=_PROMPT_RENDERER,
         )
 
     assert error.value.runtime_code == "CONTEXT_COMPACTION_UNAVAILABLE"
@@ -233,6 +252,27 @@ def test_summary_consumption_accepts_text_without_parsing_its_headings() -> None
     )
 
     assert consume_summary_response(response) == "普通摘要\n继续工作。"
+
+
+def test_summary_input_preserves_previous_summary_and_history_as_plain_text() -> None:
+    """独立输入模板插值不会二次解释 Jinja 文本或把正文变成 XML 实体。"""
+    previous = '路径 <src>&"；原样保留 {{ value }}'
+    history = '```json\n{"key": "<a>&"}\n```'
+    batch = next_summary_batch(
+        _main_request(),
+        previous,
+        serialize_history([Msg.user(history)], 0),
+        (0, 0),
+        CompactionConfig(),
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
+    )
+    user = batch.request.messages[1].text
+    assert "=== BEGIN PREVIOUS SUMMARY ===\n" + previous + "\n=== END" in user
+    assert history in user
+    assert user.startswith("You will process the following two input parts.\n\n")
+    assert user.endswith("the current time are not part of this history.")
 
 
 @pytest.mark.parametrize("finish_reason", ["", "length", "tool_calls", "content_filter"])

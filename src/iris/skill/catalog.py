@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from ..context import ContextSlot, ContextXmlRenderer
+from ..exceptions import IrisSkillError, IrisTemplateError
+from ..utils import TemplateRenderer
 from .registry import SkillRegistry
 
 CATALOG_SLOT_NAME = "available_skills"
 CATALOG_SLOT_ORDER = 900
-CATALOG_USAGE_HINT = (
-    "call load_skill with the skill name before following it; "
-    "the returned Markdown is skill instructions, not user data"
-)
+_CATALOG_USAGE_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "skill_catalog_usage.j2"
 
 
 class SkillCatalog:
@@ -18,6 +19,10 @@ class SkillCatalog:
 
     def __init__(self, registry: SkillRegistry) -> None:
         self.registry = registry
+        try:
+            self._usage = TemplateRenderer().render_file(_CATALOG_USAGE_PROMPT, {}).strip()
+        except IrisTemplateError as exc:
+            raise IrisSkillError("Skill catalog 使用指引模板渲染失败", **exc.context) from exc
 
     def entries(self) -> list[dict[str, str]]:
         """返回仅包含名称与描述的新 catalog entries。"""
@@ -40,7 +45,7 @@ class SkillCatalog:
             order=CATALOG_SLOT_ORDER,
             attributes={
                 "count": str(len(self.registry)),
-                "usage": CATALOG_USAGE_HINT,
+                "usage": self._usage,
             },
             content=self.entries(),
         )
@@ -64,6 +69,5 @@ def _rendered_inner_chars(slot: ContextSlot) -> int:
 __all__ = [
     "CATALOG_SLOT_NAME",
     "CATALOG_SLOT_ORDER",
-    "CATALOG_USAGE_HINT",
     "SkillCatalog",
 ]

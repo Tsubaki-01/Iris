@@ -24,7 +24,8 @@ flowchart LR
 ```
 
 `models.py` defines contracts, `config.py` loads YAML and resolves template paths, `builder.py`
-orchestrates sections, and `renderer.py` implements XML and Jinja2 rendering.
+orchestrates sections, and `renderer.py` implements XML rendering. File templates use the shared
+[`iris.utils.TemplateRenderer`](../utils/README.md).
 
 ## Quick start
 
@@ -101,12 +102,15 @@ BCI messages produced by `build()` carry
 `build_before_current_input(section)` prepares BCI on its own for input archival, without rendering
 fixed context sections until the model request.
 
-When `template` is set, `ContextTemplateRenderer` receives exactly one variable, `slots`: an ordered,
-JSON-mode list of slot dictionaries. Jinja2 uses XML autoescape and `StrictUndefined`; rendered text
-is preserved as prompt text. Missing templates, encoding/dependency/render errors, and non-serializable
-slot values raise `IrisContextError`.
+When `template` is set, `iris.utils.TemplateRenderer` receives exactly one variable, `slots`: an ordered,
+JSON-mode list of slot dictionaries. Jinja2 uses `StrictUndefined` with autoescape disabled by default,
+preserving plain text and Markdown. XML templates must enable `{% autoescape true %}` or apply `|e`
+to the relevant variables. The default `ContextXmlRenderer` still escapes text and attributes itself.
+The builder strips leading and trailing whitespace from template output before using it as prompt text.
+It converts template loading and rendering errors to `IrisContextError`; non-serializable slot values
+also raise `IrisContextError`.
 
-`ContextTemplateRenderer` reuses a Jinja Environment per resolved entry directory, retains
+`TemplateRenderer` reuses a Jinja Environment per resolved entry directory, retains
 FileSystemLoader, and calls `get_template()` for each render. Jinja's default in-memory compiled
 cache and `auto_reload=True` detect changes to the entry and used dependencies by file mtime.
 Unchanged templates reuse compiled code while each render uses current data. Runs on the same
@@ -132,7 +136,7 @@ Unknown fields are rejected and no legacy migration runs.
 
 `iris.context` exports exactly `CONTEXT_SENDER`, `ContextSlot`, `ContextSection`,
 `ContextBuildInput`, `ContextBuildOutput`, `ContextBuilder`, `ContextXmlRenderer`,
-`ContextTemplateRenderer`, and `load_context_build_input`.
+and `load_context_build_input`. Import `TemplateRenderer` from `iris.utils` for file templates.
 
 The builder accepts optional renderer instances and exposes `build(input_data)` and
 `render_section(section_name, section)` for rendering one of its defined section types.
@@ -150,8 +154,8 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Slot/section contracts, ordering, roles, limits, and XML rendering | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
-| YAML, template paths, and Jinja2 rendering | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
-| Template loading and reloading | `renderer.py` | `tests/context/test_template_renderer.py` |
+| YAML, template paths, and Jinja2 integration | `config.py`, `builder.py` | `tests/context/test_context_config.py` |
+| Template loading, reloading, and escaping | `../utils/templating.py` | `tests/utils/test_templating.py` |
 
 ```bash
 uv run pytest tests/context

@@ -5,22 +5,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..agents.config.compaction import CompactionConfig
 from ..exceptions import IrisContextCompactionError
 from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
+from ..utils import TemplateRenderer
+from ._prompts import render_prompt
 
-_USER_TEMPLATE = """You will process the following two input parts.
-
-=== BEGIN PREVIOUS SUMMARY ===
-{previous_summary_or_none}
-=== END PREVIOUS SUMMARY ===
-
-=== BEGIN SAVED HISTORY FOR THIS BATCH ===
-{serialized_history}
-=== END SAVED HISTORY FOR THIS BATCH ===
-
-The saved history is in record order. Unarchived new input, the summary request itself, and the current time are not part of this history."""  # noqa: E501
+_INPUT_TEMPLATE = Path(__file__).parents[1] / "prompts" / "compaction_input.j2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +88,7 @@ def next_summary_batch(
     estimate_input_tokens: Callable[[LLMRequest], int],
     *,
     system_prompt: str,
+    prompt_renderer: TemplateRenderer,
 ) -> SummaryBatch:
     """使用当前工作摘要计量完整请求，顺序合并记录并按需切分长正文。
 
@@ -102,7 +96,9 @@ def next_summary_batch(
     """
     fragments: list[str] = []
     index, offset = position
-    request = _summary_request(main_request, previous_summary, "", config, system_prompt)
+    request = _summary_request(
+        main_request, previous_summary, "", config, system_prompt, prompt_renderer
+    )
     while index < len(records):
         record = records[index]
         full_fragment = _render_fragment(record, offset, len(record.text))
@@ -112,6 +108,7 @@ def next_summary_batch(
             "\n\n".join([*fragments, full_fragment]),
             config,
             system_prompt,
+            prompt_renderer,
         )
         if estimate_input_tokens(candidate) <= config.input_budget_tokens:
             fragments.append(full_fragment)
@@ -132,6 +129,7 @@ def next_summary_batch(
                 "\n\n".join([*fragments, fragment]),
                 config,
                 system_prompt,
+                prompt_renderer,
             )
             if estimate_input_tokens(candidate) <= config.input_budget_tokens:
                 next_offset = midpoint
@@ -179,17 +177,22 @@ def _summary_request(
     serialized_history: str,
     config: CompactionConfig,
     system_prompt: str,
+    prompt_renderer: TemplateRenderer,
 ) -> LLMRequest:
     return main_request.model_copy(
         update={
             "messages": [
                 Msg.system(system_prompt),
                 Msg.user(
-                    _USER_TEMPLATE.format(
-                        previous_summary_or_none=(
-                            "(none)" if previous_summary is None else previous_summary
-                        ),
-                        serialized_history=serialized_history,
+                    render_prompt(
+                        prompt_renderer,
+                        _INPUT_TEMPLATE,
+                        {
+                            "previous_summary_or_none": (
+                                "(none)" if previous_summary is None else previous_summary
+                            ),
+                            "serialized_history": serialized_history,
+                        },
                     )
                 ),
             ],

@@ -6,15 +6,16 @@ from typing import Literal
 
 from pydantic_core import PydanticSerializationError
 
-from ..exceptions import IrisContextError
+from ..exceptions import IrisContextError, IrisTemplateError
 from ..message import Msg
+from ..utils import TemplateRenderer
 from .models import (
     ContextBuildInput,
     ContextBuildOutput,
     ContextSection,
     ContextSlot,
 )
-from .renderer import ContextTemplateRenderer, ContextXmlRenderer
+from .renderer import ContextXmlRenderer
 
 CONTEXT_SENDER = "context"
 SectionName = Literal["system", "memory", "before_current_input"]
@@ -33,10 +34,10 @@ class ContextBuilder:
         self,
         *,
         xml_renderer: ContextXmlRenderer | None = None,
-        template_renderer: ContextTemplateRenderer | None = None,
+        template_renderer: TemplateRenderer | None = None,
     ) -> None:
         self.xml_renderer = xml_renderer or ContextXmlRenderer()
-        self.template_renderer = template_renderer or ContextTemplateRenderer()
+        self.template_renderer = template_renderer or TemplateRenderer()
 
     def build(
         self, input_data: ContextBuildInput, *, system_addendum: str = ""
@@ -98,10 +99,13 @@ class ContextBuilder:
                     path=str(section.template),
                     error=str(exc),
                 ) from exc
-            rendered = self.template_renderer.render_file(
-                section.template,
-                template_context,
-            )
+            try:
+                rendered = self.template_renderer.render_file(
+                    section.template,
+                    template_context,
+                ).strip()
+            except IrisTemplateError as exc:
+                raise IrisContextError(exc.message, section=section_name, **exc.context) from exc
         else:
             rendered = self.xml_renderer._render_trusted_section(
                 _ROOT_TAGS[section_name],

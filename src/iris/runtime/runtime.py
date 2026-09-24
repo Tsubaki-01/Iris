@@ -62,6 +62,7 @@ from ._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from ._prompts import render_prompt
 from .commit import (
     CommitPortToolEffectGuard,
     RuntimeCommitPort,
@@ -947,6 +948,7 @@ class AgentRuntime:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
         candidates = await load_context_windows(
+            prompt_renderer=self.environment.prompt_renderer,
             memory_service=self.environment.memory_service,
             namespaces=config.memory.read_namespaces,
             tool_names=(
@@ -1298,9 +1300,9 @@ class AgentRuntime:
             )
         completed = False
         try:
-            system_prompt = self.environment.context_builder.template_renderer.render_file(
-                config.prompt_path, {}
-            )
+            system_prompt = render_prompt(
+                self.environment.prompt_renderer, config.prompt_path, {}
+            ).strip()
             previous = snapshot.compaction
             summary = previous.summary if previous is not None else None
             start = previous.covered_message_count if previous is not None else 0
@@ -1315,6 +1317,7 @@ class AgentRuntime:
                     config,
                     provider.estimate_input_tokens,
                     system_prompt=system_prompt,
+                    prompt_renderer=self.environment.prompt_renderer,
                 )
                 for attempt in range(2):
                     stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)

@@ -27,6 +27,7 @@ from ..message import LLMRequest, ModelStreamEvent
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
+from ..utils import TemplateRenderer
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
 
@@ -103,6 +104,7 @@ class RuntimeEnvironment:
         context_input (ContextBuildInput): context 构建输入。
         provider (CompletionProvider): provider-neutral 调用边界。
         context_builder (ContextBuilder): 固定 context 生成器。
+        prompt_renderer (TemplateRenderer): runtime 独立指令的模板渲染器。
         assembler (RuntimeMessageAssembler): provider 请求装配器。
         tool_bridge (ToolBridge): 工具可见性、预检与执行边界。
         workspace_root (Path): 工具执行使用的 workspace 根路径。
@@ -117,6 +119,7 @@ class RuntimeEnvironment:
     context_input: ContextBuildInput
     provider: CompletionProvider
     context_builder: ContextBuilder = field(default_factory=ContextBuilder)
+    prompt_renderer: TemplateRenderer = field(default_factory=TemplateRenderer)
     assembler: RuntimeMessageAssembler = field(default_factory=RuntimeMessageAssembler)
     tool_bridge: ToolBridge = field(default_factory=_default_tool_bridge)
     workspace_root: Path = field(default_factory=Path.cwd)

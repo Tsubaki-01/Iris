@@ -121,6 +121,11 @@ Details the user explicitly asks to remember are retained. The `reason` briefly 
 recording or consolidating. These are model instructions: JSON schema validation checks structure and
 field constraints, not whether the text's conclusions follow from its evidence.
 
+Flush and Dream instructions live in [`memory_flush.j2`](../prompts/memory_flush.j2) and
+[`memory_dream.j2`](../prompts/memory_dream.j2). `MemoryService.prompt_renderer` owns an independent
+`iris.utils.TemplateRenderer`; Python prepares schemas and input data, while templates preserve JSON
+quotes and `<>&` as plain text. Template loading and rendering failures become `IrisMemoryError`.
+
 Flush/dream requests use `temperature=0` and `response_format={"type": "json_object"}`; the generation
 provider must support both parameters. JSON mode constrains response format; the existing parsing
 boundary still checks fields and evidence references. Invalid responses are not committed, and saved
@@ -263,6 +268,10 @@ is published as `Memory.md` in the canonical namespace directory. Configure `ove
 `iris.providers.CompletionProvider`. Agent configuration binds the resolved main provider, while
 an explicitly injected service keeps its host-supplied configuration. Construction and reads do not
 call the model; optional runner maintenance owns automatic generation.
+
+Overview generation instructions live in [`memory_overview.j2`](../prompts/memory_overview.j2), read
+through the same service's `prompt_renderer`. Editing instructions does not require changing Python
+snapshot preparation, budgets, or response parsing.
 
 ```python
 # The service already has its overview provider/model configured.

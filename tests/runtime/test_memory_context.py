@@ -8,11 +8,12 @@ from pathlib import Path
 import pytest
 
 from iris.context import ContextBuilder, ContextBuildInput, ContextSection, ContextSlot
-from iris.exceptions import IrisContextError
+from iris.exceptions import IrisContextError, IrisTemplateError
 from iris.lifecycle import SessionContextWindow
 from iris.memory import MemoryOverviewDocument, MemoryService, SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, Msg
 from iris.runtime.memory_context import load_context_windows, select_context_window
+from iris.utils import TemplateRenderer
 
 
 class TextTokenProvider:
@@ -149,6 +150,7 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
         tmp_path / "memory.db", (_document("research"), _document("project"))
     )
     full, navigation = await load_context_windows(
+        prompt_renderer=TemplateRenderer(),
         memory_service=service,
         namespaces=["research", "project"],
         tool_names=["memory_search", "memory_fetch"],
@@ -167,10 +169,9 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
     full_cost = provider.estimate_input_tokens(_request(full)) - provider.estimate_input_tokens(
         _request(SessionContextWindow())
     )
-    navigation_cost = (
-        provider.estimate_input_tokens(_request(navigation))
-        - provider.estimate_input_tokens(_request(SessionContextWindow()))
-    )
+    navigation_cost = provider.estimate_input_tokens(
+        _request(navigation)
+    ) - provider.estimate_input_tokens(_request(SessionContextWindow()))
     assert navigation_cost < full_cost
     window, _ = select_context_window(
         candidates=(full, navigation),
@@ -199,7 +200,10 @@ async def test_instructions_follow_actual_tools_and_limit_queries_to_covered_top
 ) -> None:
     service = DocumentsService(tmp_path / "memory.db", (_document("project"),))
     candidates = await load_context_windows(
-        memory_service=service, namespaces=["project"], tool_names=tool_names
+        prompt_renderer=TemplateRenderer(),
+        memory_service=service,
+        namespaces=["project"],
+        tool_names=tool_names,
     )
     for window in candidates:
         text = window.memory_overview
@@ -228,13 +232,19 @@ async def test_missing_overview_keeps_chat_available_without_long_term_queries(
         store, mirror=FileMemoryMirror(tmp_path / "mirror") if with_mirror else None
     )
     full, navigation = await load_context_windows(
-        memory_service=service, namespaces=["project"], tool_names=["memory_search", "memory_fetch"]
+        prompt_renderer=TemplateRenderer(),
+        memory_service=service,
+        namespaces=["project"],
+        tool_names=["memory_search", "memory_fetch"],
     )
     assert full is navigation
     if with_mirror:
         assert full.sources[0].source_revision is None
     else:
         assert full.sources == ()
+        assert full.memory_overview.endswith(
+            "## project\n\n未配置概览发布物，本窗口不使用长期记忆。"
+        )
     assert "## project" in full.memory_overview
     assert "没有概览则本窗口暂不使用长期记忆" in full.memory_overview
     assert "不查询长期记忆" in full.memory_overview
@@ -246,7 +256,76 @@ async def test_no_service_or_empty_scope_initializes_an_empty_window(tmp_path: P
     service = DocumentsService(tmp_path / "memory.db", (_document("project"),))
     for memory_service, namespaces in ((None, ["project"]), (service, [])):
         full, navigation = await load_context_windows(
-            memory_service=memory_service, namespaces=namespaces, tool_names=["memory_search"]
+            prompt_renderer=TemplateRenderer(),
+            memory_service=memory_service,
+            namespaces=namespaces,
+            tool_names=["memory_search"],
         )
         assert full == navigation == SessionContextWindow()
     assert service.reads == []
+
+
+@pytest.mark.asyncio
+async def test_window_template_preserves_exact_plain_text_and_document_whitespace(
+    tmp_path: Path,
+) -> None:
+    """模板输出保持文案、段落和文档尾换行，正文不执行 XML 转义。"""
+    document = MemoryOverviewDocument(
+        namespace="project",
+        path=tmp_path / "Memory.md",
+        source_revision=2,
+        text='  <fact> "A&B" {{ raw }}\n\n',
+        navigation='范围 <topic> & "details"\n',
+        warning="概览 <old> & current",
+    )
+    second_document = MemoryOverviewDocument(
+        namespace="research",
+        path=tmp_path / "Research.md",
+        source_revision=2,
+        text="第二份事实\n",
+        navigation="第二份范围\n",
+        warning="",
+    )
+    full, navigation = await load_context_windows(
+        prompt_renderer=TemplateRenderer(),
+        memory_service=DocumentsService(tmp_path / "memory.db", (document, second_document)),
+        namespaces=["project", "research"],
+        tool_names=[],
+    )
+    instructions = (
+        "以当前概览为长期记忆范围；没有提及的主题默认没有，不搜索这些主题。"
+        "仅对概览已覆盖且问题需要的主题按需读取，无关问题无需读取。"
+        "没有概览则本窗口暂不使用长期记忆，正常聊天但不查询长期记忆。"
+        "概览或文件未同步的提示不扩展主题范围，也不阻断已覆盖主题的数据库查询；"
+        "概览可能旧于数据库当前记录，不能视为已核实的当前值。"
+        " 当前没有专用数据库读取工具。"
+    )
+    heading = f"## project\n\n{document.warning}\n\n"
+    assert full.memory_overview == (
+        f"# Memory overview\n\n{instructions}\n\n{heading}{document.text}"
+        f"\n\n## research\n\n{second_document.text}"
+    )
+    assert navigation.memory_overview == (
+        "# Memory overview\n\n本窗口仅载入知识范围，未载入核心事实。\n\n"
+        f"{instructions}\n\n{heading}{document.navigation}"
+        f"\n\n## research\n\n{second_document.navigation}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_window_template_failure_is_a_context_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """读取器错误在窗口模板边界转换为 context 领域异常。"""
+    missing = tmp_path / "missing.j2"
+    monkeypatch.setattr("iris.runtime.memory_context._MEMORY_CONTEXT_PROMPT", missing)
+    with pytest.raises(IrisContextError) as caught:
+        await load_context_windows(
+            prompt_renderer=TemplateRenderer(),
+            memory_service=DocumentsService(tmp_path / "memory.db", (_document("project"),)),
+            namespaces=["project"],
+            tool_names=[],
+        )
+    assert caught.value.runtime_source == "context"
+    assert caught.value.context["path"] == str(missing)
+    assert isinstance(caught.value.__cause__, IrisTemplateError)

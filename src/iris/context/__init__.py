@@ -8,7 +8,7 @@ from .models import (
     ContextSection,
     ContextSlot,
 )
-from .renderer import ContextTemplateRenderer, ContextXmlRenderer
+from .renderer import ContextXmlRenderer
 
 __all__ = [
     "CONTEXT_SENDER",
@@ -17,7 +17,6 @@ __all__ = [
     "ContextBuilder",
     "ContextSection",
     "ContextSlot",
-    "ContextTemplateRenderer",
     "ContextXmlRenderer",
     "load_context_build_input",
 ]

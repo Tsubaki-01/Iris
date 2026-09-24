@@ -27,7 +27,8 @@ flowchart LR
 
 `models.py` 定义 slot、section、输入和输出；`config.py` 负责 YAML
 加载与模板路径解析；`builder.py` 负责编排过滤、排序、渲染和字符上限；
-`renderer.py` 提供默认 XML 与文件模板渲染。
+`renderer.py` 提供默认 XML 渲染；文件模板由共享的
+[`iris.utils.TemplateRenderer`](../utils/README.md) 渲染。
 
 ## 快速入门
 
@@ -254,28 +255,32 @@ class ContextBuildOutput(BaseModel):
 ## 模板渲染
 
 配置 `ContextSection.template` 后，builder 使用
-`ContextTemplateRenderer`，否则使用默认 XML renderer。
+`iris.utils.TemplateRenderer`，否则使用默认 XML renderer。
 
 模板只收到一个变量：`slots`。它是经过启用过滤、排序和 JSON 模式序列化后
 得到的字典列表。`system`、`memory`、`version`、`metadata` 等名称不会注入模板。
 
 ```jinja2
+{% autoescape true %}
 <memory_context>
 {% for slot in slots %}
   <entry name="{{ slot.name }}">{{ slot.content }}</entry>
 {% endfor %}
 </memory_context>
+{% endautoescape %}
 ```
 
-模板环境启用 XML autoescape 和 `StrictUndefined`。模板不存在、路径不是文件、
-编码、解析或运行时错误均使用 `IrisContextError`，模板最终输出会作为
-普通 prompt 文本保留。如果某个 slot 无法进行 JSON 模式序列化，builder 也会
+Jinja 环境使用 `StrictUndefined`，默认关闭自动转义，适用于纯文本和 Markdown。
+生成 XML 的模板需像上例一样使用 `{% autoescape true %}`，或为需要转义的变量使用 `|e`；
+默认 `ContextXmlRenderer` 仍自行转义正文和属性。Builder 对模板输出调用 `.strip()` 后
+作为普通 prompt 文本使用。模板不存在、路径不是文件、编码、解析或运行时错误由 builder
+转换为 `IrisContextError`。如果某个 slot 无法进行 JSON 模式序列化，builder 也会
 抛出 `IrisContextError`，并附带 section、模板路径和底层错误。
 
 模板渲染使用数据副本；模板 renderer 对传入上下文的修改不会改变原 section
 或 slot。
 
-`ContextTemplateRenderer` 按解析后的入口目录复用 Jinja Environment，保留 FileSystemLoader，
+`TemplateRenderer` 按解析后的入口目录复用 Jinja Environment，保留 FileSystemLoader，
 每次渲染都通过 `get_template()` 获取入口。Jinja 使用默认的进程内编译缓存和 `auto_reload=True`，
 按文件 mtime 检测入口与实际使用依赖的变化；文件未变时复用编译结果，每次仍用当前数据生成文本。
 同一 runner 的多个 run 复用此缓存，它不保存最终 prompt，也不写入 Store 或 SQLite。
@@ -322,7 +327,7 @@ def load_context_build_input(path: str | Path) -> ContextBuildInput: ...
 
 ## 公共 API
 
-`iris.context` 只导出以下九项：
+`iris.context` 只导出以下八项：
 
 | API | 用途 |
 | --- | --- |
@@ -333,8 +338,9 @@ def load_context_build_input(path: str | Path) -> ContextBuildInput: ...
 | `ContextBuildOutput` | 返回三个固定位置的 `Msg` |
 | `ContextBuilder` | 编排过滤、排序、渲染、校验和消息创建 |
 | `ContextXmlRenderer` | 默认 XML section/slot renderer |
-| `ContextTemplateRenderer` | Jinja2 文件模板 renderer |
 | `load_context_build_input` | 从 YAML 加载 `ContextBuildInput` |
+
+文件模板 renderer 从 `iris.utils` 导入 `TemplateRenderer`。
 
 ### Builder 与 renderer 签名
 
@@ -344,7 +350,7 @@ class ContextBuilder:
         self,
         *,
         xml_renderer: ContextXmlRenderer | None = None,
-        template_renderer: ContextTemplateRenderer | None = None,
+        template_renderer: TemplateRenderer | None = None,
     ) -> None: ...
 
     def build(
@@ -359,14 +365,6 @@ class ContextXmlRenderer:
     ) -> str: ...
 
     def render_slot(self, slot: ContextSlot) -> str: ...
-
-
-class ContextTemplateRenderer:
-    def render_file(
-        self,
-        template_path: Path,
-        context: dict[str, Any],
-    ) -> str: ...
 ```
 
 ## 异常
@@ -400,8 +398,8 @@ class ContextTemplateRenderer:
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | slot/section 约束、顺序、角色、字符上限与 XML 渲染 | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
-| YAML、模板路径与 Jinja2 渲染 | `config.py`, `renderer.py` | `tests/context/test_context_config.py` |
-| 模板加载与更新 | `renderer.py` | `tests/context/test_template_renderer.py` |
+| YAML、模板路径与 Jinja2 接入 | `config.py`, `builder.py` | `tests/context/test_context_config.py` |
+| 模板加载、更新与转义策略 | `../utils/templating.py` | `tests/utils/test_templating.py` |
 
 ```bash
 uv run pytest tests/context
