@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, ClassVar, Generic, TextIO, TypeVar, cast
+from typing import Any, ClassVar, Generic, Literal, TextIO, TypeVar, cast
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -717,6 +717,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
     description: ClassVar[str]
     input_type: type[InputT]
     capabilities: ClassVar[set[ToolCapability]]
+    context_retention: ClassVar[Literal["keep", "observation"]] = "keep"
     # endregion
 
     # ==========================================
@@ -743,6 +744,7 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
             capabilities=self.capabilities,
             group="file",
             max_result_chars=max_result_chars,
+            context_retention=self.context_retention,
         )
 
     # endregion
@@ -836,6 +838,7 @@ class ReadFileTool(FileTool[ReadFileInput]):
     )
     input_type: type[ReadFileInput] = ReadFileInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
+    context_retention: ClassVar[Literal["keep", "observation"]] = "observation"
 
     async def _impl(
         self,
@@ -861,6 +864,7 @@ class ListFilesTool(FileTool[ListFilesInput]):
     description: ClassVar[str] = "列出 workspace 内文件"
     input_type: type[ListFilesInput] = ListFilesInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
+    context_retention: ClassVar[Literal["keep", "observation"]] = "observation"
 
     async def _impl(
         self,
@@ -880,6 +884,7 @@ class GrepSearchTool(FileTool[GrepSearchInput]):
     description: ClassVar[str] = "搜索 workspace 内文本文件"
     input_type: type[GrepSearchInput] = GrepSearchInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
+    context_retention: ClassVar[Literal["keep", "observation"]] = "observation"
 
     async def _impl(
         self,

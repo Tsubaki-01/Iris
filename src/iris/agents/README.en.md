@@ -114,19 +114,32 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
-`AgentConfig.context_policy` uses `ContextPolicyConfig` and currently exposes `enabled`, defaulting
-to `true`:
+`AgentConfig.context_policy` uses `ContextPolicyConfig` with these defaults:
 
 ```yaml
 context_policy:
   enabled: true
+  preserve_recent_tool_groups: 2
+  old_result_preview_chars: 512
 ```
 
 The complete `AgentRunner` registers `context_read` and `context_search` to read committed messages
 and saved tool results from the current session. They require neither long-term memory nor an
-explicit `file.read` tool. Setting `enabled: false` omits both tools; existing artifact handling and
-LLM compaction remain available. This configuration does not yet select duplicate-result pruning,
-dynamic host state, or deferred-tool activation.
+explicit `file.read` tool. Setting `enabled: false` omits both tools and the new history-body
+reductions; existing artifact handling and LLM compaction remain available.
+
+`preserve_recent_tool_groups` keeps the latest two closed tool batches verbatim during deterministic
+reduction; zero is allowed. It does not change the existing LLM summary's soft recent-history target.
+`old_result_preview_chars` defaults to 512 body characters, split into a 384-character head and
+128-character tail. Notices and refs are counted separately; zero retains only the notice and ref.
+Both settings require nonnegative integers. Only successful results declared `observation` by the
+tool author are eligible.
+
+At the existing 80% full-request threshold, runtime first folds exact duplicate bodies, then shortens
+older results in history order. It accepts only candidates that reduce the complete request's token
+estimate and uses existing LLM compaction if needed. Every actual tool call still executes and raw
+history stays unchanged. See [runtime](../runtime/README.en.md#history-projection-and-summary-construction)
+for read-availability and protection rules.
 
 Configuration loading does not read history. Runner supplies the store-bound access service;
 direct `RuntimeFactory.from_config*()` callers with this policy enabled must pass `context_access`,
@@ -217,8 +230,9 @@ first compaction reads the file. With the Python SDK, relative paths use the dir
 
 `load_agent_config()` and `AgentConfig` validate these values without calling a model or tokenizer.
 The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. Before each
-main model call, runtime automatically summarizes old history when the full input reaches 80%,
-including committed steps in the current run while preserving task anchors and recent text.
+main model call, runtime first attempts deterministic body reduction under `context_policy`. If the
+full input still reaches 80%, it summarizes old history, including committed steps in the current
+run, while preserving task anchors and recent text.
 Summaries use the current model; `summary_ratio` caps generation output and may include reasoning.
 The resulting full request must be no larger than 80% and strictly smaller than before. Once started,
 a failed compaction ends the current run while preserving raw history and the last committed summary.

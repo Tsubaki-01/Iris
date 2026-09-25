@@ -77,7 +77,7 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影与窗口。
 后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
-每次 `before_model` 在主步骤 reservation 获准后检查完整输入，压缩不额外消耗主步骤预算。
+每次 `before_model` 检查完整输入，实际 LLM 摘要在主步骤 reservation 获准后进行，不额外消耗主步骤预算。
 
 ### 历史投影与摘要构造
 
@@ -91,6 +91,31 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
 回读引用，下标来自原始历史，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
 取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
+
+[`_context_projection.py`](./_context_projection.py) 在完整请求达到既有 80% trigger 时，先折叠
+精确重复工具正文，再从旧到新短化 observation 结果；只有完整 `LLMRequest` 的 token 估算
+实际下降才采用候选。低于 trigger 即停止，已足够时不调用摘要模型。单次大结果仍由 artifact
+处理；这里同时处理多轮中型输出累积造成的压力。
+
+- 资格来自执行时保存的 `metadata.extra.context_retention="observation"`，不是当前工具目录。
+  错误、未闭合调用、keep 结果、用户和 assistant 文字、summary 与任务锚点不被短化。
+- 默认保留最近两个已闭合工具批次；一批是 assistant 的完整 calls 与对应 results，普通消息
+  不算工具批次。该保护只用于确定性裁剪，不增加 LLM 摘要的硬保留条件。
+- 精确判等使用已保存的规范工具名、key 排序后的 JSON 参数及完整内联正文。保留最新代表和
+  近期保护组；较早副本换成明确的代表 ref 与本次原文 ref。不同结果、artifact 预览或文件路径
+  不作为相等证据，也不为判等读取大文件。每次工具调用照常执行，所有 call/result 均保留。
+- 旧结果预览默认 512 字符，分配给正文 head 384 / tail 128；说明和稳定 ref 额外计入请求。
+  已 offload 的长预览也可短化，但实际保留的去重代表不会再被短化。
+
+正文裁剪要求最终 schema 中可见 `context_read`，且模型配置与本次 request_options 合并后的
+effective `tool_choice` 允许调用它。`include_tools=false`、`tool_choice="none"`、隐藏回读
+schema 或强制另一具体 function 时跳过裁剪；强制 `context_read` 本身仍可裁剪。原有 LLM
+compaction 不因此关闭。
+
+主请求、候选摘要切点和压缩后的最终请求使用同一个投影入口，每个候选重新确定可见正文
+中的重复代表。投影只 copy-on-write 修改派生正文，不写原始消息、session revision、checkpoint
+或裁剪列表；restart/fork 从各自历史重算。摘要原料仍是未裁剪的已归档原文，大结果只保留其
+已有预览与 ref，不自动扫描全部 artifact。
 
 `_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
@@ -118,7 +143,8 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 `num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空
 文本；`IrisContextCompactionError` 使用 `context` 来源及 `CONTEXT_COMPACTION_*` 错误码。
 
-完整输入达到可用预算 B 的 80% 时选择新增前缀；没有新增前缀且输入不超过 B 时直接继续。
+确定性正文减载后，完整输入仍达到可用预算 B 的 80% 时选择新增摘要前缀；没有新增前缀且
+输入不超过 B 时直接继续。
 有新增前缀时，先保存每份返回响应的 `RunUsage.compaction`，再检查摘要是否完整有效。
 全部分块完成后，完整主请求须不超过 80% 且比压缩前更小，才能原子提交投影。摘要不进入主
 response 的 message delta，也不增加主步骤 reservation。
@@ -267,8 +293,8 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
-窗口选择同时返回选定请求的完整 token 数，压缩后的验收直接复用；相同的 full/navigation
-候选只构造和计量一次。这些复用只限当前采用过程，不跨持久化边界保存请求缓存。
+full/base 的专用额度差额使用同形、未裁剪的历史计算，避免把历史正文释放量计入概览成本。
+选定窗口后，实际主请求再经过上述正文投影与完整计量；成功压缩采用的新窗口也走同一路径。
 
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
 通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
@@ -351,6 +377,9 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 共同非流式协议 `CompletionProvider` 从 `iris.providers` 导入。
 
 ## 验证
+
+正文减载的定向用例见 `tests/runtime/test_context_projection.py` 与
+`tests/harness/test_context_pruning.py`，分别检查纯请求投影以及实际调用、原文保存和回读。
 
 ```bash
 uv run pytest tests/runtime

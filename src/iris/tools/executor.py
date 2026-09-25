@@ -626,10 +626,19 @@ class ToolExecutor:
         context: ToolExecutionContext,
     ) -> ToolResult:
         """填充缺失 identity，并对最终交付正文执行 ordinary artifact 归一化。"""
+        metadata = {
+            key: value
+            for key, value in result.metadata.items()
+            if key not in {"context_retention", "context_tool_name"}
+        }
+        # 框架事实最后加入，to_block_metadata 归一化时覆盖用户 extra 中的同名字段。
+        metadata["context_retention"] = tool.definition.context_retention
+        metadata["context_tool_name"] = tool.definition.name
         normalized = result.model_copy(
             update={
                 "tool_use_id": result.tool_use_id or tool_use.id,
                 "tool_name": result.tool_name or tool_use.name,
+                "metadata": metadata,
             }
         )
         return artifact_store_for(

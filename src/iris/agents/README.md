@@ -121,7 +121,7 @@ model: openai/gpt-4o-mini
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
-- `context_policy`: 默认构造的 `ContextPolicyConfig`，`enabled: true` 自动接入当前会话上下文回读。
+- `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、重复工具正文折叠与旧观察结果短化。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
@@ -137,17 +137,29 @@ model: openai/gpt-4o-mini
 
 ### `ContextPolicyConfig`
 
-`context_policy` 当前提供 `enabled`，默认 `true`：
+`context_policy` 默认配置：
 
 ```yaml
 context_policy:
   enabled: true
+  preserve_recent_tool_groups: 2
+  old_result_preview_chars: 512
 ```
 
 完整 `AgentRunner` 根据这个开关注册 `context_read` 与 `context_search`，读取当前会话的已提交
 消息和当时保存的工具结果；不依赖长期 memory，也不需要显式配置 `file.read`。设为 `false`
-时不注册这两个工具；现有工具 artifact 和 LLM compaction 继续工作。它目前不配置重复结果
-裁剪、动态宿主状态或 deferred 工具激活。
+时不注册这两个工具，也不进行新增的历史正文裁剪；现有工具 artifact 和 LLM compaction
+继续工作。
+
+`preserve_recent_tool_groups` 是确定性裁剪时完整保留的最近已闭合工具批次数，默认 2，允许
+设为 0；不改变原有 LLM 摘要的近期原文软目标。`old_result_preview_chars` 默认 512，按
+384 字符开头与 128 字符结尾保留旧观察正文，说明与引用另外计量；设为 0 时只留说明和引用。
+两项均须为非负整数。只有工具作者声明为 `observation` 的成功结果可以参与裁剪。
+
+完整请求达到既有 80% 压力线时，runtime 先尝试精确重复正文折叠，再按历史顺序短化旧结果，
+仅采用能减少完整请求 token 估算的候选；不足时继续原有 LLM compaction。每次实际工具调用
+照常执行，已提交原文保持不变。具体回读可用条件与保护规则见
+[runtime 说明](../runtime/README.md#历史投影与摘要构造)。
 
 配置加载不读取历史。Runner 提供绑定 lifecycle store 的读取服务；直接使用
 `RuntimeFactory.from_config*()` 且启用该策略时，必须传入 `context_access`，否则装配报告
@@ -191,7 +203,8 @@ compaction:
 
 配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过
 `RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。每次主模型调用前，
-runtime 在完整输入达到 80% 时自动摘要旧历史，包括当前 run 已提交的步骤，并保留当前任务
+runtime 先按 `context_policy` 尝试确定性正文减载；完整输入仍达到 80% 时才自动摘要旧历史，
+包括当前 run 已提交的步骤，并保留当前任务
 锚点与近期原文。摘要使用当前模型；`summary_ratio` 是生成输出上限，可能包含模型 reasoning。
 压缩后的完整请求必须不超过 80% 且严格缩小。已开始的压缩失败会结束当前 run，原文与上次
 已提交摘要保留。主调用 usage 与 `RunUsage.compaction` 分开累计；provider 估算边界见

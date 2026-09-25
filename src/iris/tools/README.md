@@ -137,11 +137,28 @@ Extract 不传服务端 timeout，使用 basic 默认值。
 - `ToolExecutionMode`: 执行模式枚举，包含 `SYNC`、`ASYNC`、`STREAM`。
 - `CallableExecutionMode`: 同步 callable 的本地执行位置，包含默认的 `INLINE` 和显式
   opt-in 的 `THREAD`；它不进入 provider schema。
-- `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`metadata`。
+- `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`context_retention`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
+
+### 历史结果的保留声明
+
+`ToolDefinition.context_retention` 默认为 `"keep"`。工具作者可显式设为 `"observation"`，允许
+已提交的成功结果在请求压力下被短化，原文仍可用 `context_read` 取回。内置 `read_file`、
+`list_files`、`grep_search`、`web_search`、`web_fetch` 声明为 observation；write/edit、执行命令、
+subagent 最终答案、HITL、Skill 正文及未知自定义工具保持 keep。READ capability 本身不会
+自动赋予裁剪资格。
+
+Executor 在实际执行后的最终化阶段固化 `context_retention` 与规范名称 `context_tool_name`，
+覆盖用户结果中同名的 metadata；历史位置为 `ToolResultBlock.metadata.extra`。恢复时使用
+当时保存的声明与规范名，不从当前 registry 猜测旧调用。错误结果与未闭合调用不参与裁剪。
+
+这些声明只控制模型历史视图。即使参数相同，工具仍真实执行；只有执行后规范名称、规范
+JSON 参数与完整正文均相同，runtime 才可能折叠较早正文。大量不同的中型结果另走旧结果
+短化，不需要每项都先达到单工具 artifact 阈值。具体保护组、预算和回读可用条件见
+[runtime 说明](../runtime/README.md#历史投影与摘要构造)。
 
 ### BaseTool 与 CallableTool
 
@@ -563,6 +580,7 @@ to_openai_responses_tool_schema, tool
 | 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | 完整结果存档与当前会话回读 | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
+| 结果保留声明与执行时事实 | `base.py`, `executor.py`, `builtin/file.py`, `builtin/web.py` | `tests/tools/test_context_retention.py` |
 | Web 搜索、批量正文与模型输出 | `builtin/web.py`, `builtin/_tavily.py` | `tests/tools/test_web_tools.py`, `tests/tools/test_middleware_artifact.py`, `tests/tools/test_permissions.py` |
 | 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
 
