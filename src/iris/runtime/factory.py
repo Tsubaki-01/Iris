@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..agents import AgentConfig, load_agent_config
+from ..context import ContextSource
 from ..exceptions import IrisConfigError
 from ..providers.protocols import CompletionProvider
 from ..tools.context_access import ContextAccessPort
@@ -45,6 +46,7 @@ class RuntimeFactory:
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
         context_access: ContextAccessPort | None = None,
+        context_source: ContextSource | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
@@ -54,6 +56,7 @@ class RuntimeFactory:
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
+            context_source (ContextSource | None): 可选的每步运行态采集接口。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -67,6 +70,7 @@ class RuntimeFactory:
             provider=provider,
             memory_service=memory_service,
             context_access=context_access,
+            context_source=context_source,
             api_key=api_key,
         )
 
@@ -79,6 +83,7 @@ class RuntimeFactory:
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
         context_access: ContextAccessPort | None = None,
+        context_source: ContextSource | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
@@ -89,6 +94,7 @@ class RuntimeFactory:
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
+            context_source (ContextSource | None): 可选的每步运行态采集接口。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -102,6 +108,7 @@ class RuntimeFactory:
             provider=provider,
             memory_service=memory_service,
             context_access=context_access,
+            context_source=context_source,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
             boundary=resolve_runtime_boundary(config, config_path=config_path),

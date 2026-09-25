@@ -42,7 +42,7 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
      +------------ LifecycleStore <-----+
 ```
 
-- `RuntimeFactory` 只装配 context、provider、tools、workspace 与可选 memory service；
+- `RuntimeFactory` 装配 context、provider、tools、workspace，以及可选 memory service 和宿主 context source；
 - `RuntimeEnvironment` 只保存 engine live dependencies，没有 session/lifecycle store 或
   interaction service；
 - runtime 不 import harness，也不直接写 SQLite；
@@ -79,6 +79,34 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 后者推进 session/checkpoint revision，保持原文、执行 cursor 和 pending 主模型 reservation。
 每次 `before_model` 检查完整输入，实际 LLM 摘要在主步骤 reservation 获准后进行，不额外消耗主步骤预算。
 
+### 宿主动态上下文与选材
+
+`RuntimeFactory.from_config()` 与 `from_config_path()` 接收可选 `context_source=`，协议与示例见
+[`iris.context`](../context/README.md#宿主动态快照)。source 存在时，每次 `before_model` 在
+model-step reservation 获准并检查取消和 deadline 后采集一次；未获准的步骤不采集。scope
+提供 session/run 身份、step index、workspace 和原始 `run_input`。下一步骤及恢复到
+`before_model` 时重新采集，child 不继承 parent source。
+
+采集受当前 run 剩余 deadline 限制，额度到期返回 `DEADLINE_EXCEEDED`；source 自身的普通
+异常（包括自行抛出的 `TimeoutError`）以 `IrisContextError` 结束本次 activation，不沿用旧值。
+协作式取消与 task cancellation 沿既有控制路径结算。`context_policy.enabled=false` 时注入
+source 会在装配时报 `IrisConfigError`。
+
+完整快照渲染为 history 后的一条 `runtime_snapshot` user 消息。未注入 source 不加消息；
+空快照明确表示当前无已提供状态。它不改写稳定 system、原始任务、已归档 BCI 或 durable
+history，也不进入摘要原料。需要后续精确回读的内容应先由宿主通过工具结果或文件保存。
+
+低于压力线时保留全部贡献。达到压力线后，先尝试精确重复正文折叠，再依次移除宿主显式
+标为 `required=False` 的贡献，最后短化旧工具正文；仍不足时进入原有 LLM compaction。
+required 条目保持，priority 较低者先移除，相同 priority 时后返回者先移除。每次变动重算
+完整请求，包含静态上下文、历史、动态消息、模型选项与工具 schema。模型不能按正文语义
+自行决定删除哪些宿主约束。
+
+可选条目只在本步骤初次请求选材一次；候选摘要切点、摘要重试和成功压缩后的最终请求共用
+已选集合，不因腾出空间重新补入。下一步骤重新采集后可重新选择。即使 `include_tools=false`
+或 effective `tool_choice` 不允许回读，动态快照、optional 选材和 LLM compaction 仍然工作；
+工具正文裁剪则遵循下节的回读条件。
+
 ### 历史投影与摘要构造
 
 内部 `compaction.py` 在完整原文上定位本 run 的原始输入、最新已归档 steer 与已注入 BCI。
@@ -92,9 +120,10 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 回读引用，下标来自原始历史，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
 取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
 
-[`_context_projection.py`](./_context_projection.py) 在完整请求达到既有 80% trigger 时，先折叠
-精确重复工具正文，再从旧到新短化 observation 结果；只有完整 `LLMRequest` 的 token 估算
-实际下降才采用候选。低于 trigger 即停止，已足够时不调用摘要模型。单次大结果仍由 artifact
+[`_context_projection.py`](./_context_projection.py) 的 `project_context_request()` 在完整请求
+达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献，最后从旧到新短化
+observation 结果；正文替换只有让完整 `LLMRequest` 的 token 估算实际下降才采用。
+低于 trigger 即停止，已足够时不调用摘要模型。单次大结果仍由 artifact
 处理；这里同时处理多轮中型输出累积造成的压力。
 
 - 资格来自执行时保存的 `metadata.extra.context_retention="observation"`，不是当前工具目录。
@@ -143,7 +172,7 @@ compaction 不因此关闭。
 `num_retries=0`。候选只存在于内存，全部分块完成后才由外层提交。摘要消费只接受完整非空
 文本；`IrisContextCompactionError` 使用 `context` 来源及 `CONTEXT_COMPACTION_*` 错误码。
 
-确定性正文减载后，完整输入仍达到可用预算 B 的 80% 时选择新增摘要前缀；没有新增前缀且
+确定性选材与正文减载后，完整输入仍达到可用预算 B 的 80% 时选择新增摘要前缀；没有新增前缀且
 输入不超过 B 时直接继续。
 有新增前缀时，先保存每份返回响应的 `RunUsage.compaction`，再检查摘要是否完整有效。
 全部分块完成后，完整主请求须不超过 80% 且比压缩前更小，才能原子提交投影。摘要不进入主
@@ -293,8 +322,9 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
-full/base 的专用额度差额使用同形、未裁剪的历史计算，避免把历史正文释放量计入概览成本。
-选定窗口后，实际主请求再经过上述正文投影与完整计量；成功压缩采用的新窗口也走同一路径。
+full/base 的专用额度差额使用同形、未裁剪的历史计算；压缩后采用新窗口时，两者也携带同一份
+已选动态快照，避免把历史正文释放量计入概览成本。选定窗口后，实际主请求再经过上述投影
+与完整计量；成功压缩采用的新窗口也走同一路径，不重新选择动态贡献。
 
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
 通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
@@ -380,6 +410,8 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 
 正文减载的定向用例见 `tests/runtime/test_context_projection.py` 与
 `tests/harness/test_context_pruning.py`，分别检查纯请求投影以及实际调用、原文保存和回读。
+动态采集与选材见 `tests/runtime/test_context_source.py`、`tests/runtime/test_context_selection.py`
+及 `tests/harness/test_context_source_integration.py`，覆盖步骤与恢复、预算顺序和真实 runner 接线。
 
 ```bash
 uv run pytest tests/runtime

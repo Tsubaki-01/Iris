@@ -13,6 +13,7 @@ from ..context import (
     ContextBuildInput,
     ContextSection,
     ContextSlot,
+    ContextSource,
     load_context_build_input,
 )
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
@@ -108,8 +109,11 @@ def assemble_runtime(
     boundary: RuntimeAssemblyBoundary,
     subagent: SubagentAssembly | None = None,
     context_access: ContextAccessPort | None = None,
+    context_source: ContextSource | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选 memory，不创建 lifecycle store。"""
+    if not config.context_policy.enabled and context_source is not None:
+        raise IrisConfigError("context_policy 禁用时不能注入 context_source")
     if config.context_policy.enabled and context_access is None:
         raise IrisConfigError(
             "启用 context_policy 需要注入 context_access；完整运行请使用 AgentRunner"
@@ -206,6 +210,7 @@ def assemble_runtime(
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
         execution_scope=execution_scope,
+        context_source=context_source,
     )
     return AgentRuntime(environment)
 

@@ -11,12 +11,14 @@ from math import floor
 from pathlib import Path
 from typing import Any, cast
 
-from ..context import ContextBuildOutput
+from ..context import ContextBuildOutput, ContextBuildScope, ContextSnapshot
+from ..context.source import render_context_snapshot
 from ..exceptions import (
     HITLCheckpointInvalidError,
     IrisAPIConnectionError,
     IrisCancellationRequestedError,
     IrisContextCompactionError,
+    IrisContextError,
     IrisError,
     IrisMCPOutcomeUnknownError,
     IrisProviderStreamError,
@@ -62,7 +64,7 @@ from ._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
-from ._context_projection import prune_tool_results
+from ._context_projection import project_context_request
 from ._context_refs import with_context_refs
 from ._prompts import render_prompt
 from .commit import (
@@ -1012,6 +1014,7 @@ class AgentRuntime:
         history: list[Msg],
         options: RuntimeExecutionOptions,
         input_budget_tokens: int,
+        context_snapshot: ContextSnapshot | None = None,
     ) -> tuple[SessionContextWindow, LLMRequest, int]:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
@@ -1025,11 +1028,25 @@ class AgentRuntime:
                 else []
             ),
         )
+
+        def build_request(window: SessionContextWindow) -> LLMRequest:
+            request = self._build_model_request(
+                history=history, options=options, context_window=window
+            )[0]
+            if context_snapshot is not None:
+                request = request.model_copy(
+                    update={
+                        "messages": [
+                            *request.messages,
+                            render_context_snapshot(context_snapshot),
+                        ]
+                    }
+                )
+            return request
+
         return select_context_window(
             candidates=candidates,
-            build_request=lambda window: self._build_model_request(
-                history=history, options=options, context_window=window
-            )[0],
+            build_request=build_request,
             provider=self.environment.provider,
             memory_budget_tokens=floor(
                 config.compaction.input_budget_tokens * config.memory.overview.system_budget_ratio
@@ -1048,47 +1065,6 @@ class AgentRuntime:
         stream_sink: RuntimeEventSink | None,
     ) -> _ModelStepAdvance | RuntimeActivationResult:
         """执行并 required commit 一次 provider step。"""
-        snapshot = commits.load_session()
-        if snapshot.session_id != activation.session_id:
-            raise IrisRunConflictError("commit port 返回了跨 session history")
-        try:
-            protected_indices = protected_message_indices(
-                list(snapshot.messages), activation.initial_session_message_count
-            )
-            model_messages = self._context_messages(list(snapshot.messages))
-            source_indices = {id(message): index for index, message in enumerate(model_messages)}
-            request, context_output = self._build_model_request(
-                history=project_history(
-                    model_messages,
-                    snapshot.compaction,
-                    protected_indices,
-                ),
-                options=activation.options,
-                context_window=cast(SessionContextWindow, snapshot.context_window),
-            )
-
-            def project_request(candidate: LLMRequest) -> LLMRequest:
-                return prune_tool_results(
-                    candidate,
-                    source_indices=source_indices,
-                    config=self.environment.agent_config.context_policy,
-                    trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
-                    estimate_input_tokens=self.environment.provider.estimate_input_tokens,
-                )
-
-            def build_request(history: list[Msg]) -> LLMRequest:
-                messages = self.environment.assembler.build_conversation(
-                    context_output=context_output,
-                    history=history,
-                    current_input=None,
-                ).messages
-                return project_request(request.model_copy(update={"messages": messages}))
-
-            request = project_request(request)
-
-        except Exception as exc:
-            return _failed_activation(cursor, exc)
-
         if _activation_cancelled(commits, cancellation):
             return RuntimeActivationResult(
                 outcome=RuntimeActivationOutcome.CANCELLED,
@@ -1114,12 +1090,91 @@ class AgentRuntime:
                 cursor=cursor,
             )
 
+        context_snapshot = None
+        source = self.environment.context_source
+        if source is not None:
+            budget = asyncio.timeout(remaining)
+            try:
+                async with budget:
+                    context_snapshot = await source.collect(
+                        ContextBuildScope(
+                            session_id=activation.session_id,
+                            run_id=activation.run_id,
+                            step_index=cursor.step_index,
+                            workspace_root=self.environment.workspace_root,
+                            run_input=activation.run_input,
+                        )
+                    )
+            except IrisCancellationRequestedError:
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                )
+            except Exception as exc:
+                if budget.expired():
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                    )
+                return _failed_activation(
+                    cursor, IrisContextError(f"context_source 采集失败：{exc}")
+                )
+        if _activation_cancelled(commits, cancellation):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+            )
+        if _deadline_expired(commits):
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+            )
+
+        snapshot = commits.load_session()
+        if snapshot.session_id != activation.session_id:
+            raise IrisRunConflictError("commit port 返回了跨 session history")
+        try:
+            protected_indices = protected_message_indices(
+                list(snapshot.messages), activation.initial_session_message_count
+            )
+            model_messages = self._context_messages(list(snapshot.messages))
+            source_indices = {id(message): index for index, message in enumerate(model_messages)}
+            request, context_output = self._build_model_request(
+                history=project_history(model_messages, snapshot.compaction, protected_indices),
+                options=activation.options,
+                context_window=cast(SessionContextWindow, snapshot.context_window),
+            )
+
+            def project_request(
+                candidate: LLMRequest, *, select_optional: bool = False
+            ) -> LLMRequest:
+                nonlocal context_snapshot
+                projected, context_snapshot = project_context_request(
+                    candidate,
+                    source_indices=source_indices,
+                    config=self.environment.agent_config.context_policy,
+                    trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
+                    estimate_input_tokens=self.environment.provider.estimate_input_tokens,
+                    snapshot=context_snapshot,
+                    select_optional=select_optional,
+                )
+                return projected
+
+            def build_request(history: list[Msg]) -> LLMRequest:
+                messages = self.environment.assembler.build_conversation(
+                    context_output=context_output,
+                    history=history,
+                    current_input=None,
+                ).messages
+                return project_request(request.model_copy(update={"messages": messages}))
+
+            request = project_request(request, select_optional=True)
+        except Exception as exc:
+            return _failed_activation(cursor, exc)
+
         try:
             compacted = await self._compact_request(
                 request=request,
                 build_request=build_request,
                 project_request=project_request,
                 model_messages=model_messages,
+                context_snapshot=context_snapshot,
                 snapshot=snapshot,
                 protected_indices=protected_indices,
                 activation=activation,
@@ -1340,6 +1395,7 @@ class AgentRuntime:
         build_request: Callable[[list[Msg]], LLMRequest],
         project_request: Callable[[LLMRequest], LLMRequest],
         model_messages: list[Msg],
+        context_snapshot: ContextSnapshot | None,
         snapshot: SessionSnapshot,
         protected_indices: tuple[int, ...],
         activation: RuntimeActivationInput,
@@ -1455,10 +1511,16 @@ class AgentRuntime:
                 candidate = build_request(history)
                 after = provider.estimate_input_tokens(candidate)
             else:
-                next_window, candidate, _ = await self._adopt_context_window(
+                next_window, _, _ = await self._adopt_context_window(
                     history=history,
                     options=activation.options,
                     input_budget_tokens=config.trigger_tokens,
+                    context_snapshot=context_snapshot,
+                )
+                candidate, _ = self._build_model_request(
+                    history=history,
+                    options=activation.options,
+                    context_window=next_window,
                 )
                 candidate = project_request(candidate)
                 after = provider.estimate_input_tokens(candidate)

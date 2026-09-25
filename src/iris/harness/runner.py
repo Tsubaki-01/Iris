@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
 from ..agents.config.subagent import load_subagent_catalog
+from ..context import ContextSource
 from ..exceptions import (
     HITLConflictError,
     IrisCancellationRequestedError,
@@ -354,6 +355,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        context_source: ContextSource | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
         observer_event_timeout_s: float = 30.0,
@@ -370,6 +372,7 @@ class AgentRunner:
             permission_policy=permission_policy,
             child_provider_factory=child_provider_factory,
             memory_service=memory_service,
+            context_source=context_source,
             store=store,
             observers=observers,
             observer_event_timeout_s=observer_event_timeout_s,
@@ -388,6 +391,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        context_source: ContextSource | None = None,
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
         observer_event_timeout_s: float = 30.0,
@@ -428,6 +432,7 @@ class AgentRunner:
             boundary=boundary,
             subagent=subagent,
             context_access=ContextAccess(resolved_store),
+            context_source=context_source,
         )
         runner = cls(
             runtime=runtime,

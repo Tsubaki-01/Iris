@@ -9,8 +9,8 @@
 - `memory`：可选的 user 消息，`sender="context"`。
 - `before_current_input`：可选的 user 消息，`sender="context"`。
 
-本包只产生这三类消息，不组装 history、current input、tools 或
-`LLMRequest`。完整请求及消息顺序由外层运行时负责。
+`ContextBuilder` 负责以上三类固定消息。本包另提供宿主动态快照的 typed 接口与渲染；
+运行时负责采集、选材、插入 history 后的临时消息以及完整 `LLMRequest` 装配。
 
 ## 架构与流程
 
@@ -29,6 +29,8 @@ flowchart LR
 加载与模板路径解析；`builder.py` 负责编排过滤、排序、渲染和字符上限；
 `renderer.py` 提供默认 XML 渲染；文件模板由共享的
 [`iris.utils.TemplateRenderer`](../utils/README.md) 渲染。
+[`source.py`](source.py) 定义 `ContextSource` 与 frozen dataclass 快照；它不读 store，也不拥有
+模型调用、运行控制或总 token 预算。
 
 ## 快速入门
 
@@ -149,6 +151,64 @@ output = ContextBuilder().build(runtime_input)
 if output.memory is not None:
     print(output.memory.text)
 ```
+
+## 宿主动态快照
+
+将实现 `ContextSource` 的 Python 对象通过 `context_source=` 传给
+`AgentRunner.from_config/from_config_path`，即可在每个主模型步骤提供当前应用状态。
+这是独立于 `context.yaml` 三段的 SDK 接口，应用自行决定要提供哪些内容：
+
+```python
+from iris.context import ContextBuildScope, ContextContribution, ContextSnapshot
+
+
+class EditorContext:
+    """按 session 提供当前编辑器状态。"""
+
+    def __init__(self, active_documents: dict[str, str]) -> None:
+        """绑定宿主维护的当前文档表。"""
+        self.active_documents = active_documents
+
+    async def collect(self, scope: ContextBuildScope) -> ContextSnapshot:
+        """返回本步骤的完整状态，缺失时返回空快照。"""
+        document = self.active_documents.get(scope.session_id)
+        if document is None:
+            return ContextSnapshot()
+        return ContextSnapshot(
+            contributions=(
+                ContextContribution(key="active_document", text=document),
+                ContextContribution(
+                    key="workspace",
+                    text=str(scope.workspace_root),
+                    required=False,
+                    priority=20,
+                ),
+            )
+        )
+
+
+source = EditorContext({"session-a": "report.md"})
+```
+
+宿主更新 `source.active_documents` 后，下一个主模型步骤会重新采集。一次步骤中的预算规划与
+最终请求共用一次采集结果；摘要与重试不会重新采集。无 source 不添加快照消息；空快照表示当前无
+已提供状态，不沿用上次值。当前文档变化也不会自动改写用户原始任务目标。
+
+| 接口 | 字段与约定 |
+| --- | --- |
+| `ContextBuildScope` | `session_id`、`run_id`、`step_index`、`workspace_root: Path`、`run_input: str` |
+| `ContextContribution` | `key`、`text`、`required=True`、`priority=100`；同快照 key 由 source 保证唯一 |
+| `ContextSnapshot` | `contributions: tuple[ContextContribution, ...] = ()`，表示完整当前快照 |
+| `ContextSource` | 异步 `collect(scope) -> ContextSnapshot`；同 runner 的多个 session 可并发调用 |
+
+只有 `required=False` 的条目可在请求压力下省略。priority 越高越优先保留，平手时先返回的
+条目优先保留；运行时不根据正文猜测哪些约束可以删除。选中内容以一条 user 消息放在完整
+历史之后，`sender="context"`、`metadata.context_kind="runtime_snapshot"`，不改变稳定 system。
+
+BCI 在 run 输入阶段构建并与用户输入一起归档，表示任务发起背景；动态快照只描述本步骤
+当前状态，不写入原始历史或 checkpoint，也不是摘要原料。需要日后精确回读的事实由宿主
+通过普通工具结果或文件保存。恢复到 `before_model` 时重新采集；child 不继承 parent source。
+完整预算、取消与失败语义见 [runtime 说明](../runtime/README.md#宿主动态上下文与选材)。
 
 ## 数据契约
 
@@ -327,7 +387,7 @@ def load_context_build_input(path: str | Path) -> ContextBuildInput: ...
 
 ## 公共 API
 
-`iris.context` 只导出以下八项：
+`iris.context` 导出以下固定上下文与宿主快照接口：
 
 | API | 用途 |
 | --- | --- |
@@ -339,6 +399,10 @@ def load_context_build_input(path: str | Path) -> ContextBuildInput: ...
 | `ContextBuilder` | 编排过滤、排序、渲染、校验和消息创建 |
 | `ContextXmlRenderer` | 默认 XML section/slot renderer |
 | `load_context_build_input` | 从 YAML 加载 `ContextBuildInput` |
+| `ContextBuildScope` | 给宿主采集提供本步骤身份、workspace 和原始输入 |
+| `ContextContribution` | 声明一项当前内容及 required/priority |
+| `ContextSnapshot` | 本步骤的完整当前快照 |
+| `ContextSource` | 宿主异步采集协议 |
 
 文件模板 renderer 从 `iris.utils` 导入 `TemplateRenderer`。
 
@@ -400,6 +464,7 @@ class ContextXmlRenderer:
 | slot/section 约束、顺序、角色、字符上限与 XML 渲染 | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML、模板路径与 Jinja2 接入 | `config.py`, `builder.py` | `tests/context/test_context_config.py` |
 | 模板加载、更新与转义策略 | `../utils/templating.py` | `tests/utils/test_templating.py` |
+| 动态快照接口与消息渲染 | `source.py` | `tests/context/test_source.py` |
 
 ```bash
 uv run pytest tests/context

@@ -63,6 +63,18 @@ parent。`message:<index>` 和 `result:<message_index>:<block_index>` 都使用�
 错误与范围见 [tools 说明](../tools/README.md#当前会话上下文回读)。读取服务位于 harness，
 runtime 只接收窄接口，不取得 store ownership。
 
+## 宿主动态上下文
+
+`AgentRunner.from_config()` 与 `from_config_path()` 接收可选 `context_source=`。它实现
+`iris.context.ContextSource.collect(scope)`，由 runtime 在每个获准的主模型步骤采集一次当前
+状态；宿主负责内容、`required` 和 `priority`，示例见 [context 说明](../context/README.md#宿主动态快照)。
+`context_policy.enabled=false` 与 source 同时提供会在装配时报 `IrisConfigError`。
+
+source 绑定当前 runner，同 runner 的多个 session 可并发采集，因此应用应按 scope 中的
+session/run 区分自己的状态。各步骤快照只进入本次请求，不写入 lifecycle history/checkpoint；
+它补充当前应用状态，BCI 仍保留本次 run 发起时的背景。恢复到 `before_model` 会重新采集，
+child 不继承 parent 的 source 或快照。需要持久证据时使用普通工具结果或宿主文件。
+
 ## 会话历史分支
 
 `SessionHistory(store)` 复用与 runner 相同的 `LifecycleStore`，提供三个同步方法。它只生成新

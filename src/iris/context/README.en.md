@@ -8,7 +8,9 @@
 - optional memory user message with `sender="context"`;
 - optional before-current-input user message with `sender="context"`.
 
-It does not assemble history, current input, tools, or `LLMRequest`; runtime owns final ordering.
+`ContextBuilder` owns these three fixed message positions. The package also provides typed host
+snapshots and their rendering. Runtime collects and selects them, appends the temporary message
+after history, and assembles the complete `LLMRequest`.
 
 ## Architecture
 
@@ -26,6 +28,8 @@ flowchart LR
 `models.py` defines contracts, `config.py` loads YAML and resolves template paths, `builder.py`
 orchestrates sections, and `renderer.py` implements XML rendering. File templates use the shared
 [`iris.utils.TemplateRenderer`](../utils/README.md).
+[`source.py`](source.py) defines `ContextSource` and frozen snapshot dataclasses. It neither reads
+the store nor owns model calls, run control, or the total token budget.
 
 ## Quick start
 
@@ -75,6 +79,68 @@ output = ContextBuilder().build(load_context_build_input("context.yaml"))
 ```
 
 The YAML root accepts only `system`, `memory`, and `before_current_input`; system is required.
+
+## Dynamic host snapshots
+
+Pass a Python implementation of `ContextSource` as `context_source=` to
+`AgentRunner.from_config/from_config_path` to supply current application state for each main model
+step. This SDK interface is separate from the three `context.yaml` sections; the host chooses its content:
+
+```python
+from iris.context import ContextBuildScope, ContextContribution, ContextSnapshot
+
+
+class EditorContext:
+    """按 session 提供当前编辑器状态。"""
+
+    def __init__(self, active_documents: dict[str, str]) -> None:
+        """绑定宿主维护的当前文档表。"""
+        self.active_documents = active_documents
+
+    async def collect(self, scope: ContextBuildScope) -> ContextSnapshot:
+        """返回本步骤的完整状态，缺失时返回空快照。"""
+        document = self.active_documents.get(scope.session_id)
+        if document is None:
+            return ContextSnapshot()
+        return ContextSnapshot(
+            contributions=(
+                ContextContribution(key="active_document", text=document),
+                ContextContribution(
+                    key="workspace",
+                    text=str(scope.workspace_root),
+                    required=False,
+                    priority=20,
+                ),
+            )
+        )
+
+
+source = EditorContext({"session-a": "report.md"})
+```
+
+After the host updates `source.active_documents`, the next main model step collects the new state.
+Budget planning and the final request within one step reuse one collected snapshot; summarization
+and retries do not recollect.
+No source means no snapshot message. An empty snapshot means no current entries, without retaining
+previous values. Changing the active document does not itself change the user's original task.
+
+| Interface | Fields and contract |
+| --- | --- |
+| `ContextBuildScope` | `session_id`, `run_id`, `step_index`, `workspace_root: Path`, `run_input: str` |
+| `ContextContribution` | `key`, `text`, `required=True`, `priority=100`; the source keeps keys unique within a snapshot |
+| `ContextSnapshot` | `contributions: tuple[ContextContribution, ...] = ()`, representing complete current state |
+| `ContextSource` | Async `collect(scope) -> ContextSnapshot`; sessions sharing a runner may collect concurrently |
+
+Only `required=False` entries may be omitted under request pressure. Higher priorities are retained
+first; ties favor entries returned earlier. Runtime does not infer which constraints can be dropped.
+Selected content becomes one user message after complete history, with `sender="context"` and
+`metadata.context_kind="runtime_snapshot"`, leaving the stable system message unchanged.
+
+BCI is built at run input and archived with the user message as the task's initial background.
+Dynamic snapshots describe the current step and enter neither raw history, checkpoints, nor summary
+material. Hosts preserve facts needed for exact later recall through ordinary tool results or files.
+Recovery at `before_model` recollects; children do not inherit their parent's source. See
+[runtime](../runtime/README.en.md#dynamic-host-context-and-selection) for budgets, cancellation, and failures.
 
 ## Contracts and rendering
 
@@ -134,9 +200,10 @@ Unknown fields are rejected and no legacy migration runs.
 
 ## Public API
 
-`iris.context` exports exactly `CONTEXT_SENDER`, `ContextSlot`, `ContextSection`,
+`iris.context` exports `CONTEXT_SENDER`, `ContextSlot`, `ContextSection`,
 `ContextBuildInput`, `ContextBuildOutput`, `ContextBuilder`, `ContextXmlRenderer`,
-and `load_context_build_input`. Import `TemplateRenderer` from `iris.utils` for file templates.
+`load_context_build_input`, `ContextBuildScope`, `ContextContribution`, `ContextSnapshot`, and
+`ContextSource`. Import `TemplateRenderer` from `iris.utils` for file templates.
 
 The builder accepts optional renderer instances and exposes `build(input_data)` and
 `render_section(section_name, section)` for rendering one of its defined section types.
@@ -156,6 +223,7 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 | Slot/section contracts, ordering, roles, limits, and XML rendering | `models.py`, `builder.py`, `renderer.py` | `tests/context/test_context_builder.py` |
 | YAML, template paths, and Jinja2 integration | `config.py`, `builder.py` | `tests/context/test_context_config.py` |
 | Template loading, reloading, and escaping | `../utils/templating.py` | `tests/utils/test_templating.py` |
+| Dynamic snapshot interfaces and message rendering | `source.py` | `tests/context/test_source.py` |
 
 ```bash
 uv run pytest tests/context
