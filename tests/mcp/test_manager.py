@@ -85,6 +85,25 @@ async def test_prepare_is_ordered_idempotent_and_publishes_to_existing_view(
 
 
 @pytest.mark.asyncio
+async def test_deferred_catalog_still_prepares_complete_connection(
+    tmp_path: Path, events: list[str]
+) -> None:
+    registry = ToolRegistry()
+    original = manager_for(tmp_path, {"external": {"command": "ok"}}, registry)
+    manager = MCPManager(
+        original.config, registry=registry, workspace_root=tmp_path, defer_tools=True
+    )
+    snapshot = await manager.prepare()
+    assert len(snapshot.servers) == 1
+    assert events == ["open:external", "list:external"]
+    assert registry.view().active_tools == []
+    assert registry.view().available_tools[0].definition.deferred is True
+    assert registry.search_deferred("echo")[0].name == "mcp__external__echo"
+    await manager.aclose()
+    assert events[-1] == "close:external"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("command", ["fail", "list-fail"])
 async def test_required_failure_preserves_registry_and_closes_every_connection(
     tmp_path: Path,

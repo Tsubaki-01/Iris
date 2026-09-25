@@ -121,6 +121,11 @@ active schemas, and searches deferred definitions. Deny filters override allow f
 tools are hidden unless explicitly allowed. Schema helpers support Iris-native, OpenAI Chat,
 OpenAI Responses, and Anthropic wrapper shapes; runtime's active provider path currently mounts the
 OpenAI Chat shape.
+`ToolRegistryView.available_tools` includes deferred definitions within the same static filters;
+only the host's original `allow` can bypass a group filter. `schemas_for(names)` exports complete
+Chat schemas for selected canonical names in registration order without changing the shared view.
+`search_deferred(query, include_groups=None, limit=10, allowed_names=None)` filters before ranking
+and applying the limit.
 
 Name-conflict checks use the registry's existing name and alias indexes directly instead of
 revisiting every registered tool definition.
@@ -350,8 +355,25 @@ objects, synchronous returns, or legacy hooks. Middleware failures become `MIDDL
 `CIRCUIT_OPEN` during cooldown.
 
 `DeferredToolIndex` uses a local BM25-like ranker over name, tags, group, and description, with CJK
-bigrams, low-weight single characters, query coverage, and stable sorting. `ToolSearchTool` exposes
-`tool_search` and returns matching definitions without activating them.
+bigrams, low-weight single characters, query coverage, and stable sorting. Construct `ToolSearchTool`
+with a static `ToolRegistryView`, for example `ToolSearchTool(registry.view())`. Its model-facing name
+is `tool_search`; `ToolSearchInput(query, include_groups=None, limit=3)` permits limits from 1 to 20.
+The lower-level registry search still defaults to 10. Base deny/group/allow and query group filters
+apply before ranking and top-k; search results cannot expand the host's group scope.
+
+JSON text and `data["tools"]` contain candidate summaries with `name`, `description` capped at 240
+characters, and `group`. No matches return an empty list; full schemas stay out of search text.
+A successful system search saves ranked canonical names in the committed tool message's
+`metadata.extra.context_revealed_tools`. Executor does not accept this field from other tools as a
+disclosure fact. Names come from the successful search body and survive an after-middleware text
+replacement; final errors and successful on_error substitutes do not create disclosure.
+
+Search alone does not mutate the registry. With `context_policy.deferred_tools: true`, runtime
+registers the tool automatically and selects complete candidate schemas for the next main model
+request only after the search result commits to that session's history. Newly found tools cannot
+be used in the same batch as their discovery call; the model waits for an actual schema in the next
+request. See [runtime](../runtime/README.en.md#deferred-tool-schemas) for budgets, forced tools,
+and batch recovery.
 
 ## Public surface and boundaries
 
@@ -373,9 +395,8 @@ MCP protocol integration lives in `iris.mcp` and uses this package's ordinary to
 | File tools, artifacts, and workspace safety | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | Complete-result storage and current-session reads | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
 | Retention declarations and execution-time facts | `base.py`, `executor.py`, `builtin/file.py`, `builtin/web.py` | `tests/tools/test_context_retention.py` |
+| Deferred search, static filters, and disclosure facts | `discovery.py`, `registry.py`, `executor.py` | `tests/tools/test_deferred_discovery.py` |
 | Circuit breaker | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
-
-Deferred search in `discovery.py` currently has no dedicated test file.
 
 ```bash
 uv run pytest tests/tools

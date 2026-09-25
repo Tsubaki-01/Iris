@@ -55,11 +55,11 @@ class ToolBridge:
         workspace_root: Path,
         permission_mode: str,
         metadata: Mapping[str, Any] | None,
-        tools_enabled: bool = True,
+        visible_tool_names: tuple[str, ...],
         cancellation: CancellationSignal | None = None,
     ) -> ToolBatchPlan:
         """无副作用预检当前 assistant 消息中的所有活动工具调用。"""
-        active_names = _active_tool_names(self.tool_view) if tools_enabled else set()
+        active_names = self.callable_names(visible_tool_names)
         context = self._execution_context(
             session_id=session_id,
             run_id=run_id,
@@ -83,6 +83,16 @@ class ToolBridge:
                     )
                 )
         return ToolBatchPlan(calls=tuple(calls))
+
+    def callable_names(self, visible_tool_names: tuple[str, ...]) -> set[str]:
+        """将冻结 canonical 集合与当前 base 目录求交后展开 aliases。"""
+        selected = set(visible_tool_names)
+        return {
+            name
+            for tool in self.tool_view.available_tools
+            if tool.name in selected
+            for name in (tool.name, *tool.definition.aliases)
+        }
 
     def read_state(self, session_id: str) -> ReadFileState | None:
         """返回 session 当前保存的文件读取状态。"""
@@ -253,15 +263,6 @@ class ToolBridge:
             read_state=self._read_states.get(session_id),
             cancellation=cancellation,
         )
-
-
-def _active_tool_names(tool_view: ToolRegistryView) -> set[str]:
-    """从活动工具视图推导本轮允许调用的工具名（含别名）。"""
-    names: set[str] = set()
-    for tool in tool_view.active_tools:
-        names.add(tool.definition.name)
-        names.update(tool.definition.aliases)
-    return names
 
 
 def _not_allowed_result(call: ToolUseBlock) -> ToolResult:

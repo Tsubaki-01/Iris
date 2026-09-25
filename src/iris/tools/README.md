@@ -207,9 +207,12 @@ tool_obj = registry.register_function(
 - `get(name)`: 按主名称或别名获取工具，未找到时抛出工具不存在错误。
 - `view(include_groups=None, allow=None, deny=None)`: 创建只读过滤视图。
 - `active_schemas(provider=None, api_style=None)`: 导出当前活动工具 schema。
-- `search_deferred(query, include_groups=None, limit=10)`: 搜索 deferred 工具定义。
+- `search_deferred(query, include_groups=None, limit=10, allowed_names=None)`: 搜索 deferred 工具定义；组与名称过滤先于排名和 limit。
 
 `ToolRegistryView.active_tools` 会隐藏 `deferred=True` 的工具，除非名称在 `allow` 中；`deny` 优先级高于 `allow`。`include_groups` 可按 `definition.group` 过滤。
+`available_tools` 返回同一静态过滤范围内的完整目录，包含 deferred 工具；只有宿主原有 `allow`
+可越过组过滤。`schemas_for(names)` 按注册顺序导出指定 canonical names 的完整 Chat schema，
+不会修改共享视图或激活其它工具。
 
 名称冲突检查直接使用注册表已有的名称和别名索引，不重新遍历已注册工具的定义。
 
@@ -527,10 +530,24 @@ def vector_lookup(query: str) -> str:
 
 registry = ToolRegistry()
 registry.register_function(vector_lookup)
-registry.register(ToolSearchTool(registry))
+registry.register(ToolSearchTool(registry.view()))
 ```
 
-`ToolSearchTool` 的工具名固定为 `tool_search`，输入模型为 `ToolSearchInput(query, include_groups=None, limit=10)`。它调用 `registry.search_deferred()`，按名称、描述、组和 tags 做 BM25-like 本地排序，返回 JSON 文本和 `data["tools"]` 摘要；它不会自动激活匹配到的 deferred 工具。
+`ToolSearchTool` 接收静态 `ToolRegistryView`，工具名固定为 `tool_search`。输入模型为
+`ToolSearchInput(query, include_groups=None, limit=3)`，limit 范围为 1–20；底层
+`registry.search_deferred()` 的默认 limit 仍为 10。搜索只覆盖 base view 允许发现的 deferred
+工具，在排名和 top-k 之前应用 deny/group/allow 与本次组过滤。搜索名称不能扩大宿主的组范围。
+
+返回 JSON 文本和 `data["tools"]` 候选摘要，每项包含 `name`、最多 240 字符的 `description`
+及 `group`；无匹配时列表为空。完整 schema 不放进搜索正文。成功系统搜索结果提交为工具消息后，
+其 `metadata.extra.context_revealed_tools` 保存按排名排列的 canonical names；executor 不接受
+其它工具写入同名字段作为披露事实。该名单来自成功搜索本体，after middleware 重建正文不会
+丢失；最终错误或 on_error 的替代成功结果不产生披露。
+
+低层搜索不修改 registry。完整 runtime 开启 `context_policy.deferred_tools: true` 后自动注册
+该工具，只在搜索结果提交到当前 session 历史后，才为下一主模型请求选择候选完整 schema。
+模型应等下一请求实际披露 schema 后再调用，不能在同一批搜索调用中使用新发现工具。
+预算、强制工具与批次恢复规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
 
 ## Schema 与装饰器
 
@@ -581,10 +598,9 @@ to_openai_responses_tool_schema, tool
 | 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | 完整结果存档与当前会话回读 | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
 | 结果保留声明与执行时事实 | `base.py`, `executor.py`, `builtin/file.py`, `builtin/web.py` | `tests/tools/test_context_retention.py` |
+| Deferred 搜索、静态过滤与披露事实 | `discovery.py`, `registry.py`, `executor.py` | `tests/tools/test_deferred_discovery.py` |
 | Web 搜索、批量正文与模型输出 | `builtin/web.py`, `builtin/_tavily.py` | `tests/tools/test_web_tools.py`, `tests/tools/test_middleware_artifact.py`, `tests/tools/test_permissions.py` |
 | 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
-
-`discovery.py` 的 deferred 检索当前没有独立测试文件。
 
 ```bash
 uv run pytest tests/tools

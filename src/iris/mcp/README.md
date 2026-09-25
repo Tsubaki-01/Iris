@@ -35,6 +35,12 @@ shared assembly 读取声明；root `AgentRunner.aprepare()` 在首次执行前�
 child 使用相同 YAML 配置和独立连接，admission 前准备，WAITING/结束后关闭；恢复按当前配置
 重新发现工具。child 关闭不影响 root；权限由既有父子组合策略裁决。
 
+`context_policy.deferred_tools: true` 将 MCP 工具定义标记为 deferred，由自动注册的
+`tool_search` 发现，成功结果提交后再为下一请求选择完整 schema。默认 `false` 保持 eager。
+这只减少模型请求中的 schema：所有服务仍在执行前完整连接、发现和发布，连接生命周期与
+required/optional 准备失败语义不变。预算内的可见集合由 runtime 按 session/步骤选择，
+不会卸载连接或更改 MCP 目录。见 [按需工具说明](../runtime/README.md#按需工具-schema)。
+
 `resolve_server_config()` 处理 `${VAR}`、`${VAR:-default}`、`${env:VAR}`，只展开一次。
 STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。相对 cwd/envFile
 基于 MCP 文件目录，未配置 cwd 则使用 workspace_root。HTTP header 在展开后按小写名称合并，
@@ -66,20 +72,23 @@ SDK MCPError 转为 `IrisMCPCallError`，不推断远端是否执行；已知输
 
 ## 实现与维护
 
-`manager.MCPManager(config, registry=registry, workspace_root=workspace)` 的 `prepare()` 按
+`manager.MCPManager(config, registry=registry, workspace_root=workspace, defer_tools=False)` 的 `prepare()` 按
 server id 顺序解析环境、连接和完整发现。每服务共享一个 startup 期限，全部成功候选通过
-`registry.register_many()` 一次发布，原有 ToolRegistryView 随即可见。required 失败不发布
+`registry.register_many()` 一次发布，原有 ToolRegistryView 随即可读取完整目录；deferred 项仍需
+模型步骤选中才导出 schema。required 失败不发布
 部分工具，optional 失败记录 diagnostic；合法空目录允许继续。
 
 `snapshot` 在成功准备后固定；并发/重复 prepare 不重复连接或发现。失败后 manager 关闭，
 需要新配置时构造新实例。`aclose()` 尝试关闭所有 owned connection，显式关闭错误报告 host。
 快照中的有效 env/header 保留在内存中，不应整体记录或持久化。
 
-`catalog.build_catalog(server, sdk_tools)` 按原始 wire 名过滤，编译 JSON Schema 2020-12
+`catalog.build_catalog(server, sdk_tools, defer_tools=False)` 按原始 wire 名过滤，编译 JSON Schema 2020-12
 输入 validator；本地 `$defs`/引用可用，不能解析的外部引用和其他 dialect 留诊断后排除。
 公开名使用 ASCII 字母、数字和下划线组成的 `mcp__...`，必要时按原始身份附稳定摘要。
 `tools.MCPTool(descriptor, connection)`
 可直接注册到既有 ToolRegistry，参数、权限、执行与取消走普通工具链。
+shared assembly 将 context policy 的开关作为同一个 `defer_tools` 参数传给 manager/catalog，
+不改变远端 schema 或按需重建 adapter。
 
 默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
 SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时

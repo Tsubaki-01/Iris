@@ -272,6 +272,7 @@ class ToolExecutor:
         tool: BaseTool,
         result: ToolResult,
         context: ToolExecutionContext,
+        revealed_tools: tuple[str, ...] | None = None,
     ) -> ToolResult:
         """普通工具与 child 共用最终归一化及 artifact 失败投影。"""
         try:
@@ -281,6 +282,7 @@ class ToolExecutor:
                     tool=tool,
                     result=result,
                     context=context,
+                    revealed_tools=revealed_tools,
                 )
             )
         except IrisToolExecutionError as exc:
@@ -513,6 +515,8 @@ class ToolExecutor:
         effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
         """执行已通过当前鉴权的调用及其生命周期。"""
+        from .discovery import ToolSearchTool
+
         tool_use = prepared.tool_use
         tool = cast(BaseTool, prepared.tool)
         validated_input = cast(BaseModel | dict[str, Any], prepared.validated_input)
@@ -536,6 +540,7 @@ class ToolExecutor:
             effect_guard.before_effect(prepared)
         if context.cancellation is not None:
             context.cancellation.raise_if_requested()
+        revealed_tools: tuple[str, ...] | None = None
         try:
             middleware_error = await self._run_before_call(tool, arguments, context)
             if middleware_error is not None:
@@ -543,6 +548,8 @@ class ToolExecutor:
             else:
                 try:
                     result = await self._run_tool_body(tool, validated_input, context)
+                    if isinstance(tool, ToolSearchTool) and not result.is_error:
+                        revealed_tools = tuple(result.metadata["context_revealed_tools"])
                 except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
                     raise
                 except Exception as exc:
@@ -575,7 +582,11 @@ class ToolExecutor:
 
         # 所有 effect 后的结果在同一出口保存；落盘失败只返回错误，不重复尝试写入。
         result = await self._finalize_result(
-            tool_use=tool_use, tool=tool, result=result, context=context
+            tool_use=tool_use,
+            tool=tool,
+            result=result,
+            context=context,
+            revealed_tools=revealed_tools,
         )
         self._record_breaker_result(tool.name, result)
         return result
@@ -624,13 +635,22 @@ class ToolExecutor:
         tool: BaseTool,
         result: ToolResult,
         context: ToolExecutionContext,
+        revealed_tools: tuple[str, ...] | None,
     ) -> ToolResult:
         """填充缺失 identity，并对最终交付正文执行 ordinary artifact 归一化。"""
         metadata = {
             key: value
             for key, value in result.metadata.items()
-            if key not in {"context_retention", "context_tool_name"}
+            if key not in {"context_retention", "context_tool_name", "context_revealed_tools"}
         }
+        if isinstance(metadata.get("extra"), dict):
+            metadata["extra"] = {
+                key: value
+                for key, value in metadata["extra"].items()
+                if key != "context_revealed_tools"
+            }
+        if revealed_tools is not None and not result.is_error:
+            metadata["context_revealed_tools"] = list(revealed_tools)
         # 框架事实最后加入，to_block_metadata 归一化时覆盖用户 extra 中的同名字段。
         metadata["context_retention"] = tool.definition.context_retention
         metadata["context_tool_name"] = tool.definition.name

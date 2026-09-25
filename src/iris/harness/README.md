@@ -75,6 +75,18 @@ session/run 区分自己的状态。各步骤快照只进入本次请求，不�
 它补充当前应用状态，BCI 仍保留本次 run 发起时的背景。恢复到 `before_model` 会重新采集，
 child 不继承 parent 的 source 或快照。需要持久证据时使用普通工具结果或宿主文件。
 
+## 按需工具披露与恢复
+
+`context_policy.deferred_tools: true` 自动接入 `tool_search`。候选在成功搜索结果提交后才供
+下一主模型请求选择完整 schema，披露事实保存在本 session 原始历史；多个 session 共用
+registry 不共享已披露集合。Fork 只继承复制前缀内的发现，child 不继承 parent 的披露状态。
+MCP 仍在执行前完整 prepare，按需 schema 不推迟连接或发现。
+
+checkpoint v3 的 `engine_cursor.visible_tool_names` 保存产生当前工具批次的可见名称，
+与 assistant calls 一起提交。WAITING、部分工具完成和恢复均保留该集合，不重跑 source
+或 schema 选材；工具权限仍在执行前刷新。批次完成后清空，下一个主步骤重新选择。
+预算、首项保护及 forced tool 规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
+
 ## 会话历史分支
 
 `SessionHistory(store)` 复用与 runner 相同的 `LifecycleStore`，提供三个同步方法。它只生成新
@@ -381,7 +393,7 @@ runtime 的只读并发窗口使用固定内部上限 8；它不增加 public co
 claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown；现有 terminal
 settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
 
-active recovery 会验证 checkpoint v2、session revision、usage counters
+active recovery 会验证 checkpoint v3、session revision、usage counters
 与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 会原子 abandon 旧 activation，
 把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
@@ -404,7 +416,7 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
 不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
-重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 9，checkpoint 仍为2，
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 9，checkpoint 为 3，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
 新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。

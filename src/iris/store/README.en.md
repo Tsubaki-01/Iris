@@ -143,8 +143,9 @@ from `before_input` to `before_model` within one lock or SQLite transaction. It 
 session revisions, the activation fence, and checkpoint sequence. It consumes no model reservation
 and leaves the step index, usage, and event sequence unchanged. Old commands conflict; SQL failures
 roll back the entire group, so recovery cannot observe partial input or a separately updated window.
-Checkpoint payload version remains `2`. Lifecycle schema is now `9`, rejecting older databases
-without migration.
+Checkpoint payload version is `3`, including the runtime cursor's required `visible_tool_names`.
+Lifecycle schema remains `9`. Older databases or checkpoints are rejected at their respective load
+boundaries without migration.
 
 `SessionSnapshot.context_window=None` means uninitialized; an explicit `SessionContextWindow()`
 means initialized with no memory text. The first input must provide its adopted window through

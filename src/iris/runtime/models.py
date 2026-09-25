@@ -39,6 +39,7 @@ class RuntimeCursor(_FrozenRuntimeModel):
 
     position: Literal["before_input", "before_model", "tool_batch", "outcome_ready"]
     step_index: int = Field(ge=0)
+    visible_tool_names: tuple[str, ...]
     next_tool_index: int = Field(default=0, ge=0)
     tool_calls: tuple[ToolUseBlock, ...] = ()
     tool_results: tuple[ToolResult, ...] = ()
@@ -47,6 +48,8 @@ class RuntimeCursor(_FrozenRuntimeModel):
 
     @model_validator(mode="after")
     def _validate_position(self) -> RuntimeCursor:
+        if self.position != "tool_batch" and self.visible_tool_names:
+            raise ValueError("只有 tool_batch cursor 可以保留 visible_tool_names")
         call_ids = [call.id for call in self.tool_calls]
         if len(call_ids) != len(set(call_ids)):
             raise ValueError("同一 model step 的 tool call ID 不能重复")

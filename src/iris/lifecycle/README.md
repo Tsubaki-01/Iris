@@ -40,10 +40,12 @@ Lifecycle 不 import `iris.harness`、`iris.runtime` 或 `iris.store`。`AgentRu
 - run、checkpoint、session revision 与 usage counters 必须交叉一致；
 - mutation events 与 aggregate facts 同事务追加，sequence 单调递增。
 
-## Checkpoint v2
+## Checkpoint v3
 
-`RunCheckpoint.checkpoint_version` 固定为 `2`，加载时拒绝旧版本，不迁移历史 checkpoint。
+`RunCheckpoint.checkpoint_version` 固定为 `3`，加载时拒绝旧版本，不迁移历史 checkpoint。
 新 run 从 `before_input` 开始；输入组保存后进入 `before_model`，恢复位置明确区分输入是否已归档。
+runtime cursor 必须包含 `visible_tool_names`：`tool_batch` 保存产生本批调用的可见工具名，
+与 assistant/tool facts 一起提交并跨 WAITING 保留；其它位置为空 tuple。不保存 registry 或 schema 对象。
 
 `RunCheckpoint.resumability` 只有：
 
@@ -107,7 +109,7 @@ checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable mo
 输入组、窗口、session revision 和 checkpoint 同事务提交；空消息初始化仍推进一次 revision，
 消息与窗口一起变化也只推进一次。
 后续 run、HITL 和恢复复用该窗口；只有成功的 `CommitCompaction.context_window` 会替换它。
-取消、失败或 CAS 冲突均保留旧窗口。Checkpoint v2 通过 session revision 绑定窗口，不复制其正文。
+取消、失败或 CAS 冲突均保留旧窗口。Checkpoint v3 通过 session revision 绑定窗口，不复制其正文。
 `RuntimeExecutionOptions` 不再接受 memory 查询、结果快照或字符预算，读取与选择由 runtime 装配负责。
 
 ### 摘要状态与用量

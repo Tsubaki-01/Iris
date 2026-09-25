@@ -67,6 +67,7 @@ from ._compaction_summary import (
 from ._context_projection import project_context_request
 from ._context_refs import with_context_refs
 from ._prompts import render_prompt
+from ._tool_context import ToolContextSelection, select_tool_context
 from .commit import (
     CommitPortToolEffectGuard,
     RuntimeCommitPort,
@@ -260,7 +261,7 @@ class AgentRuntime:
                     workspace_root=self.environment.workspace_root,
                     permission_mode=self.environment.agent_config.permissions.writes,
                     metadata={"activation_id": activation.activation_id},
-                    tools_enabled=activation.options.include_tools,
+                    visible_tool_names=cursor.visible_tool_names,
                     cancellation=cancellation,
                 )
             if interaction_projection is not None:
@@ -546,14 +547,19 @@ class AgentRuntime:
         workspace_root: Path,
         permission_mode: str,
         metadata: Mapping[str, Any] | None,
-        tools_enabled: bool,
+        visible_tool_names: tuple[str, ...],
         cancellation: CancellationSignal,
         interaction_projection: ToolResult | RuntimeApprovedToolCall | None = None,
     ) -> ToolBatchPlan:
         """在任何 outer permission 前识别 linked/已回答调用，保留原模型顺序。"""
         bridge = self.environment.tool_bridge
+        allowed_names = bridge.callable_names(visible_tool_names)
         subagent_names = {
-            tool.name for tool in bridge.tool_view.active_tools if isinstance(tool, SubagentTool)
+            name
+            for tool in bridge.tool_view.available_tools
+            if isinstance(tool, SubagentTool)
+            for name in (tool.name, *tool.definition.aliases)
+            if name in allowed_names
         }
         projected_id = (
             interaction_projection.tool_use_id
@@ -565,8 +571,7 @@ class AgentRuntime:
         continuations = {
             call.id
             for call in assistant_message.tool_calls
-            if tools_enabled
-            and call.name in subagent_names
+            if call.name in subagent_names
             and (
                 commits.load_subagent_link(tool_call_id=call.id) is not None
                 or call.id == projected_id
@@ -583,7 +588,9 @@ class AgentRuntime:
         )
         if not continuations:
             return bridge.preflight_once(
-                assistant_message=assistant_message, tools_enabled=tools_enabled, **context
+                assistant_message=assistant_message,
+                visible_tool_names=visible_tool_names,
+                **context,
             )
         calls = []
         for call in assistant_message.tool_calls:
@@ -593,7 +600,7 @@ class AgentRuntime:
                 calls.extend(
                     bridge.preflight_once(
                         assistant_message=assistant_message.model_copy(update={"content": [call]}),
-                        tools_enabled=tools_enabled,
+                        visible_tool_names=visible_tool_names,
                         **context,
                     ).calls
                 )
@@ -980,6 +987,7 @@ class AgentRuntime:
         history: list[Msg],
         options: RuntimeExecutionOptions,
         context_window: SessionContextWindow,
+        tool_selection: ToolContextSelection | None = None,
     ) -> tuple[LLMRequest, ContextBuildOutput]:
         """按同一窗口组装完整消息、模型选项和实际工具schema。"""
         context_input = self.environment.context_input.model_copy(
@@ -1000,11 +1008,18 @@ class AgentRuntime:
             current_input=None,
         )
         request = _apply_request_options(request, options.request_options)
+        if tool_selection is None:
+            tool_selection = select_tool_context(
+                self.environment.tool_bridge.tool_view,
+                history,
+                deferred_tools=self.environment.agent_config.context_policy.deferred_tools,
+                include_tools=options.include_tools,
+                tool_choice=request.tool_choice,
+            )
         request = _apply_tool_schemas(
             request,
-            include_tools=options.include_tools,
             tool_view=self.environment.tool_bridge.tool_view,
-            provider=self.environment.agent_config.model.provider,
+            selection=tool_selection,
         )
         return request, context_output
 
@@ -1015,6 +1030,7 @@ class AgentRuntime:
         options: RuntimeExecutionOptions,
         input_budget_tokens: int,
         context_snapshot: ContextSnapshot | None = None,
+        tool_selection: ToolContextSelection | None = None,
     ) -> tuple[SessionContextWindow, LLMRequest, int]:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
@@ -1031,7 +1047,10 @@ class AgentRuntime:
 
         def build_request(window: SessionContextWindow) -> LLMRequest:
             request = self._build_model_request(
-                history=history, options=options, context_window=window
+                history=history,
+                options=options,
+                context_window=window,
+                tool_selection=tool_selection,
             )[0]
             if context_snapshot is not None:
                 request = request.model_copy(
@@ -1135,10 +1154,20 @@ class AgentRuntime:
             )
             model_messages = self._context_messages(list(snapshot.messages))
             source_indices = {id(message): index for index, message in enumerate(model_messages)}
+            tool_selection = select_tool_context(
+                self.environment.tool_bridge.tool_view,
+                list(snapshot.messages),
+                deferred_tools=self.environment.agent_config.context_policy.deferred_tools,
+                include_tools=activation.options.include_tools,
+                tool_choice=activation.options.request_options.get(
+                    "tool_choice", self.environment.agent_config.model.tool_choice
+                ),
+            )
             request, context_output = self._build_model_request(
                 history=project_history(model_messages, snapshot.compaction, protected_indices),
                 options=activation.options,
                 context_window=cast(SessionContextWindow, snapshot.context_window),
+                tool_selection=tool_selection,
             )
 
             def project_request(
@@ -1153,6 +1182,7 @@ class AgentRuntime:
                     estimate_input_tokens=self.environment.provider.estimate_input_tokens,
                     snapshot=context_snapshot,
                     select_optional=select_optional,
+                    optional_tool_names=tool_selection.optional_names,
                 )
                 return projected
 
@@ -1165,6 +1195,11 @@ class AgentRuntime:
                 return project_request(request.model_copy(update={"messages": messages}))
 
             request = project_request(request, select_optional=True)
+            tool_selection = ToolContextSelection(
+                tuple(tool["function"]["name"] for tool in request.tools),
+                (),
+                request.tool_choice,
+            )
         except Exception as exc:
             return _failed_activation(cursor, exc)
 
@@ -1175,6 +1210,7 @@ class AgentRuntime:
                 project_request=project_request,
                 model_messages=model_messages,
                 context_snapshot=context_snapshot,
+                tool_selection=tool_selection,
                 snapshot=snapshot,
                 protected_indices=protected_indices,
                 activation=activation,
@@ -1278,6 +1314,7 @@ class AgentRuntime:
                 claimed_steering, claimed_input = steering_claim
                 cursor_after = RuntimeCursor(
                     position="before_model",
+                    visible_tool_names=(),
                     step_index=cursor.step_index + 1,
                     read_state=read_state,
                 )
@@ -1312,6 +1349,7 @@ class AgentRuntime:
 
             cursor_after = RuntimeCursor(
                 position="outcome_ready",
+                visible_tool_names=(),
                 step_index=cursor.step_index,
                 assistant_message=assistant,
                 read_state=read_state,
@@ -1352,11 +1390,12 @@ class AgentRuntime:
             workspace_root=self.environment.workspace_root,
             permission_mode=self.environment.agent_config.permissions.writes,
             metadata={"activation_id": activation.activation_id},
-            tools_enabled=activation.options.include_tools,
+            visible_tool_names=tuple(tool["function"]["name"] for tool in request.tools),
             cancellation=cancellation,
         )
         cursor_after = RuntimeCursor(
             position="tool_batch",
+            visible_tool_names=tuple(tool["function"]["name"] for tool in request.tools),
             step_index=cursor.step_index,
             tool_calls=tuple(assistant.tool_calls),
             assistant_message=assistant,
@@ -1396,6 +1435,7 @@ class AgentRuntime:
         project_request: Callable[[LLMRequest], LLMRequest],
         model_messages: list[Msg],
         context_snapshot: ContextSnapshot | None,
+        tool_selection: ToolContextSelection,
         snapshot: SessionSnapshot,
         protected_indices: tuple[int, ...],
         activation: RuntimeActivationInput,
@@ -1516,11 +1556,13 @@ class AgentRuntime:
                     options=activation.options,
                     input_budget_tokens=config.trigger_tokens,
                     context_snapshot=context_snapshot,
+                    tool_selection=tool_selection,
                 )
                 candidate, _ = self._build_model_request(
                     history=history,
                     options=activation.options,
                     context_window=next_window,
+                    tool_selection=tool_selection,
                 )
                 candidate = project_request(candidate)
                 after = provider.estimate_input_tokens(candidate)
@@ -1707,7 +1749,10 @@ def _project_tool_result_cursor(
     next_index = cursor.next_tool_index + 1
     if next_index == len(cursor.tool_calls):
         return RuntimeCursor(
-            position="before_model", step_index=cursor.step_index + 1, read_state=read_state
+            position="before_model",
+            step_index=cursor.step_index + 1,
+            read_state=read_state,
+            visible_tool_names=(),
         )
     return cursor.model_copy(
         update={
@@ -1999,18 +2044,16 @@ def _apply_request_options(
 def _apply_tool_schemas(
     request: LLMRequest,
     *,
-    include_tools: bool,
     tool_view: ToolRegistryView,
-    provider: str,
+    selection: ToolContextSelection,
 ) -> LLMRequest:
     """按当前活动工具视图挂载 LiteLLM Chat 工具 schema。"""
-    if not include_tools or request.tool_choice == "none":
-        return request.model_copy(update={"tools": [], "tool_choice": None})
-    tools = tool_view.active_schemas(
-        provider="openai",
-        api_style="chat",
+    return request.model_copy(
+        update={
+            "tools": tool_view.schemas_for(selection.names),
+            "tool_choice": selection.tool_choice,
+        }
     )
-    return request.model_copy(update={"tools": tools})
 
 
 __all__ = ["AgentRuntime"]

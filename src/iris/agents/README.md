@@ -121,7 +121,7 @@ model: openai/gpt-4o-mini
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
-- `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、宿主动态快照选材及历史工具正文减载。
+- `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
@@ -144,6 +144,7 @@ context_policy:
   enabled: true
   preserve_recent_tool_groups: 2
   old_result_preview_chars: 512
+  deferred_tools: false
 ```
 
 完整 `AgentRunner` 根据这个开关注册 `context_read` 与 `context_search`，读取当前会话的已提交
@@ -157,7 +158,7 @@ compaction 继续工作。同时传入 `context_source` 会在装配时报 `Iris
 两项均须为非负整数。只有工具作者声明为 `observation` 的成功结果可以参与裁剪。
 
 完整请求达到既有 80% 压力线时，runtime 先尝试精确重复正文折叠，再按优先级移除宿主明确
-标为可选的动态贡献，最后按历史顺序短化旧结果。
+标为可选的动态贡献及可撤下的 deferred schema，最后按历史顺序短化旧结果。
 正文替换仅采用能减少完整请求 token 估算的候选；不足时继续原有 LLM compaction。每次实际工具调用
 照常执行，已提交原文保持不变。具体回读可用条件与保护规则见
 [runtime 说明](../runtime/README.md#历史投影与摘要构造)。
@@ -170,6 +171,12 @@ compaction 继续工作。同时传入 `context_source` 会在装配时报 `Iris
 `from_config*()` 入口均支持；不在 YAML 中配置 callback。source 每主模型步骤返回完整当前
 快照，与输入阶段一次归档的 BCI 不同。required 条目保持，只有显式 optional 条目参与选材；
 协议与示例见 [context 说明](../context/README.md#宿主动态快照)。
+
+`deferred_tools` 默认 `false`，保持原有 eager/deferred 可见性；设为 `true` 必须同时保持
+`enabled: true`。开启后自动注册 `tool_search`，Python 工具仍按作者的 `deferred` 声明，
+MCP 工具统一标记 deferred；MCP 仍在执行前完整连接和发现。已有 eager 工具、回读工具及
+`load_skill` 保持直接可见。成功搜索结果提交后，下一请求按预算披露候选的完整 schema；
+已选工具名与该批调用一起保存，具体规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
 
 ### `CompactionConfig`
 

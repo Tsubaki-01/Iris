@@ -58,12 +58,15 @@ def _compile_input_schema(schema: dict[str, Any]) -> Draft202012Validator:
 def build_catalog(
     server: MCPResolvedServer,
     tools: Sequence[types.Tool],
+    *,
+    defer_tools: bool = False,
 ) -> tuple[tuple[MCPToolDescriptor, ...], tuple[MCPDiagnostic, ...]]:
     """过滤原始工具名，构造 descriptor；无效单工具留下诊断后排除。
 
     Args:
         server: 已求值的 server 配置。
         tools: 同一 session 完整分页发现的 SDK 工具。
+        defer_tools: 只延迟模型 schema 披露，完整目录仍已准备。
 
     Returns:
         可发布的 descriptors 与单工具诊断；注册冲突由 registry 负责。
@@ -84,6 +87,7 @@ def build_catalog(
                 input_schema=deepcopy(tool.input_schema),
                 capabilities={ToolCapability.MCP},
                 group="mcp",
+                deferred=defer_tools,
             )
         except (SchemaError, Unresolvable, IrisToolValidationError, ValidationError) as error:
             message = "工具 schema 或描述无效，或包含无法本地解析的引用"

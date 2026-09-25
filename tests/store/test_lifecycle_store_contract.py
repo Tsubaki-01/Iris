@@ -105,7 +105,11 @@ def _checkpoint(
         run_id=run_id,
         sequence=sequence,
         activation_id=activation_id,
-        engine_cursor={"position": "before_model", "step_index": committed},
+        engine_cursor={
+            "position": "before_model",
+            "step_index": committed,
+            "visible_tool_names": [],
+        },
         session_revision=session_revision,
         model_steps_reserved=reserved,
         model_steps_committed=committed,
@@ -328,6 +332,7 @@ def test_compaction_rejects_invalid_boundary_without_partial_changes(
         cursor = {
             "position": "tool_batch" if invalid == "not_before_model" else "before_model",
             "step_index": 2,
+            "visible_tool_names": [],
         }
         usage = ready.run.usage.model_copy(update={"model_steps_committed": 2})
         committed = lifecycle_store.commit_model_step(
@@ -382,7 +387,11 @@ def test_compaction_rejects_invalid_boundary_without_partial_changes(
             command,
             checkpoint=command.checkpoint.model_copy(
                 update={
-                    "engine_cursor": {"position": "before_model", "step_index": 99},
+                    "engine_cursor": {
+                        "position": "before_model",
+                        "step_index": 99,
+                        "visible_tool_names": [],
+                    },
                 }
             ),
         )
@@ -520,6 +529,7 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
                     "engine_cursor": {
                         "position": "tool_batch" if has_tool else "outcome_ready",
                         "step_index": 2,
+                        "visible_tool_names": [call.tool_name for call in prepared],
                     },
                     "resumability": CheckpointResumability.OUTCOME_READY
                     if path == "finalize"

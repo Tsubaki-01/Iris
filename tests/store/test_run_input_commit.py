@@ -64,7 +64,7 @@ def _input_command(
         run_id=run_id,
         sequence=1,
         activation_id=activation_id,
-        engine_cursor={"position": "before_input", "step_index": 0},
+        engine_cursor={"position": "before_input", "step_index": 0, "visible_tool_names": []},
         session_revision=session.revision,
         model_steps_reserved=0,
         model_steps_committed=0,
@@ -90,7 +90,11 @@ def _input_command(
             update={
                 "sequence": 2,
                 "session_revision": session.revision + 1,
-                "engine_cursor": {"position": "before_model", "step_index": 0},
+                "engine_cursor": {
+                    "position": "before_model",
+                    "step_index": 0,
+                    "visible_tool_names": [],
+                },
             }
         ),
         now=NOW,
@@ -111,7 +115,7 @@ def test_input_commit_saves_history_and_cursor_without_model_step(store: Lifecyc
     assert committed.events == ()
     assert committed.session_revision == 1
     assert committed.checkpoint == command.checkpoint
-    assert committed.checkpoint.checkpoint_version == 2
+    assert committed.checkpoint.checkpoint_version == 3
     assert committed.run.checkpoint_sequence == 2
     assert store.load_checkpoint(command.run_id) == command.checkpoint
     assert store.load_session("session").messages == command.message_delta
@@ -152,6 +156,7 @@ def test_input_commit_rejects_changed_facts_atomically(
                 "engine_cursor": {
                     "position": "tool_batch" if mismatch == "position" else "before_model",
                     "step_index": 1 if mismatch == "step" else 0,
+                    "visible_tool_names": [],
                 }
             }
         command = replace(command, checkpoint=command.checkpoint.model_copy(update=changes))
@@ -236,7 +241,7 @@ def test_compaction_replaces_window_and_fork_starts_uninitialized(store: Lifecyc
     assert saved.compaction == compact.compaction
     assert saved.revision == 2
     assert committed.checkpoint.session_revision == saved.revision
-    assert committed.checkpoint.checkpoint_version == 2
+    assert committed.checkpoint.checkpoint_version == 3
     if isinstance(store, SQLiteStore):
         reopened = SQLiteStore(store.path)
         assert reopened.load_session("session") == saved
@@ -303,14 +308,14 @@ def test_compaction_failure_preserves_initialized_window(
     assert store.list_events(command.run_id) == events
 
 
-def test_checkpoint_v1_is_rejected_at_load_boundary(tmp_path: Path) -> None:
+def test_checkpoint_v2_is_rejected_at_load_boundary(tmp_path: Path) -> None:
     path = tmp_path / "old-checkpoint.db"
     store = SQLiteStore(path)
     command = _input_command(store)
     with pytest.raises(ValidationError, match="checkpoint_version"):
-        RunCheckpoint.model_validate({**command.checkpoint.model_dump(), "checkpoint_version": 1})
+        RunCheckpoint.model_validate({**command.checkpoint.model_dump(), "checkpoint_version": 2})
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE run_checkpoints SET checkpoint_version = 1")
+        connection.execute("UPDATE run_checkpoints SET checkpoint_version = 2")
     with pytest.raises(IrisRunPersistenceError):
         store.load_checkpoint(command.run_id)
 

@@ -82,7 +82,7 @@ async def test_once_collect_across_summary_retry_frozen_selection_and_new_memory
     ).model_copy(
         update={
             "kind": "recover",
-            "cursor": RuntimeCursor(position="before_model", step_index=0),
+            "cursor": RuntimeCursor(position="before_model", step_index=0, visible_tool_names=()),
         }
     )
     raw = [Msg.assistant("archived evidence" * 1000), Msg.user("original")]

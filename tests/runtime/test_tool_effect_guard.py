@@ -278,6 +278,7 @@ def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> 
     second = executor.prepare_many([second_use], context).calls[0]
     cursor = RuntimeCursor(
         position="tool_batch",
+        visible_tool_names=("echo",),
         step_index=2,
         next_tool_index=0,
         tool_calls=(first.tool_use, second.tool_use),

@@ -40,6 +40,14 @@ Children use the same YAML configuration with independent connections, prepare b
 close at WAITING/completion. Recovery rediscovers tools using current configuration. Child closure
 does not affect root connections; the existing parent/child policy decides permissions.
 
+`context_policy.deferred_tools: true` marks MCP definitions deferred. The automatically registered
+`tool_search` discovers candidates; after its successful result commits, runtime selects complete
+schemas for the next request. The default `false` retains eager visibility. This reduces model
+schemas only: all servers still connect, discover, and publish before execution. Connection lifetimes
+and required/optional preparation failures are unchanged. Runtime selects schemas per session and
+step without unloading connections or changing the catalog. See
+[deferred tools](../runtime/README.en.md#deferred-tool-schemas).
+
 `resolve_server_config()` expands `${VAR}`, `${VAR:-default}`, and `${env:VAR}` exactly once.
 STDIO environment precedence is env_vars → envFile → env; the host environment stays unchanged.
 Relative cwd/envFile paths use the MCP file directory; omitted cwd uses workspace_root.
@@ -75,10 +83,11 @@ Iris does not replay calls or reconnect automatically.
 
 ## Implementation and maintenance
 
-`manager.MCPManager(config, registry=registry, workspace_root=workspace).prepare()` resolves,
+`manager.MCPManager(config, registry=registry, workspace_root=workspace, defer_tools=False).prepare()` resolves,
 connects, and fully discovers servers in server-id order. Each server shares one startup deadline.
-All candidates publish through `registry.register_many()` once, becoming visible to existing
-ToolRegistryViews. Required failures publish no partial MCP tools; optional failures produce
+All candidates publish through `registry.register_many()` once, making the complete catalog available
+to existing ToolRegistryViews; deferred entries need selection before schema export. Required failures
+publish no partial MCP tools; optional failures produce
 diagnostics. Valid empty catalogs are allowed.
 
 The successful `snapshot` stays fixed, and concurrent/repeated prepare calls do not reconnect or
@@ -86,12 +95,14 @@ rediscover. Failed managers close; create a new instance for new configuration. 
 every owned connection and reports explicit closure failures to the host. Effective env/header
 values in the snapshot stay in memory and should not be logged or persisted.
 
-`catalog.build_catalog(server, sdk_tools)` filters original wire names and compiles JSON Schema
+`catalog.build_catalog(server, sdk_tools, defer_tools=False)` filters original wire names and compiles JSON Schema
 2020-12 input validators. Local references work; unresolved external references and other dialects
 produce diagnostics and exclude the tool. Public names use ASCII letters, digits and underscores
 in `mcp__...`, adding a stable identity
 digest only when necessary. Register `tools.MCPTool(descriptor, connection)` in the existing
 ToolRegistry to use the ordinary input, permission, execution, and cancellation path.
+Shared assembly passes the context-policy setting through the same `defer_tools` parameter to the
+manager and catalog, without changing remote schemas or rebuilding adapters on demand.
 
 Default permissions allow MCP tools only when local trust_annotations and readOnlyHint are both
 true. Other tools require confirmation. Uncertain SDK failures become ordinary errors or
