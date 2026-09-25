@@ -37,7 +37,7 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
     records: list[SummaryRecord] = []
     for message_index, message in enumerate(messages, start=start_index):
         identity = (
-            f"message={message_index} | role={message.role.value} | "
+            f"message={message_index} | ref=message:{message_index} | role={message.role.value} | "
             f"sender={json.dumps(message.sender, ensure_ascii=False)}"
         )
         if isinstance(message.content, str) or not message.content:
@@ -69,7 +69,7 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
                         )
                 records.append(
                     SummaryRecord(
-                        f"{header} | kind=tool_result | "
+                        f"{header} | ref=result:{message_index}:{block_index} | kind=tool_result | "
                         f"call_id={json.dumps(block.tool_use_id, ensure_ascii=False)} | "
                         f"name={json.dumps(block.name, ensure_ascii=False)} | "
                         f"execution_status={status} | is_error={str(block.is_error).lower()}",

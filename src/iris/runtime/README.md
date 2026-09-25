@@ -88,9 +88,16 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 切点保持 assistant 的整批 tool calls/results 完整，近期原文是软目标，大组放不下时可以仅留
 较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
 
+默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
+回读引用，下标来自原始历史，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
+取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
+
 `_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
 当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。
+记录 header 包含原始 `message:<index>` / `result:<message_index>:<block_index>`，摘要指令要求
+保留后续仍需使用的精确引用；回读通过 harness 提供的 context access port 访问保存材料，
+不让 runtime 直接读取生命周期数据库或重新执行历史工具。
 完整记录前缀采用指数探测与二分细化，只有下一条正文需要时才做字符切分，避免逐条重算
 全部已接受前缀。每个返回批次都经过完整请求计量；分批不承诺最大装填率，也不跨批缓存工作摘要。
 切点规划复用相同空后缀的估算，不改变完整消息组和近期原文保留规则。
@@ -300,13 +307,21 @@ Special branch 的 timeout 由 harness 按 child admission absolute 时间管理
 内部 `_assembly.py` 统一装配 context、skills、provider 与工具。ROOT 接收已加载的路由/port
 bundle 才注册 `subagent`；CHILD 始终排除它。唯一 boundary resolver 选择父子 workspace 的
 较窄目录，不相交时报配置错误，并组合实际 parent policy 与 child 默认 policy。
-Public `RuntimeFactory.from_config*()` 保持普通参数；配置 `tools.subagent` 时要求使用
-`AgentRunner.from_config*()`，因为委派需要完整 lifecycle owner。
+配置 `tools.subagent` 时要求使用 `AgentRunner.from_config*()`，而非低层
+`RuntimeFactory.from_config*()`，因为委派需要完整 lifecycle owner。
+
+Factory 接收可选 `context_access: ContextAccessPort`（定义于
+[`iris.tools.context_access`](../tools/context_access.py)）。默认 `context_policy.enabled=true`
+要求提供它；缺少时装配抛出 `IrisConfigError`。完整 `AgentRunner` 自动提供此依赖；直接使用
+低层工厂时由宿主实现，或显式配置 `context_policy.enabled: false` 关闭回读工具。下例的
+`provider` 与 `access` 均由宿主提供：
 
 ```python
 from iris.runtime import RuntimeFactory
 
-runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
+runtime = RuntimeFactory.from_config_path(
+    "agent.yaml", provider=provider, context_access=access
+)
 ```
 
 Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配置由 harness composition

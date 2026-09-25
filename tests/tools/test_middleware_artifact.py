@@ -23,6 +23,46 @@ from iris.tools import (
     ToolRegistry,
     ToolResult,
 )
+from iris.tools.artifacts import ToolArtifactStore
+
+
+def test_repeated_call_id_preserves_each_full_text(tmp_path: Path) -> None:
+    """同一调用 ID 再次出现时，旧产物与最终文本引用保持不变。"""
+    store = ToolArtifactStore(tmp_path, preview_chars=10)
+    results = [
+        store.persist_if_large(
+            ToolResult(tool_use_id="same", tool_name="read", content=[TextBlock(text=value)]),
+            max_chars=500,
+        )
+        for value in ("first" * 1000, "second" * 1000)
+    ]
+    first, second = (result.artifact for result in results)
+    assert first is not None and second is not None
+    assert first.path != second.path
+    assert first.text_path == first.path
+    assert second.text_path == second.path
+    assert first.path.read_text(encoding="utf-8") == "first" * 1000
+    assert second.path.read_text(encoding="utf-8") == "second" * 1000
+
+
+def test_native_artifact_keeps_separate_final_model_text(tmp_path: Path) -> None:
+    """原生 MCP JSON 不能替代 middleware 后真正交付的模型正文。"""
+    store = ToolArtifactStore(tmp_path, preview_chars=10)
+    raw = store.persist_json("mcp", {"original": "payload"}, preview="original")
+    result = store.persist_if_large(
+        ToolResult(
+            tool_use_id="mcp",
+            tool_name="remote",
+            artifact=raw,
+            content=[TextBlock(text="expanded" * 1000)],
+        ),
+        max_chars=500,
+    )
+    assert result.artifact is not None
+    assert result.artifact.path == raw.path
+    assert json.loads(raw.path.read_text(encoding="utf-8")) == {"original": "payload"}
+    assert result.artifact.text_path != raw.path
+    assert result.artifact.text_path.read_text(encoding="utf-8") == "expanded" * 1000
 
 
 @pytest.mark.asyncio
@@ -36,7 +76,7 @@ async def test_after_call_expansion_is_persisted_once(tmp_path: Path) -> None:
             self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
         ) -> ToolResult:
             """补充正文，保持工具 identity。"""
-            return result.model_copy(update={"content": [TextBlock(text="expanded result")]})
+            return result.model_copy(update={"content": [TextBlock(text="expanded result" * 100)]})
 
     class SmallTool(BaseTool):
         """声明短结果阈值的正常工具。"""
@@ -45,7 +85,7 @@ async def test_after_call_expansion_is_persisted_once(tmp_path: Path) -> None:
             name="small",
             description="短结果",
             input_schema={"type": "object", "properties": {}},
-            max_result_chars=3,
+            max_result_chars=500,
             preview_chars=2,
         )
 
@@ -65,7 +105,7 @@ async def test_after_call_expansion_is_persisted_once(tmp_path: Path) -> None:
     )
     assert not result.is_error
     assert result.artifact is not None
-    assert result.artifact.path.read_text(encoding="utf-8") == "expanded result"
+    assert result.artifact.path.read_text(encoding="utf-8") == "expanded result" * 100
     assert result.artifact.preview == "ex"
 
 
@@ -85,10 +125,13 @@ async def test_different_ids_keep_both_artifacts(
 
     registry = ToolRegistry()
     tool = registry.register_function(echo)
-    tool.definition.max_result_chars = 3
+    tool.definition.max_result_chars = 500
     executor = ToolExecutor(registry)
     artifacts = []
-    for identifier, content in [(first_id, "first result"), (second_id, "second result")]:
+    for identifier, content in [
+        (first_id, "first result" * 100),
+        (second_id, "second result" * 100),
+    ]:
         result = await executor.execute_one(
             ToolUseBlock(
                 id=identifier if id_field == "call" else "same-call",
@@ -106,8 +149,8 @@ async def test_different_ids_keep_both_artifacts(
         artifacts.append(result.artifact)
 
     assert artifacts[0].path != artifacts[1].path
-    assert artifacts[0].path.read_text(encoding="utf-8") == "first result"
-    assert artifacts[1].path.read_text(encoding="utf-8") == "second result"
+    assert artifacts[0].path.read_text(encoding="utf-8") == "first result" * 100
+    assert artifacts[1].path.read_text(encoding="utf-8") == "second result" * 100
 
 
 @pytest.mark.asyncio
@@ -222,8 +265,8 @@ async def test_preflight_error_is_bounded_without_file_effect(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_tiny_budget_keeps_retrieval_notice_without_preview(tmp_path: Path) -> None:
-    """无法容纳完整路径的预算保留取回说明，预览不再额外占空间。"""
+async def test_tiny_budget_reports_artifact_error_without_partial_handle(tmp_path: Path) -> None:
+    """无法容纳完整提示时返回明确错误，不制造残缺成功句柄。"""
 
     def produce() -> str:
         """返回足以触发小预算的正文。"""
@@ -236,9 +279,8 @@ async def test_tiny_budget_keeps_retrieval_notice_without_preview(tmp_path: Path
         ToolUseBlock(id="small", name="produce", input={}),
         ToolExecutionContext(workspace_root=tmp_path),
     )
-    assert result.artifact is not None
-    assert result.model_content.startswith("\n\n[")
-    assert str(result.artifact.path) in result.model_content
+    assert result.artifact is None
+    assert result.is_error and result.error.code == "ARTIFACT_ERROR"
 
 
 @pytest.mark.asyncio
@@ -284,6 +326,7 @@ async def test_web_fetch_artifact_can_be_read_with_configured_file_tool(
     assert result.artifact is not None
     assert failed_url in result.model_content
     assert str(result.artifact.path) in result.model_content
+    assert "context_read" not in result.model_content
     assert body in result.artifact.path.read_text(encoding="utf-8")
     read_input: dict[str, Any] = {"file_path": str(result.artifact.path)}
     page = await executor.execute_one(

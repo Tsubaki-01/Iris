@@ -29,7 +29,13 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
+from ..lifecycle.history import (
+    ForkPointCursor,
+    ForkPointPage,
+    RunHistorySnapshot,
+    RunMessageSlice,
+    SessionMessagePage,
+)
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -649,6 +655,36 @@ class SQLiteStore:
             )
 
         return self._read(operation, read)
+
+    def read_session_messages(
+        self, session_id: str, *, start: int, limit: int
+    ) -> SessionMessagePage:
+        """在一次快照中只读有限消息行，释放事务后解码。"""
+        if start < 0 or limit <= 0:
+            raise IrisRunStateError("消息分页要求 start >= 0 且 limit > 0")
+        operation = "read_session_messages"
+
+        def read(connection: sqlite3.Connection) -> tuple[int, list[sqlite3.Row]]:
+            metadata = self._select_session_metadata(connection, session_id, operation=operation)
+            total = metadata.message_count if metadata is not None else 0
+            rows = connection.execute(
+                """SELECT ordinal, message_json FROM session_messages
+                WHERE session_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?""",
+                (session_id, start, limit),
+            ).fetchall()
+            return total, rows
+
+        total, rows = self._read(operation, read)
+        count = min(limit, max(0, total - start))
+        messages = decode_session_messages(
+            rows, expected_count=count, start_count=start, path=self.path, operation=operation
+        )
+        end = start + count
+        return SessionMessagePage(
+            items=tuple(enumerate(messages, start=start)),
+            next_index=end if end < total else None,
+            total_count=total,
+        )
 
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128

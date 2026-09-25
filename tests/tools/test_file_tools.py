@@ -516,7 +516,7 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
         read_state=ReadFileState(),
     )
 
-    registry = register_file_tools(max_result_chars=120)
+    registry = register_file_tools(max_result_chars=1000)
     registry.get("grep_search").definition.preview_chars = 80
     result = await ToolExecutor(registry).execute_one(
         ToolUseBlock(id="grep_1", name="grep_search", input={"pattern": "needle"}),
@@ -525,10 +525,12 @@ async def test_large_grep_result_creates_artifact(tmp_path: Path) -> None:
 
     assert result.artifact is not None
     assert result.artifact.path.exists()
-    assert result.artifact.path == (
-        tmp_path / ".iris" / "tool-results" / "id_73657373696f6e5f31" / "id_677265705f31.txt"
+    assert result.artifact.path.parent == (
+        tmp_path / ".iris" / "tool-results" / "id_73657373696f6e5f31"
     )
-    assert result.artifact.size_bytes > 120
+    assert result.artifact.path.name.startswith("id_677265705f31-")
+    assert result.artifact.text_path == result.artifact.path
+    assert result.artifact.size_bytes > 1000
     assert ".iris/" in result.model_content
     assert "建议将 .iris/ 加入 .gitignore" in result.model_content
 

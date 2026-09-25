@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from ..agents import AgentConfig, build_tool_registry
 from ..context import (
@@ -29,6 +29,7 @@ from ..skill import (
     discover_skills,
 )
 from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor
+from ..tools.context_access import ContextAccessPort, ContextReadTool, ContextSearchTool
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
 from .environment import RuntimeEnvironment, RuntimeExecutionScope
@@ -106,8 +107,13 @@ def assemble_runtime(
     execution_scope: RuntimeExecutionScope,
     boundary: RuntimeAssemblyBoundary,
     subagent: SubagentAssembly | None = None,
+    context_access: ContextAccessPort | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选 memory，不创建 lifecycle store。"""
+    if config.context_policy.enabled and context_access is None:
+        raise IrisConfigError(
+            "启用 context_policy 需要注入 context_access；完整运行请使用 AgentRunner"
+        )
     base_dir = _base_dir(config_path)
     if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
         config = config.model_copy(
@@ -143,6 +149,13 @@ def assemble_runtime(
     tool_registry = build_tool_registry(
         config.tools, memory_service=memory_service, memory_config=config.memory
     )
+    if config.context_policy.enabled:
+        access = cast(ContextAccessPort, context_access)
+        try:
+            tool_registry.register(ContextReadTool(access))
+            tool_registry.register(ContextSearchTool(access))
+        except IrisToolValidationError as exc:
+            raise IrisConfigError("context_read/search 与现有工具名称或别名冲突") from exc
     context_input, skill_registry = _prepare_skills(
         context_input,
         config=config,

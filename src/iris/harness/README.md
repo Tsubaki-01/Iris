@@ -48,6 +48,21 @@ child 的普通 YAML 可独立配置 MCP。fresh child 在 admission 前准备�
 父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
 创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
+## 当前会话上下文回读
+
+`context_policy.enabled` 默认 `true`。`AgentRunner.from_config*()` 使用同一个 lifecycle store
+构造内部 `ContextAccess`，由共同 runtime 装配入口注册 `context_read` 与 `context_search`。
+宿主不必配置 `file.read`、memory 或额外存储；设置 `enabled: false` 可关闭这两个工具。
+
+回读使用本次工具执行的 session ID；root 与 child 各自读取自己的已提交历史，不自动读取
+parent。`message:<index>` 和 `result:<message_index>:<block_index>` 都使用从零开始的原始
+位置，压缩后的摘要不改变编号。Fork 继承前缀位置和原 artifact 引用，文件不复制。
+
+小结果从 lifecycle 原文读取，大结果通过已提交 artifact 取回最终文本或原生 MCP JSON；
+读取不会重跑工具。Search 仅查已提交正文与预览，不扫描完整 artifact 文件。具体分页参数、
+错误与范围见 [tools 说明](../tools/README.md#当前会话上下文回读)。读取服务位于 harness，
+runtime 只接收窄接口，不取得 store ownership。
+
 ## 会话历史分支
 
 `SessionHistory(store)` 复用与 runner 相同的 `LifecycleStore`，提供三个同步方法。它只生成新

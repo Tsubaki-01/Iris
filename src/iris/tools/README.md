@@ -45,7 +45,7 @@ graph TD
 1. 用 `CallableTool`、`ToolRegistry.register_function()` 或自定义 `BaseTool` 生成 `ToolDefinition`。
 2. `ToolRegistry` 管理工具名称、别名、分组、deferred 可见性，并导出 provider schema。
 3. `ToolExecutor` 接收 `iris.message.ToolUseBlock`，查找工具、校验输入、检查权限、执行工具、运行 middleware，并返回 `ToolResult`。
-4. 超过 `ToolDefinition.max_result_chars` 的执行结果（含错误）会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`，返回预览和 artifact 元数据。预检短路错误只裁剪说明，不写入文件。
+4. 超过 `ToolDefinition.max_result_chars` 的执行结果（含错误）会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}-{随机标识}.txt`，返回预览和 artifact 元数据。预检短路错误只裁剪说明，不写入文件。
 
 ## 快速入门
 
@@ -116,8 +116,9 @@ query 时返回服务提取的正文，不等同于原始 HTML。片段长度由
 超时及响应解析失败会进入现有 `EXECUTION_ERROR` 工具结果，模型可据此调整后续调用。
 
 超过默认 50,000 字符的整份 Markdown 由现有 executor 保存为 artifact，返回预览和
-文件路径。示例中的 `file.read` 让模型通过 `read_file` 继续分页读取；它需要显式启用，
-不会因为产生 artifact 自动注册。
+文件路径。默认启用的 `context_policy` 让完整 runner 自动提供 `context_read`，模型可按
+历史 result 引用分页读取当时保存的正文。示例中的 `file.read` 仍是可选的文件访问工具，
+需要显式启用；当前会话 artifact 的回读不依赖它。
 
 默认 policy 允许这两个具体 builtin 自动执行，仍保留 NETWORK 标签、执行前权限刷新和
 现有串行调度；SDK 自定义策略和父级策略继续生效。每次调用创建并关闭异步 HTTP 客户端，
@@ -140,7 +141,7 @@ Extract 不传服务端 timeout，使用 basic 默认值。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
-- `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview`。
+- `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
 
 ### BaseTool 与 CallableTool
 
@@ -382,6 +383,35 @@ column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和
 
 默认权限策略不会直接允许写工具。使用文件写入/编辑时，需要给 `ToolExecutor` 传入允许写入的策略，例如 `DefaultPermissionPolicy(write_mode="allow")`。
 
+## 当前会话上下文回读
+
+`AgentRunner` 默认通过 `context_policy.enabled: true` 注册 `context_read` 与 `context_search`，
+不需要加入 `tools.builtin`，也不依赖 memory 或 `file.read`。工具通过
+[`ContextAccessPort`](context_access.py) 委托宿主读取；每次使用当前 `ToolExecutionContext.session_id`，
+模型不传 session ID 或任意文件路径。
+
+| 工具 | 参数 | 返回与范围 |
+| --- | --- | --- |
+| `context_read` | `ref`；`offset=0`；`limit=4000`（1..8000）；`representation="text"` 或 `"raw"` | 读取一页已保存正文；`ToolResult.data` 含 `ref/representation/offset/next_offset/has_more/content` |
+| `context_search` | 非空 `query`；`after=0`；`limit=10`（1..20） | 当前会话已提交正文及工具预览的 Unicode casefold 子串搜索；返回 `matches/next_after/has_more` |
+
+`message:<index>` 引用原始消息；`result:<message_index>:<block_index>` 引用其中的工具结果块。
+两种下标都从零开始，不随摘要投影重编号。`text` 读取结果最终截短前的模型文本，优先使用
+`artifact.text_path`，否则使用历史正文；`raw` 仅适用于有 artifact 的 result，读取原生文件文本，
+例如 MCP JSON。message 的文本表示包含 role、sender 和块边界。
+普通历史原文回读应使用默认 `text`；内联结果和 message 引用没有 `raw` 表示。
+工具参数说明也明确这一区别，避免把“原文”误解为必须选择 `raw`。
+
+`context_read` 的 offset/limit 按 Python Unicode 字符计。正文与短分页 header 共同返回，工具额度
+为 12,000 字符，普通分页不会再次 offload。after middleware 仍可改写输出，因此分页还原保证
+适用于未改写正文的 middleware。文件丢失或引用无效返回 `CONTEXT_SOURCE_UNAVAILABLE`；
+请求不存在的 raw 表示返回 `CONTEXT_REPRESENTATION_UNAVAILABLE`。读取不会重新执行原工具，
+也不会用当前文件内容替代历史结果。
+
+Search 每次最多扫描 200 条消息，每条最多一个命中，片段最多 240 字符；不扫描外置 artifact
+的完整正文。即使本页无命中，`has_more=true` 时仍可从 `next_after` 继续。命中给出精确 ref，
+需要完整结果时再 read。完整的一次读取或扫描在同一个 IO worker 内完成。
+
 ## Human tool
 
 `AskQuestionInput` 与 `AskQuestionTool` 位于 `iris.tools.builtin.human`，并从 `iris.tools` 顶层
@@ -407,10 +437,13 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 
 ### Artifact
 
-`ToolArtifactStore.persist_if_large(result, max_chars=...)` 统一处理成功和错误结果。正文超限且尚无
-artifact 时保存完整 model_content；已有 artifact 保留。最终预算计入错误前缀和完整取回提示，
-错误的预览与路径写入 error.message。若阈值连提示和错误前缀都放不下，只保留这两部分，正文
-预览为空；此时提示长度构成最小输出，优先保证模型仍可取得完整路径。
+`ToolArtifactStore.persist_if_large(result, max_chars=...)` 统一处理成功和错误结果。正文超限时保存
+after middleware 后的完整 `model_content`。普通文本只写一份 `.txt`，`text_path == path`；已有
+MCP JSON 等 artifact 时保留原 `path`，另写 `.model.txt` 并通过 `text_path` 引用，不能用原生
+payload 代替 middleware 最终输出。未截短结果不额外保存文本。
+
+最终预算计入错误前缀和完整取回提示，错误的预览与路径写入 `error.message`。若阈值连提示和
+错误前缀都放不下，返回 `ARTIFACT_ERROR`，不输出残缺引用或放宽字符预算。
 
 预览长度唯一由 `ToolDefinition.preview_chars` 决定；`ToolExecutor` 不再接受
 `artifact_preview_chars`。工具异常与 middleware 错误也走相同的最终保存出口，落盘失败只返回
@@ -422,8 +455,9 @@ artifact 时保存完整 model_content；已有 artifact 保留。最终预算�
 `IrisMCPOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
 
 会话与调用 ID 的文件名片段统一为 `id_` 加完整 UTF-8 字节的小写十六进制编码；空 ID
-编码为 `id_`。不同 ID 在大小写不敏感的文件系统上也保持不同路径，目录归属检查仍在落盘
-处执行。此命名规则直接替换旧规则，已有 artifact 引用继续使用其中保存的路径。
+编码为 `id_`。每次落盘再附加随机标识，即使同一 session 重复使用 call ID，也不会覆盖旧产物。
+不同 ID 在大小写不敏感的文件系统上保持不同路径，目录归属检查仍在落盘处执行。恢复和 fork
+沿用已保存的不可变路径，不复制或重写 payload。
 
 Executor 在全部 `after_call` 完成后执行一次 artifact 处理，因此 hook 扩展后的最终正文也受
 `max_result_chars` 约束；hook 收到的是工具完整结果。
@@ -528,6 +562,7 @@ to_openai_responses_tool_schema, tool
 | 基础模型、callable/schema 适配与注册 | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_schema.py`, `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
 | 执行生命周期与 HITL 预检 | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | 文件工具、artifact 与 workspace 安全边界 | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
+| 完整结果存档与当前会话回读 | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
 | Web 搜索、批量正文与模型输出 | `builtin/web.py`, `builtin/_tavily.py` | `tests/tools/test_web_tools.py`, `tests/tools/test_middleware_artifact.py`, `tests/tools/test_permissions.py` |
 | 熔断器 | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
 

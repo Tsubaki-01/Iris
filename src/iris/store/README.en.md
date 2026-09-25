@@ -193,6 +193,15 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `sessions.revision`; the in-memory store reads the integer under its lock. Neither decodes or copies
 messages, the summary, or the context window; use `load_session()` when those are needed.
 
+`read_session_messages(session_id, *, start, limit)` reads a bounded original-message page and
+returns `iris.lifecycle.SessionMessagePage(items, next_index, total_count)`. Each item carries its
+zero-based source index and message; `next_index=None` marks the end of this read snapshot. SQLite
+reads the count and at most `limit` rows in one transaction, then decodes them. The in-memory store
+copies the requested slice under its lock without exposing store-owned message objects. Neither
+loads the whole conversation before paging or applies summary projection. An absent session or a
+start beyond the end returns an empty page; the store raises `IrisRunStateError` for `start < 0` or
+`limit <= 0`. Separate pages do not share a fixed snapshot.
+
 `load_tool_call()` returns `None` for an absent composite key even when the run is absent, and
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves

@@ -26,6 +26,7 @@ def _config(
             "name": "memory-agent",
             "model": "openai/test",
             "system": "instructions",
+            "context_policy": {"enabled": False},
             "permissions": {"workspace": str(workspace)},
             "memory": {} if memory is None else memory,
             "tools": {"builtin": builtin or []},
@@ -46,6 +47,7 @@ def test_yaml_memory_uses_effective_workspace_and_shared_tool_service(
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: memory-agent\nmodel: openai/test\nsystem: instructions\n"
+        "context_policy:\n  enabled: false\n"
         "permissions:\n  workspace: project\nmemory:\n  enabled: true\n"
         "  read_namespaces: [project, research]\n  write_namespace: research\n",
         encoding="utf-8",
@@ -268,6 +270,7 @@ def test_cli_uses_the_shared_memory_assembly(
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: cli\nmodel: openai/test\nsystem: instructions\n"
+        "context_policy:\n  enabled: false\n"
         "memory:\n  enabled: true\n",
         encoding="utf-8",
     )
@@ -306,6 +309,7 @@ def test_child_uses_own_memory_config_and_effective_workspace(
     child_path = tmp_path / "child.yaml"
     child_path.write_text(
         "name: child\nmodel: openai/test\nsystem: child\n"
+        "context_policy:\n  enabled: false\n"
         "permissions:\n  workspace: .\n"
         + ("memory:\n  enabled: true\n" if child_enabled else ""),
         encoding="utf-8",

@@ -16,7 +16,13 @@ from typing import Protocol
 from ..hitl.models import HumanInteraction, HumanInteractionResponse
 from ..message.message import Msg
 from ..tools.base import ToolResult
-from .history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
+from .history import (
+    ForkPointCursor,
+    ForkPointPage,
+    RunHistorySnapshot,
+    RunMessageSlice,
+    SessionMessagePage,
+)
 from .models import (
     ActivationKind,
     AgentRunOptions,
@@ -359,6 +365,12 @@ class LifecycleStore(Protocol):
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
+
+    def read_session_messages(
+        self, session_id: str, *, start: int, limit: int
+    ) -> SessionMessagePage:
+        """读取从零开始的有限原文页，不加载其余历史。"""
+        ...
 
     def load_session_revision(self, session_id: str) -> int:
         """只读当前 session CAS revision；不存在时返回 0，不加载历史和投影。"""

@@ -88,10 +88,15 @@ SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris �
 CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后收尾输出和后台 loop。
 
 富内容、structuredContent、SDK 保留的 metadata 或超长投影保存为完整 `.mcp.json`，模型只见
-有界文本与路径。after middleware 扩容保留已有 JSON；仅扩容后的纯文本沿用 `.txt`。
-文件按当前 context.session_id 分目录；错误的路径写入模型实际读取的 error.message。
+有界文本与路径。after middleware 后文本仍超限时，保留 JSON 的 `artifact.path`，另写完整
+`.model.txt` 到 `artifact.text_path`；没有原生产物的大文本只写 `.txt`，两字段指向同一文件。
+原生 MCP JSON 与最终模型文本分开保存，不能互相替代。文件按当前 `context.session_id`
+分目录，每次落盘使用新的随机标识；错误的路径写入模型实际读取的 `error.message`。
 adapter 保留完整文本供 middleware 消费，最终裁剪统一由 executor 完成；预览长度取当前
 ToolDefinition.preview_chars。直接调用 MCPTool.arun 得到的是尚未经过 executor 限长的结果。
+启用默认 context policy 的完整 runner 会附加历史 result 引用；`context_read` 的 `text`
+表示读取最终模型文本，`raw` 表示读取原生 MCP JSON，无需重新调用远端。范围与分页见
+[上下文回读](../tools/README.md#当前会话上下文回读)。
 SDK 返回后，完整投影、`model_dump`、JSON 编码和落盘在工具 IO worker 中执行。取消只延后到
 本地作业实际完成，保留确定结果或 `ARTIFACT_ERROR`，不会重新调用远端；SDK 网络等待仍可取消。
 

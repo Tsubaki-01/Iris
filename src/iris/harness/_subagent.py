@@ -192,6 +192,7 @@ class HarnessSubagentController:
 
     def _assemble_child(self, route: SubagentRoute) -> AgentRunner:
         """只加载 selected ordinary config，直接消费 CHILD boundary 与独立 provider。"""
+        from ._context_access import ContextAccess
         from .runner import AgentRunner
 
         config = load_agent_config(route.config_path)
@@ -214,6 +215,7 @@ class HarnessSubagentController:
             api_key=None,
             execution_scope=RuntimeExecutionScope.CHILD,
             boundary=boundary,
+            context_access=ContextAccess(self.store),
         )
         return AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
 

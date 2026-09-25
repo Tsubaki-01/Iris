@@ -15,6 +15,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..exceptions import IrisToolExecutionError
 from ..message import TextBlock
@@ -82,9 +83,12 @@ class ToolArtifactStore:
         try:
             root = self.root.resolve(strict=False)
             root.mkdir(parents=True, exist_ok=True)
-            path = (root / f"{safe_path_segment(tool_use_id)}{suffix}").resolve(strict=False)
+            path = (root / f"{safe_path_segment(tool_use_id)}-{uuid4().hex}{suffix}").resolve(
+                strict=False
+            )
             path.relative_to(root)
-            size = path.write_bytes(content.encode("utf-8"))
+            with path.open("xb") as output:
+                size = output.write(content.encode("utf-8"))
         except (OSError, ValueError) as exc:
             raise IrisToolExecutionError("ARTIFACT_ERROR: 写入工具 artifact 失败") from exc
         return ToolArtifact(path=path, mime_type=mime_type, size_bytes=size, preview=preview)
@@ -126,19 +130,29 @@ class ToolArtifactStore:
 
         # --- 2. Write artifact payload to disk ---
         preview = content[: self.preview_chars]
-        artifact = result.artifact or self._persist_text(
+        text_artifact = self._persist_text(
             result.tool_use_id,
             content,
-            suffix=".txt",
+            suffix=".model.txt" if result.artifact is not None else ".txt",
             mime_type="text/plain",
             preview=preview,
+        )
+        artifact = (result.artifact or text_artifact).model_copy(
+            update={"text_path": text_artifact.path}
         )
 
         # --- 3. Replace memory text with preview ---
         suffix = (
-            f"\n\n[结果已截断，完整内容已写入 {artifact.path}，大小 {artifact.size_bytes} bytes。"
-            " 可使用 read_file 读取该路径。建议将 .iris/ 加入 .gitignore。]"
+            f"\n\n[工具 {result.tool_name} 结果已截断，完整文本：{text_artifact.path}。"
+            "可读取该文件查看完整文本。建议将 .iris/ 加入 .gitignore。]"
         )
+        if result.artifact is not None:
+            suffix += f"\n[原生结果：{artifact.path}]"
+        prefix_chars = (
+            len(f"Error[{result.error.code}]: ") if result.is_error and result.error else 0
+        )
+        if len(suffix) + prefix_chars > max_chars:
+            raise IrisToolExecutionError("ARTIFACT_ERROR: 工具结果额度不足以容纳完整回读提示")
         limited = truncate_tool_result(
             result, max_chars=max_chars, preview_chars=self.preview_chars, suffix=suffix
         )

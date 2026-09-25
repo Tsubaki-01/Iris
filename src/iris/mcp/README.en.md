@@ -102,11 +102,18 @@ does not prove remote effects stopped. CLI shutdown waits for `manager.close(can
 closes the runner, then finishes output and the background loop.
 
 Rich content, structuredContent, SDK-retained metadata, and oversized projections are saved as
-complete `.mcp.json` files. Models receive bounded text and a path. After-hook expansion preserves
-an existing JSON artifact; expanded plain text without one uses `.txt`. The adapter preserves full
-text for middleware; the executor alone applies the final limit using ToolDefinition.preview_chars.
-Direct MCPTool.arun calls return results before this final limit. Files are scoped to the
-current context.session_id, and error paths appear in the model-visible error.message.
+complete `.mcp.json` files. Models receive bounded text and a path. If the text after middleware
+exceeds the limit, the JSON stays at `artifact.path` and a separate `.model.txt` file preserves the
+complete final text at `artifact.text_path`. Large text without a native artifact uses one `.txt`
+file for both fields. Raw MCP JSON and final model text are separate representations, not substitutes.
+The adapter preserves full text for middleware; the executor alone applies the final limit using
+ToolDefinition.preview_chars. Direct MCPTool.arun calls return results before this final limit.
+Files are scoped to the current context.session_id and receive a fresh random identifier on each
+write; error paths appear in the model-visible error.message.
+Complete runners with the default context policy attach a historical result reference.
+`context_read` retrieves final model text with `representation="text"` or native MCP JSON with
+`"raw"`, without another remote call. See [context reads](../tools/README.en.md#current-session-context-reads)
+for scope and pagination.
 After the SDK returns, complete projection, `model_dump`, JSON encoding, and writing run in a tool IO
 worker. Cancellation drains this local job and preserves the known result or `ARTIFACT_ERROR`
 without another remote call. The SDK network wait remains cancellable.

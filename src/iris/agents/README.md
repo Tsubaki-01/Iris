@@ -121,8 +121,9 @@ model: openai/gpt-4o-mini
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
+- `context_policy`: 默认构造的 `ContextPolicyConfig`，`enabled: true` 自动接入当前会话上下文回读。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
-- `tools`: `ToolsConfig`，默认不注册任何工具。
+- `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
 - `session`: `SessionConfig`，默认 `backend: none`。
 
@@ -133,6 +134,24 @@ model: openai/gpt-4o-mini
 - `path`: 独立 `context.yaml` 文件路径。相对路径按 `agent.yaml` 所在目录解析。
 
 `AgentContextConfig` 只保存路径声明，不读取 context 文件。
+
+### `ContextPolicyConfig`
+
+`context_policy` 当前提供 `enabled`，默认 `true`：
+
+```yaml
+context_policy:
+  enabled: true
+```
+
+完整 `AgentRunner` 根据这个开关注册 `context_read` 与 `context_search`，读取当前会话的已提交
+消息和当时保存的工具结果；不依赖长期 memory，也不需要显式配置 `file.read`。设为 `false`
+时不注册这两个工具；现有工具 artifact 和 LLM compaction 继续工作。它目前不配置重复结果
+裁剪、动态宿主状态或 deferred 工具激活。
+
+配置加载不读取历史。Runner 提供绑定 lifecycle store 的读取服务；直接使用
+`RuntimeFactory.from_config*()` 且启用该策略时，必须传入 `context_access`，否则装配报告
+`IrisConfigError`。参数、分页和引用范围见 [tools 说明](../tools/README.md#当前会话上下文回读)。
 
 ### `CompactionConfig`
 
@@ -260,8 +279,9 @@ tools:
 也可在初始化时传入 `provider_api_keys`。需要 dotenv 时显式传 `env_file`。缺少 Tavily key
 会抛出 `IrisConfigError`，不会改用聊天模型的通用 key。
 
-两个具体 Web builtin 在默认策略下自动执行，自定义策略仍然生效。`file.read` 用于
-继续读取长网页正文的 artifact，需要显式启用。检索筛选、批量 URL、正文/摘录和错误
+两个具体 Web builtin 在默认策略下自动执行，自定义策略仍然生效。默认 context policy 提供
+`context_read`，可按历史引用继续读取长网页结果；`file.read` 是需要显式启用的文件工具。
+检索筛选、批量 URL、正文/摘录和错误
 行为见 [Web 工具说明](../tools/README.md#web-搜索与网页读取)。
 
 `tools.python` 必须使用结构化对象，不支持混合列表：

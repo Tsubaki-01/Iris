@@ -21,12 +21,21 @@ async def test_factory_uses_config_base_and_prepares_existing_view(
     peer = MCPPeer(monkeypatch)
     (tmp_path / "mcp.json").write_text('{"servers":{"test":{"command":"${IRIS_FIXTURE_CMD}"}}}')
     path = tmp_path / "agent.yaml"
-    path.write_text("name: a\nmodel: openai/test\nsystem: test\nmcp:\n  path: mcp.json\n")
+    path.write_text(
+        "name: a\nmodel: openai/test\nsystem: test\n"
+        "context_policy:\n  enabled: false\nmcp:\n  path: mcp.json\n"
+    )
     if from_path:
         runtime = RuntimeFactory.from_config_path(path, provider=StaticProvider())
     else:
         config = AgentConfig.model_validate(
-            {"name": "a", "model": "openai/test", "system": "test", "mcp": {"path": "mcp.json"}}
+            {
+                "name": "a",
+                "model": "openai/test",
+                "system": "test",
+                "context_policy": {"enabled": False},
+                "mcp": {"path": "mcp.json"},
+            }
         )
         runtime = RuntimeFactory.from_config(config, config_path=path, provider=StaticProvider())
     view = runtime.environment.tool_bridge.tool_view

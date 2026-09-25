@@ -99,6 +99,7 @@ from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
+from ._context_access import ContextAccess
 from ._events import _RunEventCollector
 from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
@@ -426,6 +427,7 @@ class AgentRunner:
             execution_scope=RuntimeExecutionScope.ROOT,
             boundary=boundary,
             subagent=subagent,
+            context_access=ContextAccess(resolved_store),
         )
         runner = cls(
             runtime=runtime,

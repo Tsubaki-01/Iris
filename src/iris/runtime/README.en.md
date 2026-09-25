@@ -106,9 +106,18 @@ batch and its results together. Recent retention is a soft target: an oversized 
 while retaining smaller recent groups, or leaving an empty suffix. Completed steps within the current
 run are eligible too.
 
+With the default `context_policy`, offloaded tool results receive
+`result:<message_index>:<block_index>` references before history projection. Indices refer to original
+history and are not renumbered when a summary is inserted. This copy-on-write view does not persist
+the retrieval notice in durable messages. Notices and `context_read/search` schemas both enter full
+request estimation.
+
 `_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.
 Each batch is measured with the current working summary; unprocessed fragments are never dropped.
+Record headers include original `message:<index>` and `result:<message_index>:<block_index>` refs;
+summary instructions ask the model to preserve refs needed later. Reads use the harness-provided
+context access port, without runtime reading the lifecycle database or rerunning historical tools.
 Complete record prefixes use exponential probes followed by binary refinement, with character splitting
 only for the next record when needed. This avoids recounting every growing prefix. Every returned batch
 is measured as a complete request; selection does not promise maximum packing or cache working summaries
@@ -352,14 +361,23 @@ rebind/finalize. Only fresh dispatch emits `tool.started`; linked recovery retai
 Internal `_assembly.py` assembles context, skills, providers, and tools. ROOT registers `subagent`
 only with a preloaded routes/port bundle; CHILD always excludes it. The boundary resolver selects
 the narrower parent/child workspace, rejects disjoint roots, and combines the actual parent policy
-with the child's default policy. Public `RuntimeFactory.from_config*()` retains its ordinary
-parameters and requires `AgentRunner.from_config*()` for `tools.subagent`, since delegation needs
-the complete lifecycle owner.
+with the child's default policy. Configurations using `tools.subagent` require
+`AgentRunner.from_config*()` rather than low-level `RuntimeFactory.from_config*()`, since delegation
+needs the complete lifecycle owner.
+
+The factory accepts `context_access: ContextAccessPort`, defined in
+[`iris.tools.context_access`](../tools/context_access.py). The default `context_policy.enabled=true`
+requires this dependency; missing access raises `IrisConfigError` during assembly. Complete
+`AgentRunner` construction supplies it automatically. Low-level callers implement the port or
+explicitly set `context_policy.enabled: false` to omit context read tools. In this example the host
+supplies both `provider` and `access`:
 
 ```python
 from iris.runtime import RuntimeFactory
 
-runtime = RuntimeFactory.from_config_path("agent.yaml", provider=provider)
+runtime = RuntimeFactory.from_config_path(
+    "agent.yaml", provider=provider, context_access=access
+)
 ```
 
 The factory never reads or creates a lifecycle database. Harness composition interprets the

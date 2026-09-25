@@ -62,6 +62,7 @@ from ._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from ._context_refs import with_context_refs
 from ._prompts import render_prompt
 from .commit import (
     CommitPortToolEffectGuard,
@@ -934,7 +935,9 @@ class AgentRuntime:
                     protected = protected_message_indices(
                         pending_history, activation.initial_session_message_count
                     )
-                    history = project_history(pending_history, snapshot.compaction, protected)
+                    history = project_history(
+                        self._context_messages(pending_history), snapshot.compaction, protected
+                    )
                     initial_window, _, _ = await self._adopt_context_window(
                         history=history,
                         options=activation.options,
@@ -958,6 +961,14 @@ class AgentRuntime:
                 cursor_after=cursor.model_copy(update={"position": "before_model"}),
                 initial_context_window=initial_window,
             )
+        )
+
+    def _context_messages(self, messages: list[Msg]) -> list[Msg]:
+        """保留原文位置，为启用策略的模型视图附加回读引用。"""
+        return (
+            with_context_refs(messages)
+            if self.environment.agent_config.context_policy.enabled
+            else messages
         )
 
     def _build_model_request(
@@ -1045,7 +1056,9 @@ class AgentRuntime:
             )
             request, context_output = self._build_model_request(
                 history=project_history(
-                    list(snapshot.messages), snapshot.compaction, protected_indices
+                    self._context_messages(list(snapshot.messages)),
+                    snapshot.compaction,
+                    protected_indices,
                 ),
                 options=activation.options,
                 context_window=cast(SessionContextWindow, snapshot.context_window),
@@ -1324,8 +1337,9 @@ class AgentRuntime:
         if before < config.trigger_tokens:
             return request
         messages = list(snapshot.messages)
+        model_messages = self._context_messages(messages)
         end = select_compaction_end(
-            messages=messages,
+            messages=model_messages,
             previous_compaction=snapshot.compaction,
             protected_indices=protected_indices,
             config=config,
@@ -1417,7 +1431,7 @@ class AgentRuntime:
             compaction = SessionCompaction.model_construct(
                 summary=summary, covered_message_count=end
             )
-            history = project_history(messages, compaction, protected_indices)
+            history = project_history(model_messages, compaction, protected_indices)
             current_window = cast(SessionContextWindow, snapshot.context_window)
             if self.environment.memory_service is None and not current_window.memory_overview:
                 next_window = SessionContextWindow()

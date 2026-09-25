@@ -4,8 +4,10 @@ import pytest
 
 from iris.agents import build_tool_registry, load_agent_config
 from iris.context import ContextBuilder, load_context_build_input
+from iris.harness._context_access import ContextAccess
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.runtime import RuntimeFactory
+from iris.store import InMemoryLifecycleStore
 from iris.tools import ToolExecutionContext
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +45,7 @@ async def test_chat_example_catalogs_and_loads_required_skill_without_network() 
     runtime = RuntimeFactory.from_config_path(
         ROOT / "examples/chat/agent.yaml",
         provider=provider,
+        context_access=ContextAccess(InMemoryLifecycleStore()),
     )
     environment = runtime.environment
     rendered = environment.context_builder.build(environment.context_input)

@@ -304,6 +304,7 @@ class ToolArtifact(BaseModel):
         mime_type (str): HTTP 体系下资源的标准网络文件表示。
         size_bytes (int): 生成资源的总占用尺寸。
         preview (str): 用于防止阻塞 LLM 但又令其了解大概的精简版信息。
+        text_path (Path | None): 最终模型文本被截短时保存完整文本的路径。
 
     Example:
         art = ToolArtifact(path=Path("/tmp/a.png"))
@@ -313,6 +314,7 @@ class ToolArtifact(BaseModel):
     mime_type: str = "text/plain"
     size_bytes: int = 0
     preview: str = ""
+    text_path: Path | None = None
 
 
 class ToolResult(BaseModel):

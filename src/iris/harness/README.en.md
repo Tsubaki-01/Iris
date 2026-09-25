@@ -55,6 +55,24 @@ independent, with the more restrictive combined permission policy. Live cancella
 and waits for its original task; the creating scope closes resources. Closure failures are logged without
 replacing outcomes. Non-live cancellation persists its request before any required preparation.
 
+## Current-session context reads
+
+`context_policy.enabled` defaults to `true`. `AgentRunner.from_config*()` constructs internal
+`ContextAccess` against the same lifecycle store and registers `context_read` and `context_search`
+through shared runtime assembly. Hosts need no `file.read`, memory service, or additional storage.
+Set `enabled: false` to omit these tools.
+
+Each call uses its tool execution session ID. Root and child read their own committed history;
+children do not automatically read the parent. `message:<index>` and
+`result:<message_index>:<block_index>` use zero-based original positions that summaries do not
+renumber. Forks inherit prefix positions and artifact references without copying files.
+
+Small results come from lifecycle history. Large results use the committed artifact to retrieve
+final text or native MCP JSON without rerunning a tool. Search covers committed text and previews,
+not entire artifact files. See [tools](../tools/README.en.md#current-session-context-reads) for page
+parameters, errors, and scope. Harness owns the read service; runtime receives a narrow interface
+without store ownership.
+
 ## Session history branches
 
 `SessionHistory(store)` shares the runner's `LifecycleStore` and provides three synchronous methods.

@@ -96,6 +96,7 @@ async def test_middleware_expansion_preserves_original_json_when_present(
         else text == "expanded" * 2000
     )
     assert str(result.artifact.path) in result.model_content
+    assert result.artifact.text_path.read_text(encoding="utf-8") == "expanded" * 2000
 
 
 @pytest.mark.asyncio
