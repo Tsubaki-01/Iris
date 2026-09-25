@@ -162,6 +162,13 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_session_revision(session_id)` 在 session 不存在时返回 `0`。SQLite 只查询 `sessions.revision`，
 内存实现只在锁内读取整数，均不解析或复制消息、摘要和窗口；需要这些内容时使用 `load_session()`。
 
+`read_session_messages(session_id, *, start, limit)` 读取有限的原始消息页，返回
+`iris.lifecycle.SessionMessagePage(items, next_index, total_count)`。`items` 保存从零开始的原始
+位置与消息，`next_index=None` 表示本次快照已到末尾。SQLite 在同一事务读取总数与最多 `limit`
+行，随后解码；内存实现在锁内复制对应 slice，返回对象不会暴露 store-owned 消息。两者都不
+先加载全部会话再分页，也不应用摘要投影。缺失 session 或越过末尾返回空页；`start < 0`
+或 `limit <= 0` 由 store 抛出 `IrisRunStateError`。跨页读取不承诺固定快照。
+
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加

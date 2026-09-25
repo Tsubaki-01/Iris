@@ -1,6 +1,13 @@
 """Logical run 生命周期的 dependency-neutral 公共契约。"""
 
-from .history import ForkPoint, ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
+from .history import (
+    ForkPoint,
+    ForkPointCursor,
+    ForkPointPage,
+    RunHistorySnapshot,
+    RunMessageSlice,
+    SessionMessagePage,
+)
 from .models import (
     ActivationKind,
     ActivationOutcome,
@@ -61,6 +68,7 @@ from .store import (
 )
 
 __all__ = [
+    "SessionMessagePage",
     "ActivationKind",
     "ActivationOutcome",
     "ActivationRecord",

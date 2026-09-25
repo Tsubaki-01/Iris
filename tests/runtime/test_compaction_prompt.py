@@ -26,6 +26,7 @@ def _config(prompt: Path | None = None) -> AgentConfig:
         name="agent",
         model="openai/test",
         system="业务指令",
+        context_policy={"enabled": False},
         compaction=CompactionConfig(prompt=prompt),
     )
 

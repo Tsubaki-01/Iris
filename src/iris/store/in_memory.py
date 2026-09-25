@@ -29,7 +29,13 @@ from ..hitl.models import (
     PermissionInteractionResponse,
     QuestionInteractionResponse,
 )
-from ..lifecycle.history import ForkPointCursor, ForkPointPage, RunHistorySnapshot, RunMessageSlice
+from ..lifecycle.history import (
+    ForkPointCursor,
+    ForkPointPage,
+    RunHistorySnapshot,
+    RunMessageSlice,
+    SessionMessagePage,
+)
 from ..lifecycle.models import (
     ActivationKind,
     ActivationOutcome,
@@ -1559,6 +1565,22 @@ class InMemoryLifecycleStore:
         with self._lock:
             session = self._sessions.get(session_id)
             return session.revision if session is not None else 0
+
+    def read_session_messages(
+        self, session_id: str, *, start: int, limit: int
+    ) -> SessionMessagePage:
+        """在同一锁内复制指定原文页，隔离返回消息与 store-owned facts。"""
+        if start < 0 or limit <= 0:
+            raise IrisRunStateError("消息分页要求 start >= 0 且 limit > 0")
+        with self._lock:
+            session = self._sessions.get(session_id)
+            messages = session.messages if session is not None else []
+            end = min(start + limit, len(messages))
+            return SessionMessagePage(
+                items=tuple(enumerate(deepcopy(messages[start:end]), start=start)),
+                next_index=end if end < len(messages) else None,
+                total_count=len(messages),
+            )
 
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128

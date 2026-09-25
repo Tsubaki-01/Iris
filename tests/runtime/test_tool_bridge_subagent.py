@@ -79,7 +79,7 @@ def _bridge(tmp_path: Path, port: RecordingPort, policy: CountingPolicy) -> Tool
         ),
         port=port,
     )
-    tool.definition.max_result_chars = 10
+    tool.definition.max_result_chars = 500
     registry = ToolRegistry()
     registry.register(tool)
     return ToolBridge(
@@ -109,7 +109,7 @@ def _context(tmp_path: Path) -> dict[str, object]:
 async def test_linked_special_path_skips_outer_policy_and_preserves_artifact_identity(
     tmp_path: Path,
 ) -> None:
-    text = "child text " * 10
+    text = "child text " * 100
     port = RecordingPort(ToolResult(tool_use_id="", tool_name="", content=[TextBlock(text=text)]))
     policy = CountingPolicy()
     policy.effect = PermissionEffect.DENY

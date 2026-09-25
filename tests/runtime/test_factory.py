@@ -21,6 +21,7 @@ def test_factory_preserves_compaction_in_agent_config() -> None:
             "name": "agent",
             "model": "openai/test",
             "system": "instructions",
+            "context_policy": {"enabled": False},
             "compaction": {"input_budget_tokens": 32000, "summary_ratio": 0.1},
         }
     )
@@ -49,6 +50,8 @@ def test_from_config_path_loads_relative_context_without_creating_store(
                 "model: openai/gpt-4o-mini",
                 "context:",
                 "  path: context.yaml",
+                "context_policy:",
+                "  enabled: false",
                 "session:",
                 "  backend: sqlite",
                 "  path: state/lifecycle.db",
@@ -75,6 +78,7 @@ def test_public_factory_requires_runner_for_subagent_config() -> None:
             "name": "parent",
             "model": "openai/test",
             "system": "parent",
+            "context_policy": {"enabled": False},
             "tools": {"subagent": "missing.yaml"},
         }
     )
@@ -154,6 +158,7 @@ def test_private_assembly_registers_subagent_only_in_root(tmp_path: Path, scope:
             "name": "a",
             "model": "openai/test",
             "system": "a",
+            "context_policy": {"enabled": False},
             "tools": {"builtin": ["file.read"], "subagent": "missing.yaml"},
         }
     )
@@ -208,6 +213,7 @@ def test_child_executor_uses_custom_parent_policy(tmp_path: Path) -> None:
             "name": "a",
             "model": "openai/test",
             "system": "a",
+            "context_policy": {"enabled": False},
             "tools": {"builtin": ["file.read"]},
         }
     )

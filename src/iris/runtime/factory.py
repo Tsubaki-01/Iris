@@ -4,7 +4,9 @@
 `AgentRuntime` 依赖图；真实模型调用仍延迟到 runtime 执行阶段。
 
 Example:
-    runtime = RuntimeFactory.from_config_path("agent.yaml", provider=fake_provider)
+    runtime = RuntimeFactory.from_config_path(
+        "agent.yaml", provider=fake_provider, context_access=host_context_access
+    )
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import TYPE_CHECKING
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import IrisConfigError
 from ..providers.protocols import CompletionProvider
+from ..tools.context_access import ContextAccessPort
 from ._assembly import RuntimeExecutionScope, assemble_runtime, resolve_runtime_boundary
 from .runtime import AgentRuntime
 
@@ -29,7 +32,9 @@ class RuntimeFactory:
     memory service 优先于配置派生对象，便于测试和 SDK 用户接管边界。
 
     Example:
-        runtime = RuntimeFactory.from_config(config, provider=fake_provider)
+        runtime = RuntimeFactory.from_config(
+            config, provider=fake_provider, context_access=host_context_access
+        )
     """
 
     @classmethod
@@ -39,6 +44,7 @@ class RuntimeFactory:
         *,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        context_access: ContextAccessPort | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
@@ -47,6 +53,7 @@ class RuntimeFactory:
             path (str | Path): Agent YAML 配置文件路径。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -59,6 +66,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            context_access=context_access,
             api_key=api_key,
         )
 
@@ -70,6 +78,7 @@ class RuntimeFactory:
         config_path: Path | None = None,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        context_access: ContextAccessPort | None = None,
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
@@ -79,6 +88,7 @@ class RuntimeFactory:
             config_path (Path | None): 配置文件路径；相对它解析 workspace、context 和摘要 prompt。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -91,6 +101,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            context_access=context_access,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
             boundary=resolve_runtime_boundary(config, config_path=config_path),

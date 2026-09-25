@@ -21,6 +21,7 @@ from ...exceptions import IrisConfigError, IrisValidationError
 from ...memory.config import MemoryConfig
 from ...providers import ModelRoute, parse_model_route
 from .compaction import CompactionConfig
+from .context_policy import ContextPolicyConfig
 from .mcp import AgentMCPConfig
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -231,6 +232,7 @@ class AgentConfig(BaseModel):
         skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
         mcp (AgentMCPConfig | None): 可选的外部 MCP 文件引用与本地策略。
         compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
+        context_policy (ContextPolicyConfig): 当前会话上下文回读策略。
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
@@ -244,6 +246,7 @@ class AgentConfig(BaseModel):
     skills: AgentSkillsConfig | None = None
     mcp: AgentMCPConfig | None = None
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

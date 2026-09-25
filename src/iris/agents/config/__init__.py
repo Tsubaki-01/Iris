@@ -12,6 +12,7 @@ from .base import (
     load_agent_config,
 )
 from .compaction import CompactionConfig
+from .context_policy import ContextPolicyConfig
 from .mcp import AgentMCPConfig, MCPServerOverride
 from .tools import build_tool_registry
 
@@ -21,6 +22,7 @@ __all__ = [
     "AgentMCPConfig",
     "AgentSkillsConfig",
     "CompactionConfig",
+    "ContextPolicyConfig",
     "ModelConfig",
     "MCPServerOverride",
     "PermissionsConfig",

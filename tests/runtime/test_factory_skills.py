@@ -64,6 +64,7 @@ def _config(
     values: dict[str, object] = {
         "name": "skill-agent",
         "model": ModelConfig(provider="openai", name="gpt-4o-mini"),
+        "context_policy": {"enabled": False},
         "permissions": PermissionsConfig(workspace=str(workspace)),
         "tools": tools or ToolsConfig(),
         "skills": skills,

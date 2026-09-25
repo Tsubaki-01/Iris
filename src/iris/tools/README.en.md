@@ -254,27 +254,66 @@ An invalid starting column returns COLUMN_OUT_OF_RANGE. An insufficient page bud
 READ_BUDGET_TOO_SMALL. Direct service read_file/read_file_observed calls require max_chars.
 
 Large execution output, including errors, is stored at
-`.iris/tool-results/{encoded_session_id}/{encoded_call_id}.txt`, and the result becomes a preview
+`.iris/tool-results/{encoded_session_id}/{encoded_call_id}-{random_id}.txt`, and the result becomes a preview
 plus artifact metadata. Each ID segment is `id_` followed by its complete UTF-8 bytes encoded as
 lowercase hexadecimal; an empty ID becomes `id_`. Distinct IDs retain distinct paths even on
-case-insensitive filesystems. Containment is still checked when writing. This naming rule
-replaces the previous rule directly; existing artifact references retain their saved paths.
+case-insensitive filesystems. Every write adds a random identifier, so reusing a call ID within a
+session does not overwrite an earlier result. Containment is still checked when writing. Recovery
+and forks reuse the saved immutable paths without copying or rewriting payloads.
 Default permissions do not
 directly allow writes; configure `DefaultPermissionPolicy(write_mode="allow")` or let runtime host
 the confirmation gate.
 
 `persist_json()` stores complete parsed MCP JSON; `artifact_store_for()` selects the store for
-the current context.session_id. Existing artifacts survive final truncation. Successes, returned
-errors, raised tool exceptions, and middleware errors share the final output handling. The budget
-includes the error prefix and retrieval notice; error.message retains the preview and path. If the
-notice and prefix alone exceed the budget, they remain intact with no body preview. Their length
-is the minimum output needed to preserve retrieval. Preflight errors are clipped without writing files.
+the current context.session_id. Oversized final `model_content` is saved after all middleware.
+Plain text uses one `.txt` file, with `ToolArtifact.text_path == path`. When a native artifact already
+exists, its `path` is preserved and a separate `.model.txt` file supplies `text_path`; the raw payload
+cannot replace the text produced by middleware. Results within the limit need no additional text file.
+
+Successes, returned errors, raised tool exceptions, and middleware errors share the final output
+handling. The budget includes the error prefix and retrieval notice; `error.message` retains the
+preview and path. If the notice and prefix alone exceed the budget, finalization returns
+`ARTIFACT_ERROR` rather than emitting an incomplete reference or exceeding the character limit.
+Preflight errors are clipped without writing files.
 
 `ToolDefinition.preview_chars` is the sole preview setting; `ToolExecutor` no longer accepts
 `artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
 Default permissions allow only locally trusted read-only MCP tools.
 `IrisMCPOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.
+
+## Current-session context reads
+
+With the default `context_policy.enabled: true`, `AgentRunner` registers `context_read` and
+`context_search` automatically. Neither belongs in `tools.builtin`, and neither requires memory or
+`file.read`. The tools delegate through [`ContextAccessPort`](context_access.py), using the current
+`ToolExecutionContext.session_id`; the model supplies neither a session ID nor an arbitrary file path.
+
+| Tool | Parameters | Result and scope |
+| --- | --- | --- |
+| `context_read` | `ref`; `offset=0`; `limit=4000` (1..8000); `representation="text"` or `"raw"` | A saved text page; `ToolResult.data` contains `ref/representation/offset/next_offset/has_more/content` |
+| `context_search` | Nonblank `query`; `after=0`; `limit=10` (1..20) | Unicode casefold substring search over committed text and tool previews in the current session; returns `matches/next_after/has_more` |
+
+`message:<index>` names an original message; `result:<message_index>:<block_index>` names a tool
+result block. Both indices are zero-based and are not renumbered by summary projection. Result
+`text` reads the complete model text before final truncation, using `artifact.text_path` when
+present or the archived body otherwise. Result `raw` requires an artifact and reads the native file
+as text, such as MCP JSON. A message's text representation includes its role, sender, and block
+boundaries.
+Use the default `text` to recall ordinary historical content. Inline results and message references
+have no `raw` representation; the tool parameter description makes this distinction explicit.
+
+Read offsets and limits count Python Unicode characters. The page and short continuation header
+share a 12,000-character tool limit, avoiding another offload during ordinary paging. After hooks
+still apply; exact page reconstruction assumes middleware does not rewrite the returned body.
+Unavailable files or invalid references return `CONTEXT_SOURCE_UNAVAILABLE`; an unavailable raw
+representation returns `CONTEXT_REPRESENTATION_UNAVAILABLE`. Reads never rerun the source tool or
+substitute current file contents for its saved result.
+
+Search scans at most 200 messages per call, returning at most one match per message and a snippet
+of at most 240 characters. It does not scan complete offloaded artifacts. A page with no matches
+can still have `has_more=true`; continue from `next_after`. Matches carry exact refs for later
+reads. Each complete read or search operation runs in one IO worker.
 
 ## Human tool, middleware, breaker, and discovery
 
@@ -313,6 +352,7 @@ MCP protocol integration lives in `iris.mcp` and uses this package's ordinary to
 | Models, callable/schema adaptation, and registration | `base.py`, `schema.py`, `registry.py` | `tests/tools/test_schema.py`, `tests/tools/test_registry.py`, `tests/tools/test_executor.py` |
 | Lifecycle and HITL preflight | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | File tools, artifacts, and workspace safety | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
+| Complete-result storage and current-session reads | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
 | Circuit breaker | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
 
 Deferred search in `discovery.py` currently has no dedicated test file.

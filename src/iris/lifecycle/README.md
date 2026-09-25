@@ -58,6 +58,13 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 `LifecycleStore` 提供 create/begin/reserve/model commit/tool claim/tool result/suspend/resolve/
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
+
+`read_session_messages(session_id, *, start, limit)` 返回公开的 `SessionMessagePage`，只读取有限
+原始消息页。`items` 为 `(index, Msg)` tuple，index 从零开始；`next_index` 是下一页起点，读完时
+为 `None`；`total_count` 是本次读取快照的原文总数。`start >= 0`、`limit > 0` 由 store 检查，
+否则抛出 `IrisRunStateError`。缺失 session 或起点已到末尾时返回空页。该接口不应用摘要投影，
+因此压缩不会改变原文位置；它与按单个 run 范围采集的 `load_run_message_slice()` 用途不同。
+
 `source_id` 是只读的来源 UUID：SQLite 数据库重开后保持不变，InMemory 仅在当前实例生命周期内
 稳定。`load_run_message_slice(run_id, after_count=0, *, limit=128)` 返回公开的 `RunMessageSlice`，在同一读取
 快照中包含 source/run/session ID、`initial_message_count`、`start_message_count`、

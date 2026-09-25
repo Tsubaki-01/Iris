@@ -61,6 +61,15 @@ provider clients, tasks, locks, signals, or callbacks.
 `LifecycleStore` exposes create/begin/reserve/model-commit/tool-claim/tool-result/suspend/resolve/
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
+
+`read_session_messages(session_id, *, start, limit)` returns the public `SessionMessagePage`, reading
+only a bounded page of original messages. `items` contains `(index, Msg)` tuples with zero-based
+indices; `next_index` is the next page's start or `None` at the end, and `total_count` is the original
+message count in this read snapshot. The store requires `start >= 0` and `limit > 0`, raising
+`IrisRunStateError` otherwise. An absent session or a start at or beyond the end returns an empty
+page. This read does not apply summary projection, so compaction cannot renumber the source. It
+serves a different purpose from the run-scoped `load_run_message_slice()`.
+
 The read-only `source_id` is a source UUID: reopening a SQLite database preserves it, while an
 InMemory identity lasts for one instance. `load_run_message_slice(run_id, after_count=0, *, limit=128)` returns
 the public `RunMessageSlice` in one read snapshot, including source/run/session IDs,

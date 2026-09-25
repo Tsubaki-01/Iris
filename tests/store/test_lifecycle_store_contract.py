@@ -743,6 +743,24 @@ def _complete_history_turn(store: LifecycleStore, *, run_id: str, session_id: st
     ).run
 
 
+def test_session_message_pages_keep_original_indices(lifecycle_store: LifecycleStore) -> None:
+    """有限分页使用原始位置，并隔离返回的可变消息。"""
+    _complete_history_turn(lifecycle_store, run_id="first", session_id="paged")
+    _complete_history_turn(lifecycle_store, run_id="second", session_id="paged")
+    page = lifecycle_store.read_session_messages("paged", start=1, limit=2)
+    assert page.total_count == 4
+    assert page.next_index == 3
+    assert [(index, message.text) for index, message in page.items] == [(1, "first"), (2, "start")]
+    page.items[0][1].metadata["changed"] = True
+    assert (
+        lifecycle_store.read_session_messages("paged", start=1, limit=1).items[0][1].metadata == {}
+    )
+    tail = lifecycle_store.read_session_messages("paged", start=3, limit=5)
+    assert tail.next_index is None
+    assert [(index, message.text) for index, message in tail.items] == [(3, "second")]
+    assert lifecycle_store.read_session_messages("absent", start=0, limit=2).items == ()
+
+
 def test_fork_uses_terminal_prefix_after_source_history_grows(
     lifecycle_store: LifecycleStore,
 ) -> None:

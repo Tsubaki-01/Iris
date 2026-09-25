@@ -97,7 +97,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 ## Public models and APIs
 
-`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ModelConfig`,
+`iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ContextPolicyConfig`, `ModelConfig`,
 `PermissionsConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
@@ -113,6 +113,25 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 - `PermissionsConfig` defaults to workspace `.` and writes `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
+
+`AgentConfig.context_policy` uses `ContextPolicyConfig` and currently exposes `enabled`, defaulting
+to `true`:
+
+```yaml
+context_policy:
+  enabled: true
+```
+
+The complete `AgentRunner` registers `context_read` and `context_search` to read committed messages
+and saved tool results from the current session. They require neither long-term memory nor an
+explicit `file.read` tool. Setting `enabled: false` omits both tools; existing artifact handling and
+LLM compaction remain available. This configuration does not yet select duplicate-result pruning,
+dynamic host state, or deferred-tool activation.
+
+Configuration loading does not read history. Runner supplies the store-bound access service;
+direct `RuntimeFactory.from_config*()` callers with this policy enabled must pass `context_access`,
+or assembly raises `IrisConfigError`. See [context reads](../tools/README.en.md#current-session-context-reads)
+for parameters, pagination, and reference scope.
 
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
 Enable it to connect the service, published overview, and both read tools:

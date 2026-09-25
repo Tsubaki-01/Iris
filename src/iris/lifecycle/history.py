@@ -65,4 +65,20 @@ class RunMessageSlice:
     messages: tuple[Msg, ...]
 
 
-__all__ = ["ForkPoint", "ForkPointCursor", "ForkPointPage", "RunHistorySnapshot", "RunMessageSlice"]
+@dataclass(frozen=True, slots=True)
+class SessionMessagePage:
+    """一次读取快照中的有限原始消息页，位置从零开始。"""
+
+    items: tuple[tuple[int, Msg], ...]
+    next_index: int | None
+    total_count: int
+
+
+__all__ = [
+    "ForkPoint",
+    "ForkPointCursor",
+    "ForkPointPage",
+    "RunHistorySnapshot",
+    "RunMessageSlice",
+    "SessionMessagePage",
+]
