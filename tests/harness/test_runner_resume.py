@@ -21,6 +21,7 @@ from iris.lifecycle import (
     RunPhase,
     RunStopReason,
     RunToolCallRecord,
+    SessionSnapshot,
 )
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
@@ -132,8 +133,12 @@ async def test_resume_exposes_same_batch_question_gates_in_original_order(
     def reject_history(run_id: str, *, step_index: int | None = None) -> list[RunToolCallRecord]:
         pytest.fail("resume subject must use an exact tool-call read")
 
+    def reject_session_history(session_id: str) -> SessionSnapshot:
+        pytest.fail("resume validation must only read session revision")
+
     with monkeypatch.context() as patch:
         patch.setattr(store, "list_tool_calls", reject_history)
+        patch.setattr(store, "load_session", reject_session_history)
         cursor = runner._validate_resume_checkpoint(
             store.load_run("run-questions"),
             first.pending_interaction,

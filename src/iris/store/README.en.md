@@ -189,6 +189,10 @@ reads. Construct commands and models through `iris.lifecycle`; do not depend on 
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
+`load_session_revision(session_id)` returns `0` for an absent session. SQLite selects only
+`sessions.revision`; the in-memory store reads the integer under its lock. Neither decodes or copies
+messages, the summary, or the context window; use `load_session()` when those are needed.
+
 schema identity is lifecycle v9.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an

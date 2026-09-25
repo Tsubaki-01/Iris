@@ -159,6 +159,9 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
+`load_session_revision(session_id)` 在 session 不存在时返回 `0`。SQLite 只查询 `sessions.revision`，
+内存实现只在锁内读取整数，均不解析或复制消息、摘要和窗口；需要这些内容时使用 `load_session()`。
+
 额外索引或连接池，schema identity 为 lifecycle v9。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。

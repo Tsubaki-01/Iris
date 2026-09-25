@@ -33,6 +33,10 @@ resume/recover 先保留纯 durable 结算，确需执行才准备；准备后�
 claim 与时间，使用当前 runner 的配置继续。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
 恢复、查询、history fork 和取消申请不依赖 MCP 连接。
 
+创建 run 和 resume/recover 的 checkpoint 检查使用 `load_session_revision()`，不为取得版本号
+加载完整历史；检查仍与 store 当前 revision 独立比较。Commit port 初始化复用已经读取的
+checkpoint revision，Runtime 需要消息和上下文窗口时仍显式读取完整 session。
+
 root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
 cancel 的 durable result 或观察超时不代表 body 清理、事件投递已经结束。active 时关闭会报错，
 重复关闭幂等；关闭后仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，

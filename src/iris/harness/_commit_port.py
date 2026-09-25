@@ -93,7 +93,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._run = run
         self._checkpoint = checkpoint
         self._cursor = cursor
-        self._session_revision = store.load_session(run.session_id).revision
+        self._session_revision = checkpoint.session_revision
         self._activation_id = activation_id
         self._clock = clock
         self._event_collector = event_collector

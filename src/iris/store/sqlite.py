@@ -9,7 +9,7 @@ from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol, TypeVar, cast
+from typing import Annotated, Any, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
@@ -114,6 +114,7 @@ from ._tool_results import is_preflight_result
 _CommandT = TypeVar("_CommandT")
 _ReadT = TypeVar("_ReadT")
 _RESPONSE_ADAPTER = TypeAdapter(HumanInteractionResponse)
+_SESSION_REVISION_ADAPTER = TypeAdapter(Annotated[int, Field(ge=0, strict=True)])
 
 
 class _ActiveCommand(Protocol):
@@ -627,6 +628,25 @@ class SQLiteStore:
                 operation="load_session",
             ),
         )
+
+    def load_session_revision(self, session_id: str) -> int:
+        """只查询当前 session revision；不存在时返回 0。"""
+        operation = "load_session_revision"
+
+        def read(connection: sqlite3.Connection) -> int:
+            row = connection.execute(
+                "SELECT revision FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                return 0
+            return _decode_row(
+                lambda value: _SESSION_REVISION_ADAPTER.validate_python(value["revision"]),
+                row,
+                path=self.path,
+                operation=operation,
+            )
+
+        return self._read(operation, read)
 
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128

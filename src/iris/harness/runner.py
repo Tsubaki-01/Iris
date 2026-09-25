@@ -515,13 +515,13 @@ class AgentRunner:
         resolved_request = request.model_copy(update={"run_id": run_id})
         activation_id = f"act_{uuid.uuid4().hex}"
         cursor = RuntimeCursor(position="before_input", step_index=0)
-        session = self.store.load_session(resolved_request.session_id)
+        session_revision = self.store.load_session_revision(resolved_request.session_id)
         checkpoint = RunCheckpoint(
             run_id=run_id,
             sequence=1,
             activation_id=activation_id,
             engine_cursor=cursor.model_dump(mode="json"),
-            session_revision=session.revision,
+            session_revision=session_revision,
             model_steps_reserved=0,
             model_steps_committed=0,
         )
@@ -1305,12 +1305,12 @@ class AgentRunner:
         checkpoint: RunCheckpoint,
     ) -> RuntimeCursor:
         """验证 safe/outcome-ready recovery 的交叉 durable facts。"""
-        session = self.store.load_session(run.session_id)
+        session_revision = self.store.load_session_revision(run.session_id)
         if (
             checkpoint.run_id != run.run_id
             or checkpoint.sequence != run.checkpoint_sequence
             or checkpoint.activation_id != run.current_activation_id
-            or checkpoint.session_revision != session.revision
+            or checkpoint.session_revision != session_revision
             or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
             or checkpoint.model_steps_committed != run.usage.model_steps_committed
         ):
@@ -1395,11 +1395,11 @@ class AgentRunner:
         该 interaction 对应的 tool call 上，并且 durable tool call 记录仍是 prepared。
         人工决定一旦被投影就会真实执行工具，因此必须先确认要执行的正是被批准的那一次调用。
         """
-        session = self.store.load_session(run.session_id)
+        session_revision = self.store.load_session_revision(run.session_id)
         if (
             checkpoint.run_id != run.run_id
             or checkpoint.sequence != run.checkpoint_sequence
-            or checkpoint.session_revision != session.revision
+            or checkpoint.session_revision != session_revision
             or checkpoint.model_steps_reserved != run.usage.model_steps_reserved
             or checkpoint.model_steps_committed != run.usage.model_steps_committed
             or checkpoint.resumability is not CheckpointResumability.SAFE

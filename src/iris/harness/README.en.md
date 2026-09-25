@@ -36,6 +36,11 @@ state, checkpoints, claims, and time, and continue with the current runner confi
 Terminal reads, ordinary waiting expiry, unresolved-CLAIMED unknown recovery, queries, history forks,
 and cancellation requests do not depend on MCP connections.
 
+Run creation and resume/recover checkpoint validation use `load_session_revision()` instead of
+loading full history just for its revision. Validation still independently compares against the
+current store revision. Commit-port initialization reuses the loaded checkpoint revision; Runtime
+explicitly loads the complete session when it needs messages and the context window.
+
 Root connections span multiple runs. Stop new calls and await the original start/resume/recover calls
 fully before `aclose()`. A cancel result or observation timeout does not prove body cleanup or event
 delivery finished. Active closure raises; repeated closure is idempotent, and durable queries remain

@@ -143,6 +143,8 @@ Both use the active fence and CAS; stale revisions conflict. Neither promises cr
 exactly-once billing for external model calls.
 `load_session_lane()` is only a pure discovery read for the lane owner; it does not recover, repair,
 or transfer ownership.
+`load_session_revision(session_id)` returns only the current CAS revision, without loading messages,
+the summary, or the context window; an absent session returns `0`. Use `load_session()` for history.
 `load_tool_call(run_id, tool_call_id)` reads one exact composite identity.
 `list_tool_calls(run_id, step_index=...)` limits ordered tool reads to one model step; omitting the
 filter returns the whole run.

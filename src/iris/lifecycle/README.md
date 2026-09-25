@@ -123,6 +123,8 @@ input+output。
 
 两者沿用 active fence 和 CAS，旧 revision 重交会冲突；不承诺跨进程外部模型调用的 exactly-once 计费。
 `load_session_lane()` 只是 lane owner 的只读发现入口，不承担恢复、修补或 ownership transfer。
+`load_session_revision(session_id)` 只返回当前 CAS revision，不读取消息、摘要或上下文窗口；
+session 不存在时返回 `0`。需要完整历史时仍使用 `load_session()`。
 `load_tool_call(run_id, tool_call_id)` 按 exact composite identity 返回单条 tool fact；
 `list_tool_calls(run_id, step_index=...)` 将有序工具读取限定为一个模型步，省略时返回整 run；
 `load_run_control(run_id)` 只返回 `RunControlSnapshot` 的 session 归属与 fence/cancellation 字段。

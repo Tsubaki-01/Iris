@@ -360,6 +360,10 @@ class LifecycleStore(Protocol):
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
 
+    def load_session_revision(self, session_id: str) -> int:
+        """只读当前 session CAS revision；不存在时返回 0，不加载历史和投影。"""
+        ...
+
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128
     ) -> RunMessageSlice: ...

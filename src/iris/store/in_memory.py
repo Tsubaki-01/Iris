@@ -1554,6 +1554,12 @@ class InMemoryLifecycleStore:
         with self._lock:
             return deepcopy(self._sessions.get(session_id, SessionSnapshot(session_id=session_id)))
 
+    def load_session_revision(self, session_id: str) -> int:
+        """只读 store-owned session 的 revision；不存在时返回 0。"""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return session.revision if session is not None else 0
+
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128
     ) -> RunMessageSlice:
