@@ -66,12 +66,31 @@ result = await executor.execute_one(
 ## Definitions, registry, and schemas
 
 `ToolDefinition` holds the validated name, description, object JSON schema, capabilities, group,
-aliases, deferred flag, output limits, and metadata. `ToolExecutionContext` carries call, workspace,
+aliases, deferred flag, output limits, `context_retention`, and metadata. `ToolExecutionContext` carries call, workspace,
 session, agent, permission, metadata, shared read-state information, and a shared live
 `cancellation` signal that serialization excludes. `ToolResult` is the single result boundary;
 `model_content` produces model-facing text and `to_block_metadata()` keeps the supported metadata
 subset. `to_msg()` projects this trusted result directly into a history message, without
 normalizing metadata again. Runtime commits and terminal tool closure share this projection.
+
+`ToolDefinition.context_retention` defaults to `"keep"`. Authors can explicitly choose
+`"observation"` to let runtime shorten committed successful result bodies under request pressure,
+while retaining the original through `context_read`. Built-in `read_file`, `list_files`, `grep_search`,
+`web_search`, and `web_fetch` opt in. Write/edit tools, command execution, subagent final answers,
+HITL, Skill bodies, and unknown custom tools keep the default. A READ capability alone does not
+make a result eligible.
+
+After execution, executor finalization stamps `context_retention` and canonical `context_tool_name`,
+overriding same-named metadata supplied by the tool. History stores these facts in
+`ToolResultBlock.metadata.extra`; recovery uses the saved declaration and name rather than the
+current registry. Errors and unclosed calls are never reduced.
+
+Retention changes only the model's history view. Identical arguments still cause a real execution;
+only afterward can equal canonical names, normalized JSON arguments, and complete result bodies
+allow older duplicates to be folded. Many distinct medium-sized results can instead be shortened
+without any individual result reaching the artifact threshold. See
+[runtime](../runtime/README.en.md#history-projection-and-summary-construction) for group protection,
+budget checks, and read-availability requirements.
 
 `BaseTool` defines `validate_input()`, read/destructive/concurrency classification, and async
 `arun()`. `CallableTool` derives a schema from signatures, annotations, docstrings, or an explicit
@@ -353,6 +372,7 @@ MCP protocol integration lives in `iris.mcp` and uses this package's ordinary to
 | Lifecycle and HITL preflight | `executor.py`, `permissions.py` | `tests/tools/test_executor.py`, `tests/tools/test_executor_preflight.py`, `tests/tools/test_human_ask_tool.py` |
 | File tools, artifacts, and workspace safety | `builtin/file.py`, `artifacts.py` | `tests/tools/test_file_tools.py` |
 | Complete-result storage and current-session reads | `artifacts.py`, `context_access.py`, `../harness/_context_access.py` | `tests/tools/test_middleware_artifact.py`, `tests/harness/test_context_access.py`, `tests/store/test_lifecycle_store_contract.py` |
+| Retention declarations and execution-time facts | `base.py`, `executor.py`, `builtin/file.py`, `builtin/web.py` | `tests/tools/test_context_retention.py` |
 | Circuit breaker | `circuit.py` | `tests/tools/test_circuit_breaker.py` |
 
 Deferred search in `discovery.py` currently has no dedicated test file.

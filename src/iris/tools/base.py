@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, Self, runtime_checkable
+from typing import Any, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -99,6 +99,7 @@ class ToolDefinition(BaseModel):
         deferred (bool): 标识是否延迟计算或初始化。
         max_result_chars (int): 执行结果文本的最长限制，防止输出撑爆上下文。
         preview_chars (int): 输出超长截断时提供给人类审查的最大字数。
+        context_retention (Literal["keep", "observation"]): 历史正文保留声明。
         metadata (dict[str, Any]): 存放其他拓展属性。
 
     Example:
@@ -114,6 +115,7 @@ class ToolDefinition(BaseModel):
     deferred: bool = False
     max_result_chars: int = 50000
     preview_chars: int = 8000
+    context_retention: Literal["keep", "observation"] = "keep"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     # ==========================================

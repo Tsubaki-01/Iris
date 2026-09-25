@@ -62,6 +62,7 @@ from ._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from ._context_projection import prune_tool_results
 from ._context_refs import with_context_refs
 from ._prompts import render_prompt
 from .commit import (
@@ -1054,9 +1055,11 @@ class AgentRuntime:
             protected_indices = protected_message_indices(
                 list(snapshot.messages), activation.initial_session_message_count
             )
+            model_messages = self._context_messages(list(snapshot.messages))
+            source_indices = {id(message): index for index, message in enumerate(model_messages)}
             request, context_output = self._build_model_request(
                 history=project_history(
-                    self._context_messages(list(snapshot.messages)),
+                    model_messages,
                     snapshot.compaction,
                     protected_indices,
                 ),
@@ -1064,13 +1067,24 @@ class AgentRuntime:
                 context_window=cast(SessionContextWindow, snapshot.context_window),
             )
 
+            def project_request(candidate: LLMRequest) -> LLMRequest:
+                return prune_tool_results(
+                    candidate,
+                    source_indices=source_indices,
+                    config=self.environment.agent_config.context_policy,
+                    trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
+                    estimate_input_tokens=self.environment.provider.estimate_input_tokens,
+                )
+
             def build_request(history: list[Msg]) -> LLMRequest:
                 messages = self.environment.assembler.build_conversation(
                     context_output=context_output,
                     history=history,
                     current_input=None,
                 ).messages
-                return request.model_copy(update={"messages": messages})
+                return project_request(request.model_copy(update={"messages": messages}))
+
+            request = project_request(request)
 
         except Exception as exc:
             return _failed_activation(cursor, exc)
@@ -1104,6 +1118,8 @@ class AgentRuntime:
             compacted = await self._compact_request(
                 request=request,
                 build_request=build_request,
+                project_request=project_request,
+                model_messages=model_messages,
                 snapshot=snapshot,
                 protected_indices=protected_indices,
                 activation=activation,
@@ -1322,6 +1338,8 @@ class AgentRuntime:
         *,
         request: LLMRequest,
         build_request: Callable[[list[Msg]], LLMRequest],
+        project_request: Callable[[LLMRequest], LLMRequest],
+        model_messages: list[Msg],
         snapshot: SessionSnapshot,
         protected_indices: tuple[int, ...],
         activation: RuntimeActivationInput,
@@ -1337,7 +1355,6 @@ class AgentRuntime:
         if before < config.trigger_tokens:
             return request
         messages = list(snapshot.messages)
-        model_messages = self._context_messages(messages)
         end = select_compaction_end(
             messages=model_messages,
             previous_compaction=snapshot.compaction,
@@ -1438,11 +1455,13 @@ class AgentRuntime:
                 candidate = build_request(history)
                 after = provider.estimate_input_tokens(candidate)
             else:
-                next_window, candidate, after = await self._adopt_context_window(
+                next_window, candidate, _ = await self._adopt_context_window(
                     history=history,
                     options=activation.options,
                     input_budget_tokens=config.trigger_tokens,
                 )
+                candidate = project_request(candidate)
+                after = provider.estimate_input_tokens(candidate)
             stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
             if stopped is not None:
                 return stopped
@@ -1923,8 +1942,8 @@ def _apply_tool_schemas(
     provider: str,
 ) -> LLMRequest:
     """按当前活动工具视图挂载 LiteLLM Chat 工具 schema。"""
-    if not include_tools:
-        return request
+    if not include_tools or request.tool_choice == "none":
+        return request.model_copy(update={"tools": [], "tool_choice": None})
     tools = tool_view.active_schemas(
         provider="openai",
         api_style="chat",

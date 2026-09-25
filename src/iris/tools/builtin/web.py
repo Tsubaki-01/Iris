@@ -101,6 +101,7 @@ class WebSearchTool(BaseTool):
             input_schema=schema_from_pydantic_model(WebSearchInput),
             capabilities={ToolCapability.NETWORK},
             group="web",
+            context_retention="observation",
         )
 
     @property
@@ -169,6 +170,7 @@ class WebFetchTool(BaseTool):
             input_schema=schema_from_pydantic_model(WebFetchInput),
             capabilities={ToolCapability.NETWORK},
             group="web",
+            context_retention="observation",
         )
 
     @property

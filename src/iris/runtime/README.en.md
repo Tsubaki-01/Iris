@@ -91,8 +91,8 @@ old `before_model/step0` cursor had archived its input.
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
 projection and context window against the session revision used to select its range. It advances session/checkpoint
 revisions while preserving raw messages, the cursor, and the pending main-model reservation.
-Every `before_model` checks the full input after receiving its main-step reservation; compaction
-does not consume an additional model-step budget slot.
+Every `before_model` checks the full input. Actual LLM summarization follows the main-step
+reservation and does not consume an additional model-step budget slot.
 
 ### History projection and summary construction
 
@@ -111,6 +111,39 @@ With the default `context_policy`, offloaded tool results receive
 history and are not renumbered when a summary is inserted. This copy-on-write view does not persist
 the retrieval notice in durable messages. Notices and `context_read/search` schemas both enter full
 request estimation.
+
+[`_context_projection.py`](./_context_projection.py) runs when the complete request reaches the
+existing 80% trigger. It first folds exact duplicate tool bodies, then shortens older observation
+results in history order. A candidate is accepted only when the full `LLMRequest` token estimate
+decreases. Reduction stops below the trigger, avoiding a summary call when enough space has been
+reclaimed. Artifacts still handle individual large outputs; this projection also handles accumulated
+medium-sized results across many calls.
+
+- Eligibility comes from saved `metadata.extra.context_retention="observation"`, not today's tool
+  registry. Errors, unclosed calls, keep results, user/assistant text, summaries, and task anchors are
+  not shortened.
+- The latest two closed tool batches remain verbatim by default. Each batch contains the assistant's
+  calls and all their results; ordinary messages do not count. This protection applies only to
+  deterministic reduction and does not add a hard retention requirement to LLM summarization.
+- Exact equality uses the saved canonical tool name, key-sorted JSON arguments, and complete inline
+  body. The newest representative and recent protected batches remain full; older copies receive
+  explicit representative and original-result refs. Changed results, artifact previews, and paths
+  are not equality evidence, and comparison does not read large files. Every tool call still executes
+  and every call/result remains present.
+- Older-result previews default to 512 body characters: a 384-character head and 128-character tail.
+  Notices and refs also count toward the request. Existing offload previews can be shortened, but
+  representatives retained for actual duplicate folds are not shortened again.
+
+Reduction requires a visible `context_read` schema and an effective `tool_choice`, after combining
+model configuration with per-run request_options, that permits calling it. It is skipped when
+`include_tools=false`, `tool_choice="none"`, the read schema is hidden, or a different function is
+forced. Forcing `context_read` itself still permits reduction. Existing LLM compaction remains available.
+
+The main request, candidate summary cuts, and final post-compaction request share the same projection
+entry point. Each candidate recomputes representatives from its visible original bodies. Projection
+copies changed bodies without writing raw history, session revisions, checkpoints, or a pruning log;
+restart/fork recomputes from its own history. Summary material remains the unpruned archived text;
+large results retain their existing previews and refs without scanning every artifact.
 
 `_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.
@@ -142,8 +175,9 @@ output cap S, and `num_retries=0`. Candidates stay in memory until all batches f
 commits them. Only complete nonempty text is accepted. `IrisContextCompactionError` uses the existing
 `context` source with `CONTEXT_COMPACTION_*` codes.
 
-At 80% of usable input budget B, runtime selects a new prefix. With no new prefix, an input no larger
-than B continues directly. When summarization starts, each returned response's
+If the full input still reaches 80% of usable input budget B after deterministic reduction, runtime
+selects a new summary prefix. With no new prefix, an input no larger than B continues directly.
+When summarization starts, each returned response's
 `RunUsage.compaction` is recorded before its body is checked. After all batches complete, the full
 main request must fit within 80% and be strictly smaller than before to commit the projection.
 Summaries never enter the main response's message delta or consume another reservation.
@@ -311,9 +345,9 @@ the overview. Existing system text, static memory, history, and tool schemas are
 If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
-Selection also returns the chosen request's complete token count for post-compaction acceptance.
-Identical full/navigation candidates are built and measured once. Reuse is confined to the current
-adoption operation, with no request cache across persistence boundaries.
+The dedicated full/base allowance difference uses matching, unpruned history so released tool-body
+tokens cannot change the measured overview cost. After selecting a window, the actual main request
+passes through body projection and complete estimation, including newly adopted post-compaction windows.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
@@ -410,6 +444,10 @@ options/status/results, `run_turn()`, `run_loop()`,
 Import the shared non-streaming `CompletionProvider` protocol from `iris.providers`.
 
 ## Verification
+
+Targeted body-reduction coverage lives in `tests/runtime/test_context_projection.py` and
+`tests/harness/test_context_pruning.py`, checking pure request projection and actual execution,
+original-history preservation, and recall respectively.
 
 ```bash
 uv run pytest tests/runtime
