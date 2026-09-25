@@ -5,6 +5,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from ..agents import ContextPolicyConfig
+from ..context import ContextSnapshot
+from ..context.source import render_context_snapshot
 from ..message import LLMRequest, ToolResultBlock
 from .compaction import _history_group_ends
 
@@ -19,15 +21,17 @@ class _Observation:
     key: tuple[str, str, str] | None
 
 
-def prune_tool_results(
+def project_context_request(
     request: LLMRequest,
     *,
     source_indices: Mapping[int, int],
     config: ContextPolicyConfig,
     trigger_tokens: int,
     estimate_input_tokens: Callable[[LLMRequest], int],
-) -> LLMRequest:
-    """先折叠相同正文，再短化旧观察，每次采用前计量完整请求。
+    snapshot: ContextSnapshot | None = None,
+    select_optional: bool = False,
+) -> tuple[LLMRequest, ContextSnapshot | None]:
+    """装配快照后依次折叠重复、选择可选材料、短化旧观察。
 
     Args:
         request: 已包含实际 context、消息与工具 schema 的请求。
@@ -35,16 +39,24 @@ def prune_tool_results(
         config: 已校验的上下文保留策略。
         trigger_tokens: 既有 compaction 的压力线。
         estimate_input_tokens: 当前 provider 的完整请求计量器。
+        snapshot: 本步骤已采集的完整快照或已冻结的选择。
+        select_optional: 仅首次装配允许选择；后续候选沿用冻结材料。
 
     Returns:
-        原请求或写时复制的模型视图，不修改输入对象。
+        写时复制的完整请求与本步骤选定快照；不修改原历史。
     """
-    if not config.enabled or not _can_read_context(request):
-        return request
+    if snapshot is not None:
+        request = request.model_copy(
+            update={"messages": [*request.messages, render_context_snapshot(snapshot)]}
+        )
     tokens = estimate_input_tokens(request)
     if tokens < trigger_tokens:
-        return request
-    groups = _closed_observations(request, source_indices)
+        return request, snapshot
+    groups = (
+        _closed_observations(request, source_indices)
+        if config.enabled and _can_read_context(request)
+        else []
+    )
     recent = config.preserve_recent_tool_groups
     older = [item for group in (groups[:-recent] if recent else groups) for item in group]
     latest = {item.key: item for group in groups for item in group if item.key is not None}
@@ -71,8 +83,36 @@ def prune_tool_results(
         else:
             replacements.clear()
             representatives.clear()
+    if select_optional and snapshot is not None and tokens >= trigger_tokens:
+        optional = sorted(
+            (
+                (index, item)
+                for index, item in enumerate(snapshot.contributions)
+                if not item.required
+            ),
+            key=lambda entry: (entry[1].priority, -entry[0]),
+        )
+        for _, item in optional:
+            snapshot = ContextSnapshot(
+                tuple(
+                    contribution
+                    for contribution in snapshot.contributions
+                    if contribution.key != item.key
+                )
+            )
+            request = request.model_copy(
+                update={
+                    "messages": [
+                        *request.messages[:-1],
+                        render_context_snapshot(snapshot),
+                    ]
+                }
+            )
+            tokens = estimate_input_tokens(request)
+            if tokens < trigger_tokens:
+                break
     if tokens < trigger_tokens:
-        return request
+        return request, snapshot
     preview_chars = config.old_result_preview_chars
     for item in older:
         if item.position in replacements or item.position in representatives:
@@ -97,7 +137,7 @@ def prune_tool_results(
             request, tokens = candidate, candidate_tokens
             if tokens < trigger_tokens:
                 break
-    return request
+    return request, snapshot
 
 
 def _can_read_context(request: LLMRequest) -> bool:

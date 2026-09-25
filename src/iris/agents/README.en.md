@@ -125,8 +125,9 @@ context_policy:
 
 The complete `AgentRunner` registers `context_read` and `context_search` to read committed messages
 and saved tool results from the current session. They require neither long-term memory nor an
-explicit `file.read` tool. Setting `enabled: false` omits both tools and the new history-body
-reductions; existing artifact handling and LLM compaction remain available.
+explicit `file.read` tool. Setting `enabled: false` omits both tools, the new history-body reductions,
+and dynamic injection; existing artifact handling and LLM compaction remain available. Supplying
+`context_source` in this mode raises `IrisConfigError` during assembly instead of ignoring host input.
 
 `preserve_recent_tool_groups` keeps the latest two closed tool batches verbatim during deterministic
 reduction; zero is allowed. It does not change the existing LLM summary's soft recent-history target.
@@ -135,9 +136,10 @@ reduction; zero is allowed. It does not change the existing LLM summary's soft r
 Both settings require nonnegative integers. Only successful results declared `observation` by the
 tool author are eligible.
 
-At the existing 80% full-request threshold, runtime first folds exact duplicate bodies, then shortens
-older results in history order. It accepts only candidates that reduce the complete request's token
-estimate and uses existing LLM compaction if needed. Every actual tool call still executes and raw
+At the existing 80% full-request threshold, runtime first folds exact duplicate bodies, then removes
+explicitly optional host contributions by priority, then shortens older results in history order.
+Body replacements are accepted only when they reduce the complete request's token estimate;
+existing LLM compaction follows if needed. Every actual tool call still executes and raw
 history stays unchanged. See [runtime](../runtime/README.en.md#history-projection-and-summary-construction)
 for read-availability and protection rules.
 
@@ -145,6 +147,11 @@ Configuration loading does not read history. Runner supplies the store-bound acc
 direct `RuntimeFactory.from_config*()` callers with this policy enabled must pass `context_access`,
 or assembly raises `IrisConfigError`. See [context reads](../tools/README.en.md#current-session-context-reads)
 for parameters, pagination, and reference scope.
+
+Both `AgentRunner` and `RuntimeFactory` support `context_source=` in their `from_config*()` SDK
+entry points; callbacks are not configured in YAML. The source returns complete current state per
+main model step, unlike BCI archived once at input. Required entries remain; only explicitly optional
+entries can be selected out. See the [context protocol and example](../context/README.en.md#dynamic-host-snapshots).
 
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
 Enable it to connect the service, published overview, and both read tools:

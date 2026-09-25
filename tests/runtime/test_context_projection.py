@@ -8,7 +8,7 @@ import pytest
 from iris.agents import ContextPolicyConfig
 from iris.lifecycle import SessionCompaction
 from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
-from iris.runtime._context_projection import prune_tool_results
+from iris.runtime._context_projection import project_context_request
 from iris.runtime.compaction import project_history
 
 
@@ -65,7 +65,7 @@ def _project(
         tools=[{"type": "function", "function": {"name": "context_read"}}] if tools else [],
         tool_choice=choice,
     )
-    return prune_tool_results(
+    return project_context_request(
         request,
         source_indices={id(message): i for i, message in enumerate(messages)},
         config=ContextPolicyConfig(
@@ -73,7 +73,7 @@ def _project(
         ),
         trigger_tokens=trigger,
         estimate_input_tokens=estimate,
-    )
+    )[0]
 
 
 def test_exact_duplicates_keep_real_pairs_recent_batches_and_raw() -> None:
@@ -168,7 +168,7 @@ def test_each_compaction_candidate_recomputes_representatives_at_original_indice
         history = project_history(
             raw, SessionCompaction(summary="summary", covered_message_count=end), ()
         )
-        return prune_tool_results(
+        return project_context_request(
             LLMRequest(
                 model="test", messages=history, tools=[{"function": {"name": "context_read"}}]
             ),
@@ -176,7 +176,7 @@ def test_each_compaction_candidate_recomputes_representatives_at_original_indice
             config=ContextPolicyConfig(preserve_recent_tool_groups=0, old_result_preview_chars=0),
             trigger_tokens=100,
             estimate_input_tokens=_estimate,
-        )
+        )[0]
 
     earlier = candidate(2)
     assert "重复正文见 result:5:0" in earlier.messages[2].tool_results[0].content

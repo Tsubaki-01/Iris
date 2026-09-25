@@ -53,7 +53,7 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
      +------------ LifecycleStore <-----+
 ```
 
-- `RuntimeFactory` assembles context, provider, tools, workspace, and optional memory only.
+- `RuntimeFactory` assembles context, provider, tools, workspace, optional memory, and a host context source.
 - `RuntimeEnvironment` contains engine live dependencies, not session/lifecycle stores or an
   interaction service.
 - Runtime never imports harness or writes SQLite directly.
@@ -94,6 +94,38 @@ revisions while preserving raw messages, the cursor, and the pending main-model 
 Every `before_model` checks the full input. Actual LLM summarization follows the main-step
 reservation and does not consume an additional model-step budget slot.
 
+### Dynamic host context and selection
+
+`RuntimeFactory.from_config()` and `from_config_path()` accept optional `context_source=`; see
+[`iris.context`](../context/README.en.md#dynamic-host-snapshots) for the protocol and example. At each
+`before_model`, runtime collects once after model-step reservation and cancellation/deadline checks.
+Unadmitted steps do not collect. The scope carries session/run identity, step index, workspace, and
+original `run_input`. The next step and recovery at `before_model` recollect; children do not inherit
+the parent's source.
+
+Collection uses the run's remaining deadline. Budget expiry returns `DEADLINE_EXCEEDED`; ordinary
+source exceptions, including a source-raised `TimeoutError`, end the activation with `IrisContextError`
+without reusing old values. Cooperative cancellation and task cancellation keep the existing control
+paths. Supplying a source with `context_policy.enabled=false` raises `IrisConfigError` during assembly.
+
+The complete snapshot becomes one `runtime_snapshot` user message after history. No source adds no
+message; an empty snapshot explicitly means no current entries. It changes neither the stable system
+message, original task, archived BCI, nor durable history, and is not summary material. Hosts preserve
+content needed for later exact recall through tool results or files.
+
+All contributions remain below the pressure threshold. Under pressure, runtime first tries exact
+duplicate body folding, then removes explicitly `required=False` contributions, then shortens old
+tool bodies before falling through to existing LLM compaction. Required entries remain. Lower
+priorities are removed first; ties remove later entries first. Each change remeasures the complete
+request, including static context, history, the snapshot, model options, and tool schemas. The model
+does not decide from text semantics which host constraints may be dropped.
+
+Optional contributions are selected only once in the step's initial request. Candidate summary cuts,
+summary retries, and the final post-compaction request reuse that set without refilling newly freed
+space. The next step collects and selects again. Dynamic snapshots, optional selection, and LLM
+compaction still work with `include_tools=false` or an effective `tool_choice` that disallows recall;
+tool-body reduction follows the recall conditions below.
+
 ### History projection and summary construction
 
 Internal `compaction.py` locates the current run's original input, latest archived steer, and injected
@@ -112,10 +144,11 @@ history and are not renumbered when a summary is inserted. This copy-on-write vi
 the retrieval notice in durable messages. Notices and `context_read/search` schemas both enter full
 request estimation.
 
-[`_context_projection.py`](./_context_projection.py) runs when the complete request reaches the
-existing 80% trigger. It first folds exact duplicate tool bodies, then shortens older observation
-results in history order. A candidate is accepted only when the full `LLMRequest` token estimate
-decreases. Reduction stops below the trigger, avoiding a summary call when enough space has been
+[`_context_projection.py`](./_context_projection.py)'s `project_context_request()` runs when the
+complete request reaches the existing 80% trigger. It first folds exact duplicate tool bodies, then
+selects optional dynamic contributions, then shortens older observation results in history order.
+Body replacements are accepted only when the full `LLMRequest` token estimate decreases. Reduction
+stops below the trigger, avoiding a summary call when enough space has been
 reclaimed. Artifacts still handle individual large outputs; this projection also handles accumulated
 medium-sized results across many calls.
 
@@ -175,7 +208,7 @@ output cap S, and `num_retries=0`. Candidates stay in memory until all batches f
 commits them. Only complete nonempty text is accepted. `IrisContextCompactionError` uses the existing
 `context` source with `CONTEXT_COMPACTION_*` codes.
 
-If the full input still reaches 80% of usable input budget B after deterministic reduction, runtime
+If the full input still reaches 80% of usable input budget B after deterministic selection and reduction, runtime
 selects a new summary prefix. With no new prefix, an input no larger than B continues directly.
 When summarization starts, each returned response's
 `RunUsage.compaction` is recorded before its body is checked. After all batches complete, the full
@@ -345,9 +378,11 @@ the overview. Existing system text, static memory, history, and tool schemas are
 If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
-The dedicated full/base allowance difference uses matching, unpruned history so released tool-body
-tokens cannot change the measured overview cost. After selecting a window, the actual main request
-passes through body projection and complete estimation, including newly adopted post-compaction windows.
+The dedicated full/base allowance difference uses matching, unpruned history. Post-compaction window
+adoption also puts the same selected snapshot in both requests, so released tool-body tokens cannot
+change the measured overview cost. After window selection, the actual main request passes through
+projection and complete estimation, including newly adopted post-compaction windows, without
+reselecting dynamic contributions.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
@@ -448,6 +483,9 @@ Import the shared non-streaming `CompletionProvider` protocol from `iris.provide
 Targeted body-reduction coverage lives in `tests/runtime/test_context_projection.py` and
 `tests/harness/test_context_pruning.py`, checking pure request projection and actual execution,
 original-history preservation, and recall respectively.
+Dynamic collection and selection are covered by `tests/runtime/test_context_source.py`,
+`tests/runtime/test_context_selection.py`, and `tests/harness/test_context_source_integration.py`,
+including steps and recovery, budget ordering, and runner wiring.
 
 ```bash
 uv run pytest tests/runtime

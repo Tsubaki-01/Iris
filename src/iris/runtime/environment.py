@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
-from ..context import ContextBuilder, ContextBuildInput
+from ..context import ContextBuilder, ContextBuildInput, ContextSource
 from ..memory import MemoryService
 from ..message import LLMRequest, ModelStreamEvent
 from ..providers.protocols import CompletionProvider
@@ -113,6 +113,7 @@ class RuntimeEnvironment:
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
         execution_scope (RuntimeExecutionScope): 明确的 ROOT/CHILD 装配范围。
         memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
+        context_source (ContextSource | None): 宿主每步采集接口，不缓存快照。
     """
 
     agent_config: AgentConfig
@@ -128,6 +129,7 @@ class RuntimeEnvironment:
     mcp_manager: MCPManager | None = None
     execution_scope: RuntimeExecutionScope = RuntimeExecutionScope.ROOT
     memory_capture_port: RuntimeMemoryCapturePort | None = None
+    context_source: ContextSource | None = None
 
     def __post_init__(self) -> None:
         """归一化工具执行的 workspace 根路径。"""

@@ -9,14 +9,19 @@ from .models import (
     ContextSlot,
 )
 from .renderer import ContextXmlRenderer
+from .source import ContextBuildScope, ContextContribution, ContextSnapshot, ContextSource
 
 __all__ = [
     "CONTEXT_SENDER",
     "ContextBuildInput",
     "ContextBuildOutput",
+    "ContextBuildScope",
     "ContextBuilder",
+    "ContextContribution",
     "ContextSection",
     "ContextSlot",
+    "ContextSnapshot",
+    "ContextSource",
     "ContextXmlRenderer",
     "load_context_build_input",
 ]

@@ -73,6 +73,20 @@ not entire artifact files. See [tools](../tools/README.en.md#current-session-con
 parameters, errors, and scope. Harness owns the read service; runtime receives a narrow interface
 without store ownership.
 
+## Dynamic host context
+
+`AgentRunner.from_config()` and `from_config_path()` accept optional `context_source=` implementing
+`iris.context.ContextSource.collect(scope)`. Runtime collects once per admitted main model step;
+the host chooses content, `required`, and `priority`. See the
+[context example](../context/README.en.md#dynamic-host-snapshots). Supplying a source with
+`context_policy.enabled=false` raises `IrisConfigError` during assembly.
+
+The source belongs to this runner. Its sessions can collect concurrently, so applications use the
+session/run scope to distinguish state. Each snapshot enters only the current request, not lifecycle
+history or checkpoints. It supplies current application state while BCI retains the run's initial
+background. Recovery at `before_model` recollects; children inherit neither the parent's source nor
+its snapshot. Preserve durable evidence through ordinary tool results or host files.
+
 ## Session history branches
 
 `SessionHistory(store)` shares the runner's `LifecycleStore` and provides three synchronous methods.
