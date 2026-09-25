@@ -620,14 +620,16 @@ class SQLiteStore:
         return self._read("load_run_control", read)
 
     def load_session(self, session_id: str) -> SessionSnapshot:
-        return self._read(
+        """在同一事务取得完整会话原始行，释放锁与事务后解析消息。"""
+        metadata, rows = self._read(
             "load_session",
-            lambda connection: self._select_session(
+            lambda connection: self._select_session_rows(
                 connection,
                 session_id,
                 operation="load_session",
             ),
         )
+        return self._decode_session(session_id, metadata, rows, operation="load_session")
 
     def load_session_revision(self, session_id: str) -> int:
         """只查询当前 session revision；不存在时返回 0。"""
@@ -3309,18 +3311,43 @@ class SQLiteStore:
         *,
         operation: str,
     ) -> SessionSnapshot:
+        """供事务内 mutation 使用，在同一事务中完成读取与解析。"""
+        metadata, rows = self._select_session_rows(connection, session_id, operation=operation)
+        return self._decode_session(session_id, metadata, rows, operation=operation)
+
+    def _select_session_rows(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        *,
+        operation: str,
+    ) -> tuple[_SessionMetadata | None, list[sqlite3.Row]]:
+        """取得同一快照的会话 metadata 与独立消息行，不解码消息。"""
         metadata = self._select_session_metadata(
             connection,
             session_id,
             operation=operation,
         )
         if metadata is None:
-            return SessionSnapshot(session_id=session_id)
+            return None, []
         rows = connection.execute(
             """SELECT ordinal, message_json FROM session_messages
             WHERE session_id = ? ORDER BY ordinal""",
             (session_id,),
         ).fetchall()
+        return metadata, rows
+
+    def _decode_session(
+        self,
+        session_id: str,
+        metadata: _SessionMetadata | None,
+        rows: list[sqlite3.Row],
+        *,
+        operation: str,
+    ) -> SessionSnapshot:
+        """把已取出的 durable 行解析为完整会话，不再访问数据库。"""
+        if metadata is None:
+            return SessionSnapshot(session_id=session_id)
         try:
             return SessionSnapshot(
                 session_id=metadata.session_id,

@@ -62,6 +62,10 @@ Reads that need multiple queries use one deferred transaction for a consistent s
 write-free.
 SQLite row decoding already creates independent objects, so public reads return those results
 without another blanket deepcopy. The in-memory implementation still deep-copies store-owned facts.
+Like paged Capture, complete `load_session()` reads metadata and raw message rows in one transaction,
+then decodes messages after releasing the transaction and instance lock. Session reads inside mutations
+such as fork remain in their original transaction. This shortens lock ownership; the synchronous store
+call itself still executes on its caller's thread.
 Exact tool-call reads reuse the existing `(run_id, tool_call_id)` primary key. Run-control reads
 select only the session identity and control columns in `RunControlSnapshot` and do not decode
 request, options, usage,
@@ -185,14 +189,14 @@ resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/inte
 reads. Construct commands and models through `iris.lifecycle`; do not depend on underscored
 `iris.store` modules.
 
-`load_tool_call()` returns `None` for an absent composite key even when the run is absent, and
-`load_run_control()` follows `load_run()` by returning `None` for an absent run.
-`list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
-`(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
 `load_session_revision(session_id)` returns `0` for an absent session. SQLite selects only
 `sessions.revision`; the in-memory store reads the integer under its lock. Neither decodes or copies
 messages, the summary, or the context window; use `load_session()` when those are needed.
 
+`load_tool_call()` returns `None` for an absent composite key even when the run is absent, and
+`load_run_control()` follows `load_run()` by returning `None` for an absent run.
+`list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
+`(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
 schema identity is lifecycle v9.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an

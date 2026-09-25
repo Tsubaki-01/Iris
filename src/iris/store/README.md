@@ -52,6 +52,9 @@ WAITING 模式同时关闭 proxy、建立 fresh RESUME activation，并返回其
 read 在同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
 SQLite row decode 已创建独立对象，public read 直接返回解析结果，不再做统一 deepcopy；
 内存实现继续通过 deepcopy 隔离 store-owned facts。
+完整 `load_session()` 与分页采集一样，在同一事务取得 metadata 和原始消息行，释放事务及
+实例锁后才解析消息；fork 等 mutation 内的会话读取仍在原事务中完成。此改动缩短持锁时间，
+同步 store 调用本身仍在调用线程执行。
 exact tool call 读取复用现有 `(run_id, tool_call_id)` 主键；run control 读取只选择
 `RunControlSnapshot` 所需的 session 归属与控制字段，不解码 request/options/usage/message/error
 JSON。内存实现以
@@ -156,12 +159,12 @@ token 额度由 runtime 负责。事件只含覆盖条数和前后输入估算�
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
 应通过 `iris.lifecycle` 构造 command 和模型，不依赖 `iris.store` 中的下划线模块。
 
-`load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
-`load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
-不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
 `load_session_revision(session_id)` 在 session 不存在时返回 `0`。SQLite 只查询 `sessions.revision`，
 内存实现只在锁内读取整数，均不解析或复制消息、摘要和窗口；需要这些内容时使用 `load_session()`。
 
+`load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
+`load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
+不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
 额外索引或连接池，schema identity 为 lifecycle v9。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
