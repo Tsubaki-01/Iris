@@ -243,15 +243,23 @@ guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 callable、自定义异步 `BaseTool` 和 THREAD callable。没有 signal 时直接 await body；有 signal
 时先检查 body 是否完成，再检查取消请求。已完成的结果优先；executor 因 signal 取消 body 后，
 若 body 捕获 `CancelledError` 并正常返回，仍保留其 `ToolResult`。若外部 `Task.cancel()`、timeout
-或 runtime sibling cancellation 已打断 executor，则只等待 body 清理结束并传播原取消，清理期间的
-返回值不替换外层中断。工具自身的普通异常仍走既有错误归一化。
+或 runtime sibling cancellation 到达，则先 drain body 并保留正常返回的确定结果；Runtime 按序
+提交后再传播取消或结算超时，不把收回结果解释为取消失效。body 真正取消或结果未知时保留
+原控制流，工具自身的普通异常仍走既有错误归一化。
 
 这条取消桥只覆盖 body。`before_call` 返回后若已有请求，body 不启动；取得 body 结果后的
 `after_call`、artifact 和 breaker 处理继续完成。慢 middleware、压住 `CancelledError` 的协程及
-INLINE 阻塞仍可能延迟退出。线程取消只结束 async waiter，worker 可继续运行；未结算 claim
+INLINE 阻塞仍可能延迟退出。自定义 THREAD callable 取消只结束 async waiter，worker 可继续运行；未结算 claim
 仍按 `OUTCOME_UNKNOWN` 处理，包括只读调用，晚到返回不能改写 durable 结果。
 
-`read_file`、`list_files` 和 `grep_search` 的阻塞文件 I/O 在 worker thread 中运行；`write_file` 与 `edit_file` 仍保持 inline。worker 不修改共享 `ReadFileState`：`read_file` 返回不可变的 `ReadFileRecord` observation，await 成功后由 event loop 合并。因此并发只读批次仍共享调用方的完整读取状态，同一次 `execute_many()` 内的 `read_file -> edit_file/write_file` 能延续读后写校验。
+`read_file`、`list_files`、`grep_search`、`write_file` 和 `edit_file` 的阻塞文件 IO 在 worker
+中运行。写入和编辑使用不可变读取记录的快照，一次完成检查、写入和 stat，再返回该文件的
+`ReadFileRecord` 由 event loop 合并。worker 不修改共享 `ReadFileState`；失败不合并，也不覆盖
+其他文件的记录。同一批次中的读后写校验保持不变；同步 `WorkspaceFileService` 方法仍可直接使用。
+
+最终结果归一化、序列化和 artifact 落盘同样交给 worker。上述有限本地操作即使等待方被重复
+取消，也会收回实际结果或错误，再结束等待；使用现有线程池，不新增常驻 worker 或 pending registry。
+这不改变直接调用 `CallableTool.arun()` 的 THREAD 取消契约，也不让远端请求变成不可取消。
 
 `WorkspaceFileService.read_text_observed()` 为 Skill 加载提供同一次打开的完整文本与
 文件观测，复用文件读取的 workspace 和普通文件边界。它不更新共享读取状态；调用方在 await

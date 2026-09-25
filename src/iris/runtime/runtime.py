@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from math import floor
 from pathlib import Path
@@ -106,6 +106,29 @@ class _ModelStepAdvance:
 
     cursor: RuntimeCursor
     plan: ToolBatchPlan | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolCompletion:
+    """已确认工具结果及在收回结果前是否耗尽单次期限。"""
+
+    result: ToolResult
+    timed_out: bool
+
+
+async def _execute_tool_with_timeout(
+    operation: Awaitable[ToolResult], timeout: float | None
+) -> _ToolCompletion:
+    """有限 IO 可能延后响应取消，但不能把已过期限的调用误判为正常完成。"""
+    budget = asyncio.timeout(timeout)
+    async with budget:
+        result = await operation
+    return _ToolCompletion(result, budget.expired())
+
+
+def _task_cancellation_pending() -> bool:
+    """已收回的工具结果不清除当前执行任务尚未传播的取消意图。"""
+    return cast(asyncio.Task[object], asyncio.current_task()).cancelling() > 0
 
 
 class _RuntimeSinkEmissionError(Exception):
@@ -299,6 +322,7 @@ class AgentRuntime:
             # --- 7. 取得当前工具结果 ---
             # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
             subagent_call: SubagentParentCall | None = None
+            tool_timed_out = False
             if projected_result is not None:
                 result = projected_result
                 claim = None
@@ -424,11 +448,8 @@ class AgentRuntime:
                             prepared.tool_use.id if approved_projection is not None else None
                         ),
                     )
-                    result = (
-                        await asyncio.wait_for(operation, timeout=timeout)
-                        if timeout is not None
-                        else await operation
-                    )
+                    completion = await _execute_tool_with_timeout(operation, timeout)
+                    result, tool_timed_out = completion.result, completion.timed_out
                 except IrisMCPOutcomeUnknownError as error:
                     return _unknown_tool_outcome(cursor, prepared, error.message)
                 except IrisCancellationRequestedError:
@@ -477,15 +498,30 @@ class AgentRuntime:
                 claim=claim,
                 result=result,
                 cancellation=cancellation,
-                steering=steering,
+                steering=None if tool_timed_out else steering,
                 stream_sink=stream_sink,
                 subagent_call=subagent_call,
             )
+            if _task_cancellation_pending():
+                raise asyncio.CancelledError
             if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.CANCELLED,
                     cursor=cursor,
                     assistant_message=batch_assistant,
+                )
+            if _deadline_expired(commits):
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                    cursor=cursor,
+                    assistant_message=batch_assistant,
+                )
+            if tool_timed_out:
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.FAILED,
+                    cursor=cursor,
+                    assistant_message=batch_assistant,
+                    error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
                 )
             if result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP:
                 return RuntimeActivationResult(
@@ -600,8 +636,8 @@ class AgentRuntime:
             )
             for (tool_index, _), guard in zip(window, durable_guards, strict=True)
         ]
-        tasks: list[asyncio.Task[ToolResult]] = []
-        runtime_cancelled_tasks: set[asyncio.Task[ToolResult]] = set()
+        tasks: list[asyncio.Task[_ToolCompletion]] = []
+        runtime_cancelled_tasks: set[asyncio.Task[_ToolCompletion]] = set()
         timeout = _tool_timeout_seconds(activation, commits)
         for (_, prepared), guard in zip(window, guards, strict=True):
             operation = self.environment.tool_bridge.execute_prepared(
@@ -615,10 +651,7 @@ class AgentRuntime:
                 cancellation=cancellation,
                 effect_guard=guard,
             )
-            task_operation = (
-                asyncio.wait_for(operation, timeout=timeout) if timeout is not None else operation
-            )
-            tasks.append(asyncio.create_task(task_operation))
+            tasks.append(asyncio.create_task(_execute_tool_with_timeout(operation, timeout)))
 
         pending = set(tasks)
         try:
@@ -627,19 +660,27 @@ class AgentRuntime:
                     pending,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if any(task.cancelled() or task.exception() is not None for task in done):
+                if any(
+                    task.cancelled() or task.exception() is not None or task.result().timed_out
+                    for task in done
+                ):
+                    newly_cancelled = remaining - runtime_cancelled_tasks
                     runtime_cancelled_tasks.update(remaining)
-                    for task in remaining:
+                    for task in newly_cancelled:
                         task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    break
                 pending = remaining
         except asyncio.CancelledError:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+            pending = {task for task in tasks if not task.done()}
+            newly_cancelled = pending - runtime_cancelled_tasks
+            runtime_cancelled_tasks.update(pending)
+            for task in newly_cancelled:
+                task.cancel()
+            # 不重复向 child 转发取消；有限 IO 必须先收回，随后按 ordinal 提交已知前缀。
+            while pending:
+                try:
+                    _, pending = await asyncio.wait(pending)
+                except asyncio.CancelledError:
+                    continue
 
         result_slots: list[ToolResult | BaseException] = []
         infrastructure_errors: list[tuple[int, BaseException]] = []
@@ -654,18 +695,13 @@ class AgentRuntime:
                 continue
             exception = task.exception()
             if exception is None:
-                result_slots.append(task.result())
+                result_slots.append(task.result().result)
                 continue
             result_slots.append(exception)
-            if not isinstance(exception, (IrisCancellationRequestedError, TimeoutError)):
+            if task not in runtime_cancelled_tasks and not isinstance(
+                exception, (IrisCancellationRequestedError, TimeoutError)
+            ):
                 infrastructure_errors.append((offset, exception))
-
-        if infrastructure_errors:
-            _, infrastructure_error = min(
-                infrastructure_errors,
-                key=lambda item: item[0],
-            )
-            raise infrastructure_error
 
         settlement_exception = next(
             (
@@ -675,6 +711,12 @@ class AgentRuntime:
             ),
             None,
         )
+        tool_timed_out = any(
+            not task.cancelled() and task.exception() is None and task.result().timed_out
+            for task in tasks
+        )
+        if settlement_exception is None and tool_timed_out:
+            settlement_exception = TimeoutError()
         committed_cursor = cursor
         interrupted = False
         for offset, slot in enumerate(result_slots):
@@ -698,9 +740,15 @@ class AgentRuntime:
                 claim=guard.claim_for(prepared.tool_use.id),
                 result=slot,
                 cancellation=cancellation,
-                steering=steering,
+                steering=None if tool_timed_out else steering,
                 stream_sink=stream_sink,
             )
+
+        if _task_cancellation_pending():
+            raise asyncio.CancelledError
+        if infrastructure_errors:
+            _, infrastructure_error = min(infrastructure_errors, key=lambda item: item[0])
+            raise infrastructure_error
 
         if interrupted:
             committed_count = committed_cursor.next_tool_index - cursor.next_tool_index
@@ -751,6 +799,13 @@ class AgentRuntime:
                 cursor=committed_cursor,
                 assistant_message=cursor.assistant_message,
             )
+        if tool_timed_out:
+            return RuntimeActivationResult(
+                outcome=RuntimeActivationOutcome.FAILED,
+                cursor=committed_cursor,
+                assistant_message=cursor.assistant_message,
+                error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
+            )
         return committed_cursor
 
     async def _commit_tool_result(
@@ -786,6 +841,7 @@ class AgentRuntime:
             )
             and not _activation_cancelled(commits, cancellation)
             and not _deadline_expired(commits)
+            and not _task_cancellation_pending()
         ):
             claimed_input = await steering.claim(
                 activation.run_id,

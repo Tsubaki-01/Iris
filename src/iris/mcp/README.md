@@ -92,6 +92,8 @@ CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后
 文件按当前 context.session_id 分目录；错误的路径写入模型实际读取的 error.message。
 adapter 保留完整文本供 middleware 消费，最终裁剪统一由 executor 完成；预览长度取当前
 ToolDefinition.preview_chars。直接调用 MCPTool.arun 得到的是尚未经过 executor 限长的结果。
+SDK 返回后，完整投影、`model_dump`、JSON 编码和落盘在工具 IO worker 中执行。取消只延后到
+本地作业实际完成，保留确定结果或 `ARTIFACT_ERROR`，不会重新调用远端；SDK 网络等待仍可取消。
 
 - `config.py`：来源字段归一和环境求值的唯一入口。
 - `models.py`：外部声明模型，以及内部 config/resolved/diagnostic 数据。

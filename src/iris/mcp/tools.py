@@ -17,6 +17,7 @@ from ..exceptions import (
     IrisToolValidationError,
 )
 from ..message import TextBlock
+from ..tools._io import run_tool_io
 from ..tools.artifacts import artifact_store_for
 from ..tools.base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
 from .connection import MCPConnection
@@ -68,7 +69,7 @@ class MCPTool(BaseTool):
         except TimeoutError as error:
             raise IrisMCPOutcomeUnknownError("MCP 调用期限耗尽，结果无法确认") from error
         try:
-            return self._project_result(result, context)
+            return await run_tool_io(lambda: self._project_result(result, context))
         except IrisToolExecutionError as error:
             return self._error(context, "ARTIFACT_ERROR", error.message)
 

@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import TextBlock
+from .._io import run_tool_io
 from .._read_state import ReadFileRecord, ReadFileState
 from ..base import (
     BaseTool,
@@ -637,12 +638,22 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当已有文件未读或读取后发生变化时。
         """
+        content, record = self.write_file_observed(params, context)
+        self.ensure_read_state(context).merge(record)
+        return content
+
+    def write_file_observed(
+        self, params: WriteFileInput, context: ToolExecutionContext
+    ) -> tuple[str, ReadFileRecord]:
+        """完成写入与 stat，返回观测但不修改调用方读取状态。"""
         path = self.resolve_path(params.file_path, context, write=True)
         if path.exists():
             self.require_fresh_read(path, context)
         self.atomic_write(path, params.content)
-        self.record_read(path, context)
-        return f"WROTE: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
+        return (
+            f"WROTE: {path.relative_to(context.workspace_root.resolve()).as_posix()}",
+            _written_file_record(path),
+        )
 
     def edit_file(self, params: EditFileInput, context: ToolExecutionContext) -> str:
         """对已读且未变的文件执行唯一字符串替换。
@@ -657,6 +668,14 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当文件不存在、读取状态过期或匹配文本不唯一时。
         """
+        content, record = self.edit_file_observed(params, context)
+        self.ensure_read_state(context).merge(record)
+        return content
+
+    def edit_file_observed(
+        self, params: EditFileInput, context: ToolExecutionContext
+    ) -> tuple[str, ReadFileRecord]:
+        """完成检查、编辑与 stat，返回观测但不修改调用方读取状态。"""
         path = self.resolve_path(params.file_path, context, write=True)
         if not path.exists():
             raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
@@ -668,8 +687,10 @@ class WorkspaceFileService:
         if count > 1:
             raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
         self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
-        self.record_read(path, context)
-        return f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}"
+        return (
+            f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}",
+            _written_file_record(path),
+        )
 
     # endregion
 
@@ -885,7 +906,12 @@ class WriteFileTool(FileTool[WriteFileInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用文件服务写入完整文本内容。"""
-        return self._text_result(self.file_service.write_file(params, context))
+        worker_context = _file_mutation_context(context)
+        content, record = await run_tool_io(
+            lambda: self.file_service.write_file_observed(params, worker_context)
+        )
+        self.file_service.ensure_read_state(context).merge(record)
+        return self._text_result(content)
 
 
 class EditFileTool(FileTool[EditFileInput]):
@@ -902,7 +928,30 @@ class EditFileTool(FileTool[EditFileInput]):
         context: ToolExecutionContext,
     ) -> ToolResult:
         """调用文件服务执行唯一字符串替换。"""
-        return self._text_result(self.file_service.edit_file(params, context))
+        worker_context = _file_mutation_context(context)
+        content, record = await run_tool_io(
+            lambda: self.file_service.edit_file_observed(params, worker_context)
+        )
+        self.file_service.ensure_read_state(context).merge(record)
+        return self._text_result(content)
+
+
+def _file_mutation_context(context: ToolExecutionContext) -> ToolExecutionContext:
+    """worker 只消费当前不可变文件记录的快照，不共享可变 files 容器。"""
+    state = context.read_state
+    return context.model_copy(
+        update={
+            "read_state": (
+                state.model_copy(update={"files": dict(state.files)}) if state is not None else None
+            )
+        }
+    )
+
+
+def _written_file_record(path: Path) -> ReadFileRecord:
+    """从已完成写入的目标取得新版本观测。"""
+    stat = path.stat()
+    return ReadFileRecord(path=path, mtime_ns=stat.st_mtime_ns, size_bytes=stat.st_size)
 
 
 # ==========================================

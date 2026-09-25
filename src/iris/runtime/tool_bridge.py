@@ -203,7 +203,7 @@ class ToolBridge:
             linked_continuation=linked_continuation,
         )
 
-    def _normalize_subagent_result(
+    async def _normalize_subagent_result(
         self,
         tool_use: ToolUseBlock,
         result: ToolResult,
@@ -225,7 +225,7 @@ class ToolBridge:
             metadata=metadata,
             cancellation=None,
         )
-        return self.tool_executor._finalize_result(
+        return await self.tool_executor._finalize_result(
             tool_use=tool_use,
             tool=self.tool_view.get(tool_use.name),
             result=result,

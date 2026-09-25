@@ -35,6 +35,7 @@ from ..hitl.models import (
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
+from ._io import run_tool_io
 from ._read_state import ReadFileState
 from .artifacts import artifact_store_for, truncate_tool_result
 from .base import (
@@ -260,11 +261,11 @@ class ToolExecutor:
         if isinstance(outcome, ChildWaiting):
             return outcome
         # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
-        return self._finalize_result(
+        return await self._finalize_result(
             tool_use=current.tool_use, tool=tool, result=outcome, context=context
         )
 
-    def _finalize_result(
+    async def _finalize_result(
         self,
         *,
         tool_use: ToolUseBlock,
@@ -274,11 +275,13 @@ class ToolExecutor:
     ) -> ToolResult:
         """普通工具与 child 共用最终归一化及 artifact 失败投影。"""
         try:
-            return self._normalize_result_identity_and_artifact(
-                tool_use=tool_use,
-                tool=tool,
-                result=result,
-                context=context,
+            return await run_tool_io(
+                lambda: self._normalize_result_identity_and_artifact(
+                    tool_use=tool_use,
+                    tool=tool,
+                    result=result,
+                    context=context,
+                )
             )
         except IrisToolExecutionError as exc:
             code, message = _tool_error_code_and_message(exc.message, allow_structured=True)
@@ -571,7 +574,9 @@ class ToolExecutor:
             result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
 
         # 所有 effect 后的结果在同一出口保存；落盘失败只返回错误，不重复尝试写入。
-        result = self._finalize_result(tool_use=tool_use, tool=tool, result=result, context=context)
+        result = await self._finalize_result(
+            tool_use=tool_use, tool=tool, result=result, context=context
+        )
         self._record_breaker_result(tool.name, result)
         return result
 
@@ -599,18 +604,18 @@ class ToolExecutor:
                 if cancellation.requested:
                     body.cancel()
                     cancellation_sent = True
-        finally:
+        except asyncio.CancelledError:
             if not body.done() and not cancellation_sent:
                 body.cancel()
-            # wait 不向 body 转发取消；重复的外层中断不能再次打断 body 清理。
+                cancellation_sent = True
             while not body.done():
                 try:
                     await asyncio.wait({body})
                 except asyncio.CancelledError:
                     continue
             if not body.cancelled():
-                # 清理中的异常不能覆盖已经在传播的外层中断。
-                body.exception()
+                return body.result()
+            raise
 
     def _normalize_result_identity_and_artifact(
         self,

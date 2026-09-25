@@ -222,14 +222,18 @@ outcome，而不是普通工具错误。
 
 普通 async callable、自定义异步 `BaseTool` 和 THREAD callable 共用 `ToolExecutor` 的 body
 取消桥：signal 触发 body task 取消并等待其清理，已完成或响应取消后正常返回的结果仍进入既有
-后处理和提交路径。外层取消、timeout 或 sibling cancellation 已打断 executor 时只 drain 并
-传播原取消，不消费清理期间的返回值。`before_call` / `after_call` 不由这条 body 取消桥中断；
+后处理和提交路径。外层取消、timeout 或 sibling cancellation 到达时也先 drain，按 ordinal
+提交已收回的确定结果；随后传播外层取消或结算期限，不把延后返回误判为正常成功。
+`asyncio.timeout().expired()` 保留单次 timeout 事实；无确定结果时仍沿用 unknown 语义。
+`before_call` / `after_call` 不由这条 body 取消桥中断；
 慢 middleware、压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟退出。
 
 并发文件读取共享同一个 `ReadFileState` identity；worker 只返回不可变 observation，由 event
 loop 合并。窗口 settle 后的 checkpoint snapshot 包含合并记录，后续串行 write barrier 可以
 继续执行 stale-read 检查。checkpoint 中的 raw dict 只在 `ToolBridge.restore_read_state()`
 恢复边界解析一次；runtime 内部始终传递 typed state，snapshot 直接序列化该对象。
+内置 write/edit 使用独立记录快照在线程完成本地操作，再由 loop 合并该文件观测；artifact
+归一化与落盘同样在线程执行。这些有限本地 IO 会收回实际结果后再结束等待，不强停线程。
 同步 callable 默认 inline；显式 `CallableExecutionMode.THREAD` 才把
 阻塞 body 放入 worker。线程无法安全强停，取消或 timeout 只停止 async waiter；claim 未结算时
 runtime 以 `OUTCOME_UNKNOWN` 收口，晚到结果不能推进 history、cursor、checkpoint 或 events。
@@ -256,12 +260,12 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
+窗口选择同时返回选定请求的完整 token 数，压缩后的验收直接复用；相同的 full/navigation
+候选只构造和计量一次。这些复用只限当前采用过程，不跨持久化边界保存请求缓存。
 
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
 通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
 窗口预算仍以实际渲染后准备发送的请求计算。
-窗口选择同时返回选定请求的完整 token 数，压缩后的验收直接复用；相同的 full/navigation
-候选只构造和计量一次。这些复用只限当前采用过程，不跨持久化边界保存请求缓存。
 
 概览通过 `ContextBuilder.build(system_addendum=...)` 放在 system 模板结果之后，计入 system
 字符上限，不写入消息历史。`context.yaml` 中的静态 memory slot 保持原位置。成功压缩把新摘要、

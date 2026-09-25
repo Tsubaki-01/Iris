@@ -872,7 +872,7 @@ class AgentRunner:
             )
             await self._deliver_events(event_collector.events)
             return cast(RunResult, rebound.result)
-        result = self.runtime.environment.tool_bridge._normalize_subagent_result(
+        result = await self.runtime.environment.tool_bridge._normalize_subagent_result(
             cursor.tool_calls[cursor.next_tool_index],
             outcome,
             session_id=parent_run.session_id,
@@ -881,6 +881,20 @@ class AgentRunner:
             workspace_root=self.runtime.environment.workspace_root,
             permission_mode=self.runtime.environment.agent_config.permissions.writes,
         )
+        parent_run = cast(RunRecord, self.store.load_run(parent_run.run_id))
+        if parent_run.phase is RunPhase.TERMINAL:
+            await self._deliver_events(event_collector.events)
+            return self._require_result(parent_run.run_id)
+        # child 已返回确定结果，只重查 parent 的取消/deadline；不重入已完成的 child expiry。
+        now = self._now()
+        deadline = parent_run.options.limits.deadline_at
+        if parent_run.cancellation_requested_at is not None or (
+            deadline is not None and now >= deadline
+        ):
+            settled = await self._settle_waiting_if_due(
+                parent_run, proxy, now=now, event_collector=event_collector
+            )
+            return cast(RunResult, settled)
         cursor_after = _project_tool_result_cursor(cursor, result, read_state=cursor.read_state)
         resumed = adapter.finalize(
             parent_run=parent_run,
@@ -890,6 +904,8 @@ class AgentRunner:
             result=result,
             cursor_after=cursor_after,
         )
+        if cast(asyncio.Task[object], asyncio.current_task()).cancelling():
+            raise asyncio.CancelledError
         if result.is_error and parent_run.options.runtime.tool_error_policy is ToolErrorPolicy.STOP:
             finished = self.store.finish_run(
                 FinishRun(

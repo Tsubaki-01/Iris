@@ -378,9 +378,12 @@ for a durable terminal result without returning cancelled early.
 
 If the body has completed, or returns normally after signal-driven cancellation, its result goes
 through postprocessing and the existing ordered durable commit before the run settles cancelled.
-Once external task cancellation, timeout, or sibling cancellation interrupts the executor, a cleanup-time return
-does not replace the original interruption. Unresolved claims still settle the run as
-`TOOL_OUTCOME_UNKNOWN`, including read-only calls. Worker threads may continue, but late returns
+Finite local file and artifact IO recovers its known result after cancellation and commits the tool
+fact before responding to task cancellation, timeout, or sibling cancellation. Parallel results
+still commit only a contiguous ordinal prefix. External task cancellation without an Iris signal
+continues to propagate, leaving recoverable ACTIVE facts rather than impersonating user cancellation.
+Unresolved claims still settle the run as
+`TOOL_OUTCOME_UNKNOWN`, including read-only calls. Custom THREAD callable workers may continue, but late returns
 cannot change the durable result, history, checkpoint, or events.
 
 The runner's live signal and store-backed commit port use

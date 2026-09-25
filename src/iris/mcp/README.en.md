@@ -107,6 +107,9 @@ an existing JSON artifact; expanded plain text without one uses `.txt`. The adap
 text for middleware; the executor alone applies the final limit using ToolDefinition.preview_chars.
 Direct MCPTool.arun calls return results before this final limit. Files are scoped to the
 current context.session_id, and error paths appear in the model-visible error.message.
+After the SDK returns, complete projection, `model_dump`, JSON encoding, and writing run in a tool IO
+worker. Cancellation drains this local job and preserves the known result or `ARTIFACT_ERROR`
+without another remote call. The SDK network wait remains cancellable.
 
 - `config.py`: the single owner of source normalization and environment resolution.
 - `models.py`: external declarations and internal config/resolved/diagnostic data.

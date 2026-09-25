@@ -254,9 +254,11 @@ it into an activation outcome rather than an ordinary tool error.
 Ordinary async callables, custom async `BaseTool` implementations, and THREAD callables share
 `ToolExecutor`'s body cancellation bridge: the signal cancels the body task and waits for cleanup.
 A completed result or a normal return after signal-driven cancellation still enters existing
-postprocessing and commit paths. Once external cancellation, timeout, or sibling cancellation
-interrupts the executor, it only drains and propagates the original cancellation without consuming
-a cleanup-time return. The body bridge does not interrupt `before_call` / `after_call`; slow
+postprocessing and commit paths. External cancellation, timeout, or sibling cancellation also drains
+the body and commits known results in ordinal order before propagating cancellation or settling the
+deadline. `asyncio.timeout().expired()` preserves elapsed tool timeouts even when finite IO returns
+normally after cancellation. Missing results retain unknown-outcome semantics.
+The body bridge does not interrupt `before_call` / `after_call`; slow
 middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay exit.
 
 Concurrent file reads share one `ReadFileState` identity. Workers only return immutable
@@ -264,6 +266,9 @@ observations, which the event loop merges. The checkpoint snapshot taken after t
 contains the combined records, so a later serial write barrier can retain stale-read checks. A raw
 checkpoint dictionary is parsed once by `ToolBridge.restore_read_state()`; runtime then carries the
 typed state and snapshots it directly.
+Built-in write/edit jobs use a snapshot of immutable records, complete their local IO in a worker,
+and merge only the returned file observation on the loop. Artifact normalization and writing also
+run in workers. These finite local operations recover the actual result before ending the wait.
 Synchronous callables remain inline by default; only explicit `CallableExecutionMode.THREAD`
 placement moves a blocking body to a worker. Threads cannot be safely forced to stop. Cancellation
 or timeout stops only the async waiter; when a claim remains unresolved, runtime settles as
@@ -297,14 +302,14 @@ the overview. Existing system text, static memory, history, and tool schemas are
 If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
+Selection also returns the chosen request's complete token count for post-compaction acceptance.
+Identical full/navigation candidates are built and measured once. Reuse is confined to the current
+adoption operation, with no request cache across persistence boundaries.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
 data. Window budgeting still measures the complete request containing the rendered text.
 
-Selection also returns the chosen request's complete token count for post-compaction acceptance.
-Identical full/navigation candidates are built and measured once. Reuse is confined to the current
-adoption operation, with no request cache across persistence boundaries.
 `ContextBuilder.build(system_addendum=...)` appends the adopted overview after system-template output,
 within the system character limit and outside message history. Static `context.yaml` memory keeps
 its original position. Successful compaction commits the new summary, adopted window, checkpoint,

@@ -155,19 +155,27 @@ THREAD callables. Without a signal it awaits the body directly; with a signal it
 completion before cancellation. A completed result wins. If the executor cancels the body because
 of the signal and the body catches `CancelledError` and returns normally, its `ToolResult` is kept.
 If external `Task.cancel()`, timeout, or runtime sibling cancellation has already interrupted the
-executor, it only waits for body cleanup and propagates the original cancellation; a cleanup-time
-return cannot replace that interruption. Ordinary tool exceptions retain existing normalization.
+executor, it drains the body and keeps a normal return for ordered durable commit. Runtime then
+propagates the pending cancellation or settles the recorded timeout; a known result does not clear
+the interruption. A genuinely cancelled body or unknown exception keeps the existing control path.
 
 This cancellation bridge covers only the body. A pending request after `before_call` prevents body
 startup; once the body returns, `after_call`, artifact handling, and breaker accounting continue.
 Slow middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay
-exit. Thread cancellation ends only the async waiter; the worker may continue. Unresolved claims
+exit. Cancellation of a custom THREAD callable ends only its async waiter; the worker may continue. Unresolved claims
 still settle as `OUTCOME_UNKNOWN`, including read-only calls, and late returns cannot change the
 durable result.
 
-The blocking I/O in `read_file`, `list_files`, and `grep_search` runs in worker threads; `write_file`
-and `edit_file` remain inline. Workers never mutate shared `ReadFileState`. A read returns an
-immutable `ReadFileRecord` observation that the event loop merges only after a successful await.
+The blocking I/O in `read_file`, `list_files`, `grep_search`, `write_file`, and `edit_file` runs in
+worker threads. Writes and edits use a snapshot of the existing immutable read records, complete
+the checks, write, and stat in one job, then return a `ReadFileRecord` for loop-side merge. Workers
+never mutate shared `ReadFileState`; a failed operation does not merge or replace other records.
+The synchronous `WorkspaceFileService` methods remain available for direct callers.
+
+Final result normalization, serialization, and artifact writing also run in a worker. These finite
+local operations drain through repeated cancellation to recover their actual result or error. They
+use the existing thread pool, with no new persistent worker or registry. This does not change direct
+`CallableTool.arun()` THREAD cancellation or make remote requests non-cancellable.
 
 `WorkspaceFileService.read_text_observed()` supplies complete text and a file observation from one
 open file for Skill loading, sharing the workspace and regular-file boundaries.

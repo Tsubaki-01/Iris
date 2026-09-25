@@ -333,9 +333,11 @@ callable、自定义异步 `BaseTool` 或 THREAD callable 的 body task 取消�
 只等待 durable terminal result，不提前返回 cancelled。
 
 body 已完成，或响应 signal 取消后仍正常返回时，结果经过后处理并按既有顺序 durable commit 后再结算
-cancelled。外层 task cancellation、timeout 或 sibling cancellation 已打断 executor 时，清理期间
-的返回值不会替换原中断。未结算 claim 仍使 run 以 `TOOL_OUTCOME_UNKNOWN` 收口，包括只读调用；
-worker 线程可以继续运行，晚到返回不能改写 durable result、history、checkpoint 或 events。
+cancelled。有限本地文件 IO 和 artifact 作业会在取消后收回确定结果，先提交工具事实再响应
+task cancellation、timeout 或 sibling cancellation；并行结果仍只提交无空洞的 ordinal 前缀。
+没有 signal 的外层 task cancellation 继续传播，留下可恢复的 ACTIVE 事实，不冒充用户取消。
+未结算 claim 仍使 run 以 `TOOL_OUTCOME_UNKNOWN` 收口，包括只读调用；
+自定义 THREAD callable 的 worker 可以继续运行，晚到返回不能改写 durable result、history、checkpoint 或 events。
 
 Runner 的 live signal 与 store-backed commit port 使用
 `iris.exceptions.IrisCancellationRequestedError` 通知 runtime 协作式收口；该类型不属于
