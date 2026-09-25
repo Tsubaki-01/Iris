@@ -70,24 +70,33 @@ def select_context_window(
     provider: CompletionProvider,
     memory_budget_tokens: int,
     input_budget_tokens: int,
-) -> tuple[SessionContextWindow, LLMRequest]:
-    """以实际完整请求选择窗口，专用额度只计算 addendum 带来的输入增量。"""
+) -> tuple[SessionContextWindow, LLMRequest, int]:
+    """返回窗口、选定请求及完整 token 数；专用额度只计算 addendum 的增量。"""
     full, navigation = candidates
     base_request = build_request(SessionContextWindow())
     base_tokens = provider.estimate_input_tokens(base_request)
+    navigation_request: LLMRequest | None = None
     try:
         full_request = build_request(full)
     except IrisContextError as exc:
         # 只有完整 system 的字符容量错误可以通过切换知识范围解决。
-        if exc.context.get("section") != "system" or "limit" not in exc.context:
+        if (
+            exc.context.get("section") != "system"
+            or "limit" not in exc.context
+            or full is navigation
+        ):
             raise
     else:
         full_tokens = provider.estimate_input_tokens(full_request)
         if full_tokens - base_tokens <= memory_budget_tokens and full_tokens <= input_budget_tokens:
-            return full, full_request
+            return full, full_request, full_tokens
+        if full is navigation:
+            navigation_request, navigation_total = full_request, full_tokens
+    if navigation_request is None:
+        navigation_request = build_request(navigation)
+        navigation_total = provider.estimate_input_tokens(navigation_request)
 
-    navigation_request = build_request(navigation)
-    navigation_tokens = provider.estimate_input_tokens(navigation_request) - base_tokens
+    navigation_tokens = navigation_total - base_tokens
     if navigation_tokens > memory_budget_tokens:
         raise IrisContextError(
             "memory 完整知识范围超过窗口预算",
@@ -96,7 +105,7 @@ def select_context_window(
             limit=memory_budget_tokens,
         )
     # 完整请求中的既有历史仍由正常compaction处理，不在这里重复实现切点与容量错误。
-    return navigation, navigation_request
+    return navigation, navigation_request, navigation_total
 
 
 __all__ = ["load_context_windows", "select_context_window"]

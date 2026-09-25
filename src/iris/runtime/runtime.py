@@ -879,7 +879,7 @@ class AgentRuntime:
                         pending_history, activation.initial_session_message_count
                     )
                     history = project_history(pending_history, snapshot.compaction, protected)
-                    initial_window, _ = await self._adopt_context_window(
+                    initial_window, _, _ = await self._adopt_context_window(
                         history=history,
                         options=activation.options,
                         input_budget_tokens=self.environment.agent_config.compaction.input_budget_tokens,
@@ -944,7 +944,7 @@ class AgentRuntime:
         history: list[Msg],
         options: RuntimeExecutionOptions,
         input_budget_tokens: int,
-    ) -> tuple[SessionContextWindow, LLMRequest]:
+    ) -> tuple[SessionContextWindow, LLMRequest, int]:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
         candidates = await load_context_windows(
@@ -1366,13 +1366,13 @@ class AgentRuntime:
             if self.environment.memory_service is None and not current_window.memory_overview:
                 next_window = SessionContextWindow()
                 candidate = build_request(history)
+                after = provider.estimate_input_tokens(candidate)
             else:
-                next_window, candidate = await self._adopt_context_window(
+                next_window, candidate, after = await self._adopt_context_window(
                     history=history,
                     options=activation.options,
                     input_budget_tokens=config.trigger_tokens,
                 )
-            after = provider.estimate_input_tokens(candidate)
             stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
             if stopped is not None:
                 return stopped

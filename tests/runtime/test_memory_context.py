@@ -46,7 +46,7 @@ def test_combined_overview_budget_selects_full_or_all_navigation(limit: int) -> 
     """两个 namespace 和包装共享限额，超限时保留全部知识范围。"""
     full = SessionContextWindow(memory_overview="facts-one|facts-two", mode="full")
     navigation = SessionContextWindow(memory_overview="topic1|topic2", mode="navigation")
-    window, request = select_context_window(
+    window, request, tokens = select_context_window(
         candidates=(full, navigation),
         build_request=_request,
         provider=TextTokenProvider(),
@@ -55,6 +55,7 @@ def test_combined_overview_budget_selects_full_or_all_navigation(limit: int) -> 
     )
     assert window is (navigation if limit == 20 else full)
     assert request.messages[0].text.endswith(window.memory_overview)
+    assert tokens == TextTokenProvider().estimate_input_tokens(request)
 
 
 def test_navigation_over_budget_is_an_explicit_capacity_error() -> None:
@@ -75,7 +76,7 @@ def test_full_request_limit_can_select_navigation_without_charging_history_to_me
     """完整请求超限可触发导航，但可压缩历史不归入memory专用额度。"""
     full = SessionContextWindow(memory_overview="facts" * 10)
     navigation = SessionContextWindow(memory_overview="topics", mode="navigation")
-    window, request = select_context_window(
+    window, request, tokens = select_context_window(
         candidates=(full, navigation),
         build_request=_request,
         provider=TextTokenProvider(),
@@ -84,7 +85,7 @@ def test_full_request_limit_can_select_navigation_without_charging_history_to_me
     )
     assert window is navigation
     # 整体历史是否可压缩继续交给既有runtime，不把它误报成导航过大。
-    assert TextTokenProvider().estimate_input_tokens(request) > 1
+    assert tokens == TextTokenProvider().estimate_input_tokens(request) > 1
 
 
 def test_system_character_limit_can_select_navigation(tmp_path: Path) -> None:
@@ -103,7 +104,7 @@ def test_system_character_limit_can_select_navigation(tmp_path: Path) -> None:
 
     full = SessionContextWindow(memory_overview="facts" * 10)
     navigation = SessionContextWindow(memory_overview="topics", mode="navigation")
-    window, request = select_context_window(
+    window, request, tokens = select_context_window(
         candidates=(full, navigation),
         build_request=build,
         provider=TextTokenProvider(),
@@ -112,6 +113,7 @@ def test_system_character_limit_can_select_navigation(tmp_path: Path) -> None:
     )
     assert window is navigation
     assert request.messages[0].text == "base\n\ntopics"
+    assert tokens == TextTokenProvider().estimate_input_tokens(request)
 
 
 class DocumentsService(MemoryService):
@@ -173,7 +175,7 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
         _request(navigation)
     ) - provider.estimate_input_tokens(_request(SessionContextWindow()))
     assert navigation_cost < full_cost
-    window, _ = select_context_window(
+    window, _, _ = select_context_window(
         candidates=(full, navigation),
         build_request=_request,
         provider=provider,

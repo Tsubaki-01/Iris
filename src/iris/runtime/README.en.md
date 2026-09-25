@@ -109,6 +109,11 @@ run are eligible too.
 `_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.
 Each batch is measured with the current working summary; unprocessed fragments are never dropped.
+Complete record prefixes use exponential probes followed by binary refinement, with character splitting
+only for the next record when needed. This avoids recounting every growing prefix. Every returned batch
+is measured as a complete request; selection does not promise maximum packing or cache working summaries
+across batches. Cut-point planning reuses identical empty-suffix estimates without changing message-group
+boundaries or the recent-history target.
 Summary instructions come from a separate Jinja2 file. The bundled
 [`prompts/compaction.j2`](../prompts/compaction.j2) requests seven Markdown headings with body text in
 the conversation's primary language. `compaction.prompt` can replace the instructions and output
@@ -297,6 +302,9 @@ namespaces or adding a third fallback. Existing compaction handles ordinary hist
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
 data. Window budgeting still measures the complete request containing the rendered text.
 
+Selection also returns the chosen request's complete token count for post-compaction acceptance.
+Identical full/navigation candidates are built and measured once. Reuse is confined to the current
+adoption operation, with no request cache across persistence boundaries.
 `ContextBuilder.build(system_addendum=...)` appends the adopted overview after system-template output,
 within the system character limit and outside message history. Static `context.yaml` memory keeps
 its original position. Successful compaction commits the new summary, adopted window, checkpoint,

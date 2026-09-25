@@ -98,7 +98,9 @@ def select_compaction_end(
     # 空摘要仍保留完整包装；实际正文的最大额度在容量判定时单独预留。
     base_tokens = planned_input_tokens(len(messages))
     selected_end = ends[-1]
-    selected_tokens = planned_input_tokens(selected_end)
+    selected_tokens = (
+        base_tokens if selected_end == len(messages) else planned_input_tokens(selected_end)
+    )
     if selected_tokens + config.summary_tokens > config.trigger_tokens:
         return selected_end
 

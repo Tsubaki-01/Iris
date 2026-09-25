@@ -90,62 +90,79 @@ def next_summary_batch(
     system_prompt: str,
     prompt_renderer: TemplateRenderer,
 ) -> SummaryBatch:
-    """使用当前工作摘要计量完整请求，顺序合并记录并按需切分长正文。
+    """指数探测完整记录前缀，再按需二分细化和切分长正文。
 
+    每个返回请求都经过完整计量；不要求找到数学上的最大装填前缀。
     调用方仅在仍有未处理记录时调用；一批响应成功后才承接返回位置。
     """
     fragments: list[str] = []
     index, offset = position
-    request = _summary_request(
-        main_request, previous_summary, "", config, system_prompt, prompt_renderer
-    )
-    while index < len(records):
-        record = records[index]
-        full_fragment = _render_fragment(record, offset, len(record.text))
-        candidate = _summary_request(
+    remaining = len(records) - index
+
+    def build(parts: list[str]) -> LLMRequest:
+        return _summary_request(
             main_request,
             previous_summary,
-            "\n\n".join([*fragments, full_fragment]),
+            "\n\n".join(parts),
             config,
             system_prompt,
             prompt_renderer,
         )
-        if estimate_input_tokens(candidate) <= config.input_budget_tokens:
-            fragments.append(full_fragment)
-            request = candidate
-            index += 1
-            offset = 0
-            continue
 
-        # 完整记录放不下时，只搜索当前记录剩余正文；每个候选都计入完整模板。
-        lower, upper = offset + 1, len(record.text) - 1
-        next_offset = offset
-        while lower <= upper:
-            midpoint = (lower + upper) // 2
-            fragment = _render_fragment(record, offset, midpoint)
-            candidate = _summary_request(
-                main_request,
-                previous_summary,
-                "\n\n".join([*fragments, fragment]),
-                config,
-                system_prompt,
-                prompt_renderer,
-            )
-            if estimate_input_tokens(candidate) <= config.input_budget_tokens:
-                next_offset = midpoint
-                request = candidate
-                lower = midpoint + 1
-            else:
-                upper = midpoint - 1
-        if next_offset > offset:
-            return SummaryBatch(request, (index, next_offset))
-        if fragments:
-            return SummaryBatch(request, (index, offset))
-        raise IrisContextCompactionError(
-            "摘要指令、工作摘要与最小历史片段无法装入输入预算",
-            code="CONTEXT_COMPACTION_UNAVAILABLE",
-        )
-    return SummaryBatch(request, (index, offset))
+    def prefix(count: int) -> LLMRequest:
+        # 只渲染已经探测到的记录，避免每批先物化全部未消费历史。
+        while len(fragments) < count:
+            record = records[index + len(fragments)]
+            start = offset if not fragments else 0
+            fragments.append(_render_fragment(record, start, len(record.text)))
+        return build(fragments[:count])
+
+    selected = 0
+    upper = 1
+    request: LLMRequest | None = None
+    while True:
+        candidate = prefix(upper)
+        if estimate_input_tokens(candidate) <= config.input_budget_tokens:
+            selected = upper
+            request = candidate
+            if selected == remaining:
+                return SummaryBatch(request, (len(records), 0))
+            upper = min(remaining, upper * 2)
+        else:
+            break
+
+    lower, upper = selected + 1, upper - 1
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        candidate = prefix(midpoint)
+        if estimate_input_tokens(candidate) <= config.input_budget_tokens:
+            selected = midpoint
+            request = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+
+    # 完整记录放不下时，只搜索下一条的剩余正文；失败候选不覆盖成功请求。
+    index += selected
+    offset = offset if selected == 0 else 0
+    record = records[index]
+    lower, upper = offset + 1, len(record.text) - 1
+    next_offset = offset
+    while lower <= upper:
+        midpoint = (lower + upper) // 2
+        candidate = build([*fragments[:selected], _render_fragment(record, offset, midpoint)])
+        if estimate_input_tokens(candidate) <= config.input_budget_tokens:
+            next_offset = midpoint
+            request = candidate
+            lower = midpoint + 1
+        else:
+            upper = midpoint - 1
+    if request is not None:
+        return SummaryBatch(request, (index, next_offset))
+    raise IrisContextCompactionError(
+        "摘要指令、工作摘要与最小历史片段无法装入输入预算",
+        code="CONTEXT_COMPACTION_UNAVAILABLE",
+    )
 
 
 def consume_summary_response(response: LLMResponse) -> str:

@@ -91,6 +91,9 @@ checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_m
 `_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
 当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。
+完整记录前缀采用指数探测与二分细化，只有下一条正文需要时才做字符切分，避免逐条重算
+全部已接受前缀。每个返回批次都经过完整请求计量；分批不承诺最大装填率，也不跨批缓存工作摘要。
+切点规划复用相同空后缀的估算，不改变完整消息组和近期原文保留规则。
 
 摘要指令来自独立 Jinja2 文件，默认使用 [`prompts/compaction.j2`](../prompts/compaction.j2)，
 要求七栏 Markdown、正文跟随对话主要语言。`compaction.prompt` 可以替换指令与输出格式；
@@ -257,6 +260,8 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
 通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
 窗口预算仍以实际渲染后准备发送的请求计算。
+窗口选择同时返回选定请求的完整 token 数，压缩后的验收直接复用；相同的 full/navigation
+候选只构造和计量一次。这些复用只限当前采用过程，不跨持久化边界保存请求缓存。
 
 概览通过 `ContextBuilder.build(system_addendum=...)` 放在 system 模板结果之后，计入 system
 字符上限，不写入消息历史。`context.yaml` 中的静态 memory slot 保持原位置。成功压缩把新摘要、
