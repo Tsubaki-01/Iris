@@ -346,6 +346,7 @@ async def test_execute_no_tool_steer_commits_input_before_next_model_step(
     ]
     assert commits.model_commits[0].cursor_after == RuntimeCursor(
         position="before_model",
+        visible_tool_names=(),
         step_index=1,
     )
     assert commits.model_commits[0].resumability is CheckpointResumability.SAFE
@@ -1641,6 +1642,7 @@ async def test_execute_restores_read_state_before_resumed_tool(tmp_path: Path) -
     )
     cursor = RuntimeCursor(
         position="tool_batch",
+        visible_tool_names=("edit_file",),
         step_index=0,
         tool_calls=tuple(assistant.tool_calls),
         assistant_message=assistant,

@@ -31,10 +31,19 @@ async def _close_connection(connection: MCPConnection) -> Exception | None:
 class MCPManager:
     """准备/关闭与 snapshot 的唯一 owner；不拥有 run 或工具 effect。"""
 
-    def __init__(self, config: MCPConfig, *, registry: ToolRegistry, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        config: MCPConfig,
+        *,
+        registry: ToolRegistry,
+        workspace_root: Path,
+        defer_tools: bool = False,
+    ) -> None:
+        """绑定完整目录与连接资源，可选择仅延迟模型 schema 披露。"""
         self.config = config
         self.registry = registry
         self.workspace_root = workspace_root
+        self.defer_tools = defer_tools
         self._lock = asyncio.Lock()
         self._closed = False
         self._connections: list[MCPConnection] = []
@@ -91,7 +100,9 @@ class MCPManager:
                     self._connections.append(connection)
                     await connection.open()
                     sdk_tools = await connection.list_tools()
-                    tools, tool_diagnostics = build_catalog(config, sdk_tools)
+                    tools, tool_diagnostics = build_catalog(
+                        config, sdk_tools, defer_tools=self.defer_tools
+                    )
                     # 同步 resolver/schema 编译不会让出 loop，发布前计入同一个 startup 期限。
                     if loop.time() >= deadline:
                         raise TimeoutError

@@ -84,8 +84,8 @@ when the run was created. In `before_input`, the engine prepares the initial win
 then saves the window and input atomically through `commit_run_input()` before entering `before_model`. This
 does not consume a model reservation or increment the step index. BCI is built only during input
 preparation; later steps and recovery after the input commit replay history without appending or
-rendering it again. Checkpoint version 2 rejects older checkpoints rather than guessing whether an
-old `before_model/step0` cursor had archived its input.
+rendering it again. Checkpoint version 3 requires `visible_tool_names` in the cursor and rejects
+older checkpoints without inferring their input state or originally visible tool set.
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
 response's usage. `commit_compaction(RuntimeCompactionCommit)` atomically replaces the summary
@@ -114,8 +114,8 @@ message, original task, archived BCI, nor durable history, and is not summary ma
 content needed for later exact recall through tool results or files.
 
 All contributions remain below the pressure threshold. Under pressure, runtime first tries exact
-duplicate body folding, then removes explicitly `required=False` contributions, then shortens old
-tool bodies before falling through to existing LLM compaction. Required entries remain. Lower
+duplicate body folding, then removes explicitly `required=False` contributions and optional deferred
+schemas, then shortens old tool bodies before existing LLM compaction. Required entries remain. Lower
 priorities are removed first; ties remove later entries first. Each change remeasures the complete
 request, including static context, history, the snapshot, model options, and tool schemas. The model
 does not decide from text semantics which host constraints may be dropped.
@@ -125,6 +125,50 @@ summary retries, and the final post-compaction request reuse that set without re
 space. The next step collects and selects again. Dynamic snapshots, optional selection, and LLM
 compaction still work with `include_tools=false` or an effective `tool_choice` that disallows recall;
 tool-body reduction follows the recall conditions below.
+
+### Deferred tool schemas
+
+`context_policy.deferred_tools` is off by default. When enabled, shared assembly registers
+`tool_search` and marks MCP definitions deferred; Python tools keep their author's declaration.
+MCP still prepares its complete catalog. Existing eager tools, `context_read/search`, and `load_skill`
+stay visible. Search uses the existing local BM25-like ranker; see
+[tools](../tools/README.en.md#human-tool-middleware-breaker-and-discovery) for inputs and results.
+
+[`_tool_context.py`](./_tool_context.py) derives candidates from
+`metadata.extra.context_revealed_tools` in the current session's raw committed messages, not search
+text or summaries. Only committed successful search results reveal tools; later calls in the same
+batch cannot use newly discovered names. The next `before_model` selects their complete schemas
+without truncating parameter definitions. Candidates must still exist in the registry and satisfy
+the static base view: deny wins, only the host's original allow can bypass group filters, and search
+never changes the shared allow set.
+
+Eager tools and explicit host base allow entries are required. After model configuration and
+request_options are merged, a function forced by effective `tool_choice` is also required, including
+an unsearched deferred tool. Aliases resolve to canonical names. Missing or base-excluded targets
+raise `IrisConfigError` instead of producing a forced request without its target schema.
+`include_tools=false` or effective `tool_choice="none"` sends no tool schemas.
+
+Optional candidates prioritize the latest search's rank, then recent successful use, recent
+discovery, and canonical name. Until an assistant main response commits after a search batch, the
+first candidate from every successful search in that batch is protected for the next opportunity to
+use it. A subsequent main response, including a final text answer, consumes that protection;
+uncommitted responses and summaries do not. Other candidates are removed in reverse order after
+optional host contributions, remeasuring the complete request each time. Required and protected
+schemas that still exceed capacity follow existing compaction/capacity errors rather than being
+dropped to evade the budget.
+
+Priority selects membership; schemas retain registry order. After initial selection, the step reuses
+the same set during budget planning, summary retries, and post-compaction requests. Removing a schema
+does not erase discovery facts: the next step can reselect it, and another search can raise its rank.
+Recall-dependent body reduction still requires callable `context_read` in the final request.
+
+The final canonical names become immutable `RuntimeCursor.visible_tool_names`, committed atomically
+with the assistant calls. New-response preflight, batch continuation, HITL, and recovery use that set,
+while retaining current base filters and permission refresh before execution. Undisclosed names
+return `TOOL_NOT_ALLOWED`; another session's search cannot change a waiting batch. Partial progress
+retains the set and leaving `tool_batch` clears it. Batch recovery does not recollect the source or
+rerun selection. Forks inherit discoveries only from their copied history prefix; children use
+their own configuration, history, and searches.
 
 ### History projection and summary construction
 
@@ -146,7 +190,7 @@ request estimation.
 
 [`_context_projection.py`](./_context_projection.py)'s `project_context_request()` runs when the
 complete request reaches the existing 80% trigger. It first folds exact duplicate tool bodies, then
-selects optional dynamic contributions, then shortens older observation results in history order.
+selects optional dynamic contributions and deferred schemas, then shortens older observation results in history order.
 Body replacements are accepted only when the full `LLMRequest` token estimate decreases. Reduction
 stops below the trigger, avoiding a summary call when enough space has been
 reclaimed. Artifacts still handle individual large outputs; this projection also handles accumulated
@@ -379,10 +423,10 @@ If full exceeds this allowance or a reducible system/request limit, selection tr
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
 The dedicated full/base allowance difference uses matching, unpruned history. Post-compaction window
-adoption also puts the same selected snapshot in both requests, so released tool-body tokens cannot
+adoption also puts the same selected snapshot and schemas in both requests, so released tool-body tokens cannot
 change the measured overview cost. After window selection, the actual main request passes through
 projection and complete estimation, including newly adopted post-compaction windows, without
-reselecting dynamic contributions.
+reselecting dynamic contributions or tools.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
@@ -486,6 +530,9 @@ original-history preservation, and recall respectively.
 Dynamic collection and selection are covered by `tests/runtime/test_context_source.py`,
 `tests/runtime/test_context_selection.py`, and `tests/harness/test_context_source_integration.py`,
 including steps and recovery, budget ordering, and runner wiring.
+Deferred schemas are covered by `tests/runtime/test_deferred_selection.py` and
+`tests/harness/test_deferred_tool_context.py`, including discovery ranking, forced tools, session
+isolation, and batch recovery.
 
 ```bash
 uv run pytest tests/runtime

@@ -10,13 +10,16 @@ import json
 import math
 import re
 from collections.abc import Iterable
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, Field, field_validator
 
 from ..exceptions import IrisToolValidationError
 from ..message import TextBlock
 from .base import BaseTool, ToolDefinition, ToolExecutionContext, ToolResult
+
+if TYPE_CHECKING:
+    from .registry import ToolRegistryView
 
 # endregion
 
@@ -43,7 +46,7 @@ class ToolSearchInput(BaseModel):
 
     query: str
     include_groups: list[str] | None = None
-    limit: int = Field(default=10, gt=0, le=50)
+    limit: int = Field(default=3, gt=0, le=20)
 
     @field_validator("query")
     @classmethod
@@ -121,6 +124,7 @@ class DeferredToolIndex:
         *,
         include_groups: set[str] | None = None,
         limit: int = 10,
+        allowed_names: set[str] | None = None,
     ) -> list[ToolDefinition]:
         """用 BM25-like 相关性搜索 deferred 工具。
 
@@ -131,6 +135,7 @@ class DeferredToolIndex:
             query (str): 非空搜索词。
             include_groups (set[str] | None): 可选的筛选组集合，仅在给定的组中搜索。
             limit (int): 最大返回的工具数量。
+            allowed_names (set[str] | None): 静态 base view 允许的 canonical 名称。
 
         Returns:
             list[ToolDefinition]: 按相关性从高到低排序后的候选工具定义列表。
@@ -143,7 +148,8 @@ class DeferredToolIndex:
         filtered_docs = [
             doc
             for doc in self._documents
-            if include_groups is None or doc[0].group in include_groups
+            if (include_groups is None or doc[0].group in include_groups)
+            and (allowed_names is None or doc[0].name in allowed_names)
         ]
 
         if not filtered_docs:
@@ -222,16 +228,18 @@ class ToolSearchTool(BaseTool):
     #               Initialization
     # ==========================================
     # region
-    def __init__(self, registry: Any) -> None:
+    def __init__(self, tool_view: ToolRegistryView) -> None:
         """初始化 tool_search。
 
         Args:
-            registry (Any): 提供 search_deferred 方法的工具注册表实例。
+            tool_view (ToolRegistryView): 宿主静态 base 视图，搜索不能扩大其范围。
         """
-        self.registry = registry
+        self.tool_view = tool_view
         self.definition = ToolDefinition(
             name="tool_search",
-            description="搜索可按需激活的延迟工具。",
+            description=(
+                "搜索延迟工具的候选摘要；下一请求只有实际加载了完整 schema 的工具才可调用。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -247,9 +255,9 @@ class ToolSearchTool(BaseTool):
                     },
                     "limit": {
                         "type": "integer",
-                        "default": 10,
+                        "default": 3,
                         "minimum": 1,
-                        "maximum": 50,
+                        "maximum": 20,
                         "description": "最大返回数量。",
                     },
                 },
@@ -323,10 +331,11 @@ class ToolSearchTool(BaseTool):
         del context
         search_input = cast(ToolSearchInput, params)
 
-        matches = self.registry.search_deferred(
+        matches = self.tool_view.registry.search_deferred(
             search_input.query,
             include_groups=search_input.normalized_groups(),
             limit=search_input.limit,
+            allowed_names={tool.name for tool in self.tool_view.available_tools},
         )
         tools = [_definition_summary(definition) for definition in matches]
         text = json.dumps({"tools": tools}, ensure_ascii=False, separators=(",", ":"))
@@ -336,6 +345,7 @@ class ToolSearchTool(BaseTool):
             tool_name=self.name,
             content=[TextBlock(text=text)],
             data={"tools": tools},
+            metadata={"context_revealed_tools": [definition.name for definition in matches]},
         )
 
     # endregion
@@ -350,13 +360,10 @@ def _definition_summary(definition: ToolDefinition) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 滤除无关细节后的紧凑 JSON 字典。
     """
-    metadata = definition.metadata
     return {
         "name": definition.name,
-        "description": definition.description,
+        "description": definition.description[:240],
         "group": definition.group,
-        "tags": list(metadata.get("tags", [])),
-        "deprecated": bool(metadata.get("deprecated", False)),
     }
 
 

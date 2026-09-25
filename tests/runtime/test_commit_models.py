@@ -39,7 +39,11 @@ def test_commit_facts_do_not_rescan_validated_tool_batch(kind: str) -> None:
     calls = tuple(ToolUseBlock(id=f"call-{index}", name="echo") for index in range(8))
     assistant = Msg.assistant(list(calls))
     cursor = RuntimeCursor(
-        position="tool_batch", step_index=0, tool_calls=calls, assistant_message=assistant
+        position="tool_batch",
+        step_index=0,
+        tool_calls=calls,
+        assistant_message=assistant,
+        visible_tool_names=("echo",),
     )
     result = ToolResult(tool_use_id="call-0", tool_name="echo", content=[])
     after = cursor.model_copy(update={"next_tool_index": 1, "tool_results": (result,)})
@@ -53,8 +57,8 @@ def test_commit_facts_do_not_rescan_validated_tool_batch(kind: str) -> None:
         arguments={},
         fingerprint="0" * 64,
     )
-    before_model = RuntimeCursor(position="before_model", step_index=0)
-    before_input = RuntimeCursor(position="before_input", step_index=0)
+    before_model = RuntimeCursor(position="before_model", step_index=0, visible_tool_names=())
+    before_input = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
     scans = 0
     validator_code = RuntimeCursor._validate_position.__code__
 
@@ -94,6 +98,7 @@ def test_cursor_raw_recovery_still_rejects_duplicate_call_identity() -> None:
         RuntimeCursor.model_validate(
             {
                 "position": "tool_batch",
+                "visible_tool_names": ("echo",),
                 "step_index": 0,
                 "assistant_message": {"role": "assistant", "content": "tools"},
                 "tool_calls": [{"id": "same", "name": "echo"}, {"id": "same", "name": "echo"}],
@@ -111,7 +116,7 @@ def test_all_activation_kinds_carry_original_input_and_history_start(kind: str) 
         kind=kind,
         run_input="原始请求",
         initial_session_message_count=4,
-        cursor=RuntimeCursor(position="before_input", step_index=0),
+        cursor=RuntimeCursor(position="before_input", step_index=0, visible_tool_names=()),
         options=RuntimeExecutionOptions(),
     )
     assert activation.run_input == "原始请求"

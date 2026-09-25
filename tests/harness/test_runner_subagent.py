@@ -1544,6 +1544,7 @@ def _prepare_parent(
     assistant = Msg.assistant([tool_use])
     prepared = runner.runtime.environment.tool_bridge.preflight_once(
         assistant_message=assistant,
+        visible_tool_names=("subagent",),
         session_id="parent-session",
         run_id="parent",
         agent_id="parent",
@@ -1552,7 +1553,11 @@ def _prepare_parent(
         metadata=None,
     ).calls[0]
     after = RuntimeCursor(
-        position="tool_batch", step_index=0, tool_calls=(tool_use,), assistant_message=assistant
+        position="tool_batch",
+        step_index=0,
+        tool_calls=(tool_use,),
+        assistant_message=assistant,
+        visible_tool_names=("subagent",),
     )
     fingerprint = make_call_fingerprint(
         session_id="parent-session",
@@ -1656,7 +1661,12 @@ async def test_child_uses_fresh_context_options_and_shared_store(
     assert child.run_id != "parent"
     assert child.phase == RunPhase.TERMINAL
     assert child.usage.tool_calls_committed == 1
-    assert result.metadata == {"agent_selector": "researcher", "child_run_id": child_id}
+    assert result.metadata == {
+        "agent_selector": "researcher",
+        "child_run_id": child_id,
+        "context_retention": "keep",
+        "context_tool_name": "subagent",
+    }
     assert runner.store.load_run("parent").usage.total_tokens == 11
     assert runner.store.load_run("parent").usage.tool_calls_committed == 0
     assert runner.store.load_tool_call("parent", "delegate").phase.value == "prepared"
@@ -1691,7 +1701,11 @@ async def test_fresh_selected_config_failures_do_not_admit_child(
     result = await _dispatch(runner, prepared)
     assert result.error.code == code
     assert not result.error.retryable
-    assert result.metadata == {"agent_selector": "broken" if kind == "broken" else "researcher"}
+    assert result.metadata == {
+        "agent_selector": "broken" if kind == "broken" else "researcher",
+        "context_retention": "keep",
+        "context_tool_name": "subagent",
+    }
     assert runner.store.load_subagent_link("parent", "delegate") is None
 
 
@@ -1801,7 +1815,12 @@ async def test_linked_terminal_projection_is_nonretryable_and_run_local(
     assert result.error.code == code
     assert not result.error.retryable
     assert result.content == [] and result.data == {} and result.stats == {}
-    assert result.metadata == {"agent_selector": "researcher", "child_run_id": child_id}
+    assert result.metadata == {
+        "agent_selector": "researcher",
+        "child_run_id": child_id,
+        "context_retention": "keep",
+        "context_tool_name": "subagent",
+    }
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ def project_context_request(
     estimate_input_tokens: Callable[[LLMRequest], int],
     snapshot: ContextSnapshot | None = None,
     select_optional: bool = False,
+    optional_tool_names: tuple[str, ...] = (),
 ) -> tuple[LLMRequest, ContextSnapshot | None]:
     """装配快照后依次折叠重复、选择可选材料、短化旧观察。
 
@@ -41,6 +42,7 @@ def project_context_request(
         estimate_input_tokens: 当前 provider 的完整请求计量器。
         snapshot: 本步骤已采集的完整快照或已冻结的选择。
         select_optional: 仅首次装配允许选择；后续候选沿用冻结材料。
+        optional_tool_names: 可撤下 schema 的优先顺序，最优先项排在前。
 
     Returns:
         写时复制的完整请求与本步骤选定快照；不修改原历史。
@@ -106,6 +108,16 @@ def project_context_request(
                         *request.messages[:-1],
                         render_context_snapshot(snapshot),
                     ]
+                }
+            )
+            tokens = estimate_input_tokens(request)
+            if tokens < trigger_tokens:
+                break
+    if select_optional and tokens >= trigger_tokens:
+        for name in reversed(optional_tool_names):
+            request = request.model_copy(
+                update={
+                    "tools": [tool for tool in request.tools if tool["function"]["name"] != name]
                 }
             )
             tokens = estimate_input_tokens(request)

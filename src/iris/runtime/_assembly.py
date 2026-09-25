@@ -31,6 +31,7 @@ from ..skill import (
 )
 from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor
 from ..tools.context_access import ContextAccessPort, ContextReadTool, ContextSearchTool
+from ..tools.discovery import ToolSearchTool
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
 from .environment import RuntimeEnvironment, RuntimeExecutionScope
@@ -190,8 +191,14 @@ def assemble_runtime(
             ),
             registry=tool_registry,
             workspace_root=workspace_root,
+            defer_tools=config.context_policy.deferred_tools,
         )
     tool_view = tool_registry.view()
+    if config.context_policy.deferred_tools:
+        try:
+            tool_registry.register(ToolSearchTool(tool_view))
+        except IrisToolValidationError as exc:
+            raise IrisConfigError("tool_search 与现有工具名称或别名冲突") from exc
     tool_executor = ToolExecutor(
         tool_registry,
         permission_policy=boundary.permission_policy,

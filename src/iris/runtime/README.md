@@ -72,7 +72,8 @@ result = await runtime.execute(
 engine 在 `before_input` 准备首次窗口、BCI 和用户输入，通过 `commit_run_input()`
 原子保存窗口与输入后进入 `before_model`，不消耗模型 reservation 或增加 step index。
 BCI 只在输入阶段构建；后续步骤及已提交输入的 resume/recover 使用历史，不重复追加或渲染。
-checkpoint 使用版本 2；旧版在恢复边界拒绝，不推断旧 `before_model/step0` 的输入状态。
+checkpoint 使用版本 3，cursor 必须提供 `visible_tool_names`；旧版在恢复边界拒绝，不推断
+旧 cursor 的输入状态或当时可见工具集合。
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
 `commit_compaction(RuntimeCompactionCommit)` 按选择区间时的 session revision 原子替换摘要投影与窗口。
@@ -97,7 +98,8 @@ source 会在装配时报 `IrisConfigError`。
 history，也不进入摘要原料。需要后续精确回读的内容应先由宿主通过工具结果或文件保存。
 
 低于压力线时保留全部贡献。达到压力线后，先尝试精确重复正文折叠，再依次移除宿主显式
-标为 `required=False` 的贡献，最后短化旧工具正文；仍不足时进入原有 LLM compaction。
+标为 `required=False` 的贡献，再撤下可选 deferred schema，最后短化旧工具正文；仍不足时
+进入原有 LLM compaction。
 required 条目保持，priority 较低者先移除，相同 priority 时后返回者先移除。每次变动重算
 完整请求，包含静态上下文、历史、动态消息、模型选项与工具 schema。模型不能按正文语义
 自行决定删除哪些宿主约束。
@@ -106,6 +108,40 @@ required 条目保持，priority 较低者先移除，相同 priority 时后返�
 已选集合，不因腾出空间重新补入。下一步骤重新采集后可重新选择。即使 `include_tools=false`
 或 effective `tool_choice` 不允许回读，动态快照、optional 选材和 LLM compaction 仍然工作；
 工具正文裁剪则遵循下节的回读条件。
+
+### 按需工具 schema
+
+`context_policy.deferred_tools` 默认关闭。开启后 shared assembly 自动注册 `tool_search`，
+将 MCP 目录标记 deferred；Python 工具保留作者的声明。MCP 仍完整 prepare，原有 eager
+工具、`context_read/search` 与 `load_skill` 不因此隐藏。搜索继续使用本地 BM25-like 排名，
+参数与结果见 [tools 说明](../tools/README.md#deferred-discovery--tool_search)。
+
+[`_tool_context.py`](./_tool_context.py) 从当前 session 原始已提交消息中的
+`metadata.extra.context_revealed_tools` 派生候选，不解析搜索正文或摘要。只有成功且已提交的
+搜索结果产生披露；同批次的后续工具调用也不能使用刚搜到的名称。下一次 `before_model`
+才选择其完整 schema，不截断参数定义。候选必须仍存在于当前 registry 且符合静态 base
+view；deny 优先，只有宿主原始 allow 可越过组过滤，搜索不会改变共享 `allow`。
+
+eager 工具和 host base allow 为必需集合。模型配置与 request_options 合并后的 effective
+`tool_choice` 若强制某个 function，该工具也必需，即使原本 deferred 或尚未搜索。别名解析为
+canonical name；目标不存在或被 base view 排除时报告 `IrisConfigError`，不发送缺少目标
+schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"` 不发送工具 schema。
+
+可选候选按最新一次搜索排名优先，再按最近成功使用、最近发现和 canonical name 排序。
+当前搜索批次之后尚无已提交 assistant 主响应时，保护该批次每次成功搜索的首项，保证
+“搜索后使用”的机会；后继主响应包括最终文字答复都会消费保护，未提交响应和 summary 不会。
+其余候选在宿主 optional 贡献之后按逆序撤下，每次重算完整请求。必需项和受保护首项仍然
+过大时进入既有压缩/容量错误路径，不撤下它们以回避预算。
+
+优先级决定成员，最终 schema 保持 registry 顺序。首次选材后的 schema 集合在本步骤的
+预算规划、摘要重试与压缩后请求中保持；移除 schema 不删除历史发现事实，下一步骤可重选，
+再次搜索也可提升其顺序。回读型正文裁剪仍只在最终请求可调用 `context_read` 时执行。
+
+最终请求的 canonical names 作为 immutable `RuntimeCursor.visible_tool_names` 与 assistant
+调用同事务保存。新响应 preflight、批次继续、HITL 和恢复使用同一集合，并保留当前 base
+目录过滤与执行前 permission refresh。未披露名称返回 `TOOL_NOT_ALLOWED`；其它 session 的
+搜索不能改变正在等待的批次。部分推进保留集合，离开 `tool_batch` 时清空；恢复批次不重新
+采集 source 或运行选材。Fork 只继承复制历史前缀中的发现，child 使用自己的配置、历史和搜索。
 
 ### 历史投影与摘要构造
 
@@ -121,8 +157,8 @@ required 条目保持，priority 较低者先移除，相同 priority 时后返�
 取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
 
 [`_context_projection.py`](./_context_projection.py) 的 `project_context_request()` 在完整请求
-达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献，最后从旧到新短化
-observation 结果；正文替换只有让完整 `LLMRequest` 的 token 估算实际下降才采用。
+达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献与 deferred schema，
+最后从旧到新短化 observation 结果；正文替换只有让完整 `LLMRequest` 的 token 估算实际下降才采用。
 低于 trigger 即停止，已足够时不调用摘要模型。单次大结果仍由 artifact
 处理；这里同时处理多轮中型输出累积造成的压力。
 
@@ -323,8 +359,8 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
 full/base 的专用额度差额使用同形、未裁剪的历史计算；压缩后采用新窗口时，两者也携带同一份
-已选动态快照，避免把历史正文释放量计入概览成本。选定窗口后，实际主请求再经过上述投影
-与完整计量；成功压缩采用的新窗口也走同一路径，不重新选择动态贡献。
+已选动态快照与 schema，避免把历史正文释放量计入概览成本。选定窗口后，实际主请求再经过
+上述投影与完整计量；成功压缩采用的新窗口也走同一路径，不重新选择动态贡献或工具集合。
 
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
 通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
@@ -412,6 +448,8 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 `tests/harness/test_context_pruning.py`，分别检查纯请求投影以及实际调用、原文保存和回读。
 动态采集与选材见 `tests/runtime/test_context_source.py`、`tests/runtime/test_context_selection.py`
 及 `tests/harness/test_context_source_integration.py`，覆盖步骤与恢复、预算顺序和真实 runner 接线。
+按需 schema 见 `tests/runtime/test_deferred_selection.py` 与
+`tests/harness/test_deferred_tool_context.py`，覆盖发现排序、强制工具、session 隔离和批次恢复。
 
 ```bash
 uv run pytest tests/runtime

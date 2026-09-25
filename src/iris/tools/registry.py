@@ -243,6 +243,7 @@ class ToolRegistry:
         *,
         include_groups: set[str] | None = None,
         limit: int = 10,
+        allowed_names: set[str] | None = None,
     ) -> list[ToolDefinition]:
         """搜索当前注册表中的 deferred 工具定义。
 
@@ -250,6 +251,7 @@ class ToolRegistry:
             query (str): 非空搜索词。
             include_groups (set[str] | None): 可选组过滤。
             limit (int): 最大返回数量。
+            allowed_names (set[str] | None): 排名前限定 canonical 候选集合。
 
         Returns:
             list[ToolDefinition]: 按 BM25-like 本地相关性排序的候选工具定义。
@@ -259,7 +261,9 @@ class ToolRegistry:
         if self._deferred_index is None:
             self._deferred_index = DeferredToolIndex()
             self._deferred_index.build(self._tools.values())
-        return self._deferred_index.search(query, include_groups=include_groups, limit=limit)
+        return self._deferred_index.search(
+            query, include_groups=include_groups, limit=limit, allowed_names=allowed_names
+        )
 
     # endregion
 
@@ -359,8 +363,8 @@ class ToolRegistryView:
         return self.registry.get(name)
 
     @property
-    def active_tools(self) -> list[BaseTool]:
-        """按视图规则返回活动工具。
+    def available_tools(self) -> list[BaseTool]:
+        """返回静态 base 允许的完整目录，包含尚未披露的 deferred 工具。
 
         以流转过滤的形式迭代，先判断黑名单抛弃，再判断组别/延迟性质进行条件排除。
 
@@ -375,10 +379,26 @@ class ToolRegistryView:
             if self.include_groups is not None and tool.definition.group not in self.include_groups:
                 if name not in self.allow:
                     continue
-            if tool.definition.deferred and name not in self.allow:
-                continue
             tools.append(tool)
         return tools
+
+    @property
+    def active_tools(self) -> list[BaseTool]:
+        """返回 eager 与宿主显式 allow 的工具，保持注册顺序。"""
+        return [
+            tool
+            for tool in self.available_tools
+            if not tool.definition.deferred or tool.name in self.allow
+        ]
+
+    def schemas_for(self, names: tuple[str, ...]) -> list[dict[str, object]]:
+        """按注册顺序导出本步骤选定的完整 Chat schema。"""
+        selected = set(names)
+        return [
+            _format_schema(tool.definition, provider="openai", api_style="chat")
+            for tool in self.available_tools
+            if tool.name in selected
+        ]
 
     def active_schemas(
         self,

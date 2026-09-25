@@ -121,6 +121,7 @@ context_policy:
   enabled: true
   preserve_recent_tool_groups: 2
   old_result_preview_chars: 512
+  deferred_tools: false
 ```
 
 The complete `AgentRunner` registers `context_read` and `context_search` to read committed messages
@@ -137,7 +138,8 @@ Both settings require nonnegative integers. Only successful results declared `ob
 tool author are eligible.
 
 At the existing 80% full-request threshold, runtime first folds exact duplicate bodies, then removes
-explicitly optional host contributions by priority, then shortens older results in history order.
+explicitly optional host contributions by priority and removable deferred schemas, then shortens
+older results in history order.
 Body replacements are accepted only when they reduce the complete request's token estimate;
 existing LLM compaction follows if needed. Every actual tool call still executes and raw
 history stays unchanged. See [runtime](../runtime/README.en.md#history-projection-and-summary-construction)
@@ -152,6 +154,14 @@ Both `AgentRunner` and `RuntimeFactory` support `context_source=` in their `from
 entry points; callbacks are not configured in YAML. The source returns complete current state per
 main model step, unlike BCI archived once at input. Required entries remain; only explicitly optional
 entries can be selected out. See the [context protocol and example](../context/README.en.md#dynamic-host-snapshots).
+
+`deferred_tools` defaults to `false`, preserving eager/deferred visibility. Enabling it requires
+`enabled: true` and automatically registers `tool_search`. Python tools retain their author's
+`deferred` declaration; MCP tools become deferred, while MCP still connects and discovers its complete
+catalog before execution. Existing eager tools, context read tools, and `load_skill` stay directly
+visible. After a successful search result commits, the next request selects complete candidate schemas
+within its budget. The selected names are saved with that batch's calls; see
+[runtime](../runtime/README.en.md#deferred-tool-schemas) for the detailed rules.
 
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
 Enable it to connect the service, published overview, and both read tools:

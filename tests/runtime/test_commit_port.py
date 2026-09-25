@@ -51,7 +51,7 @@ def _store_commit_port(
     event_collector: _RunEventCollector | None = None,
 ) -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
     store = InMemoryLifecycleStore()
-    initial = RuntimeCursor(position="before_input", step_index=0)
+    initial = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
     before = initial.model_copy(update={"position": "before_model"})
     created = store.create_run(
         CreateRun(
@@ -109,6 +109,7 @@ def _store_commit_port(
             prepared_tool_calls=(call,),
             cursor_after=RuntimeCursor(
                 position="tool_batch",
+                visible_tool_names=(tool_use.name,),
                 step_index=0,
                 tool_calls=(tool_use,),
                 assistant_message=assistant,
@@ -260,7 +261,7 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
 ) -> None:
     path = tmp_path / "cross-process.db"
     owner = SQLiteStore(path)
-    before = RuntimeCursor(position="before_input", step_index=0)
+    before = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
     created = owner.create_run(
         CreateRun(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
@@ -443,7 +444,7 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
     assert port.run.usage.compaction.total_tokens == 44_000
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
-    cursor = RuntimeCursor(position="before_model", step_index=1)
+    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
     port.commit_tool_result(
         RuntimeToolResultCommit(
             tool_call=call,
@@ -461,7 +462,10 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
             assistant_message=assistant,
             message_delta=(assistant,),
             cursor_after=RuntimeCursor(
-                position="outcome_ready", step_index=1, assistant_message=assistant
+                position="outcome_ready",
+                step_index=1,
+                assistant_message=assistant,
+                visible_tool_names=(),
             ),
             input_tokens=25_000,
             output_tokens=1_000,
@@ -478,7 +482,7 @@ def _reserved_compaction_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCom
     store, port, call = _store_commit_port()
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
-    cursor = RuntimeCursor(position="before_model", step_index=1)
+    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
     port.commit_tool_result(
         RuntimeToolResultCommit(
             tool_call=call,

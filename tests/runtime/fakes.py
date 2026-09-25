@@ -586,7 +586,7 @@ def start_activation(
         kind="start",
         run_input=input,
         initial_session_message_count=initial_session_message_count,
-        cursor=RuntimeCursor(position="before_input", step_index=0),
+        cursor=RuntimeCursor(position="before_input", step_index=0, visible_tool_names=()),
         options=options or RuntimeExecutionOptions(),
     )
 
