@@ -425,8 +425,17 @@ namespaces or adding a third fallback. Existing compaction handles ordinary hist
 The dedicated full/base allowance difference uses matching, unpruned history. Post-compaction window
 adoption also puts the same selected snapshot and schemas in both requests, so released tool-body tokens cannot
 change the measured overview cost. After window selection, the actual main request passes through
-projection and complete estimation, including newly adopted post-compaction windows, without
+projection, including newly adopted post-compaction windows, without
 reselecting dynamic contributions or tools.
+
+The internal `MeasuredRequest` carries an exact request with its complete input token estimate.
+Request assembly appends the dynamic snapshot once before measuring; changes to bodies, schemas,
+or overview text produce a newly measured candidate. Unchanged projection, the compaction entry,
+and cut-point selection reuse the existing number, so a low-pressure main step measures once.
+Window adoption returns the selected unpruned request and its estimate directly to projection,
+without rebuilding or recounting it. Navigation requests that still exceed the total input budget
+continue to compaction. This passes one candidate's result through helpers without a cross-request
+cache or replacing complete estimation with the sum of individual tool costs.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
 It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool

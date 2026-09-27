@@ -2,8 +2,10 @@
 
 from iris.agents import ContextPolicyConfig
 from iris.context import ContextContribution, ContextSnapshot
+from iris.context.source import render_context_snapshot
 from iris.message import LLMRequest, Msg
 from iris.runtime._context_projection import project_context_request
+from iris.runtime._request_measurement import measure_request
 from tests.runtime.test_context_projection import _batch, _estimate
 
 
@@ -15,11 +17,18 @@ def _project(
     select: bool = True,
     tools: bool = True,
 ) -> tuple[LLMRequest, ContextSnapshot | None]:
-    return project_context_request(
-        LLMRequest(
-            model="test",
-            messages=[Msg.system("required-system"), *history],
-            tools=[{"function": {"name": "context_read"}}] if tools else [],
+    measured, selected = project_context_request(
+        measure_request(
+            LLMRequest(
+                model="test",
+                messages=[
+                    Msg.system("required-system"),
+                    *history,
+                    render_context_snapshot(snapshot),
+                ],
+                tools=[{"function": {"name": "context_read"}}] if tools else [],
+            ),
+            _estimate,
         ),
         source_indices={id(message): index for index, message in enumerate(history)},
         config=ContextPolicyConfig(preserve_recent_tool_groups=0, old_result_preview_chars=0),
@@ -28,6 +37,7 @@ def _project(
         snapshot=snapshot,
         select_optional=select,
     )
+    return measured.request, selected
 
 
 def test_duplicate_folding_precedes_optional_removal() -> None:

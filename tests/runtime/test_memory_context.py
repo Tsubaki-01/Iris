@@ -12,6 +12,7 @@ from iris.exceptions import IrisContextError, IrisTemplateError
 from iris.lifecycle import SessionContextWindow
 from iris.memory import MemoryOverviewDocument, MemoryService, SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, Msg
+from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.memory_context import load_context_windows, select_context_window
 from iris.utils import TemplateRenderer
 
@@ -41,18 +42,22 @@ def _request(window: SessionContextWindow) -> LLMRequest:
     )
 
 
+def _measured_request(window: SessionContextWindow) -> MeasuredRequest:
+    return measure_request(_request(window), TextTokenProvider().estimate_input_tokens)
+
+
 @pytest.mark.parametrize("limit", [20, 21])
 def test_combined_overview_budget_selects_full_or_all_navigation(limit: int) -> None:
     """两个 namespace 和包装共享限额，超限时保留全部知识范围。"""
     full = SessionContextWindow(memory_overview="facts-one|facts-two", mode="full")
     navigation = SessionContextWindow(memory_overview="topic1|topic2", mode="navigation")
-    window, request, tokens = select_context_window(
+    window, measured = select_context_window(
         candidates=(full, navigation),
-        build_request=_request,
-        provider=TextTokenProvider(),
+        build_request=_measured_request,
         memory_budget_tokens=limit,
         input_budget_tokens=1000,
     )
+    request, tokens = measured.request, measured.input_tokens
     assert window is (navigation if limit == 20 else full)
     assert request.messages[0].text.endswith(window.memory_overview)
     assert tokens == TextTokenProvider().estimate_input_tokens(request)
@@ -65,8 +70,7 @@ def test_navigation_over_budget_is_an_explicit_capacity_error() -> None:
     with pytest.raises(IrisContextError, match="知识范围.*预算"):
         select_context_window(
             candidates=(full, navigation),
-            build_request=_request,
-            provider=TextTokenProvider(),
+            build_request=_measured_request,
             memory_budget_tokens=12,
             input_budget_tokens=1000,
         )
@@ -76,13 +80,13 @@ def test_full_request_limit_can_select_navigation_without_charging_history_to_me
     """完整请求超限可触发导航，但可压缩历史不归入memory专用额度。"""
     full = SessionContextWindow(memory_overview="facts" * 10)
     navigation = SessionContextWindow(memory_overview="topics", mode="navigation")
-    window, request, tokens = select_context_window(
+    window, measured = select_context_window(
         candidates=(full, navigation),
-        build_request=_request,
-        provider=TextTokenProvider(),
+        build_request=_measured_request,
         memory_budget_tokens=100,
         input_budget_tokens=1,
     )
+    request, tokens = measured.request, measured.input_tokens
     assert window is navigation
     # 整体历史是否可压缩继续交给既有runtime，不把它误报成导航过大。
     assert tokens == TextTokenProvider().estimate_input_tokens(request) > 1
@@ -98,19 +102,22 @@ def test_system_character_limit_can_select_navigation(tmp_path: Path) -> None:
         )
     )
 
-    def build(window: SessionContextWindow) -> LLMRequest:
+    def build(window: SessionContextWindow) -> MeasuredRequest:
         output = ContextBuilder().build(context, system_addendum=window.memory_overview)
-        return LLMRequest(model="main", messages=[output.system, Msg.user("question")])
+        return measure_request(
+            LLMRequest(model="main", messages=[output.system, Msg.user("question")]),
+            TextTokenProvider().estimate_input_tokens,
+        )
 
     full = SessionContextWindow(memory_overview="facts" * 10)
     navigation = SessionContextWindow(memory_overview="topics", mode="navigation")
-    window, request, tokens = select_context_window(
+    window, measured = select_context_window(
         candidates=(full, navigation),
         build_request=build,
-        provider=TextTokenProvider(),
         memory_budget_tokens=100,
         input_budget_tokens=1000,
     )
+    request, tokens = measured.request, measured.input_tokens
     assert window is navigation
     assert request.messages[0].text == "base\n\ntopics"
     assert tokens == TextTokenProvider().estimate_input_tokens(request)
@@ -175,10 +182,9 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
         _request(navigation)
     ) - provider.estimate_input_tokens(_request(SessionContextWindow()))
     assert navigation_cost < full_cost
-    window, _, _ = select_context_window(
+    window, _ = select_context_window(
         candidates=(full, navigation),
-        build_request=_request,
-        provider=provider,
+        build_request=_measured_request,
         memory_budget_tokens=navigation_cost,
         input_budget_tokens=10000,
     )
@@ -186,8 +192,7 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
     with pytest.raises(IrisContextError, match="知识范围.*预算"):
         select_context_window(
             candidates=(full, navigation),
-            build_request=_request,
-            provider=provider,
+            build_request=_measured_request,
             memory_budget_tokens=navigation_cost - 1,
             input_budget_tokens=10000,
         )

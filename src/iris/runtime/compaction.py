@@ -10,7 +10,8 @@ from collections.abc import Callable
 
 from ..agents import CompactionConfig
 from ..lifecycle import SessionCompaction
-from ..message import LLMRequest, Msg, Role
+from ..message import Msg, Role
+from ._request_measurement import MeasuredRequest
 
 
 def protected_message_indices(
@@ -65,8 +66,7 @@ def select_compaction_end(
     previous_compaction: SessionCompaction | None,
     protected_indices: tuple[int, ...],
     config: CompactionConfig,
-    build_request: Callable[[list[Msg]], LLMRequest],
-    estimate_input_tokens: Callable[[LLMRequest], int],
+    build_request: Callable[[list[Msg]], MeasuredRequest],
 ) -> int | None:
     """选择新增摘要前缀的完整组边界，以 K 为近期原文保留目标。
 
@@ -93,7 +93,7 @@ def select_compaction_end(
             protected_indices=protected_indices,
             summary="",
         )
-        return estimate_input_tokens(build_request(history))
+        return build_request(history).input_tokens
 
     # 空摘要仍保留完整包装；实际正文的最大额度在容量判定时单独预留。
     base_tokens = planned_input_tokens(len(messages))

@@ -14,6 +14,7 @@ from iris.memory import MemoryService, SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
 from iris.runtime import RuntimeActivationOutcome
 from iris.runtime._context_projection import project_context_request
+from iris.runtime._request_measurement import measure_request
 from iris.runtime._tool_context import select_tool_context
 from iris.tools import ToolRegistry
 from tests.runtime.test_context_projection import _estimate
@@ -42,8 +43,10 @@ def test_hundred_deferred_tools_start_hidden_and_latest_first_fits_complete_sche
         tool_choice=None,
     )
     schemas = view.schemas_for(selected.names)
-    request, _ = project_context_request(
-        LLMRequest(model="test", messages=[Msg.user("question")], tools=schemas),
+    measured, _ = project_context_request(
+        measure_request(
+            LLMRequest(model="test", messages=[Msg.user("question")], tools=schemas), _estimate
+        ),
         source_indices={},
         config=ContextPolicyConfig(),
         trigger_tokens=3000,
@@ -51,6 +54,7 @@ def test_hundred_deferred_tools_start_hidden_and_latest_first_fits_complete_sche
         select_optional=True,
         optional_tool_names=selected.optional_names,
     )
+    request = measured.request
     assert [schema["function"]["name"] for schema in request.tools] == ["tool_3"]
     assert request.tools[0] == next(
         schema for schema in schemas if schema["function"]["name"] == "tool_3"

@@ -8,6 +8,7 @@ from ..agents import ContextPolicyConfig
 from ..context import ContextSnapshot
 from ..context.source import render_context_snapshot
 from ..message import LLMRequest, ToolResultBlock
+from ._request_measurement import MeasuredRequest, measure_request
 from .compaction import _history_group_ends
 
 
@@ -22,7 +23,7 @@ class _Observation:
 
 
 def project_context_request(
-    request: LLMRequest,
+    measured: MeasuredRequest,
     *,
     source_indices: Mapping[int, int],
     config: ContextPolicyConfig,
@@ -31,11 +32,11 @@ def project_context_request(
     snapshot: ContextSnapshot | None = None,
     select_optional: bool = False,
     optional_tool_names: tuple[str, ...] = (),
-) -> tuple[LLMRequest, ContextSnapshot | None]:
-    """装配快照后依次折叠重复、选择可选材料、短化旧观察。
+) -> tuple[MeasuredRequest, ContextSnapshot | None]:
+    """对已装配并计量的请求依次折叠重复、选择可选材料、短化旧观察。
 
     Args:
-        request: 已包含实际 context、消息与工具 schema 的请求。
+        measured: 已包含实际 context、动态快照、消息与工具 schema 的请求及计量。
         source_indices: 本步骤原模型历史对象 identity 到原始消息下标的映射。
         config: 已校验的上下文保留策略。
         trigger_tokens: 既有 compaction 的压力线。
@@ -45,15 +46,11 @@ def project_context_request(
         optional_tool_names: 可撤下 schema 的优先顺序，最优先项排在前。
 
     Returns:
-        写时复制的完整请求与本步骤选定快照；不修改原历史。
+        写时复制的已计量请求与本步骤选定快照；不修改原历史。
     """
-    if snapshot is not None:
-        request = request.model_copy(
-            update={"messages": [*request.messages, render_context_snapshot(snapshot)]}
-        )
-    tokens = estimate_input_tokens(request)
+    request, tokens = measured.request, measured.input_tokens
     if tokens < trigger_tokens:
-        return request, snapshot
+        return measured, snapshot
     groups = (
         _closed_observations(request, source_indices)
         if config.enabled and _can_read_context(request)
@@ -78,10 +75,10 @@ def project_context_request(
             replacements[item.position] = text
             representatives.add(representative.position)
     if replacements:
-        candidate = _replace_contents(request, replacements)
-        candidate_tokens = estimate_input_tokens(candidate)
-        if candidate_tokens < tokens:
-            request, tokens = candidate, candidate_tokens
+        candidate = measure_request(_replace_contents(request, replacements), estimate_input_tokens)
+        if candidate.input_tokens < tokens:
+            measured = candidate
+            request, tokens = measured.request, measured.input_tokens
         else:
             replacements.clear()
             representatives.clear()
@@ -110,7 +107,8 @@ def project_context_request(
                     ]
                 }
             )
-            tokens = estimate_input_tokens(request)
+            measured = measure_request(request, estimate_input_tokens)
+            tokens = measured.input_tokens
             if tokens < trigger_tokens:
                 break
     if select_optional and tokens >= trigger_tokens:
@@ -120,11 +118,12 @@ def project_context_request(
                     "tools": [tool for tool in request.tools if tool["function"]["name"] != name]
                 }
             )
-            tokens = estimate_input_tokens(request)
+            measured = measure_request(request, estimate_input_tokens)
+            tokens = measured.input_tokens
             if tokens < trigger_tokens:
                 break
     if tokens < trigger_tokens:
-        return request, snapshot
+        return measured, snapshot
     preview_chars = config.old_result_preview_chars
     for item in older:
         if item.position in replacements or item.position in representatives:
@@ -143,13 +142,15 @@ def project_context_request(
             text += f"\n预览：{preview}"
         if len(text) >= len(content):
             continue
-        candidate = _replace_contents(request, {item.position: text})
-        candidate_tokens = estimate_input_tokens(candidate)
-        if candidate_tokens < tokens:
-            request, tokens = candidate, candidate_tokens
+        candidate = measure_request(
+            _replace_contents(request, {item.position: text}), estimate_input_tokens
+        )
+        if candidate.input_tokens < tokens:
+            measured = candidate
+            request, tokens = measured.request, measured.input_tokens
             if tokens < trigger_tokens:
                 break
-    return request, snapshot
+    return measured, snapshot
 
 
 def _can_read_context(request: LLMRequest) -> bool:
