@@ -9,10 +9,9 @@ from typing import Any
 from ..exceptions import IrisContextError
 from ..lifecycle import MemoryOverviewSource, SessionContextWindow
 from ..memory import MemoryService
-from ..message import LLMRequest
-from ..providers.protocols import CompletionProvider
 from ..utils import TemplateRenderer
 from ._prompts import render_prompt
+from ._request_measurement import MeasuredRequest
 
 _MEMORY_CONTEXT_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "memory_context.j2"
 
@@ -66,16 +65,15 @@ async def load_context_windows(
 def select_context_window(
     *,
     candidates: tuple[SessionContextWindow, SessionContextWindow],
-    build_request: Callable[[SessionContextWindow], LLMRequest],
-    provider: CompletionProvider,
+    build_request: Callable[[SessionContextWindow], MeasuredRequest],
     memory_budget_tokens: int,
     input_budget_tokens: int,
-) -> tuple[SessionContextWindow, LLMRequest, int]:
-    """返回窗口、选定请求及完整 token 数；专用额度只计算 addendum 的增量。"""
+) -> tuple[SessionContextWindow, MeasuredRequest]:
+    """返回窗口及未裁剪的已计量请求；专用额度只计算 addendum 的增量。"""
     full, navigation = candidates
     base_request = build_request(SessionContextWindow())
-    base_tokens = provider.estimate_input_tokens(base_request)
-    navigation_request: LLMRequest | None = None
+    base_tokens = base_request.input_tokens
+    navigation_request: MeasuredRequest | None = None
     try:
         full_request = build_request(full)
     except IrisContextError as exc:
@@ -87,16 +85,15 @@ def select_context_window(
         ):
             raise
     else:
-        full_tokens = provider.estimate_input_tokens(full_request)
+        full_tokens = full_request.input_tokens
         if full_tokens - base_tokens <= memory_budget_tokens and full_tokens <= input_budget_tokens:
-            return full, full_request, full_tokens
+            return full, full_request
         if full is navigation:
-            navigation_request, navigation_total = full_request, full_tokens
+            navigation_request = full_request
     if navigation_request is None:
         navigation_request = build_request(navigation)
-        navigation_total = provider.estimate_input_tokens(navigation_request)
 
-    navigation_tokens = navigation_total - base_tokens
+    navigation_tokens = navigation_request.input_tokens - base_tokens
     if navigation_tokens > memory_budget_tokens:
         raise IrisContextError(
             "memory 完整知识范围超过窗口预算",
@@ -105,7 +102,7 @@ def select_context_window(
             limit=memory_budget_tokens,
         )
     # 完整请求中的既有历史仍由正常compaction处理，不在这里重复实现切点与容量错误。
-    return navigation, navigation_request, navigation_total
+    return navigation, navigation_request
 
 
 __all__ = ["load_context_windows", "select_context_window"]

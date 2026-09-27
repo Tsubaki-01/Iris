@@ -67,6 +67,7 @@ from ._compaction_summary import (
 from ._context_projection import project_context_request
 from ._context_refs import with_context_refs
 from ._prompts import render_prompt
+from ._request_measurement import MeasuredRequest, measure_request
 from ._tool_context import ToolContextSelection, select_tool_context
 from .commit import (
     CommitPortToolEffectGuard,
@@ -948,7 +949,7 @@ class AgentRuntime:
                     history = project_history(
                         self._context_messages(pending_history), snapshot.compaction, protected
                     )
-                    initial_window, _, _ = await self._adopt_context_window(
+                    initial_window, _ = await self._adopt_context_window(
                         history=history,
                         options=activation.options,
                         input_budget_tokens=self.environment.agent_config.compaction.input_budget_tokens,
@@ -1023,6 +1024,16 @@ class AgentRuntime:
         )
         return request, context_output
 
+    def _measure_model_request(
+        self, request: LLMRequest, context_snapshot: ContextSnapshot | None
+    ) -> MeasuredRequest:
+        """追加本步动态快照一次，再计量完整待投影请求。"""
+        if context_snapshot is not None:
+            request = request.model_copy(
+                update={"messages": [*request.messages, render_context_snapshot(context_snapshot)]}
+            )
+        return measure_request(request, self.environment.provider.estimate_input_tokens)
+
     async def _adopt_context_window(
         self,
         *,
@@ -1031,7 +1042,7 @@ class AgentRuntime:
         input_budget_tokens: int,
         context_snapshot: ContextSnapshot | None = None,
         tool_selection: ToolContextSelection | None = None,
-    ) -> tuple[SessionContextWindow, LLMRequest, int]:
+    ) -> tuple[SessionContextWindow, MeasuredRequest]:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
         candidates = await load_context_windows(
@@ -1045,28 +1056,18 @@ class AgentRuntime:
             ),
         )
 
-        def build_request(window: SessionContextWindow) -> LLMRequest:
+        def build_request(window: SessionContextWindow) -> MeasuredRequest:
             request = self._build_model_request(
                 history=history,
                 options=options,
                 context_window=window,
                 tool_selection=tool_selection,
             )[0]
-            if context_snapshot is not None:
-                request = request.model_copy(
-                    update={
-                        "messages": [
-                            *request.messages,
-                            render_context_snapshot(context_snapshot),
-                        ]
-                    }
-                )
-            return request
+            return self._measure_model_request(request, context_snapshot)
 
         return select_context_window(
             candidates=candidates,
             build_request=build_request,
-            provider=self.environment.provider,
             memory_budget_tokens=floor(
                 config.compaction.input_budget_tokens * config.memory.overview.system_budget_ratio
             ),
@@ -1171,8 +1172,8 @@ class AgentRuntime:
             )
 
             def project_request(
-                candidate: LLMRequest, *, select_optional: bool = False
-            ) -> LLMRequest:
+                candidate: MeasuredRequest, *, select_optional: bool = False
+            ) -> MeasuredRequest:
                 nonlocal context_snapshot
                 projected, context_snapshot = project_context_request(
                     candidate,
@@ -1186,15 +1187,22 @@ class AgentRuntime:
                 )
                 return projected
 
-            def build_request(history: list[Msg]) -> LLMRequest:
+            def build_request(history: list[Msg]) -> MeasuredRequest:
                 messages = self.environment.assembler.build_conversation(
                     context_output=context_output,
                     history=history,
                     current_input=None,
                 ).messages
-                return project_request(request.model_copy(update={"messages": messages}))
+                return project_request(
+                    self._measure_model_request(
+                        request.model_copy(update={"messages": messages}), context_snapshot
+                    )
+                )
 
-            request = project_request(request, select_optional=True)
+            measured = project_request(
+                self._measure_model_request(request, context_snapshot), select_optional=True
+            )
+            request = measured.request
             tool_selection = ToolContextSelection(
                 tuple(tool["function"]["name"] for tool in request.tools),
                 (),
@@ -1205,7 +1213,7 @@ class AgentRuntime:
 
         try:
             compacted = await self._compact_request(
-                request=request,
+                measured=measured,
                 build_request=build_request,
                 project_request=project_request,
                 model_messages=model_messages,
@@ -1223,7 +1231,8 @@ class AgentRuntime:
             return _failed_activation(cursor, exc)
         if isinstance(compacted, RuntimeActivationResult):
             return compacted
-        request = compacted
+        request = compacted.request
+        visible_tool_names = tool_selection.names
         # 摘要与重试已消耗原 run 的绝对 deadline，不沿用 reservation 的旧剩余额度。
         remaining = commits.remaining_deadline_seconds()
         if remaining is not None and remaining <= 0:
@@ -1390,12 +1399,12 @@ class AgentRuntime:
             workspace_root=self.environment.workspace_root,
             permission_mode=self.environment.agent_config.permissions.writes,
             metadata={"activation_id": activation.activation_id},
-            visible_tool_names=tuple(tool["function"]["name"] for tool in request.tools),
+            visible_tool_names=visible_tool_names,
             cancellation=cancellation,
         )
         cursor_after = RuntimeCursor(
             position="tool_batch",
-            visible_tool_names=tuple(tool["function"]["name"] for tool in request.tools),
+            visible_tool_names=visible_tool_names,
             step_index=cursor.step_index,
             tool_calls=tuple(assistant.tool_calls),
             assistant_message=assistant,
@@ -1430,9 +1439,9 @@ class AgentRuntime:
     async def _compact_request(
         self,
         *,
-        request: LLMRequest,
-        build_request: Callable[[list[Msg]], LLMRequest],
-        project_request: Callable[[LLMRequest], LLMRequest],
+        measured: MeasuredRequest,
+        build_request: Callable[[list[Msg]], MeasuredRequest],
+        project_request: Callable[[MeasuredRequest], MeasuredRequest],
         model_messages: list[Msg],
         context_snapshot: ContextSnapshot | None,
         tool_selection: ToolContextSelection,
@@ -1443,13 +1452,13 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         stream_sink: RuntimeEventSink | None,
-    ) -> LLMRequest | RuntimeActivationResult:
+    ) -> MeasuredRequest | RuntimeActivationResult:
         """在同一模型步 reservation 内生成并原子安装完整摘要投影。"""
         config = self.environment.agent_config.compaction
         provider = self.environment.provider
-        before = provider.estimate_input_tokens(request)
+        before = measured.input_tokens
         if before < config.trigger_tokens:
-            return request
+            return measured
         messages = list(snapshot.messages)
         end = select_compaction_end(
             messages=model_messages,
@@ -1457,11 +1466,10 @@ class AgentRuntime:
             protected_indices=protected_indices,
             config=config,
             build_request=build_request,
-            estimate_input_tokens=provider.estimate_input_tokens,
         )
         if end is None:
             if before <= config.input_budget_tokens:
-                return request
+                return measured
             raise IrisContextCompactionError(
                 "输入超过预算且没有新增可压缩历史", code="CONTEXT_COMPACTION_UNAVAILABLE"
             )
@@ -1493,7 +1501,7 @@ class AgentRuntime:
             position = (0, 0)
             while position[0] < len(records):
                 batch = next_summary_batch(
-                    request,
+                    measured.request,
                     summary,
                     records,
                     position,
@@ -1549,23 +1557,16 @@ class AgentRuntime:
             if self.environment.memory_service is None and not current_window.memory_overview:
                 next_window = SessionContextWindow()
                 candidate = build_request(history)
-                after = provider.estimate_input_tokens(candidate)
             else:
-                next_window, _, _ = await self._adopt_context_window(
+                next_window, candidate = await self._adopt_context_window(
                     history=history,
                     options=activation.options,
                     input_budget_tokens=config.trigger_tokens,
                     context_snapshot=context_snapshot,
                     tool_selection=tool_selection,
                 )
-                candidate, _ = self._build_model_request(
-                    history=history,
-                    options=activation.options,
-                    context_window=next_window,
-                    tool_selection=tool_selection,
-                )
                 candidate = project_request(candidate)
-                after = provider.estimate_input_tokens(candidate)
+            after = candidate.input_tokens
             stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)
             if stopped is not None:
                 return stopped

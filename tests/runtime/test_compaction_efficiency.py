@@ -8,6 +8,7 @@ from iris.agents import CompactionConfig
 from iris.lifecycle import SessionContextWindow
 from iris.message import LLMRequest, Msg
 from iris.runtime._compaction_summary import next_summary_batch, serialize_history
+from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.compaction import select_compaction_end
 from iris.runtime.memory_context import select_context_window
 from iris.utils import TemplateRenderer
@@ -58,8 +59,9 @@ def test_closed_history_does_not_recount_the_same_empty_suffix() -> None:
         previous_compaction=None,
         protected_indices=(),
         config=CompactionConfig(input_budget_tokens=1000),
-        build_request=lambda history: LLMRequest(model="test", messages=history),
-        estimate_input_tokens=estimate,
+        build_request=lambda history: measure_request(
+            LLMRequest(model="test", messages=history), estimate
+        ),
     )
     assert end == 1
     assert len(requests) == 1
@@ -78,19 +80,19 @@ def test_identical_overview_candidates_reuse_full_request_and_token_count() -> N
             counted.append(request)
             return super().estimate_input_tokens(request)
 
-    def build(window: SessionContextWindow) -> LLMRequest:
+    def build(window: SessionContextWindow) -> MeasuredRequest:
         built.append(window)
-        return _request(window)
+        return measure_request(_request(window), Provider().estimate_input_tokens)
 
     selected = select_context_window(
         candidates=(navigation, navigation),
         build_request=build,
-        provider=Provider(),
         memory_budget_tokens=100,
         input_budget_tokens=1,
     )
     assert len(counted) == len(built) == 2
-    window, request, tokens = selected
+    window, measured = selected
+    request, tokens = measured.request, measured.input_tokens
     assert window is navigation and request is counted[-1]
     assert tokens == TextTokenProvider().estimate_input_tokens(request)
 

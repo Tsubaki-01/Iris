@@ -8,6 +8,7 @@ from collections.abc import Callable
 from iris.agents import CompactionConfig
 from iris.lifecycle import SessionCompaction
 from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.runtime._request_measurement import measure_request
 from iris.runtime.compaction import (
     project_history,
     protected_message_indices,
@@ -48,8 +49,7 @@ def _select(
         previous_compaction=previous,
         protected_indices=protected_message_indices(messages, initial_count),
         config=config or CompactionConfig(input_budget_tokens=1000),
-        build_request=build_request,
-        estimate_input_tokens=_estimate,
+        build_request=lambda history: measure_request(build_request(history), _estimate),
     )
 
 
