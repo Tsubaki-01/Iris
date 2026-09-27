@@ -43,10 +43,7 @@ def decode_session_messages(
         for expected_ordinal, row in enumerate(rows, start=start_count + 1):
             if row["ordinal"] != expected_ordinal:
                 raise ValueError("session message ordinal 不连续")
-            payload = json.loads(row["message_json"])
-            if not isinstance(payload, dict):
-                raise TypeError("session message JSON 必须是 object")
-            messages.append(Msg.from_dict(payload))
+            messages.append(decode_session_message(row, path=path, operation=operation))
         return messages
     except (
         ValidationError,
@@ -61,4 +58,17 @@ def decode_session_messages(
             "lifecycle SQLite session history 无法验证",
             path=str(path),
             operation=operation,
+        ) from exc
+
+
+def decode_session_message(row: sqlite3.Row, *, path: Path, operation: str) -> Msg:
+    """解析单条原文，供连续后缀与稀疏锚点共用。"""
+    try:
+        payload = json.loads(row["message_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("session message JSON 必须是 object")
+        return Msg.from_dict(payload)
+    except (ValidationError, ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
+        raise IrisRunPersistenceError(
+            "lifecycle SQLite session history 无法验证", path=str(path), operation=operation
         ) from exc

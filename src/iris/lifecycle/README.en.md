@@ -65,6 +65,23 @@ provider clients, tasks, locks, signals, or callbacks.
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
 
+`load_session_header(session_id)` returns `SessionHeader(session_id, revision, message_count,
+context_window)` without reading messages, the summary, or discovery state. An absent session returns
+zero counts and no window. `load_run_context(run_id, *, include_tool_discovery)` returns a consistent
+`SessionContextSnapshot`: header, compaction, `raw_tail`, `protected_indices`,
+`protected_prefix_messages`, and optional `tool_discovery`. With summary coverage C and total count N,
+the tail covers `[C,N)`. Protected indices and prefix `(index, Msg)` pairs keep absolute positions for
+the current run's BCI, input, and latest ordinary steer. `include_tool_discovery=False` avoids reading
+discovery JSON; a missing run raises `IrisRunNotFoundError`. This reads current model context rather
+than a historical terminal preview. Complete `load_session()` and Fork return contracts are unchanged.
+
+`SessionToolDiscovery` stores the latest discovery/use positions, ordered results from the last search,
+and unconsumed first-result protections. `SessionReadState` combines it with the last ordinary-user
+position. Only the store updates these models from message deltas and commits them atomically with
+the original messages; runtime cannot submit a separate active-tool list. Summary/window updates
+preserve discovery facts, and Fork initializes independent state from its cutoff prefix.
+`SessionSnapshot` still represents complete originals and its existing session fields.
+
 `read_session_messages(session_id, *, start, limit)` returns the public `SessionMessagePage`, reading
 only a bounded page of original messages. `items` contains `(index, Msg)` tuples with zero-based
 indices; `next_index` is the next page's start or `None` at the end, and `total_count` is the original

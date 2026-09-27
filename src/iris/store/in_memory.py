@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import datetime
 from threading import RLock
 from typing import Any, Protocol, cast
@@ -34,6 +35,8 @@ from ..lifecycle.history import (
     ForkPointPage,
     RunHistorySnapshot,
     RunMessageSlice,
+    SessionContextSnapshot,
+    SessionHeader,
     SessionMessagePage,
 )
 from ..lifecycle.models import (
@@ -54,6 +57,7 @@ from ..lifecycle.models import (
     RunStopReason,
     RunToolCallRecord,
     RunUsage,
+    SessionReadState,
     SessionSnapshot,
     SubagentRunLink,
     ToolCallPhase,
@@ -100,6 +104,7 @@ from ._session_history import (
     validate_context_window_initialization,
     validate_fork_source,
 )
+from ._session_projection import advance_session_read_state, protected_run_indices
 from ._subagent import (
     validate_current_proxy,
     validate_final_proxy,
@@ -109,6 +114,19 @@ from ._subagent import (
 )
 from ._terminal_closure import build_terminal_tool_closure
 from ._tool_results import is_preflight_result
+
+
+@dataclass(frozen=True, slots=True)
+class _MemorySession:
+    """原文快照与派生状态的一次安装单位。"""
+
+    snapshot: SessionSnapshot
+    read_state: SessionReadState
+
+
+def _empty_session(session_id: str) -> _MemorySession:
+    """构造尚无原文的内部会话。"""
+    return _MemorySession(SessionSnapshot(session_id=session_id), SessionReadState())
 
 
 class _ActiveCommand(Protocol):
@@ -126,7 +144,7 @@ class InMemoryLifecycleStore:
         self._source_id = str(uuid4())
         self._lock = RLock()
         self._runs: dict[str, RunRecord] = {}
-        self._sessions: dict[str, SessionSnapshot] = {}
+        self._sessions: dict[str, _MemorySession] = {}
         self._lanes: dict[str, str] = {}
         self._activations: dict[str, ActivationRecord] = {}
         self._checkpoints: dict[str, RunCheckpoint] = {}
@@ -286,7 +304,7 @@ class InMemoryLifecycleStore:
                 checkpoint,
                 command.checkpoint,
                 activation_id,
-                next_session.revision,
+                next_session.snapshot.revision,
                 run.usage,
             )
             activation: ActivationRecord | None = None
@@ -343,7 +361,7 @@ class InMemoryLifecycleStore:
             )
             committed = commit_tool_call(tool, result=command.result, now=command.now)
             self._runs[run.run_id] = updated
-            self._sessions[session.session_id] = next_session
+            self._sessions[session.snapshot.session_id] = next_session
             self._checkpoints[run.run_id] = command.checkpoint
             self._set_tool_call(committed)
             self._events[run.run_id].extend(events)
@@ -355,7 +373,9 @@ class InMemoryLifecycleStore:
             return deepcopy(
                 RunCommit(
                     run=updated,
-                    session_revision=next_session.revision if command.message_delta else None,
+                    session_revision=next_session.snapshot.revision
+                    if command.message_delta
+                    else None,
                     checkpoint=command.checkpoint,
                     interaction=closed,
                     events=tuple(events),
@@ -382,12 +402,12 @@ class InMemoryLifecycleStore:
                 )
             session = self._sessions.get(
                 command.request.session_id,
-                SessionSnapshot(session_id=command.request.session_id),
+                _empty_session(command.request.session_id),
             )
-            if command.initial_checkpoint.session_revision != session.revision:
+            if command.initial_checkpoint.session_revision != session.snapshot.revision:
                 raise IrisRunConflictError(
                     "initial checkpoint session revision 不匹配",
-                    expected=session.revision,
+                    expected=session.snapshot.revision,
                     actual=command.initial_checkpoint.session_revision,
                 )
 
@@ -398,12 +418,12 @@ class InMemoryLifecycleStore:
                     session_id=command.request.session_id,
                     agent_id=command.agent_id,
                     request=command.request,
-                    initial_session_message_count=len(session.messages),
+                    initial_session_message_count=len(session.snapshot.messages),
                     options=command.options,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.DEADLINE_EXCEEDED,
-                    terminal_session_message_count=len(session.messages),
-                    terminal_compaction=session.compaction,
+                    terminal_session_message_count=len(session.snapshot.messages),
+                    terminal_compaction=session.snapshot.compaction,
                     revision=1,
                     current_activation_id=None,
                     pending_interaction_id=None,
@@ -419,7 +439,7 @@ class InMemoryLifecycleStore:
                 result = project_result(run)
                 commit = RunCommit(run=run, events=events, result=result)
                 self._runs[run_id] = deepcopy(run)
-                self._sessions.setdefault(session.session_id, deepcopy(session))
+                self._sessions.setdefault(session.snapshot.session_id, session)
                 self._events[run_id] = deepcopy(list(events))
                 self._results[run_id] = deepcopy(result)
                 return deepcopy(commit)
@@ -437,7 +457,7 @@ class InMemoryLifecycleStore:
                 session_id=command.request.session_id,
                 agent_id=command.agent_id,
                 request=command.request,
-                initial_session_message_count=len(session.messages),
+                initial_session_message_count=len(session.snapshot.messages),
                 options=command.options,
                 phase=RunPhase.ACTIVE,
                 revision=1,
@@ -466,8 +486,8 @@ class InMemoryLifecycleStore:
                 events=events,
             )
             self._runs[run_id] = deepcopy(run)
-            self._sessions.setdefault(session.session_id, deepcopy(session))
-            self._lanes[session.session_id] = run_id
+            self._sessions.setdefault(session.snapshot.session_id, session)
+            self._lanes[session.snapshot.session_id] = run_id
             self._activations[activation.activation_id] = deepcopy(activation)
             self._checkpoints[run_id] = deepcopy(command.initial_checkpoint)
             self._events[run_id] = deepcopy(list(events))
@@ -563,22 +583,25 @@ class InMemoryLifecycleStore:
             current_checkpoint = self._require_checkpoint(run.run_id)
             validate_run_input_transition(current_checkpoint, command.checkpoint)
             validate_context_window_initialization(
-                session.context_window, command.initial_context_window
+                session.snapshot.context_window, command.initial_context_window
             )
             next_session = self._append_messages(session, command.message_delta)
             if command.initial_context_window is not None:
-                next_session = next_session.model_copy(
-                    update={
-                        "context_window": command.initial_context_window,
-                        "revision": session.revision + 1,
-                    }
+                next_session = replace(
+                    next_session,
+                    snapshot=next_session.snapshot.model_copy(
+                        update={
+                            "context_window": command.initial_context_window,
+                            "revision": session.snapshot.revision + 1,
+                        }
+                    ),
                 )
             self._validate_checkpoint_replacement(
                 run,
                 current_checkpoint,
                 command.checkpoint,
                 command.activation_id,
-                next_session.revision,
+                next_session.snapshot.revision,
                 run.usage,
             )
             updated = self._replace_run(
@@ -588,13 +611,15 @@ class InMemoryLifecycleStore:
                 updated_at=command.now,
             )
             self._runs[run.run_id] = updated
-            self._sessions[session.session_id] = next_session
+            self._sessions[session.snapshot.session_id] = next_session
             self._checkpoints[run.run_id] = command.checkpoint
             return deepcopy(
                 RunCommit(
                     run=updated,
                     session_revision=(
-                        next_session.revision if next_session.revision != session.revision else None
+                        next_session.snapshot.revision
+                        if next_session.snapshot.revision != session.snapshot.revision
+                        else None
                     ),
                     checkpoint=command.checkpoint,
                 )
@@ -662,23 +687,26 @@ class InMemoryLifecycleStore:
                 run,
                 current_checkpoint,
                 command,
-                session_message_count=len(session.messages),
-                previous_compaction=session.compaction,
+                session_message_count=len(session.snapshot.messages),
+                previous_compaction=session.snapshot.compaction,
             )
             self._validate_checkpoint_replacement(
                 run,
                 current_checkpoint,
                 command.checkpoint,
                 command.activation_id,
-                session.revision + 1,
+                session.snapshot.revision + 1,
                 run.usage,
             )
-            next_session = session.model_copy(
-                update={
-                    "compaction": command.compaction,
-                    "context_window": command.context_window,
-                    "revision": session.revision + 1,
-                }
+            next_session = replace(
+                session,
+                snapshot=session.snapshot.model_copy(
+                    update={
+                        "compaction": command.compaction,
+                        "context_window": command.context_window,
+                        "revision": session.snapshot.revision + 1,
+                    }
+                ),
             )
             sequence = run.last_event_sequence + 1
             updated = self._replace_run(
@@ -702,7 +730,7 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                session_revision=next_session.revision,
+                session_revision=next_session.snapshot.revision,
                 checkpoint=command.checkpoint,
                 events=(event,),
             )
@@ -725,7 +753,7 @@ class InMemoryLifecycleStore:
                 current_checkpoint,
                 command.checkpoint,
                 command.activation_id,
-                next_session.revision,
+                next_session.snapshot.revision,
                 command.usage,
             )
             if command.usage.model_steps_reserved != run.usage.model_steps_reserved:
@@ -753,12 +781,12 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                session_revision=next_session.revision if command.message_delta else None,
+                session_revision=next_session.snapshot.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = next_session
+            self._sessions[session.snapshot.session_id] = next_session
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             for tool_call in prepared:
                 self._set_tool_call(tool_call)
@@ -849,7 +877,7 @@ class InMemoryLifecycleStore:
                 checkpoint,
                 command.checkpoint,
                 command.activation_id,
-                next_session.revision,
+                next_session.snapshot.revision,
                 run.usage,
             )
             committed_call = commit_tool_call(
@@ -878,12 +906,12 @@ class InMemoryLifecycleStore:
             )
             commit = RunCommit(
                 run=updated,
-                session_revision=next_session.revision if command.message_delta else None,
+                session_revision=next_session.snapshot.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 events=(event,),
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = next_session
+            self._sessions[session.snapshot.session_id] = next_session
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._set_tool_call(committed_call)
             self._events[run.run_id].append(deepcopy(event))
@@ -902,7 +930,7 @@ class InMemoryLifecycleStore:
                 checkpoint,
                 command.checkpoint,
                 command.activation_id,
-                next_session.revision,
+                next_session.snapshot.revision,
                 command.usage,
             )
             interaction = command.pending_interaction
@@ -966,14 +994,14 @@ class InMemoryLifecycleStore:
             result = project_result(updated, interaction)
             commit = RunCommit(
                 run=updated,
-                session_revision=next_session.revision if command.message_delta else None,
+                session_revision=next_session.snapshot.revision if command.message_delta else None,
                 checkpoint=command.checkpoint,
                 interaction=interaction,
                 events=(event,),
                 result=result,
             )
             self._runs[run.run_id] = deepcopy(updated)
-            self._sessions[session.session_id] = next_session
+            self._sessions[session.snapshot.session_id] = next_session
             self._activations[activation.activation_id] = deepcopy(settled)
             self._checkpoints[run.run_id] = deepcopy(command.checkpoint)
             self._interactions[interaction.interaction_id] = deepcopy(interaction)
@@ -1081,7 +1109,7 @@ class InMemoryLifecycleStore:
                 )
             ]
             interaction: HumanInteraction | None = None
-            updated_session: SessionSnapshot | None = None
+            updated_session: _MemorySession | None = None
             updated_checkpoint = checkpoint
             claimed_closures: list[RunToolCallRecord] = []
             if run.phase is RunPhase.WAITING and command.settle_waiting:
@@ -1090,14 +1118,14 @@ class InMemoryLifecycleStore:
                 closure_messages = [message for _, _, message in closures]
                 current_session = self._sessions.get(
                     run.session_id,
-                    SessionSnapshot(session_id=run.session_id),
+                    _empty_session(run.session_id),
                 )
                 appended_session = self._append_messages(current_session, closure_messages)
                 if closure_messages:
                     updated_session = appended_session
                     updated_checkpoint = checkpoint.model_copy(
                         deep=True,
-                        update={"session_revision": appended_session.revision},
+                        update={"session_revision": appended_session.snapshot.revision},
                     )
                 claimed_closures = [
                     updated_call
@@ -1121,8 +1149,8 @@ class InMemoryLifecycleStore:
                     run,
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.CANCELLED,
-                    terminal_session_message_count=len(appended_session.messages),
-                    terminal_compaction=appended_session.compaction,
+                    terminal_session_message_count=len(appended_session.snapshot.messages),
+                    terminal_compaction=appended_session.snapshot.compaction,
                     revision=run.revision + 1,
                     pending_interaction_id=None,
                     cancellation_requested_at=command.now,
@@ -1159,7 +1187,9 @@ class InMemoryLifecycleStore:
                     self._results[run.run_id] = deepcopy(result)
             commit = RunCommit(
                 run=updated,
-                session_revision=updated_session.revision if updated_session is not None else None,
+                session_revision=updated_session.snapshot.revision
+                if updated_session is not None
+                else None,
                 checkpoint=updated_checkpoint,
                 interaction=interaction,
                 events=tuple(events),
@@ -1168,7 +1198,7 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             if (
                 updated_session is not None
-                and updated_session.revision != checkpoint.session_revision
+                and updated_session.snapshot.revision != checkpoint.session_revision
             ):
                 self._sessions[run.session_id] = updated_session
                 self._checkpoints[run.run_id] = deepcopy(updated_checkpoint)
@@ -1225,13 +1255,13 @@ class InMemoryLifecycleStore:
             closure_messages = [message for _, _, message in closures]
             current_session = self._sessions.get(
                 run.session_id,
-                SessionSnapshot(session_id=run.session_id),
+                _empty_session(run.session_id),
             )
             updated_session = self._append_messages(current_session, closure_messages)
             updated_checkpoint = (
                 checkpoint.model_copy(
                     deep=True,
-                    update={"session_revision": updated_session.revision},
+                    update={"session_revision": updated_session.snapshot.revision},
                 )
                 if closure_messages
                 else checkpoint
@@ -1246,8 +1276,8 @@ class InMemoryLifecycleStore:
                 run,
                 phase=RunPhase.TERMINAL,
                 stop_reason=command.stop_reason,
-                terminal_session_message_count=len(updated_session.messages),
-                terminal_compaction=updated_session.compaction,
+                terminal_session_message_count=len(updated_session.snapshot.messages),
+                terminal_compaction=updated_session.snapshot.compaction,
                 revision=run.revision + 1,
                 current_activation_id=None,
                 pending_interaction_id=None,
@@ -1280,7 +1310,7 @@ class InMemoryLifecycleStore:
             result = project_result(updated)
             commit = RunCommit(
                 run=updated,
-                session_revision=updated_session.revision if closure_messages else None,
+                session_revision=updated_session.snapshot.revision if closure_messages else None,
                 checkpoint=updated_checkpoint,
                 interaction=interaction,
                 events=(*unknown_events, terminal_event),
@@ -1350,22 +1380,22 @@ class InMemoryLifecycleStore:
             )
             closure_messages = [message for _, _, message in terminal_closures]
             terminal_message_count = (
-                len(self._sessions[run.session_id].messages) + len(closure_messages)
+                len(self._sessions[run.session_id].snapshot.messages) + len(closure_messages)
                 if command.recovery_disposition
                 in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
                 else None
             )
-            updated_session: SessionSnapshot | None = None
+            updated_session: _MemorySession | None = None
             terminal_checkpoint = checkpoint
             if closure_messages:
                 current_session = self._sessions.get(
                     run.session_id,
-                    SessionSnapshot(session_id=run.session_id),
+                    _empty_session(run.session_id),
                 )
                 updated_session = self._append_messages(current_session, closure_messages)
                 terminal_checkpoint = checkpoint.model_copy(
                     deep=True,
-                    update={"session_revision": updated_session.revision},
+                    update={"session_revision": updated_session.snapshot.revision},
                 )
             if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
                 if not claimed:
@@ -1383,7 +1413,7 @@ class InMemoryLifecycleStore:
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.OUTCOME_UNKNOWN,
                     terminal_session_message_count=terminal_message_count,
-                    terminal_compaction=self._sessions[run.session_id].compaction,
+                    terminal_compaction=self._sessions[run.session_id].snapshot.compaction,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     error=RunErrorInfo(
@@ -1420,7 +1450,7 @@ class InMemoryLifecycleStore:
                 commit = RunCommit(
                     run=updated,
                     session_revision=(
-                        updated_session.revision if updated_session is not None else None
+                        updated_session.snapshot.revision if updated_session is not None else None
                     ),
                     checkpoint=terminal_checkpoint,
                     events=events,
@@ -1447,7 +1477,7 @@ class InMemoryLifecycleStore:
                     phase=RunPhase.TERMINAL,
                     stop_reason=RunStopReason.COMPLETED,
                     terminal_session_message_count=terminal_message_count,
-                    terminal_compaction=self._sessions[run.session_id].compaction,
+                    terminal_compaction=self._sessions[run.session_id].snapshot.compaction,
                     revision=run.revision + 1,
                     current_activation_id=None,
                     last_event_sequence=terminal_sequence,
@@ -1466,7 +1496,7 @@ class InMemoryLifecycleStore:
                 commit = RunCommit(
                     run=updated,
                     session_revision=(
-                        updated_session.revision if updated_session is not None else None
+                        updated_session.snapshot.revision if updated_session is not None else None
                     ),
                     checkpoint=terminal_checkpoint,
                     events=events,
@@ -1558,13 +1588,59 @@ class InMemoryLifecycleStore:
     def load_session(self, session_id: str) -> SessionSnapshot:
         """返回 session snapshot；缺失 session 表示 revision 0 的空历史。"""
         with self._lock:
-            return deepcopy(self._sessions.get(session_id, SessionSnapshot(session_id=session_id)))
+            return deepcopy(self._sessions.get(session_id, _empty_session(session_id)).snapshot)
+
+    def load_session_header(self, session_id: str) -> SessionHeader:
+        """只复制输入准备需要的窗口，不遍历原文或发现状态。"""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return SessionHeader(session_id, 0, 0, None)
+            snapshot = session.snapshot
+            return SessionHeader(
+                session_id,
+                snapshot.revision,
+                len(snapshot.messages),
+                deepcopy(snapshot.context_window),
+            )
+
+    def load_run_context(
+        self, run_id: str, *, include_tool_discovery: bool
+    ) -> SessionContextSnapshot:
+        """在同一锁内只复制未覆盖后缀与当前 run 的保护原文。"""
+        with self._lock:
+            run = self._require_run(run_id)
+            session = self._sessions[run.session_id]
+            snapshot = session.snapshot
+            count = len(snapshot.messages)
+            start = snapshot.compaction.covered_message_count if snapshot.compaction else 0
+            initial = run.initial_session_message_count
+            protected = protected_run_indices(
+                initial,
+                count,
+                snapshot.messages[initial] if initial < count else None,
+                session.read_state.last_ordinary_user_index,
+            )
+            return SessionContextSnapshot(
+                header=SessionHeader(
+                    run.session_id, snapshot.revision, count, deepcopy(snapshot.context_window)
+                ),
+                compaction=deepcopy(snapshot.compaction),
+                raw_tail=deepcopy(tuple(snapshot.messages[start:])),
+                protected_indices=protected,
+                protected_prefix_messages=deepcopy(
+                    tuple((index, snapshot.messages[index]) for index in protected if index < start)
+                ),
+                tool_discovery=(
+                    deepcopy(session.read_state.tool_discovery) if include_tool_discovery else None
+                ),
+            )
 
     def load_session_revision(self, session_id: str) -> int:
         """只读 store-owned session 的 revision；不存在时返回 0。"""
         with self._lock:
             session = self._sessions.get(session_id)
-            return session.revision if session is not None else 0
+            return session.snapshot.revision if session is not None else 0
 
     def read_session_messages(
         self, session_id: str, *, start: int, limit: int
@@ -1574,7 +1650,7 @@ class InMemoryLifecycleStore:
             raise IrisRunStateError("消息分页要求 start >= 0 且 limit > 0")
         with self._lock:
             session = self._sessions.get(session_id)
-            messages = session.messages if session is not None else []
+            messages = session.snapshot.messages if session is not None else []
             end = min(start + limit, len(messages))
             return SessionMessagePage(
                 items=tuple(enumerate(deepcopy(messages[start:end]), start=start)),
@@ -1588,7 +1664,7 @@ class InMemoryLifecycleStore:
         """在同一锁内复制至多 limit 条本 run 消息，排除继承前缀与后续 run。"""
         with self._lock:
             run = self._require_run(run_id)
-            messages = self._sessions[run.session_id].messages
+            messages = self._sessions[run.session_id].snapshot.messages
             start, end = run_message_slice_bounds(
                 run, session_message_count=len(messages), after_count=after_count, limit=limit
             )
@@ -1648,7 +1724,7 @@ class InMemoryLifecycleStore:
         with self._lock:
             run = self._load_fork_source(source_run_id)
             point = project_fork_point(run)
-            messages = self._sessions[run.session_id].messages[: point.message_count]
+            messages = self._sessions[run.session_id].snapshot.messages[: point.message_count]
             return RunHistorySnapshot(point=point, messages=tuple(deepcopy(messages)))
 
     def fork_session(self, command: ForkSession) -> SessionSnapshot:
@@ -1675,12 +1751,16 @@ class InMemoryLifecycleStore:
             branch = SessionSnapshot.model_construct(
                 session_id=command.target_session_id,
                 revision=0,
-                messages=deepcopy(self._sessions[run.session_id].messages[: point.message_count]),
+                messages=deepcopy(
+                    self._sessions[run.session_id].snapshot.messages[: point.message_count]
+                ),
                 forked_from_run_id=run.run_id,
                 compaction=run.terminal_compaction,
                 context_window=None,
             )
-            self._sessions[branch.session_id] = branch
+            self._sessions[branch.session_id] = _MemorySession(
+                branch, advance_session_read_state(SessionReadState(), 0, branch.messages)
+            )
             return deepcopy(branch)
 
     def _load_fork_source(self, source_run_id: str) -> RunRecord:
@@ -1826,27 +1906,33 @@ class InMemoryLifecycleStore:
         self,
         run: RunRecord,
         expected_session_revision: int,
-    ) -> SessionSnapshot:
-        session = self._sessions.get(run.session_id, SessionSnapshot(session_id=run.session_id))
-        if session.revision != expected_session_revision:
+    ) -> _MemorySession:
+        session = self._sessions.get(run.session_id, _empty_session(run.session_id))
+        if session.snapshot.revision != expected_session_revision:
             raise IrisRunConflictError(
                 "session revision 已变化",
                 session_id=run.session_id,
                 expected=expected_session_revision,
-                actual=session.revision,
+                actual=session.snapshot.revision,
             )
         return session
 
     @staticmethod
-    def _append_messages(session: SessionSnapshot, delta: list[Msg]) -> SessionSnapshot:
-        """追加非空消息增量，并保留会话的直接分支来源。"""
+    def _append_messages(session: _MemorySession, delta: list[Msg]) -> _MemorySession:
+        """构造原文与派生状态候选，由 mutation 完成检查后一起安装。"""
         if not delta:
-            return deepcopy(session)
-        return session.model_copy(
-            update={
-                "revision": session.revision + 1,
-                "messages": [*session.messages, *deepcopy(delta)],
-            }
+            return session
+        snapshot = session.snapshot
+        return _MemorySession(
+            snapshot=snapshot.model_copy(
+                update={
+                    "revision": snapshot.revision + 1,
+                    "messages": [*snapshot.messages, *deepcopy(delta)],
+                }
+            ),
+            read_state=advance_session_read_state(
+                session.read_state, len(snapshot.messages), delta
+            ),
         )
 
     @staticmethod
@@ -2057,8 +2143,8 @@ class InMemoryLifecycleStore:
             run,
             phase=RunPhase.TERMINAL,
             stop_reason=RunStopReason.BUDGET_EXHAUSTED,
-            terminal_session_message_count=len(self._sessions[run.session_id].messages),
-            terminal_compaction=self._sessions[run.session_id].compaction,
+            terminal_session_message_count=len(self._sessions[run.session_id].snapshot.messages),
+            terminal_compaction=self._sessions[run.session_id].snapshot.compaction,
             revision=run.revision + 1,
             current_activation_id=None,
             last_event_sequence=sequence,

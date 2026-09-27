@@ -21,6 +21,8 @@ from .history import (
     ForkPointPage,
     RunHistorySnapshot,
     RunMessageSlice,
+    SessionContextSnapshot,
+    SessionHeader,
     SessionMessagePage,
 )
 from .models import (
@@ -365,6 +367,12 @@ class LifecycleStore(Protocol):
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
+
+    def load_session_header(self, session_id: str) -> SessionHeader: ...
+
+    def load_run_context(
+        self, run_id: str, *, include_tool_discovery: bool
+    ) -> SessionContextSnapshot: ...
 
     def read_session_messages(
         self, session_id: str, *, start: int, limit: int

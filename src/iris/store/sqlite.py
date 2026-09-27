@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v9 的同步 SQLite store。"""
+"""精确 lifecycle schema v10 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ from ..lifecycle.history import (
     ForkPointPage,
     RunHistorySnapshot,
     RunMessageSlice,
+    SessionContextSnapshot,
+    SessionHeader,
     SessionMessagePage,
 )
 from ..lifecycle.models import (
@@ -58,7 +60,9 @@ from ..lifecycle.models import (
     RunUsage,
     SessionCompaction,
     SessionContextWindow,
+    SessionReadState,
     SessionSnapshot,
+    SessionToolDiscovery,
     SubagentRunLink,
     ToolCallPhase,
     project_result,
@@ -105,7 +109,8 @@ from ._session_history import (
     validate_context_window_initialization,
     validate_fork_source,
 )
-from ._sqlite_messages import decode_session_messages
+from ._session_projection import advance_session_read_state, protected_run_indices
+from ._sqlite_messages import decode_session_message, decode_session_messages
 from ._sqlite_schema import create_schema, require_exact_schema
 from ._subagent import (
     validate_current_proxy,
@@ -121,6 +126,7 @@ _CommandT = TypeVar("_CommandT")
 _ReadT = TypeVar("_ReadT")
 _RESPONSE_ADAPTER = TypeAdapter(HumanInteractionResponse)
 _SESSION_REVISION_ADAPTER = TypeAdapter(Annotated[int, Field(ge=0, strict=True)])
+_OPTIONAL_INDEX_ADAPTER = TypeAdapter(Annotated[int, Field(ge=0, strict=True)] | None)
 
 
 class _ActiveCommand(Protocol):
@@ -656,6 +662,154 @@ class SQLiteStore:
 
         return self._read(operation, read)
 
+    def load_session_header(self, session_id: str) -> SessionHeader:
+        """只读输入准备所需字段，不查询原文、摘要或发现 JSON。"""
+        operation = "load_session_header"
+
+        def read(connection: sqlite3.Connection) -> SessionHeader:
+            row = connection.execute(
+                "SELECT session_id, revision, message_count, context_window_json "
+                "FROM sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return SessionHeader(session_id, 0, 0, None)
+            return _decode_row(_row_to_session_header, row, path=self.path, operation=operation)
+
+        return self._read(operation, read)
+
+    def load_run_context(
+        self, run_id: str, *, include_tool_discovery: bool
+    ) -> SessionContextSnapshot:
+        """同一读取快照取得有效后缀和稀疏锚点，释放锁后解码原文。"""
+        operation = "load_run_context"
+
+        def read(
+            connection: sqlite3.Connection,
+        ) -> tuple[
+            _SessionMetadata,
+            int,
+            int | None,
+            SessionToolDiscovery | None,
+            list[sqlite3.Row],
+            dict[int, sqlite3.Row],
+        ]:
+            run = connection.execute(
+                "SELECT session_id, initial_session_message_count FROM agent_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if run is None:
+                raise IrisRunNotFoundError("run 不存在", run_id=run_id)
+            initial = _decode_row(
+                lambda row: _SESSION_REVISION_ADAPTER.validate_python(
+                    row["initial_session_message_count"]
+                ),
+                run,
+                path=self.path,
+                operation=operation,
+            )
+            metadata = self._select_session_metadata(
+                connection, run["session_id"], operation=operation
+            )
+            if metadata is None:
+                raise IrisRunPersistenceError("run 缺少 session", run_id=run_id)
+            fields = "last_ordinary_user_index"
+            if include_tool_discovery:
+                fields += ", tool_discovery_json"
+            state_row = connection.execute(
+                f"SELECT {fields} FROM sessions WHERE session_id = ?",
+                (metadata.session_id,),
+            ).fetchone()
+            last_user = _decode_row(
+                lambda row: _OPTIONAL_INDEX_ADAPTER.validate_python(
+                    row["last_ordinary_user_index"]
+                ),
+                state_row,
+                path=self.path,
+                operation=operation,
+            )
+            discovery = (
+                _decode_row(_row_to_tool_discovery, state_row, path=self.path, operation=operation)
+                if include_tool_discovery
+                else None
+            )
+            start = metadata.compaction.covered_message_count if metadata.compaction else 0
+            rows = connection.execute(
+                "SELECT ordinal, message_json FROM session_messages "
+                "WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal",
+                (metadata.session_id, start, metadata.message_count),
+            ).fetchall()
+            candidates: set[int] = set()
+            if initial < metadata.message_count:
+                candidates.add(initial)
+                if initial + 1 < metadata.message_count:
+                    candidates.add(initial + 1)
+                if last_user is not None and initial <= last_user < metadata.message_count:
+                    candidates.add(last_user)
+            prefix_indices = sorted(index for index in candidates if index < start)
+            prefix = {}
+            if prefix_indices:
+                placeholders = ", ".join("?" for _ in prefix_indices)
+                prefix = {
+                    row["ordinal"] - 1: row
+                    for row in connection.execute(
+                        "SELECT ordinal, message_json FROM session_messages "
+                        f"WHERE session_id = ? AND ordinal IN ({placeholders}) ORDER BY ordinal",
+                        (metadata.session_id, *(index + 1 for index in prefix_indices)),
+                    ).fetchall()
+                }
+            return metadata, initial, last_user, discovery, rows, prefix
+
+        metadata, initial, last_user, discovery, rows, prefix_rows = self._read(operation, read)
+        start = metadata.compaction.covered_message_count if metadata.compaction else 0
+        tail = tuple(
+            decode_session_messages(
+                rows,
+                expected_count=metadata.message_count - start,
+                start_count=start,
+                path=self.path,
+                operation=operation,
+            )
+        )
+        prefix: dict[int, Msg] = {}
+
+        def message_at(index: int) -> Msg:
+            if index >= start:
+                return tail[index - start]
+            if index not in prefix:
+                try:
+                    row = prefix_rows[index]
+                except KeyError as exc:
+                    raise IrisRunPersistenceError(
+                        "session 保护消息缺失",
+                        path=str(self.path),
+                        operation=operation,
+                    ) from exc
+                prefix[index] = decode_session_message(row, path=self.path, operation=operation)
+            return prefix[index]
+
+        protected = protected_run_indices(
+            initial,
+            metadata.message_count,
+            message_at(initial) if initial < metadata.message_count else None,
+            last_user,
+        )
+        return SessionContextSnapshot(
+            header=SessionHeader(
+                metadata.session_id,
+                metadata.revision,
+                metadata.message_count,
+                metadata.context_window,
+            ),
+            compaction=metadata.compaction,
+            raw_tail=tail,
+            protected_indices=protected,
+            protected_prefix_messages=tuple(
+                (index, message_at(index)) for index in protected if index < start
+            ),
+            tool_discovery=discovery,
+        )
+
     def read_session_messages(
         self, session_id: str, *, start: int, limit: int
     ) -> SessionMessagePage:
@@ -836,6 +990,17 @@ class SQLiteStore:
                     )
                     branch = self._select_session(
                         connection, command.target_session_id, operation=operation
+                    )
+                    read_state = advance_session_read_state(SessionReadState(), 0, branch.messages)
+                    _execute(
+                        connection,
+                        "UPDATE sessions SET tool_discovery_json = ?, last_ordinary_user_index = ? "
+                        "WHERE session_id = ?",
+                        (
+                            _dump_json(read_state.tool_discovery),
+                            read_state.last_ordinary_user_index,
+                            command.target_session_id,
+                        ),
                     )
                     connection.commit()
                     return branch
@@ -2987,11 +3152,31 @@ class SQLiteStore:
         """CAS 推进 session metadata，并只插入本次 message delta。"""
         next_revision = current.revision + 1
         next_message_count = current.message_count + len(message_delta)
+        assignments = ""
+        projection_values: list[object] = []
+        if message_delta:
+            row = connection.execute(
+                "SELECT tool_discovery_json, last_ordinary_user_index FROM sessions "
+                "WHERE session_id = ?",
+                (current.session_id,),
+            ).fetchone()
+            read_state = _decode_row(
+                _row_to_session_read_state, row, path=self.path, operation="append_messages"
+            )
+            updated_state = advance_session_read_state(
+                read_state, current.message_count, message_delta
+            )
+            if updated_state.tool_discovery is not read_state.tool_discovery:
+                assignments += ", tool_discovery_json = ?"
+                projection_values.append(_dump_json(updated_state.tool_discovery))
+            if updated_state.last_ordinary_user_index != read_state.last_ordinary_user_index:
+                assignments += ", last_ordinary_user_index = ?"
+                projection_values.append(updated_state.last_ordinary_user_index)
         cursor = _execute(
             connection,
-            """UPDATE sessions
+            f"""UPDATE sessions
             SET revision = ?, message_count = ?, updated_at = ?,
-                context_window_json = COALESCE(?, context_window_json)
+                context_window_json = COALESCE(?, context_window_json){assignments}
             WHERE session_id = ? AND revision = ? AND message_count = ?""",
             (
                 next_revision,
@@ -3002,6 +3187,7 @@ class SQLiteStore:
                     if initial_context_window is not None
                     else None
                 ),
+                *projection_values,
                 current.session_id,
                 current.revision,
                 current.message_count,
@@ -3564,6 +3750,35 @@ def _project_durable_result(
             path=str(path),
             operation=operation,
         ) from exc
+
+
+def _row_to_session_header(row: sqlite3.Row) -> SessionHeader:
+    """在持久化读取边界解析窄 header 字段。"""
+    return SessionHeader(
+        session_id=row["session_id"],
+        revision=_SESSION_REVISION_ADAPTER.validate_python(row["revision"]),
+        message_count=_SESSION_REVISION_ADAPTER.validate_python(row["message_count"]),
+        context_window=(
+            SessionContextWindow.model_validate_json(row["context_window_json"])
+            if row["context_window_json"] is not None
+            else None
+        ),
+    )
+
+
+def _row_to_tool_discovery(row: sqlite3.Row) -> SessionToolDiscovery:
+    """从独立 JSON 字段解析持久发现投影。"""
+    return SessionToolDiscovery.model_validate_json(row["tool_discovery_json"])
+
+
+def _row_to_session_read_state(row: sqlite3.Row) -> SessionReadState:
+    """组合已经解析的发现状态与普通输入指针。"""
+    return SessionReadState.model_construct(
+        tool_discovery=_row_to_tool_discovery(row),
+        last_ordinary_user_index=_OPTIONAL_INDEX_ADAPTER.validate_python(
+            row["last_ordinary_user_index"]
+        ),
+    )
 
 
 def _row_to_session_metadata(row: sqlite3.Row) -> _SessionMetadata:

@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v9 schema 与 session history 的持久化契约测试。"""
+"""Lifecycle SQLite v10 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
@@ -44,6 +44,8 @@ _COLUMNS = {
         "forked_from_run_id",
         "compaction_json",
         "context_window_json",
+        "tool_discovery_json",
+        "last_ordinary_user_index",
     ],
     "session_messages": ["session_id", "ordinal", "message_json"],
     "agent_runs": [
@@ -149,7 +151,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v9_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v10_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -190,7 +192,7 @@ def test_empty_database_creates_exact_v9_schema_and_reopens(tmp_path: Path) -> N
     assert tables == _TABLES
     assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 9)]
+    assert identity == [("agent_lifecycle", 10)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
@@ -210,7 +212,8 @@ def test_empty_database_creates_exact_v9_schema_and_reopens(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize(
-    "kind", ["legacy", "v3", "v4", "v5", "v6", "v7", "v8", "extra", "missing", "unknown_version"]
+    "kind",
+    ["legacy", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "extra", "missing", "unknown_version"],
 )
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
@@ -249,6 +252,10 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("UPDATE lifecycle_schema SET version = 7")
             elif kind == "v8":
                 connection.execute("UPDATE lifecycle_schema SET version = 8")
+            elif kind == "v9":
+                connection.execute("ALTER TABLE sessions DROP COLUMN tool_discovery_json")
+                connection.execute("ALTER TABLE sessions DROP COLUMN last_ordinary_user_index")
+                connection.execute("UPDATE lifecycle_schema SET version = 9")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()

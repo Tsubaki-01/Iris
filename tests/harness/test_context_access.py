@@ -6,9 +6,11 @@ import pytest
 
 from iris.exceptions import IrisToolExecutionError
 from iris.harness._context_access import ContextAccess
-from iris.lifecycle import SessionSnapshot
+from iris.lifecycle import SessionReadState, SessionSnapshot
 from iris.message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
+from iris.store._session_projection import advance_session_read_state
+from iris.store.in_memory import _MemorySession
 from iris.tools import (
     ToolArtifactStore,
     ToolExecutionContext,
@@ -22,7 +24,10 @@ from iris.tools.context_access import ContextReadInput, ContextReadTool, Context
 def _access(messages: list[Msg]) -> ContextAccess:
     """准备专属于会话 one 的已提交原文 fixture。"""
     store = InMemoryLifecycleStore()
-    store._sessions["one"] = SessionSnapshot(session_id="one", messages=messages)
+    snapshot = SessionSnapshot(session_id="one", messages=messages)
+    store._sessions["one"] = _MemorySession(
+        snapshot, advance_session_read_state(SessionReadState(), 0, messages)
+    )
     return ContextAccess(store)
 
 
