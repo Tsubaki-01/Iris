@@ -17,8 +17,9 @@ from ..hitl import HumanInteraction, HumanInteractionRequest, make_call_fingerpr
 from ..lifecycle import (
     CheckpointResumability,
     SessionCompaction,
+    SessionContextSnapshot,
     SessionContextWindow,
-    SessionSnapshot,
+    SessionHeader,
     TokenUsage,
 )
 from ..lifecycle.models import SubagentRunLink
@@ -144,8 +145,11 @@ class RuntimeSuspensionResult:
 class RuntimeCommitPort(Protocol):
     """Runner-owned required commit boundary。"""
 
-    def load_session(self) -> SessionSnapshot:
-        """读取 port 绑定 session 的 revisioned history。"""
+    def load_session_header(self) -> SessionHeader:
+        """只读输入准备所需的计数、上下文窗口与 revision。"""
+
+    def load_model_context(self, *, include_tool_discovery: bool) -> SessionContextSnapshot:
+        """读取当前 run 的有效历史及同一版本的发现状态。"""
 
     def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
         """原子归档输入组并进入 before_model，不消耗模型步。"""

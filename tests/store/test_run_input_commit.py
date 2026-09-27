@@ -31,6 +31,7 @@ from iris.message import Msg
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 
 from .test_lifecycle_store_contract import _compaction_command
+from .test_session_projection import _assert_session_projection
 
 NOW = datetime(2026, 9, 19, tzinfo=UTC)
 
@@ -107,6 +108,7 @@ def test_input_commit_saves_history_and_cursor_without_model_step(store: Lifecyc
     events = store.list_events(command.run_id)
 
     committed = store.commit_run_input(command)
+    _assert_session_projection(store, command.run_id)
 
     assert before is not None
     assert committed.run.revision == before.revision + 1
@@ -143,6 +145,7 @@ def test_input_commit_rejects_changed_facts_atomically(
     command = _input_command(store)
     before = store.load_run(command.run_id)
     checkpoint_before = store.load_checkpoint(command.run_id)
+    _assert_session_projection(store, command.run_id)
     if mismatch == "session":
         command = replace(command, expected_session_revision=1)
     elif mismatch == "fence":
@@ -168,6 +171,7 @@ def test_input_commit_rejects_changed_facts_atomically(
     assert store.load_checkpoint(command.run_id) == checkpoint_before
     assert store.load_session("session").messages == []
     assert store.load_session("session").context_window is None
+    _assert_session_projection(store, command.run_id)
 
 
 def test_input_requires_explicit_initial_window(store: LifecycleStore) -> None:

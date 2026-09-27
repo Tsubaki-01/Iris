@@ -35,7 +35,10 @@ claim 与时间，使用当前 runner 的配置继续。terminal 读取、普通
 
 创建 run 和 resume/recover 的 checkpoint 检查使用 `load_session_revision()`，不为取得版本号
 加载完整历史；检查仍与 store 当前 revision 独立比较。Commit port 初始化复用已经读取的
-checkpoint revision，Runtime 需要消息和上下文窗口时仍显式读取完整 session。
+checkpoint revision。输入准备通过绑定 port 的 `load_session_header()` 只取元信息；主模型步骤
+通过 `load_model_context(include_tool_discovery=...)` 读取一致的有效历史快照，两个入口都更新
+port 持有的 session revision。后者由 store 的 `load_run_context(run_id, ...)` 提供摘要、未覆盖
+后缀及当前 run 保护锚点，按需包含发现投影。公开 `get_session()` 仍返回完整原文。
 
 root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
 cancel 的 durable result 或观察超时不代表 body 清理、事件投递已经结束。active 时关闭会报错，

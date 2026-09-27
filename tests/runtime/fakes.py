@@ -16,13 +16,15 @@ from iris.lifecycle import (
     CheckpointResumability,
     RuntimeExecutionOptions,
     SessionCompaction,
+    SessionContextSnapshot,
     SessionContextWindow,
-    SessionSnapshot,
+    SessionHeader,
+    SessionReadState,
     TokenUsage,
 )
 from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryService
-from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, ToolUseBlock
+from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, Msg, ToolUseBlock
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
     AgentRuntime,
@@ -44,6 +46,7 @@ from iris.runtime import (
     ToolBridge,
     ToolCallClaim,
 )
+from iris.store._session_projection import advance_session_read_state, protected_run_indices
 from iris.tools import (
     DefaultPermissionPolicy,
     PermissionPolicy,
@@ -53,6 +56,20 @@ from iris.tools import (
     ToolResult,
 )
 from iris.tools.subagent import ChildWaiting, SubagentParentCall
+
+
+def history_snapshot(
+    messages: Sequence[Msg],
+    *,
+    initial_count: int = 0,
+    compaction: SessionCompaction | None = None,
+) -> SessionContextSnapshot:
+    """按新端口契约为纯投影测试构造带绝对位置的有效历史。"""
+    port = FakeRuntimeCommitPort(
+        start_activation(initial_session_message_count=initial_count), messages=messages
+    )
+    port.compaction = compaction
+    return port.load_model_context(include_tool_discovery=True)
 
 
 class MutableCancellationSignal:
@@ -117,11 +134,10 @@ class FakeRuntimeCommitPort:
         cancellation_requested: bool = False,
         fail_at: str | None = None,
     ) -> None:
-        from iris.message import Msg
-
         self.activation = activation
         self.cursor = activation.cursor
         self.messages = [Msg.model_validate(message) for message in messages]
+        self._read_state = advance_session_read_state(SessionReadState(), 0, self.messages)
         self.max_model_steps = max_model_steps
         self.deadline = remaining_deadline_seconds
         self.cancel_requested = cancellation_requested
@@ -147,16 +163,42 @@ class FakeRuntimeCommitPort:
         self.subagent_rebinds: list[ChildWaiting] = []
         self.subagent_finalizations: list[ToolResult] = []
 
-    def load_session(self) -> SessionSnapshot:
-        """返回当前 revisioned history。"""
-        self._record("load_session")
-        return SessionSnapshot(
-            session_id=self.activation.session_id,
-            revision=self._revision,
-            messages=list(self.messages),
-            compaction=self.compaction,
-            context_window=self.context_window,
+    def load_session_header(self) -> SessionHeader:
+        """返回输入准备的窄快照。"""
+        self._record("load_session_header")
+        return SessionHeader(
+            self.activation.session_id, self._revision, len(self.messages), self.context_window
         )
+
+    def load_model_context(self, *, include_tool_discovery: bool) -> SessionContextSnapshot:
+        """按真实 store 契约返回有效后缀、保护锚点和发现事实。"""
+        self._record("load_model_context")
+        count = len(self.messages)
+        initial = self.activation.initial_session_message_count
+        start = self.compaction.covered_message_count if self.compaction else 0
+        protected = protected_run_indices(
+            initial,
+            count,
+            self.messages[initial] if initial < count else None,
+            self._read_state.last_ordinary_user_index,
+        )
+        return SessionContextSnapshot(
+            header=SessionHeader(
+                self.activation.session_id, self._revision, count, self.context_window
+            ),
+            compaction=self.compaction,
+            raw_tail=tuple(self.messages[start:]),
+            protected_indices=protected,
+            protected_prefix_messages=tuple(
+                (index, self.messages[index]) for index in protected if index < start
+            ),
+            tool_discovery=self._read_state.tool_discovery if include_tool_discovery else None,
+        )
+
+    def _append_messages(self, delta: Sequence[Msg]) -> None:
+        """让测试端口的投影与提交消息同步推进。"""
+        self._read_state = advance_session_read_state(self._read_state, len(self.messages), delta)
+        self.messages.extend(delta)
 
     def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
         """归档输入组，保持模型计数和 reservation 不变。"""
@@ -164,7 +206,7 @@ class FakeRuntimeCommitPort:
         self._require_cursor(commit.cursor_before)
         if commit.cursor_before.position != "before_input":
             raise IrisRunConflictError("输入只能在 before_input 提交")
-        self.messages.extend(commit.message_delta)
+        self._append_messages(commit.message_delta)
         if commit.initial_context_window is not None:
             self.context_window = commit.initial_context_window
         self.cursor = commit.cursor_after
@@ -196,7 +238,7 @@ class FakeRuntimeCommitPort:
         self._consume_reservation(commit.cursor_before)
         self._require_model_transition(commit)
         self._remember_prepared_calls(commit.prepared_tool_calls)
-        self.messages.extend(commit.message_delta)
+        self._append_messages(commit.message_delta)
         self.cursor = commit.cursor_after
         self._revision += 1
         self.model_commits.append(commit)
@@ -250,7 +292,7 @@ class FakeRuntimeCommitPort:
         elif not self._claimless_result_allowed(commit):
             raise IrisRunConflictError("fake port 普通 effect result 缺少 durable claim")
         self._require_single_step_cursor(commit)
-        self.messages.extend(commit.message_delta)
+        self._append_messages(commit.message_delta)
         self.cursor = commit.cursor_after
         self._revision += 1
         self.tool_commits.append(commit)
@@ -276,7 +318,7 @@ class FakeRuntimeCommitPort:
         self._interaction_kinds[suspension.interaction_request.tool_call.tool_call_id] = (
             interaction_kind
         )
-        self.messages.extend(suspension.message_delta)
+        self._append_messages(suspension.message_delta)
         self.cursor = suspension.cursor
         self._revision += 1
         self.suspensions.append(suspension)
@@ -346,7 +388,7 @@ class FakeRuntimeCommitPort:
         """记录 child final 并提交唯一 parent message。"""
         self._record("finalize_subagent_result")
         self.subagent_finalizations.append(result)
-        self.messages.append(result.to_msg())
+        self._append_messages((result.to_msg(),))
         self.cursor = cursor_after
         self._revision += 1
         return self.cursor

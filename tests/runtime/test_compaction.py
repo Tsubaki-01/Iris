@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+from fakes import history_snapshot
+
 from iris.agents import CompactionConfig
 from iris.lifecycle import SessionCompaction
 from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
-from iris.runtime._request_measurement import measure_request
+from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.compaction import (
     project_history,
-    protected_message_indices,
     select_compaction_end,
 )
 
@@ -45,9 +47,7 @@ def _select(
     build_request: Callable[[list[Msg]], LLMRequest] = _request,
 ) -> int | None:
     return select_compaction_end(
-        messages=messages,
-        previous_compaction=previous,
-        protected_indices=protected_message_indices(messages, initial_count),
+        snapshot=history_snapshot(messages, initial_count=initial_count, compaction=previous),
         config=config or CompactionConfig(input_budget_tokens=1000),
         build_request=lambda history: measure_request(build_request(history), _estimate),
     )
@@ -66,7 +66,7 @@ def test_protects_current_run_bci_input_and_metadata_free_latest_steer() -> None
         Msg.tool_result(tool_use_id="call", content="结果"),
     ]
 
-    assert protected_message_indices(messages, 3) == (3, 4, 7)
+    assert history_snapshot(messages, initial_count=3).protected_indices == (3, 4, 7)
 
 
 def test_current_run_without_bci_never_borrows_old_context() -> None:
@@ -78,8 +78,8 @@ def test_current_run_without_bci_never_borrows_old_context() -> None:
         Msg.assistant("处理中"),
     ]
 
-    assert protected_message_indices(messages, 3) == (3,)
-    assert protected_message_indices(messages, len(messages)) == ()
+    assert history_snapshot(messages, initial_count=3).protected_indices == (3,)
+    assert history_snapshot(messages, initial_count=len(messages)).protected_indices == ()
 
 
 def test_projection_restores_covered_anchors_once_in_original_order() -> None:
@@ -91,34 +91,32 @@ def test_projection_restores_covered_anchors_once_in_original_order() -> None:
         Msg.user("最新方向"),
         Msg.assistant("第二步"),
     ]
-    protected = protected_message_indices(messages, 1)
     compacted = SessionCompaction(summary="工作摘要", covered_message_count=4)
 
-    projected = project_history(messages, compacted, protected)
+    snapshot = history_snapshot(messages, initial_count=1, compaction=compacted)
+    projected = project_history(snapshot, compacted)
 
     assert projected[0].text == "<summary>\n工作摘要\n</summary>"
     assert projected[0].sender == "context"
     assert projected[1:] == [messages[1], messages[2], messages[4], messages[5]]
     assert messages[3].text == "第一步"
-    assert project_history(messages, None, protected) == messages
+    assert project_history(history_snapshot(messages, initial_count=1), None) == messages
 
 
 def test_repeated_projection_uses_only_latest_summary_with_one_wrapper() -> None:
     messages = [Msg.user("任务"), Msg.assistant("第一步"), Msg.assistant("第二步")]
-    protected = protected_message_indices(messages, 0)
+    compacted = SessionCompaction(summary="第一次", covered_message_count=2)
+    snapshot = history_snapshot(messages, compaction=compacted)
 
-    first = project_history(
-        messages, SessionCompaction(summary="第一次", covered_message_count=2), protected
-    )
-    second = project_history(
-        messages, SessionCompaction(summary="第二次", covered_message_count=3), protected
-    )
+    first = project_history(snapshot, compacted)
+    second = project_history(snapshot, SessionCompaction(summary="第二次", covered_message_count=3))
 
     assert first[1:] == [messages[0], messages[2]]
     assert [message.text for message in second] == ["<summary>\n第二次\n</summary>", "任务"]
 
 
-def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch() -> None:
+@pytest.mark.parametrize("covered", [0, 2])
+def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch(covered: int) -> None:
     messages = [
         Msg.user("旧" * 500),
         Msg.assistant("旧" * 500),
@@ -136,13 +134,20 @@ def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch() -> None:
         Msg.tool_result(tool_use_id="c", content="C" * 50),
     ]
 
-    end = _select(messages, initial_count=2, config=CompactionConfig(input_budget_tokens=1200))
+    previous = (
+        SessionCompaction(summary="已有摘要", covered_message_count=covered) if covered else None
+    )
+    end = _select(
+        messages,
+        initial_count=2,
+        previous=previous,
+        config=CompactionConfig(input_budget_tokens=1200),
+    )
 
     assert end == 6
     projected = project_history(
-        messages,
+        history_snapshot(messages, initial_count=2, compaction=previous),
         SessionCompaction(summary="旧步骤摘要", covered_message_count=end),
-        protected_message_indices(messages, 2),
     )
     assert projected[1:] == [messages[2], messages[6], messages[7]]
 
@@ -180,9 +185,8 @@ def test_oversized_latest_group_allows_empty_suffix_and_preserves_anchor() -> No
 
     assert end == len(messages)
     assert project_history(
-        messages,
+        history_snapshot(messages),
         SessionCompaction(summary="结果摘要", covered_message_count=end),
-        (0,),
     )[1:] == [messages[0]]
 
 
@@ -242,3 +246,79 @@ def test_existing_summary_boundary_only_advances_over_new_complete_groups() -> N
     previous = SessionCompaction(summary="已有摘要", covered_message_count=2)
 
     assert _select(messages, initial_count=3, previous=previous) == 3
+
+
+@pytest.mark.parametrize("covered", [2, 3, 5, 6, 7, 8])
+def test_sparse_history_candidates_equal_full_history_projection(covered: int) -> None:
+    """摘要推进跨过后缀内输入和steer时，它们转为保护前缀且只出现一次。"""
+    messages = [
+        Msg.user("old question"),
+        Msg.assistant("old answer"),
+        Msg.assistant("old continuation"),
+        Msg.user("BCI", sender="context", metadata={"context_kind": "before_current_input"}),
+        Msg.user("current input"),
+        Msg.assistant("working"),
+        Msg.user("latest steer"),
+        Msg.assistant("new observation"),
+    ]
+    previous = SessionCompaction(summary="previous", covered_message_count=covered)
+    snapshot = history_snapshot(messages, initial_count=3, compaction=previous)
+    protected = (3, 4, 6)
+    assert snapshot.header.message_count == len(messages)
+    assert snapshot.raw_tail == tuple(messages[covered:])
+    assert snapshot.protected_indices == protected
+    assert snapshot.protected_prefix_messages == tuple(
+        (index, messages[index]) for index in protected if index < covered
+    )
+    for end in (index for index in (2, 3, 5, 6, 7, 8) if index >= covered):
+        candidate = SessionCompaction(summary=f"summary-{end}", covered_message_count=end)
+        expected = [
+            Msg.user(f"<summary>\nsummary-{end}\n</summary>", sender="context"),
+            *(messages[index] for index in protected if index < end),
+            *messages[end:],
+        ]
+        assert project_history(snapshot, candidate) == expected
+
+
+def test_empty_tail_keeps_prefix_anchors_without_new_compaction_work() -> None:
+    """C=N时只装配摘要和保护原文，选切点不计量任何候选。"""
+    messages = [Msg.assistant("old"), Msg.user("input"), Msg.assistant("work"), Msg.user("steer")]
+    compaction = SessionCompaction(summary="all covered", covered_message_count=len(messages))
+    snapshot = history_snapshot(messages, initial_count=1, compaction=compaction)
+    assert snapshot.raw_tail == ()
+    assert snapshot.protected_indices == (1, 3)
+    assert project_history(snapshot, compaction)[1:] == [messages[1], messages[3]]
+    requests: list[list[Msg]] = []
+
+    def build(history: list[Msg]) -> MeasuredRequest:
+        requests.append(history)
+        return measure_request(_request(history), _estimate)
+
+    assert (
+        select_compaction_end(snapshot=snapshot, config=CompactionConfig(), build_request=build)
+        is None
+    )
+    assert requests == []
+
+
+def test_documented_boundary_example_preserves_absolute_positions() -> None:
+    """设计实例中122从后缀转为保护前缀，94/95仍保留且不重复。"""
+    messages = [Msg.assistant(f"message {index}") for index in range(136)]
+    messages[94] = Msg.user(
+        "BCI", sender="context", metadata={"context_kind": "before_current_input"}
+    )
+    messages[95] = Msg.user("input")
+    messages[122] = Msg.user("latest steer")
+    previous = SessionCompaction(summary="previous", covered_message_count=100)
+    snapshot = history_snapshot(messages, initial_count=94, compaction=previous)
+    assert snapshot.protected_indices == (94, 95, 122)
+    assert snapshot.protected_prefix_messages == ((94, messages[94]), (95, messages[95]))
+    assert snapshot.raw_tail == tuple(messages[100:])
+    assert project_history(snapshot, previous)[1:] == [messages[94], messages[95], *messages[100:]]
+    candidate = SessionCompaction(summary="next", covered_message_count=128)
+    assert project_history(snapshot, candidate)[1:] == [
+        messages[94],
+        messages[95],
+        messages[122],
+        *messages[128:],
+    ]

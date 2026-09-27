@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from fakes import history_snapshot
+
 from iris.agents import AgentConfig
 from iris.context import ContextBuilder, ContextBuildInput, ContextSection, ContextSlot
 from iris.lifecycle import SessionCompaction
 from iris.message import Msg
 from iris.runtime import RuntimeMessageAssembler
-from iris.runtime.compaction import project_history, protected_message_indices
+from iris.runtime.compaction import project_history
 
 
 def test_structured_context_keeps_memory_history_before_current_input_order() -> None:
@@ -54,8 +56,8 @@ def test_compacted_history_keeps_fixed_sections_and_unarchived_turn_in_order() -
     )
     raw = [Msg.user("旧任务"), Msg.assistant("旧结果"), Msg.user("最近原文")]
     compaction = SessionCompaction(summary="历史摘要", covered_message_count=2)
-    protected = protected_message_indices(raw, initial_session_message_count=len(raw))
-    history = project_history(raw, compaction, protected)
+    snapshot = history_snapshot(raw, initial_count=len(raw), compaction=compaction)
+    history = project_history(snapshot, compaction)
     current = Msg.user("尚未归档的新任务")
     assembler = RuntimeMessageAssembler()
     conversation = assembler.build_conversation(

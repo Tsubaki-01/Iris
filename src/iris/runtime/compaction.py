@@ -9,62 +9,29 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..agents import CompactionConfig
-from ..lifecycle import SessionCompaction
-from ..message import Msg, Role
+from ..lifecycle import SessionCompaction, SessionContextSnapshot
+from ..lifecycle.history import is_ordinary_user
+from ..message import Msg
 from ._request_measurement import MeasuredRequest
 
 
-def protected_message_indices(
-    messages: list[Msg], initial_session_message_count: int
-) -> tuple[int, ...]:
-    """定位本 run 已归档的 BCI、原始 input 和最新普通用户 steer。
-
-    输入阶段按 BCI（可选）、input 一次归档；run 起点之前的 context 不属于
-    当前任务。工具结果虽然也使用 user role，但不能被当作 steer。
-    """
-    if initial_session_message_count == len(messages):
-        return ()
-
-    original_input = initial_session_message_count
-    protected: set[int] = set()
-    if messages[original_input].metadata.get("context_kind") == "before_current_input":
-        protected.add(original_input)
-        original_input += 1
-    protected.add(original_input)
-
-    latest_steer = next(
-        (
-            index
-            for index in range(len(messages) - 1, original_input, -1)
-            if _is_ordinary_user(messages[index])
-        ),
-        original_input,
-    )
-    protected.add(latest_steer)
-    return tuple(sorted(protected))
-
-
 def project_history(
-    messages: list[Msg],
+    snapshot: SessionContextSnapshot,
     compaction: SessionCompaction | None,
-    protected_indices: tuple[int, ...],
 ) -> list[Msg]:
     """构造摘要、已覆盖锚点和未覆盖原文组成的模型历史视图。"""
     if compaction is None:
-        return list(messages)
+        return list(snapshot.raw_tail)
     return _project_with_summary(
-        messages,
+        snapshot,
         covered_count=compaction.covered_message_count,
-        protected_indices=protected_indices,
         summary=compaction.summary,
     )
 
 
 def select_compaction_end(
     *,
-    messages: list[Msg],
-    previous_compaction: SessionCompaction | None,
-    protected_indices: tuple[int, ...],
+    snapshot: SessionContextSnapshot,
     config: CompactionConfig,
     build_request: Callable[[list[Msg]], MeasuredRequest],
 ) -> int | None:
@@ -75,31 +42,39 @@ def select_compaction_end(
     S 只是生成上限，连空 suffix 的规划都超额时仍返回最靠后的合法边界，
     由 runtime 使用真实摘要检查最终请求大小。None 只表示没有新增切点。
     """
-    previous_end = previous_compaction.covered_message_count if previous_compaction else 0
+    previous_end = snapshot.compaction.covered_message_count if snapshot.compaction else 0
+    message_count = snapshot.header.message_count
     first_compressible = next(
-        (index for index in range(previous_end, len(messages)) if index not in protected_indices),
+        (
+            index
+            for index in range(previous_end, message_count)
+            if index not in snapshot.protected_indices
+        ),
         None,
     )
     if first_compressible is None:
         return None
-    ends = [end for end in _history_group_ends(messages) if end > first_compressible]
+    ends = [
+        previous_end + end
+        for end in _history_group_ends(list(snapshot.raw_tail))
+        if previous_end + end > first_compressible
+    ]
     if not ends:
         return None
 
     def planned_input_tokens(end: int) -> int:
         history = _project_with_summary(
-            messages,
+            snapshot,
             covered_count=end,
-            protected_indices=protected_indices,
             summary="",
         )
         return build_request(history).input_tokens
 
     # 空摘要仍保留完整包装；实际正文的最大额度在容量判定时单独预留。
-    base_tokens = planned_input_tokens(len(messages))
+    base_tokens = planned_input_tokens(message_count)
     selected_end = ends[-1]
     selected_tokens = (
-        base_tokens if selected_end == len(messages) else planned_input_tokens(selected_end)
+        base_tokens if selected_end == message_count else planned_input_tokens(selected_end)
     )
     if selected_tokens + config.summary_tokens > config.trigger_tokens:
         return selected_end
@@ -116,21 +91,23 @@ def select_compaction_end(
 
 
 def _project_with_summary(
-    messages: list[Msg],
+    snapshot: SessionContextSnapshot,
     *,
     covered_count: int,
-    protected_indices: tuple[int, ...],
     summary: str,
 ) -> list[Msg]:
+    start = snapshot.compaction.covered_message_count if snapshot.compaction else 0
+    prefix = dict(snapshot.protected_prefix_messages)
+    anchors = [
+        prefix[index] if index < start else snapshot.raw_tail[index - start]
+        for index in snapshot.protected_indices
+        if index < covered_count
+    ]
     return [
         Msg.user(f"<summary>\n{summary}\n</summary>", sender="context"),
-        *(messages[index] for index in protected_indices if index < covered_count),
-        *messages[covered_count:],
+        *anchors,
+        *snapshot.raw_tail[covered_count - start :],
     ]
-
-
-def _is_ordinary_user(message: Msg) -> bool:
-    return message.role == Role.USER and message.sender != "context" and not message.tool_results
 
 
 def _history_group_ends(messages: list[Msg]) -> list[int]:
@@ -145,11 +122,11 @@ def _history_group_ends(messages: list[Msg]) -> list[int]:
         if (
             message.metadata.get("context_kind") == "before_current_input"
             and index + 1 < len(messages)
-            and _is_ordinary_user(messages[index + 1])
+            and is_ordinary_user(messages[index + 1])
         ):
             continue
         ends.append(index + 1)
     return ends
 
 
-__all__ = ["project_history", "protected_message_indices", "select_compaction_end"]
+__all__ = ["project_history", "select_compaction_end"]

@@ -1,6 +1,6 @@
 """消息增量维护发现与普通用户位置，保持全量重放语义。"""
 
-from iris.lifecycle import SessionReadState, SessionToolDiscovery
+from iris.lifecycle import LifecycleStore, SessionReadState, SessionToolDiscovery
 from iris.message import Msg, Role
 from iris.store._session_projection import advance_session_read_state
 
@@ -46,6 +46,29 @@ def _replay(messages: list[Msg]) -> SessionReadState:
         ),
         last_ordinary_user_index=last_user,
     )
+
+
+def _assert_session_projection(store: LifecycleStore, run_id: str) -> None:
+    """将持久投影及保护位置与原文完整重放的独立结果比较。"""
+    run = store.load_run(run_id)
+    assert run is not None
+    messages = store.load_session(run.session_id).messages
+    expected = _replay(messages)
+    context = store.load_run_context(run_id, include_tool_discovery=True)
+    assert context.header.message_count == len(messages)
+    assert context.tool_discovery == expected.tool_discovery
+    protected: set[int] = set()
+    initial = run.initial_session_message_count
+    if initial < len(messages):
+        protected.add(initial)
+        if messages[initial].metadata.get("context_kind") == "before_current_input":
+            protected.add(initial + 1)
+        if (
+            expected.last_ordinary_user_index is not None
+            and expected.last_ordinary_user_index >= initial
+        ):
+            protected.add(expected.last_ordinary_user_index)
+    assert context.protected_indices == tuple(sorted(protected))
 
 
 def test_incremental_state_matches_replay_and_preserves_old_state() -> None:

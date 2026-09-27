@@ -268,7 +268,7 @@ SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_
 
 `_session_history.py` 共享来源检查与结果投影。内存实现持同一 `RLock` 复制前缀并一次写入目标。
 SQLite 在 `BEGIN IMMEDIATE` 事务内检查来源、创建带来源字段的 session、通过 `INSERT ... SELECT`
-复制消息，再完整读回目标并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
+复制消息，再完整读回目标、从该截止前缀初始化发现投影并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
 source 当前 session revision 或空闲 lane。当前 schema v10 的无迁移规则保持不变。
 
 来源不存在时，预览和 fork 抛 `IrisRunNotFoundError`；来源非 terminal 或为 child，以及
@@ -280,6 +280,7 @@ source 当前 session revision 或空闲 lane。当前 schema v10 的无迁移�
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | aggregate 语义与 CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| 增量投影及有效历史读取 | `_session_projection.py`、两个 store | `tests/store/test_session_projection.py`、`tests/store/test_session_context.py` |
 | 历史列表、预览与 fork | `_session_history.py`、`_sqlite_messages.py`、两个 store | `tests/store/test_lifecycle_store_contract.py`、`tests/store/test_lifecycle_sqlite_faults.py` |
 | 当前 schema 创建与精确校验 | `_sqlite_schema.py`、`sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transaction 与故障回滚 | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |

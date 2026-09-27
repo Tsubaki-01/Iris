@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable
 
 import pytest
+from fakes import history_snapshot
 
 from iris.agents import ContextPolicyConfig
 from iris.lifecycle import SessionCompaction
@@ -167,7 +168,8 @@ def test_each_compaction_candidate_recomputes_representatives_at_original_indice
 
     def candidate(end: int) -> LLMRequest:
         history = project_history(
-            raw, SessionCompaction(summary="summary", covered_message_count=end), ()
+            history_snapshot(raw, initial_count=len(raw)),
+            SessionCompaction(summary="summary", covered_message_count=end),
         )
         return project_context_request(
             measure_request(

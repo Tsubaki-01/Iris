@@ -38,8 +38,12 @@ and cancellation requests do not depend on MCP connections.
 
 Run creation and resume/recover checkpoint validation use `load_session_revision()` instead of
 loading full history just for its revision. Validation still independently compares against the
-current store revision. Commit-port initialization reuses the loaded checkpoint revision; Runtime
-explicitly loads the complete session when it needs messages and the context window.
+current store revision. Commit-port initialization reuses the loaded checkpoint revision. Input
+preparation calls the bound port's `load_session_header()` for metadata; main model steps call
+`load_model_context(include_tool_discovery=...)` for a consistent effective-history snapshot.
+Both refresh the port's session revision. The latter delegates to the store's
+`load_run_context(run_id, ...)`, returning the summary, uncovered suffix, current-run protected
+anchors, and requested discovery projection. Public `get_session()` still returns complete raw history.
 
 Root connections span multiple runs. Stop new calls and await the original start/resume/recover calls
 fully before `aclose()`. A cancel result or observation timeout does not prove body cleanup or event
