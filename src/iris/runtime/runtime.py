@@ -36,8 +36,8 @@ from ..lifecycle import (
     RunErrorInfo,
     RuntimeExecutionOptions,
     SessionCompaction,
+    SessionContextSnapshot,
     SessionContextWindow,
-    SessionSnapshot,
     TokenUsage,
     ToolErrorPolicy,
 )
@@ -82,7 +82,7 @@ from .commit import (
     ToolCallClaim,
     build_runtime_tool_call,
 )
-from .compaction import project_history, protected_message_indices, select_compaction_end
+from .compaction import project_history, select_compaction_end
 from .environment import RuntimeEnvironment, streaming_provider_for
 from .memory_context import load_context_windows, select_context_window
 from .models import (
@@ -926,8 +926,8 @@ class AgentRuntime:
         cancellation: CancellationSignal,
     ) -> RuntimeCursor | RuntimeActivationResult:
         """准备首次窗口、BCI 和用户输入，在任何模型调用前原子提交。"""
-        snapshot = commits.load_session()
-        if snapshot.session_id != activation.session_id:
+        header = commits.load_session_header()
+        if header.session_id != activation.session_id:
             raise IrisRunConflictError("commit port 返回了跨 session history")
         try:
             before_current_input = self.environment.context_builder.build_before_current_input(
@@ -938,21 +938,22 @@ class AgentRuntime:
                 current_input=Msg.user(activation.run_input),
             )
             initial_window = None
-            if snapshot.context_window is None:
+            if header.context_window is None:
                 if self.environment.memory_service is None:
                     initial_window = SessionContextWindow()
                 else:
-                    pending_history = [*snapshot.messages, *messages]
-                    protected = protected_message_indices(
-                        pending_history, activation.initial_session_message_count
+                    snapshot = commits.load_model_context(
+                        include_tool_discovery=self._include_tool_discovery(activation.options)
                     )
-                    history = project_history(
-                        self._context_messages(pending_history), snapshot.compaction, protected
-                    )
+                    history = [
+                        *project_history(self._context_messages(snapshot), snapshot.compaction),
+                        *messages,
+                    ]
                     initial_window, _ = await self._adopt_context_window(
                         history=history,
                         options=activation.options,
                         input_budget_tokens=self.environment.agent_config.compaction.input_budget_tokens,
+                        tool_selection=self._select_tools(snapshot, activation.options),
                     )
         except Exception as exc:
             return _failed_activation(cursor, exc)
@@ -974,12 +975,34 @@ class AgentRuntime:
             )
         )
 
-    def _context_messages(self, messages: list[Msg]) -> list[Msg]:
+    def _context_messages(self, snapshot: SessionContextSnapshot) -> SessionContextSnapshot:
         """保留原文位置，为启用策略的模型视图附加回读引用。"""
         return (
-            with_context_refs(messages)
+            with_context_refs(snapshot)
             if self.environment.agent_config.context_policy.enabled
-            else messages
+            else snapshot
+        )
+
+    def _include_tool_discovery(self, options: RuntimeExecutionOptions) -> bool:
+        """只在本步按需披露生效时读取持久发现投影。"""
+        config = self.environment.agent_config
+        return (
+            config.context_policy.deferred_tools
+            and options.include_tools
+            and options.request_options.get("tool_choice", config.model.tool_choice) != "none"
+        )
+
+    def _select_tools(
+        self, snapshot: SessionContextSnapshot, options: RuntimeExecutionOptions
+    ) -> ToolContextSelection:
+        """从当前配置和同一快照的发现事实选择完整 schema。"""
+        return select_tool_context(
+            self.environment.tool_bridge.tool_view,
+            snapshot.tool_discovery,
+            include_tools=options.include_tools,
+            tool_choice=options.request_options.get(
+                "tool_choice", self.environment.agent_config.model.tool_choice
+            ),
         )
 
     def _build_model_request(
@@ -988,7 +1011,7 @@ class AgentRuntime:
         history: list[Msg],
         options: RuntimeExecutionOptions,
         context_window: SessionContextWindow,
-        tool_selection: ToolContextSelection | None = None,
+        tool_selection: ToolContextSelection,
     ) -> tuple[LLMRequest, ContextBuildOutput]:
         """按同一窗口组装完整消息、模型选项和实际工具schema。"""
         context_input = self.environment.context_input.model_copy(
@@ -1009,14 +1032,6 @@ class AgentRuntime:
             current_input=None,
         )
         request = _apply_request_options(request, options.request_options)
-        if tool_selection is None:
-            tool_selection = select_tool_context(
-                self.environment.tool_bridge.tool_view,
-                history,
-                deferred_tools=self.environment.agent_config.context_policy.deferred_tools,
-                include_tools=options.include_tools,
-                tool_choice=request.tool_choice,
-            )
         request = _apply_tool_schemas(
             request,
             tool_view=self.environment.tool_bridge.tool_view,
@@ -1041,7 +1056,7 @@ class AgentRuntime:
         options: RuntimeExecutionOptions,
         input_budget_tokens: int,
         context_snapshot: ContextSnapshot | None = None,
-        tool_selection: ToolContextSelection | None = None,
+        tool_selection: ToolContextSelection,
     ) -> tuple[SessionContextWindow, MeasuredRequest]:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
@@ -1146,28 +1161,26 @@ class AgentRuntime:
                 outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
             )
 
-        snapshot = commits.load_session()
-        if snapshot.session_id != activation.session_id:
+        snapshot = commits.load_model_context(
+            include_tool_discovery=self._include_tool_discovery(activation.options)
+        )
+        if snapshot.header.session_id != activation.session_id:
             raise IrisRunConflictError("commit port 返回了跨 session history")
         try:
-            protected_indices = protected_message_indices(
-                list(snapshot.messages), activation.initial_session_message_count
+            model_snapshot = self._context_messages(snapshot)
+            start = snapshot.compaction.covered_message_count if snapshot.compaction else 0
+            source_indices = {
+                id(message): index
+                for index, message in enumerate(model_snapshot.raw_tail, start=start)
+            }
+            source_indices.update(
+                (id(message), index) for index, message in model_snapshot.protected_prefix_messages
             )
-            model_messages = self._context_messages(list(snapshot.messages))
-            source_indices = {id(message): index for index, message in enumerate(model_messages)}
-            tool_selection = select_tool_context(
-                self.environment.tool_bridge.tool_view,
-                list(snapshot.messages),
-                deferred_tools=self.environment.agent_config.context_policy.deferred_tools,
-                include_tools=activation.options.include_tools,
-                tool_choice=activation.options.request_options.get(
-                    "tool_choice", self.environment.agent_config.model.tool_choice
-                ),
-            )
+            tool_selection = self._select_tools(snapshot, activation.options)
             request, context_output = self._build_model_request(
-                history=project_history(model_messages, snapshot.compaction, protected_indices),
+                history=project_history(model_snapshot, snapshot.compaction),
                 options=activation.options,
-                context_window=cast(SessionContextWindow, snapshot.context_window),
+                context_window=cast(SessionContextWindow, snapshot.header.context_window),
                 tool_selection=tool_selection,
             )
 
@@ -1216,11 +1229,10 @@ class AgentRuntime:
                 measured=measured,
                 build_request=build_request,
                 project_request=project_request,
-                model_messages=model_messages,
+                model_snapshot=model_snapshot,
                 context_snapshot=context_snapshot,
                 tool_selection=tool_selection,
                 snapshot=snapshot,
-                protected_indices=protected_indices,
                 activation=activation,
                 cursor=cursor,
                 commits=commits,
@@ -1442,11 +1454,10 @@ class AgentRuntime:
         measured: MeasuredRequest,
         build_request: Callable[[list[Msg]], MeasuredRequest],
         project_request: Callable[[MeasuredRequest], MeasuredRequest],
-        model_messages: list[Msg],
+        model_snapshot: SessionContextSnapshot,
         context_snapshot: ContextSnapshot | None,
         tool_selection: ToolContextSelection,
-        snapshot: SessionSnapshot,
-        protected_indices: tuple[int, ...],
+        snapshot: SessionContextSnapshot,
         activation: RuntimeActivationInput,
         cursor: RuntimeCursor,
         commits: RuntimeCommitPort,
@@ -1459,11 +1470,8 @@ class AgentRuntime:
         before = measured.input_tokens
         if before < config.trigger_tokens:
             return measured
-        messages = list(snapshot.messages)
         end = select_compaction_end(
-            messages=model_messages,
-            previous_compaction=snapshot.compaction,
-            protected_indices=protected_indices,
+            snapshot=model_snapshot,
             config=config,
             build_request=build_request,
         )
@@ -1476,7 +1484,7 @@ class AgentRuntime:
 
         capture_port = self.environment.memory_capture_port
         if capture_port is not None:
-            capture_port.request_capture(activation.run_id, len(snapshot.messages))
+            capture_port.request_capture(activation.run_id, snapshot.header.message_count)
         loop = asyncio.get_running_loop()
         operation_deadline = loop.time() + config.timeout_seconds
         if stream_sink is not None:
@@ -1497,7 +1505,7 @@ class AgentRuntime:
             previous = snapshot.compaction
             summary = previous.summary if previous is not None else None
             start = previous.covered_message_count if previous is not None else 0
-            records = serialize_history(messages[start:end], start)
+            records = serialize_history(list(snapshot.raw_tail[: end - start]), start)
             position = (0, 0)
             while position[0] < len(records):
                 batch = next_summary_batch(
@@ -1552,8 +1560,8 @@ class AgentRuntime:
             compaction = SessionCompaction.model_construct(
                 summary=summary, covered_message_count=end
             )
-            history = project_history(model_messages, compaction, protected_indices)
-            current_window = cast(SessionContextWindow, snapshot.context_window)
+            history = project_history(model_snapshot, compaction)
+            current_window = cast(SessionContextWindow, snapshot.header.context_window)
             if self.environment.memory_service is None and not current_window.memory_overview:
                 next_window = SessionContextWindow()
                 candidate = build_request(history)
@@ -1578,7 +1586,7 @@ class AgentRuntime:
             commits.commit_compaction(
                 RuntimeCompactionCommit(
                     cursor_before=cursor,
-                    expected_session_revision=snapshot.revision,
+                    expected_session_revision=snapshot.header.revision,
                     compaction=compaction,
                     context_window=next_window,
                     before_input_tokens=before,

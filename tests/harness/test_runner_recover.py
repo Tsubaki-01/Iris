@@ -78,7 +78,7 @@ async def test_safe_recovery_reuses_reserved_model_step_and_executes_once(
         event_collector=_RunEventCollector(),
         workspace_root=tmp_path,
     )
-    session = port.load_session()
+    session = port.load_session_header()
     summary = SessionCompaction(summary="前一轮已完成", covered_message_count=2)
     port.record_compaction_usage(TokenUsage(total_tokens=22_000))
     port.commit_compaction(

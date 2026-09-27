@@ -14,6 +14,7 @@ from iris.lifecycle import RuntimeExecutionOptions, SessionContextWindow
 from iris.memory import MemoryService, SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.runtime import RuntimeActivationOutcome
+from iris.runtime._tool_context import select_tool_context
 from iris.store import InMemoryLifecycleStore
 from iris.tools import ToolRegistry
 from iris.tools.context_access import ContextReadTool
@@ -157,6 +158,12 @@ async def test_memory_delta_uses_unpruned_history_then_final_window_is_reduced(
         history=[*raw, Msg.user("continue")],
         options=RuntimeExecutionOptions(),
         context_window=SessionContextWindow(),
+        tool_selection=select_tool_context(
+            runtime.environment.tool_bridge.tool_view,
+            None,
+            include_tools=True,
+            tool_choice=None,
+        ),
     )
     baseline = provider.estimate_input_tokens(base)
     runtime.environment.agent_config = config.model_copy(

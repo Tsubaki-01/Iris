@@ -80,7 +80,8 @@ def _runtime(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("triggered", [False, True])
-async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool) -> None:
+@pytest.mark.parametrize("covered", [0, 1])
+async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool, covered: int) -> None:
     """真实压缩提示引用全部已提交原文，普通模型请求不触发捕获。"""
     provider = _ThresholdProvider(95000 if triggered else 1, 70000)
     if not triggered:
@@ -98,9 +99,15 @@ async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool) ->
     raw = [Msg.user("旧任务"), Msg.assistant("旧结果")]
     activation = start_activation(input="当前任务", initial_session_message_count=2)
     port = FakeRuntimeCommitPort(activation, messages=raw)
+    if covered:
+        port.compaction = SessionCompaction(summary="已有摘要", covered_message_count=covered)
     await runtime.execute(activation, commits=port, cancellation=MutableCancellationSignal())
     expected_count = len(raw) + len(port.input_commits[0].message_delta)
     assert hints == ([(activation.run_id, expected_count)] if triggered else [])
+    if triggered and covered:
+        summary_input = provider.requests[0].messages[-1].text
+        assert "message:1" in summary_input and "旧结果" in summary_input
+        assert "message:0" not in summary_input and "旧任务" not in summary_input
 
 
 @pytest.mark.asyncio

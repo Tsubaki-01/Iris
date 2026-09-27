@@ -70,6 +70,8 @@ from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolResult
 
+from .test_session_projection import _assert_session_projection
+
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _T1 = _NOW + timedelta(seconds=1)
 _T2 = _NOW + timedelta(seconds=2)
@@ -1239,6 +1241,7 @@ def test_waiting_cancellation_records_terminal_cutoff(
         _create(lifecycle_store),
         include_tool_history=include_tool_history,
     )
+    _assert_session_projection(lifecycle_store, "run-1")
     assert waiting.run.terminal_session_message_count is None
     terminal = lifecycle_store.request_cancellation(
         RequestCancellation(
@@ -1254,6 +1257,7 @@ def test_waiting_cancellation_records_terminal_cutoff(
     assert terminal.run.terminal_session_message_count == expected_count
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == expected_count
     assert len(lifecycle_store.load_session("session-1").messages) == expected_count
+    _assert_session_projection(lifecycle_store, "run-1")
 
 
 def test_recovery_without_closer_keeps_committed_message_cutoff(
@@ -1540,6 +1544,7 @@ def test_commit_model_step_updates_history_checkpoint_and_tool_intents_atomicall
 ) -> None:
     """缺少任一 history/checkpoint/tool replacement 都应被本断言捕获。"""
     committed = _prepare_tool(lifecycle_store)
+    _assert_session_projection(lifecycle_store, "run-1")
 
     session = lifecycle_store.load_session("session-1")
     assert session.revision == 1
@@ -1700,6 +1705,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
         tool_use_id="call-tool",
         tool_name="probe",
         content=[TextBlock(text="done")],
+        metadata={"context_tool_name": "probe"},
     )
 
     committed = lifecycle_store.commit_tool_result(
@@ -1711,13 +1717,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
             tool_call_id="call-tool",
             expected_tool_version=claimed_call.version,
             result=result,
-            message_delta=[
-                Msg.tool_result(
-                    tool_use_id="call-tool",
-                    name="probe",
-                    content="done",
-                )
-            ],
+            message_delta=[result.to_msg()],
             checkpoint=_checkpoint(
                 run_id="run-1",
                 sequence=3,
@@ -1733,6 +1733,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     assert committed.run.usage.compaction.total_tokens == 22000
     assert lifecycle_store.list_tool_calls("run-1")[0].result == result
     assert lifecycle_store.load_session("session-1").revision == 2
+    _assert_session_projection(lifecycle_store, "run-1")
 
 
 def test_claim_batch_respects_durable_cancellation_fence(
@@ -2080,6 +2081,7 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
 ) -> None:
     """Terminal settlement 必须原子闭合全部 unresolved tool history。"""
     prepared = _prepare_tool_batch(lifecycle_store)
+    _assert_session_projection(lifecycle_store, "run-1")
     claim_revision = prepared.run.revision
     for tool_call_id in ("call-1", "call-2"):
         claimed = lifecycle_store.claim_tool_call(
@@ -2108,6 +2110,7 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
         now=_T3,
     )
     terminal = lifecycle_store.finish_run(command)
+    _assert_session_projection(lifecycle_store, "run-1")
 
     records = lifecycle_store.list_tool_calls("run-1")
     assert [record.phase for record in records] == [
@@ -2155,6 +2158,7 @@ def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
         lifecycle_store.finish_run(command)
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
     assert lifecycle_store.load_session("session-1") == session
+    _assert_session_projection(lifecycle_store, "run-1")
 
 
 def test_safe_recovery_abandons_old_fence_and_rebinds_checkpoint(
@@ -2217,6 +2221,7 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
 ) -> None:
     """Recovery 原子关闭多个 claim，重开后保留 activation/tool 精确事实。"""
     prepared = _prepare_tool_batch(lifecycle_store)
+    _assert_session_projection(lifecycle_store, "run-1")
     first_claimed = lifecycle_store.claim_tool_call(
         ClaimToolCall(
             run_id="run-1",
@@ -2250,6 +2255,7 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
             now=_T3,
         )
     )
+    _assert_session_projection(lifecycle_store, "run-1")
 
     assert [event.kind for event in recovered.events] == [
         "activation.abandoned",
@@ -2276,6 +2282,7 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     if not isinstance(lifecycle_store, SQLiteStore):
         return
     reopened = SQLiteStore(lifecycle_store.path)
+    _assert_session_projection(reopened, "run-1")
     assert reopened.load_run("run-1").terminal_session_message_count == 4
     reopened_records = reopened.list_tool_calls("run-1")
     with sqlite3.connect(lifecycle_store.path) as connection:
@@ -2469,7 +2476,11 @@ def _finalize_command(store: LifecycleStore, *, waiting: bool) -> FinalizeSubage
         tool_use_id="delegate",
         tool_name="subagent",
         content=[TextBlock(text="done")],
-        metadata={"agent_selector": "researcher", "child_run_id": "run-1"},
+        metadata={
+            "agent_selector": "researcher",
+            "child_run_id": "run-1",
+            "context_tool_name": "subagent",
+        },
     )
     return FinalizeSubagentResult(
         parent_run_id="parent",
@@ -2726,6 +2737,7 @@ def test_finalize_subagent_result_commits_parent_once_without_claim(
     _terminal_child(store)
     command = _finalize_command(store, waiting=mode != "active")
     result = store.finalize_subagent_result(command)
+    _assert_session_projection(store, "parent")
     assert result.run.phase.value == "active"
     assert result.run.pending_interaction_id is None
     assert result.result is None
@@ -2758,6 +2770,7 @@ def test_finalize_subagent_result_commits_parent_once_without_claim(
     assert store.list_events("parent") == events_before_retry
     assert store.load_run("parent").usage.tool_calls_committed == 1
     assert len(store.load_session("parent-session").messages) == 2
+    _assert_session_projection(store, "parent")
 
 
 def test_finalize_subagent_result_rejects_nonterminal_child_without_parent_delta(
@@ -2770,6 +2783,7 @@ def test_finalize_subagent_result_rejects_nonterminal_child_without_parent_delta
         store.finalize_subagent_result(_finalize_command(store, waiting=False))
     assert store.load_run("parent") == parent.run
     assert store.load_session("parent-session").revision == 1
+    _assert_session_projection(store, "parent")
 
 
 def test_terminal_child_is_excluded_before_fork_point_limit(

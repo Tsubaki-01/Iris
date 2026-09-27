@@ -323,7 +323,8 @@ copied.
 `_session_history.py` shares source checks and result projections. The in-memory store copies the
 prefix and inserts the target once under the same `RLock`. SQLite checks the source, creates the
 target session with its source field, copies messages through `INSERT ... SELECT`, reads the target,
-and commits within one `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
+initializes its discovery projection from that cutoff prefix, and commits within one
+`BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
 empty target or partial messages. This operation requires neither the source's current session
 revision nor a free lane. The current schema v10 policy still provides no migration.
 
@@ -337,6 +338,7 @@ failures use `IrisRunPersistenceError`.
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Aggregate semantics and CAS | `in_memory.py` | `tests/store/test_lifecycle_store_contract.py` |
+| Incremental projection and effective history reads | `_session_projection.py`, both stores | `tests/store/test_session_projection.py`, `tests/store/test_session_context.py` |
 | History lists, previews, and forks | `_session_history.py`, `_sqlite_messages.py`, both stores | `tests/store/test_lifecycle_store_contract.py`, `tests/store/test_lifecycle_sqlite_faults.py` |
 | Current schema creation and exact validation | `_sqlite_schema.py`, `sqlite.py` | `tests/store/test_lifecycle_sqlite_schema.py` |
 | SQLite transactions and fault rollback | `sqlite.py` | `tests/store/test_lifecycle_sqlite_faults.py` |

@@ -429,7 +429,7 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
     """无 event 的自身 revision 推进不能误判为外来 mutation。"""
     store, port, call = _store_commit_port()
     checkpoint = port.checkpoint
-    session = port.load_session()
+    session = port.load_model_context(include_tool_discovery=False)
     before = port.run
     usage = TokenUsage(input_tokens=20_000, output_tokens=2_000, total_tokens=22_000)
 
@@ -440,7 +440,7 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
     assert port.run.revision == before.revision + 2
     assert port.run.last_event_sequence == before.last_event_sequence
     assert port.checkpoint == checkpoint
-    assert port.load_session() == session
+    assert port.load_model_context(include_tool_discovery=False) == session
     assert port.run.usage.compaction.total_tokens == 44_000
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
@@ -499,7 +499,8 @@ def _reserved_compaction_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCom
 def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
     """摘要提交推进 checkpoint，重建 port 后仅复用原 pending reservation。"""
     store, port = _reserved_compaction_port()
-    before = port.load_session()
+    before = port.load_model_context(include_tool_discovery=False)
+    original_messages = store.load_session(port.run.session_id).messages
     cursor = port.cursor
     sequence = port.checkpoint.sequence
     usage = port.run.usage
@@ -509,7 +510,7 @@ def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
         port.commit_compaction(
             RuntimeCompactionCommit(
                 cursor_before=cursor,
-                expected_session_revision=before.revision,
+                expected_session_revision=before.header.revision,
                 compaction=compaction,
                 context_window=SessionContextWindow(),
                 before_input_tokens=80_000,
@@ -519,12 +520,13 @@ def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
         == cursor
     )
 
-    after = port.load_session()
-    assert after.messages == before.messages
+    after = port.load_model_context(include_tool_discovery=False)
+    assert store.load_session(port.run.session_id).messages == original_messages
+    assert after.header.message_count == before.header.message_count
     assert after.compaction == compaction
-    assert after.revision == before.revision + 1
+    assert after.header.revision == before.header.revision + 1
     assert port.checkpoint.sequence == sequence + 1
-    assert port.checkpoint.session_revision == after.revision
+    assert port.checkpoint.session_revision == after.header.revision
     assert port.run.usage == usage
     # 同一进程提交摘要后不能把已消费的复用标记重新打开。
     assert port._reusable_model_reservation is False
@@ -547,7 +549,7 @@ def test_compaction_commit_keeps_cursor_and_pending_reservation() -> None:
 def test_compaction_usage_accepts_later_cancellation_and_rejects_projection() -> None:
     """摘要费用记录后仍能观察取消，取消后不能安装候选摘要。"""
     store, port = _reserved_compaction_port()
-    session = port.load_session()
+    session = port.load_model_context(include_tool_discovery=False)
     port.record_compaction_usage(TokenUsage(total_tokens=22_000))
     _request_cancel(store)
     assert port.cancellation_requested()
@@ -555,12 +557,12 @@ def test_compaction_usage_accepts_later_cancellation_and_rejects_projection() ->
         port.commit_compaction(
             RuntimeCompactionCommit(
                 cursor_before=port.cursor,
-                expected_session_revision=session.revision,
+                expected_session_revision=session.header.revision,
                 compaction=SessionCompaction(summary="摘要", covered_message_count=3),
                 context_window=SessionContextWindow(),
                 before_input_tokens=80_000,
                 after_input_tokens=20_000,
             )
         )
-    assert port.load_session() == session
+    assert port.load_model_context(include_tool_discovery=False) == session
     assert port.run.usage.compaction.total_tokens == 22_000

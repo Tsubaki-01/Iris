@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from fakes import history_snapshot
+
 from iris.agents import CompactionConfig
 from iris.lifecycle import SessionContextWindow
 from iris.message import LLMRequest, Msg
@@ -55,9 +57,7 @@ def test_closed_history_does_not_recount_the_same_empty_suffix() -> None:
         return _estimate(request)
 
     end = select_compaction_end(
-        messages=[Msg.user("old history")],
-        previous_compaction=None,
-        protected_indices=(),
+        snapshot=history_snapshot([Msg.user("old history")], initial_count=1),
         config=CompactionConfig(input_budget_tokens=1000),
         build_request=lambda history: measure_request(
             LLMRequest(model="test", messages=history), estimate

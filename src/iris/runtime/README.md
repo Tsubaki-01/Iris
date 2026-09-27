@@ -116,8 +116,9 @@ required 条目保持，priority 较低者先移除，相同 priority 时后返�
 工具、`context_read/search` 与 `load_skill` 不因此隐藏。搜索继续使用本地 BM25-like 排名，
 参数与结果见 [tools 说明](../tools/README.md#deferred-discovery--tool_search)。
 
-[`_tool_context.py`](./_tool_context.py) 从当前 session 原始已提交消息中的
-`metadata.extra.context_revealed_tools` 派生候选，不解析搜索正文或摘要。只有成功且已提交的
+store 随消息提交增量维护 session 的发现、成功使用、最新搜索和首项保护投影；
+[`_tool_context.py`](./_tool_context.py) 直接消费该投影，不在每一步重扫原文。
+事实来自已提交结果中的 `metadata.extra.context_revealed_tools`，不解析搜索正文或摘要。只有成功且已提交的
 搜索结果产生披露；同批次的后续工具调用也不能使用刚搜到的名称。下一次 `before_model`
 才选择其完整 schema，不截断参数定义。候选必须仍存在于当前 registry 且符合静态 base
 view；deny 优先，只有宿主原始 allow 可越过组过滤，搜索不会改变共享 `allow`。
@@ -145,7 +146,11 @@ schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"
 
 ### 历史投影与摘要构造
 
-内部 `compaction.py` 在完整原文上定位本 run 的原始输入、最新已归档 steer 与已注入 BCI。
+输入准备先读 `load_session_header()`；已有窗口或没有 memory service 时不读历史。
+主步骤通过 `load_model_context(include_tool_discovery=...)` 一次读取同一快照中的摘要、
+未覆盖后缀，以及摘要边界前受保护的本 run 原始输入、最新已归档 steer 与 BCI。
+禁用本步按需工具披露时不读取发现 JSON；消息提交仍正常维护投影。
+内部 `compaction.py` 消费这个有效范围，新增摘要边界推进后重新定位保护锚点。
 历史投影依次放入摘要消息、已覆盖锚点、未覆盖原文；assembler 将固定 system、静态 memory
 放在历史之前。BCI 用 `context_kind=before_current_input` 标记；Search/Fetch 结果属于普通工具
 历史，不加入强制保护集合。摘要只在投影时包装一层 `<summary>`，不追加回原文。
@@ -153,7 +158,7 @@ schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"
 较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
 
 默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
-回读引用，下标来自原始历史，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
+回读引用，后缀按摘要覆盖数偏移，前缀锚点保留原始下标，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
 取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
 
 [`_context_projection.py`](./_context_projection.py) 的 `project_context_request()` 在完整请求
@@ -181,6 +186,10 @@ compaction 不因此关闭。
 中的重复代表。投影只 copy-on-write 修改派生正文，不写原始消息、session revision、checkpoint
 或裁剪列表；restart/fork 从各自历史重算。摘要原料仍是未裁剪的已归档原文，大结果只保留其
 已有预览与 ref，不自动扫描全部 artifact。
+
+新摘要原料只取本次后缀中新增覆盖的原文；Capture 使用完整消息总数，而非后缀长度。
+公开完整历史和回读接口保持原义。无摘要时后缀仍是完整历史；Fork 仍一次复制并返回完整
+截止前缀，再从该前缀初始化发现投影，不继承 parent 截点后的发现或执行 checkpoint。
 
 `_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用

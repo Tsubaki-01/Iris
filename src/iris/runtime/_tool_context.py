@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..exceptions import IrisConfigError, IrisToolNotFoundError
-from ..message import Msg, Role
+from ..lifecycle import SessionToolDiscovery
 from ..tools import ToolRegistryView
 
 
@@ -19,9 +19,8 @@ class ToolContextSelection:
 
 def select_tool_context(
     view: ToolRegistryView,
-    messages: list[Msg],
+    discovery: SessionToolDiscovery | None,
     *,
-    deferred_tools: bool,
     include_tools: bool,
     tool_choice: str | dict[str, Any] | None,
 ) -> ToolContextSelection:
@@ -40,26 +39,10 @@ def select_tool_context(
             raise IrisConfigError("tool_choice 指定的工具被 base view 排除", tool_name=target)
         required.add(canonical)
         tool_choice = {**tool_choice, "function": {**tool_choice["function"], "name": canonical}}
-    discovered: dict[str, int] = {}
-    used: dict[str, int] = {}
-    latest: tuple[str, ...] = ()
-    protected: set[str] = set()
-    if deferred_tools:
-        for index, message in enumerate(messages):
-            if message.role is Role.ASSISTANT:
-                protected.clear()
-            for result in message.tool_results:
-                if result.is_error:
-                    continue
-                facts = result.metadata.get("extra", {})
-                name = facts.get("context_tool_name")
-                if name is not None:
-                    used[name] = index
-                if "context_revealed_tools" in facts:
-                    latest = tuple(facts["context_revealed_tools"])
-                    discovered.update((name, index) for name in latest)
-                    if latest:
-                        protected.add(latest[0])
+    discovered = discovery.discovered_at if discovery is not None else {}
+    used = discovery.used_at if discovery is not None else {}
+    latest = discovery.latest_search_names if discovery is not None else ()
+    protected = discovery.protected_first_names if discovery is not None else ()
     ranked = sorted(
         (name for name in discovered if name in available and name not in required),
         key=lambda name: (

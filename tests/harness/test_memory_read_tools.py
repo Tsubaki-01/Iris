@@ -129,7 +129,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     )
     assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
     assert [tool["function"]["name"] for tool in provider.requests[0].tools] == (
-        ["memory_search", "memory_fetch"] if include_tools else []
+        ["memory_search", "memory_fetch", "context_read", "context_search"] if include_tools else []
     )
     for name in ("memory_search", "memory_fetch"):
         assert (name in provider.requests[0].messages[0].text) is include_tools
@@ -233,7 +233,11 @@ async def test_disabled_config_ignores_injected_service_and_saved_overview(
     result = await runner.start(AgentRunRequest(input="继续聊天", run_id="disabled"))
     assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
     request = provider.requests[0]
-    assert request.tools == []
+    # 关闭长期记忆不影响默认启用的会话原文回读工具。
+    assert [tool["function"]["name"] for tool in request.tools] == [
+        "context_read",
+        "context_search",
+    ]
     assert "概览专用事实" not in request.messages[0].text
     assert any("静态固定资料" in message.text for message in request.messages)
     replayed = [item for message in request.messages for item in message.tool_results]

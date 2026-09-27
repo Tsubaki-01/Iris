@@ -45,6 +45,7 @@ from .test_lifecycle_store_contract import (
 from .test_lifecycle_store_contract import (
     _create_command as _create_history_command,
 )
+from .test_session_projection import _assert_session_projection
 
 _NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 _TOOL_FINGERPRINT = "a" * 64
@@ -195,6 +196,7 @@ def test_statement_failure_rolls_back_outcome_unknown_recovery(
         checkpoint_before = store.load_checkpoint("run-1")
         calls_before = store.list_tool_calls("run-1")
         events_before = store.list_events("run-1")
+        _assert_session_projection(store, "run-1")
         before = path.read_bytes()
         calls = 0
 
@@ -227,6 +229,7 @@ def test_statement_failure_rolls_back_outcome_unknown_recovery(
         assert reopened.load_checkpoint("run-1") == checkpoint_before
         assert reopened.list_tool_calls("run-1") == calls_before
         assert reopened.list_events("run-1") == events_before
+        _assert_session_projection(reopened, "run-1")
         with sqlite3.connect(path) as connection:
             activation = connection.execute(
                 "SELECT status, outcome FROM run_activations WHERE activation_id = ?",
@@ -260,6 +263,7 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
     session_before = store.load_session("session-1")
     checkpoint_before = store.load_checkpoint("run-1")
     events_before = store.list_events("run-1")
+    _assert_session_projection(store, "run-1")
     command = CommitModelStep(
         run_id="run-1",
         expected_run_revision=reserved.run.revision,
@@ -299,6 +303,7 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
     assert store.load_session("session-1") == session_before
     assert store.load_checkpoint("run-1") == checkpoint_before
     assert store.list_events("run-1") == events_before
+    _assert_session_projection(store, "run-1")
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM session_messages").fetchone() == (0,)
 

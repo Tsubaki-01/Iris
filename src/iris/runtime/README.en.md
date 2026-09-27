@@ -134,9 +134,10 @@ MCP still prepares its complete catalog. Existing eager tools, `context_read/sea
 stay visible. Search uses the existing local BM25-like ranker; see
 [tools](../tools/README.en.md#human-tool-middleware-breaker-and-discovery) for inputs and results.
 
-[`_tool_context.py`](./_tool_context.py) derives candidates from
-`metadata.extra.context_revealed_tools` in the current session's raw committed messages, not search
-text or summaries. Only committed successful search results reveal tools; later calls in the same
+The store incrementally maintains session discovery, successful use, latest-search order, and
+first-result protection as messages commit. [`_tool_context.py`](./_tool_context.py) consumes that
+projection without rescanning raw history on each step. Facts originate in committed results'
+`metadata.extra.context_revealed_tools`, not search text or summaries. Only committed successful search results reveal tools; later calls in the same
 batch cannot use newly discovered names. The next `before_model` selects their complete schemas
 without truncating parameter definitions. Candidates must still exist in the registry and satisfy
 the static base view: deny wins, only the host's original allow can bypass group filters, and search
@@ -172,8 +173,13 @@ their own configuration, history, and searches.
 
 ### History projection and summary construction
 
-Internal `compaction.py` locates the current run's original input, latest archived steer, and injected
-BCI in complete raw history. Projection orders the summary, covered anchors, and uncovered raw suffix.
+Input preparation first calls `load_session_header()`; an existing window or absent memory service
+requires no history read. Each main step calls `load_model_context(include_tool_discovery=...)` to
+read one consistent snapshot: summary, uncovered suffix, and the current run's protected input,
+latest archived steer, and BCI before the summary boundary. Steps with deferred disclosure disabled
+skip discovery JSON reads; message commits still maintain the projection. Internal `compaction.py`
+uses this effective range and relocates protected anchors as candidate summary boundaries advance.
+Projection orders the summary, covered anchors, and uncovered raw suffix.
 The assembler places fixed system and static memory before history. BCI is marked with
 `context_kind=before_current_input`; Search/Fetch results are ordinary tool history and are not
 pinned. A single `<summary>` wrapper is added only in the projection; summaries never append to raw
@@ -184,7 +190,8 @@ run are eligible too.
 
 With the default `context_policy`, offloaded tool results receive
 `result:<message_index>:<block_index>` references before history projection. Indices refer to original
-history and are not renumbered when a summary is inserted. This copy-on-write view does not persist
+history: suffix positions start at the persisted coverage boundary and prefix anchors retain their
+absolute positions. A summary does not renumber them. This copy-on-write view does not persist
 the retrieval notice in durable messages. Notices and `context_read/search` schemas both enter full
 request estimation.
 
@@ -221,6 +228,12 @@ entry point. Each candidate recomputes representatives from its visible original
 copies changed bodies without writing raw history, session revisions, checkpoints, or a pruning log;
 restart/fork recomputes from its own history. Summary material remains the unpruned archived text;
 large results retain their existing previews and refs without scanning every artifact.
+
+New summaries consume only the newly covered portion of the raw suffix. Capture uses the complete
+message count, not the suffix length. Public full-history and recall APIs retain their meaning.
+Without a summary the suffix remains the whole history. Fork still copies and returns the complete
+cutoff prefix once, initializes discovery from that prefix, and excludes later parent discoveries
+and the parent's execution checkpoint.
 
 `_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.

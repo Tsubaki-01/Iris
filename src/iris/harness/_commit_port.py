@@ -36,7 +36,8 @@ from ..lifecycle import (
     RunRecord,
     RunToolCallRecord,
     RunUsage,
-    SessionSnapshot,
+    SessionContextSnapshot,
+    SessionHeader,
     SuspendRun,
     TokenUsage,
     ToolCallPhase,
@@ -124,11 +125,19 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         """撤销该 activation 后续所有 mutation 权限。"""
         self._writable = False
 
-    def load_session(self) -> SessionSnapshot:
-        """读取 port 绑定 session 的权威 history。"""
-        session = self._store.load_session(self._run.session_id)
-        self._session_revision = session.revision
-        return session
+    def load_session_header(self) -> SessionHeader:
+        """只读取输入准备所需的会话计数、窗口与 revision。"""
+        header = self._store.load_session_header(self._run.session_id)
+        self._session_revision = header.revision
+        return header
+
+    def load_model_context(self, *, include_tool_discovery: bool) -> SessionContextSnapshot:
+        """读取当前 run 的有效历史和同一快照内的发现投影。"""
+        snapshot = self._store.load_run_context(
+            self._run.run_id, include_tool_discovery=include_tool_discovery
+        )
+        self._session_revision = snapshot.header.revision
+        return snapshot
 
     def commit_run_input(self, commit: RuntimeRunInputCommit) -> RuntimeCursor:
         """输入组与恢复位置在首个模型请求前一次归档。"""

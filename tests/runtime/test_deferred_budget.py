@@ -4,7 +4,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeRuntimeCommitPort, MutableCancellationSignal, build_runtime, start_activation
+from fakes import (
+    FakeRuntimeCommitPort,
+    MutableCancellationSignal,
+    build_runtime,
+    history_snapshot,
+    start_activation,
+)
 
 from iris.agents import AgentConfig, ContextPolicyConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
@@ -31,14 +37,13 @@ def test_hundred_deferred_tools_start_hidden_and_latest_first_fits_complete_sche
     view = registry.view()
     assert (
         select_tool_context(
-            view, [], deferred_tools=True, include_tools=True, tool_choice=None
+            view, history_snapshot([]).tool_discovery, include_tools=True, tool_choice=None
         ).names
         == ()
     )
     selected = select_tool_context(
         view,
-        _search("tool_3", "tool_2", "tool_1"),
-        deferred_tools=True,
+        history_snapshot(_search("tool_3", "tool_2", "tool_1")).tool_discovery,
         include_tools=True,
         tool_choice=None,
     )
