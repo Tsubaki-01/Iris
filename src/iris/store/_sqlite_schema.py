@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -28,7 +28,9 @@ CREATE TABLE sessions (
     updated_at TEXT NOT NULL,
     forked_from_run_id TEXT REFERENCES agent_runs(run_id),
     compaction_json TEXT,
-    context_window_json TEXT
+    context_window_json TEXT,
+    tool_discovery_json TEXT NOT NULL DEFAULT '{}',
+    last_ordinary_user_index INTEGER CHECK (last_ordinary_user_index >= 0)
 )
 """
 

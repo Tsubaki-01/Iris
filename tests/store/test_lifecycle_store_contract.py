@@ -1341,10 +1341,19 @@ def test_memory_session_append_preserves_direct_source(messages: list[Msg]) -> N
         messages=[Msg.user("inherited")],
         forked_from_run_id="source-run",
     )
-    appended = InMemoryLifecycleStore._append_messages(original, messages)
-    assert appended.forked_from_run_id == "source-run"
-    assert appended.messages == [*original.messages, *messages]
-    assert appended.revision == (1 if messages else 0)
+    from iris.lifecycle import SessionReadState
+    from iris.store._session_projection import advance_session_read_state
+    from iris.store.in_memory import _MemorySession
+
+    aggregate = _MemorySession(
+        original, advance_session_read_state(SessionReadState(), 0, original.messages)
+    )
+    appended = InMemoryLifecycleStore._append_messages(aggregate, messages)
+    assert appended.snapshot.forked_from_run_id == "source-run"
+    assert appended.snapshot.messages == [*original.messages, *messages]
+    assert appended.snapshot.revision == (1 if messages else 0)
+    if not messages:
+        assert appended is aggregate
 
 
 def test_create_and_read_are_copy_isolated(lifecycle_store: LifecycleStore) -> None:

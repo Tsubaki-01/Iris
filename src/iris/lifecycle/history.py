@@ -8,8 +8,35 @@ Example:
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..message.message import Msg
-from .models import RunStopReason
+from ..message.message import Msg, Role
+from .models import RunStopReason, SessionCompaction, SessionContextWindow, SessionToolDiscovery
+
+
+def is_ordinary_user(message: Msg) -> bool:
+    """区分普通输入与 context、工具结果占用的 user role。"""
+    return message.role is Role.USER and message.sender != "context" and not message.tool_results
+
+
+@dataclass(frozen=True, slots=True)
+class SessionHeader:
+    """输入准备所需的窄会话信息，不携带历史与摘要正文。"""
+
+    session_id: str
+    revision: int
+    message_count: int
+    context_window: SessionContextWindow | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContextSnapshot:
+    """同一版本的模型有效历史及保留绝对位置的当前任务锚点。"""
+
+    header: SessionHeader
+    compaction: SessionCompaction | None
+    raw_tail: tuple[Msg, ...]
+    protected_indices: tuple[int, ...]
+    protected_prefix_messages: tuple[tuple[int, Msg], ...]
+    tool_discovery: SessionToolDiscovery | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +102,9 @@ class SessionMessagePage:
 
 
 __all__ = [
+    "SessionHeader",
+    "SessionContextSnapshot",
+    "is_ordinary_user",
     "ForkPoint",
     "ForkPointCursor",
     "ForkPointPage",

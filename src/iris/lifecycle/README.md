@@ -61,6 +61,20 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
 
+`load_session_header(session_id)` 返回 `SessionHeader(session_id, revision, message_count,
+context_window)`，不读取原文、摘要或发现状态；缺失 session 返回零计数和空窗口。
+`load_run_context(run_id, *, include_tool_discovery)` 返回同一版本的 `SessionContextSnapshot`：
+header、compaction、`raw_tail`、`protected_indices`、`protected_prefix_messages` 和可选的
+`tool_discovery`。设摘要覆盖数为 C、原文总数为 N，tail 对应 `[C,N)`；保护下标和 prefix 中的
+`(index, Msg)` 始终使用绝对下标，保留当前 run 的 BCI、input 和最新普通 steer。
+`include_tool_discovery=False` 不加载发现 JSON；缺失 run 抛出 `IrisRunNotFoundError`。
+这是当前模型上下文读取，不是历史终态预览；完整 `load_session()` 和 Fork 的返回契约保持不变。
+
+`SessionToolDiscovery` 保存最近发现/成功使用位置、最后搜索的有序结果和尚未消费的搜索首项保护；
+`SessionReadState` 组合该模型与最后普通用户位置。两者只能由 store 按消息 delta 更新并与原文一起
+原子提交，不是 runtime 可单独写入的工具名单。摘要与窗口更新不改变发现事实，Fork 从截止前缀
+初始化独立派生状态。`SessionSnapshot` 仍只表示完整原文及既有会话字段。
+
 `read_session_messages(session_id, *, start, limit)` 返回公开的 `SessionMessagePage`，只读取有限
 原始消息页。`items` 为 `(index, Msg)` tuple，index 从零开始；`next_index` 是下一页起点，读完时
 为 `None`；`total_count` 是本次读取快照的原文总数。`start >= 0`、`limit > 0` 由 store 检查，

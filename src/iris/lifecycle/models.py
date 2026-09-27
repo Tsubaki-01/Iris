@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -557,6 +557,22 @@ class RunControlSnapshot(_FrozenModel):
         return self
 
 
+class SessionToolDiscovery(_FrozenModel):
+    """由已提交原文增量折叠的会话工具发现事实。"""
+
+    discovered_at: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    used_at: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
+    latest_search_names: tuple[str, ...] = ()
+    protected_first_names: tuple[str, ...] = ()
+
+
+class SessionReadState(_FrozenModel):
+    """Store 与原文一起提交的派生读取状态。"""
+
+    tool_discovery: SessionToolDiscovery = Field(default_factory=SessionToolDiscovery)
+    last_ordinary_user_index: int | None = Field(default=None, ge=0)
+
+
 class SessionSnapshot(_FrozenModel):
     """一个 session 的消息历史、固定上下文窗口与 CAS revision。"""
 
@@ -823,6 +839,8 @@ __all__ = [
     "RunUsage",
     "RuntimeExecutionOptions",
     "SessionSnapshot",
+    "SessionToolDiscovery",
+    "SessionReadState",
     "SessionCompaction",
     "SessionContextWindow",
     "TokenUsage",
