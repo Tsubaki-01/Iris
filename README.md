@@ -28,6 +28,11 @@ Agent 默认自动压缩长上下文：可用输入预算为 96,000 tokens（已
 
 Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 
+## Context Engineering
+
+Compaction、Offload 与回读、Pruning 与 Trim、动态上下文、统一上下文预算和工具按需披露，
+见 [`Context Engineering 实现机制`](docs/context-engineering.md)。
+
 ## 长期记忆
 
 使用以下配置启用长期记忆，默认关闭：
