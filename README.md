@@ -33,6 +33,12 @@ Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 Compaction、Offload 与回读、Pruning 与 Trim、动态上下文、统一上下文预算和工具按需披露，
 见 [`Context Engineering 实现机制`](docs/context-engineering.md)。
 
+## 评测接入
+
+仓库提供 [Inspect AI 接入接口](evals/README.md)，通过独立的 `eval` 依赖组使用。
+接口调用现有 `AgentRunner`，支持任务回调、运行结果投影和资源收尾；当前未接入实际
+题集、benchmark 评分或真实模型跑分。
+
 ## 长期记忆
 
 使用以下配置启用长期记忆，默认关闭：
