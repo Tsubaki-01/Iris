@@ -202,7 +202,7 @@ class DockerCommandService:
             )
         except self._errors as error:
             raise IrisCommandError(
-                "Docker 准备失败；请确认本地引擎可用且镜像已预先准备",
+                "Docker 准备失败；请确认本地引擎可用，并将配置的镜像预先显式构建到该引擎",
                 started=False,
                 image=self._config.image,
                 error=str(error),

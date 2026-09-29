@@ -299,7 +299,7 @@ command:
   mode: docker
   timeout_seconds: 120
   docker:
-    image: python:3.12-slim
+    image: iris-command:local
     network: none
     cpus: 2
     memory_mb: 1024
@@ -314,7 +314,8 @@ tools:
 ```
 
 Docker mode may omit the docker block to use these defaults. It requires the sandbox extra, a
-local Linux engine, and a prepared image; Iris does not pull images or fall back to the host.
+local Linux engine, and an image built explicitly from the repository root with
+`docker build --load -t iris-command:local .`. Iris does not build or pull images, or fall back to the host.
 The optional endpoint accepts only a local Unix socket or Windows named pipe, defaulting to
 `unix:///var/run/docker.sock` or `npipe:////./pipe/docker_engine`. Native mode has no Docker
 dependency and rejects a docker block.

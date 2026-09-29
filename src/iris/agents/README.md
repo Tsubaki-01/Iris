@@ -364,7 +364,7 @@ command:
   mode: docker
   timeout_seconds: 120
   docker:
-    image: python:3.12-slim
+    image: iris-command:local
     network: none
     cpus: 2
     memory_mb: 1024
@@ -379,8 +379,9 @@ tools:
 ```
 
 默认 `mode: native` 不依赖 Docker，在宿主执行；native 不能同时声明 `docker` 块。
-`mode: docker` 省略该块时使用以上默认值，需要 sandbox extra、本地 Linux engine 和预备
-镜像；不自动拉镜像或回退宿主。`docker.endpoint` 可指定本地 unix socket / Windows named
+`mode: docker` 省略该块时使用以上默认值，需要 sandbox extra、本地 Linux engine，并先在仓库
+根目录执行 `docker build --load -t iris-command:local .`。Iris 不自动构建、拉取镜像或回退宿主。
+`docker.endpoint` 可指定本地 unix socket / Windows named
 pipe；默认分别为 `unix:///var/run/docker.sock`、`npipe:////./pipe/docker_engine`。
 
 root 在构造时拥有配置和服务，child 不得显式声明自己的 `command`，但可自行注册入口。

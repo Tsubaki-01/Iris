@@ -53,14 +53,15 @@ command:
 workspace 不允许注册命令工具。移动端可保留普通工具而不提供代码执行。
 
 需要本地隔离时，先安装并启动 Linux Docker Engine 或 Docker Desktop 的 Linux engine，
-显式准备可选依赖和镜像：
+显式安装可选依赖，并在仓库根目录用 [Dockerfile](Dockerfile) 构建命令镜像：
 
 ```powershell
 uv sync --extra sandbox
-docker pull python:3.12-slim
+docker build --load -t iris-command:local .
 ```
 
-下面是完整的 Docker Agent 配置；运行时不会自行拉镜像，也不会在 Docker 不可用时回退宿主：
+镜像以 `python:3.12-slim` 为最小基底，可按项目需要预装依赖；Iris 应用仍在宿主运行。
+下面是完整的 Docker Agent 配置；运行时不会自行构建或拉取镜像，也不会在 Docker 不可用时回退宿主：
 
 ```yaml
 name: docker-command-agent
@@ -76,7 +77,7 @@ command:
   mode: docker
   timeout_seconds: 120
   docker:
-    image: python:3.12-slim
+    image: iris-command:local
     network: none
     cpus: 2
     memory_mb: 1024

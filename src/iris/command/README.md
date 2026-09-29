@@ -9,7 +9,7 @@ native = CommandConfig()  # 默认 120 秒
 docker = CommandConfig.model_validate({"mode": "docker"})
 ```
 
-`DockerConfig` 默认使用预先准备的 `python:3.12-slim` 镜像、`none` 网络、2 CPU、1024 MiB 内存和 128 PID。`endpoint` 只接受本地 Unix socket 或 Windows named pipe。配置解析和导入本包都不连接 Docker；Native 模式显式声明 `docker` 块会报错。
+`DockerConfig` 默认使用显式构建的 `iris-command:local` 镜像、`none` 网络、2 CPU、1024 MiB 内存和 128 PID。`endpoint` 只接受本地 Unix socket 或 Windows named pipe。配置解析和导入本包都不连接 Docker；Native 模式显式声明 `docker` 块会报错。
 
 `CommandService.execute(scope, request)` 接收已解析的宿主 cwd 和最终命令期限，返回前台执行事实。服务不拥有工具权限、生命周期历史或模型调用。
 
@@ -58,14 +58,27 @@ Native **不是 OS 级隔离沙箱**。直接服务调用接收已解析的宿�
 
 ## 本地 Docker
 
-开发环境先准备 Linux Docker Engine，或 Windows Docker Desktop 的 Linux engine，再显式安装 extra 和准备镜像：
+开发环境先准备 Linux Docker Engine，或 Windows Docker Desktop 的 Linux engine，再从仓库根目录安装 extra 并显式构建镜像：
 
 ```console
 uv sync --extra sandbox
-docker pull python:3.12-slim
+docker build --load -t iris-command:local .
 ```
 
-服务不会安装 Docker、拉取镜像或回退 Native。基础导入不加载 aiodocker；仅 Docker 的 `prepare()` 导入驱动并检查本地引擎、Linux 容器模式和预备镜像。默认 endpoint 在 Windows 为 `npipe:////./pipe/docker_engine`，Linux 为 `unix:///var/run/docker.sock`；显式传给驱动，不由远程 context 或 `DOCKER_HOST` 改写。
+根目录 [Dockerfile](../../../Dockerfile) 仅以 `python:3.12-slim` 为基底，不预装项目无关的工具；[.dockerignore](../../../.dockerignore) 排除本地环境、缓存和私有文档等无关构建内容。`--load` 将构建结果载入本地镜像库。首次获取基础镜像或安装包可能联网；运行时 `network: none` 不限制开发者显式执行的 build。
+
+服务不会安装 Docker、构建或拉取镜像，也不会回退 Native。基础导入不加载 aiodocker；仅 Docker 的 `prepare()` 导入驱动并检查本地引擎、Linux 容器模式和预备镜像。默认 endpoint 在 Windows 为 `npipe:////./pipe/docker_engine`，Linux 为 `unix:///var/run/docker.sock`；显式传给驱动，不由 Docker CLI context 或 `DOCKER_HOST` 改写。因此 build 必须使用该 endpoint 对应的同一本地 engine；CLI 使用其他 context 时，切换回对应引擎或用 `docker --host ENDPOINT build --load -t iris-command:local .` 指定它。
+
+按需编辑 Dockerfile 即可预装依赖。例如需要 HTTP 客户端时，可采用：
+
+```dockerfile
+FROM python:3.12-slim
+RUN python -m pip install --no-cache-dir httpx
+```
+
+用 `docker build --load -t my-agent-command:local .` 构建后，将 `command.docker.image` 设为 `my-agent-command:local`。只有已安装 Iris wheel 的开发者，也可在自己的目录保存上述配方再构建。预装依赖应全局安装，或通过 `COPY` 放入所有运行用户可读的目录（如 `/opt/agent-tools`）；不要安装到 `/root/.local`，也不要放在会被项目挂载覆盖的 `/workspace`。命令 helper 保留在 Iris 包中，执行时传入容器，不需要把 Iris 安装到镜像里。
+
+Dockerfile 只声明依赖环境；runtime 继续决定 root 挂载、运行用户、工作目录、常驻启动命令、网络和资源限额。已有容器不会随镜像 tag 重建而替换：使用新镜像前先关闭旧 root，再创建新 runner；普通 stop/start 仍复用原容器。
 
 在前面的调用示例中，可将服务构造替换为：
 
@@ -91,7 +104,3 @@ service = DockerCommandService(workspace, DockerConfig(), workspace_writable=Tru
 ```console
 uv run --extra sandbox pytest tests/command/test_docker_integration.py --run-docker -p no:cacheprovider --basetemp=tmp/pytest-docker-local
 ```
-
-Docker Desktop Linux engine 实测覆盖同容器复用、中文 cwd 写回、真实退出码与局部超时、共享中断/重启、离线依赖与后台服务复用、只读挂载、有限输出、close 删除与宿主文件保留。受控本地 TCP 目标验证 none/bridge；真实负载验证 CPU 节流、内存 OOM 与 PID 派生限制。完整 Runner 验证模型/HITL 不受其他 run 容器停止影响、两种期限、child 写入边界和独立 root。
-
-非 Desktop 的 Linux Engine 尚未实测；WSL 的 Native 证据不能替代该平台的 Unix socket、UID:GID 与挂载验收。

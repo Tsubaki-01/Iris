@@ -1,0 +1,22 @@
+# 本地状态与生成文件不进入镜像构建上下文。
+.git
+.codex
+.agents
+.private
+.venv
+.worktrees
+.env
+.env.*
+**/__pycache__
+**/.pytest_cache
+.mypy_cache
+.ruff_cache
+**/node_modules
+**/*.egg-info
+tmp
+temp
+build
+dist
+data
+out
+logs

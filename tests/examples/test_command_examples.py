@@ -23,6 +23,7 @@ def test_command_example_configs_expose_command_and_child_boundaries() -> None:
     assert native.permissions.execute == docker.permissions.execute == "confirm"
     assert "exec.command" in native.tools.builtin and "exec.command" in docker.tools.builtin
     assert docker.command.docker.network == "none"
+    assert docker.command.docker.image == "iris-command:local"
     assert docker.command.docker.cpus == 1
     assert docker.command.docker.memory_mb == 256
     assert docker.command.docker.pids_limit == 64

@@ -27,7 +27,7 @@ command:
   mode: docker
   timeout_seconds: 15
   docker:
-    image: python:3.12-slim
+    image: iris-command:local
     network: none
     cpus: 1
     memory_mb: 256
