@@ -175,8 +175,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 cursor=cursor,
                 remaining_deadline_seconds=self.remaining_deadline_seconds(),
             )
-        previous_reserved = self._run.usage.model_steps_reserved
-        commit = self._store.reserve_model_step(
+        reservation = self._store.reserve_model_step(
             ReserveModelStep(
                 run_id=self._run.run_id,
                 expected_run_revision=self._run.revision,
@@ -184,15 +183,11 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 now=self._clock(),
             )
         )
-        self._accept(commit)
-        granted = (
-            commit.run.phase is RunPhase.ACTIVE
-            and commit.run.usage.model_steps_reserved == previous_reserved + 1
-        )
-        if not granted:
+        self._accept(reservation.commit)
+        if not reservation.granted:
             self._writable = False
         return ModelStepReservation(
-            granted=granted,
+            granted=reservation.granted,
             step_index=cursor.step_index,
             cursor=cursor,
             remaining_deadline_seconds=self.remaining_deadline_seconds(),

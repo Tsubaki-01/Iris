@@ -22,6 +22,7 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
+from ..execution import CommandStopSlot
 from ..hitl.models import (
     HumanInteraction,
     HumanInteractionResponse,
@@ -56,6 +57,7 @@ from ..tools.subagent import (
 )
 
 if TYPE_CHECKING:
+    from ._execution_lifecycle import ExecutionLifecycle
     from .runner import AgentRunner, Clock
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,7 @@ class HarnessSubagentController:
         self.parent_boundary = parent_boundary
         self.child_provider_factory = child_provider_factory
         self.clock = clock
+        self.execution_lifecycle: ExecutionLifecycle | None = None
         self._live_children: dict[str, tuple[AgentRunner, asyncio.Task[RunResult]]] = {}
 
     async def execute(self, invocation: SubagentInvocation) -> SubagentExecutionOutcome:
@@ -194,6 +197,7 @@ class HarnessSubagentController:
     def _assemble_child(self, route: SubagentRoute) -> AgentRunner:
         """只加载 selected ordinary config，直接消费 CHILD boundary 与独立 provider。"""
         from ._context_access import ContextAccess
+        from ._execution_lifecycle import ChildExecutionTarget
         from .runner import AgentRunner
 
         config = load_agent_config(route.config_path)
@@ -218,7 +222,37 @@ class HarnessSubagentController:
             boundary=boundary,
             context_access=ContextAccess(self.store),
         )
-        return AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
+        runner = AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
+        runner._execution_lifecycle = cast("ExecutionLifecycle", self.execution_lifecycle)
+        runner._execution_target = ChildExecutionTarget(self, route)
+        if runner._subagent_controller is not None:
+            runner._subagent_controller.execution_lifecycle = self.execution_lifecycle
+        return runner
+
+    @asynccontextmanager
+    async def open_execution_target(
+        self, route: SubagentRoute, run_id: str
+    ) -> AsyncIterator[AgentRunner]:
+        """按 exact run 借用活动 child，或重建仅供期限/清理结算的临时 runner。"""
+        live = self._live_children.get(run_id)
+        if live is not None:
+            yield live[0]
+            return
+        async with self._owned_child_runner(self._assemble_child(route)) as runner:
+            yield runner
+
+    def _handoff_settlement_receipt(
+        self, parent_run_id: str, parent_tool_call_id: str, child_run_id: str
+    ) -> None:
+        """消费当前 child 终态的一次停止事实，交给当前父调用而不写入历史。"""
+        receipt = cast("ExecutionLifecycle", self.execution_lifecycle).take_settlement_receipt(
+            child_run_id
+        )
+        if receipt is not None:
+            slot = self.parent_boundary.command_stop_slots.setdefault(
+                (parent_run_id, parent_tool_call_id), CommandStopSlot()
+            )
+            slot.receipt = receipt
 
     async def resume_proxy(
         self,
@@ -282,6 +316,8 @@ class HarnessSubagentController:
             result = self.store.load_result(child_run_id)
             if result is None:
                 raise IrisRunStateError("linked child 缺少 durable result", run_id=child_run_id)
+        if child.phase is RunPhase.TERMINAL:
+            self._handoff_settlement_receipt(parent.run_id, parent_tool_call_id, child_run_id)
         projected = self._project_outcome(route.selector, parent, child, result)
         if (
             isinstance(projected, ChildWaiting)
@@ -352,6 +388,8 @@ class HarnessSubagentController:
                         continue
                 cleanup.result()
                 raise
+            if result.run.phase is RunPhase.TERMINAL:
+                self._handoff_settlement_receipt(parent.run_id, parent_tool_call_id, child.run_id)
             return self._project_outcome(
                 route.selector, parent, self._load_run(child.run_id), result
             )
@@ -369,8 +407,8 @@ class HarnessSubagentController:
         live = self._live_children.get(child.run_id)
         if live is not None:
             runner, task = live
-            runner.request_cancel(child.run_id, reason=reason)
-            await asyncio.shield(task)
+            await runner.cancel(child.run_id, reason=reason)
+            await asyncio.gather(task, return_exceptions=True)
         elif child.phase is not RunPhase.TERMINAL:
             tool = self.store.load_tool_call(parent_run_id, parent_tool_call_id)
             route = self.routes.routes[
@@ -382,6 +420,9 @@ class HarnessSubagentController:
                     await runner.recover(
                         child.run_id, expected_activation_id=cancelled.current_activation_id
                     )
+                elif cancelled.phase is RunPhase.WAITING:
+                    await runner.cancel(child.run_id, reason=reason)
+        self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child.run_id)
 
     async def expire_proxy(self, *, parent_run: RunRecord, proxy: HumanInteraction) -> ToolResult:
         """消费 durable child-owned expiry；不伪造回答或改写 canonical owner。"""
@@ -423,6 +464,7 @@ class HarnessSubagentController:
                     await runner.recover(
                         child.run_id, expected_activation_id=child.current_activation_id
                     )
+            self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child_run_id)
         return _error_result(selector, "SUBAGENT_TIMEOUT", "Child agent timed out", child_run_id)
 
     def _load_run(self, run_id: str) -> RunRecord:

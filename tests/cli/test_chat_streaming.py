@@ -19,7 +19,8 @@ import pytest
 
 from iris.cli.chat import ChatOptions, _ChatLiveOutput, run_chat_loop
 from iris.harness import AgentRunner
-from iris.lifecycle import RunEvent, RunEventKind
+from iris.harness.streaming import ExecutionCleanupFailed
+from iris.lifecycle import RunErrorInfo, RunEvent, RunEventKind
 from iris.message import (
     LLMRequest,
     ModelBlockCompleted,
@@ -40,6 +41,25 @@ from tests.harness.fakes import build_runtime, text_response
 from tests.runtime.fakes import FakeStreamingProvider
 
 # endregion
+
+
+def test_chat_cleanup_failure_is_visible_without_terminal() -> None:
+    """后台清理失败即时显示，不能等不存在的 run terminal。"""
+    output: list[str] = []
+    live = _ChatLiveOutput(output.append)
+    live.publish(
+        ExecutionCleanupFailed(
+            run_id="run-cleanup",
+            session_id="session-cleanup",
+            error=RunErrorInfo(
+                code="EXECUTION_CLEANUP_FAILED", source="tool", message="Docker 停止未确认"
+            ),
+        )
+    )
+    assert "执行环境清理失败" in "".join(output)
+    assert "run-cleanup" in "".join(output)
+    assert "Docker 停止未确认" in "".join(output)
+    assert live.finish_run("run-cleanup") is False
 
 
 @pytest.mark.parametrize(

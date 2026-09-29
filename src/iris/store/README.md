@@ -89,9 +89,14 @@ Mutation 的 `RunCommit` 只携带发生变化的 `session_revision`，不为生
 创建 run 在同一事务内记录 `initial_session_message_count`。首次 terminal settlement 在
 `RunRecord.terminal_session_message_count` 记录 session 累计消息数，包括本次工具闭合消息，
 并在 `terminal_compaction` 冻结当时的摘要；没有摘要时为 `None`。后续读取保持该快照。
-创建时 deadline、预算耗尽、waiting 取消、普通
-finish、`OUTCOME_UNKNOWN` recovery 和 `FINALIZE` recovery 均写入该字段。没有 checkpoint 或
-没有 closer 时也记录实际消息数，0 合法。SQLite 使用已读取的 session metadata 计数，无需加载完整历史。
+普通 `FinishRun` 与正常 `FINALIZE` recovery 写入这些终态字段；没有 closer 时也记录实际消息数，
+0 合法。SQLite 使用已读取的 session metadata 计数，无需加载完整历史。
+
+创建时已过 deadline 仍占有 ACTIVE run、初始 checkpoint、activation 与 lane。预算预留返回
+`ModelStepReservationResult(granted, commit)`，拒绝只返回当前事实且不改变 revision、usage 或
+events。取消请求只记录首次意图，不关闭 WAITING interaction。UNKNOWN recovery 先以 CAS 接管新
+RECOVER fence，checkpoint sequence 递增并标记 `BLOCKED_UNKNOWN`，原 claims、usage 与已提交
+历史保持。以上异常由异步 owner 清理后提交 `FinishRun`，store 不跨异步调用持有事务或提前放行 lane。
 
 Store 不缓存完整 command，也不承诺历史写入原样重交成功。每次 mutation 都按当前状态、
 revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态错误，不重复追加事实。
@@ -202,14 +207,15 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `None`。它不修复、恢复或接管 run；host 仍需读取 run/interaction，并用精确 activation fence 调用
 `recover()`，或用精确 interaction identity 调用 `resume()`。
 
-取消请求、waiting settlement、activation abandon/rebind、outcome-ready finalize 与 unresolved
-claim -> outcome unknown 都在 aggregate transaction 内完成。runtime 不包含旧 schema reader、
+取消请求、activation abandon/rebind、outcome-ready finalize 分别在 aggregate transaction 内完成；
+waiting settlement 与 unresolved claim -> outcome unknown 由清理后的 `FinishRun` 原子完成。
+runtime 不包含旧 schema reader、
 dual write 或 compatibility adapter；不兼容文件直接拒绝。
 
 同一 active activation 可以在提交任何 result 前持有多个 exact durable claims；每条 claim 仍绑定
 step、ordinal、call ID、fingerprint 和 version。durable cancellation 先提交时，store 拒绝新的
-claim 且不追加 claim event；claim 先提交时，该调用只能提交明确 result，或在 terminal/
-recovery transaction 中与其他 unresolved claims 一起原子关闭为 outcome unknown，绝不重放。
+claim 且不追加 claim event；claim 先提交时，该调用只能提交明确 result，或在 terminal
+transaction 中与其他 unresolved claims 一起原子关闭为 outcome unknown，绝不重放。
 
 effect 前的预检失败与 `CIRCUIT_OPEN` 熔断结果允许直接从 `PREPARED` 提交，不产生 claim
 event；两个 store 使用 `_tool_results.py` 的同一分类规则。Subagent admission 前的

@@ -64,7 +64,7 @@ def _seed(store: LifecycleStore, messages: list[Msg], covered: int) -> RunCommit
             activation_id=command.activation_id,
             now=NOW,
         )
-    )
+    ).commit
     return store.commit_compaction(_compaction_command(ready, count=covered))
 
 
@@ -314,7 +314,7 @@ def test_memory_context_only_copies_returned_messages(monkeypatch: pytest.Monkey
 def test_memory_run_admission_does_not_copy_existing_history(
     monkeypatch: pytest.MonkeyPatch, expired: bool
 ) -> None:
-    """普通准入与立即终止均复用内部历史，公开读取仍复制隔离。"""
+    """普通与已过期准入都复用内部历史，公开读取仍复制隔离。"""
     store = InMemoryLifecycleStore()
     messages = _history(2000)
     current = _seed(store, messages, 0)
@@ -341,7 +341,7 @@ def test_memory_run_admission_does_not_copy_existing_history(
 
     monkeypatch.setattr(Msg, "__deepcopy__", copy_message)
     created = store.create_run(command)
-    assert created.run.phase is (RunPhase.TERMINAL if expired else RunPhase.ACTIVE)
+    assert created.run.phase is RunPhase.ACTIVE
     assert created.run.initial_session_message_count == 2000
     assert copied == []
     public = store.load_session("session")

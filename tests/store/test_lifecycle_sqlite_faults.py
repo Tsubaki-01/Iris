@@ -258,7 +258,7 @@ def test_partial_session_message_insert_rolls_back_complete_model_commit(
             activation_id="act-1",
             now=_NOW,
         )
-    )
+    ).commit
     run_before = store.load_run("run-1")
     session_before = store.load_session("session-1")
     checkpoint_before = store.load_checkpoint("run-1")
@@ -388,7 +388,7 @@ def test_compaction_write_failures_roll_back_projection_checkpoint_and_event(
                 activation_id="current-act",
                 now=_NOW,
             )
-        )
+        ).commit
         checkpoint = reserved.checkpoint
         assert checkpoint is not None
         command = CommitCompaction(
@@ -550,7 +550,7 @@ def _prepare_claimed_tool(store: SQLiteStore) -> RunCommit:
             activation_id="act-1",
             now=_NOW,
         )
-    )
+    ).commit
     assistant = Msg.assistant([ToolUseBlock(id="call-tool", name="probe", input={"value": "A"})])
     prepared = RunToolCallRecord(
         run_id="run-1",
@@ -611,5 +611,6 @@ def _recovery_command(run_revision: int, checkpoint_sequence: int) -> RecoverAct
         expected_activation_id="act-1",
         expected_checkpoint_sequence=checkpoint_sequence,
         recovery_disposition=RecoveryDisposition.OUTCOME_UNKNOWN,
+        new_activation_id="act-recovered",
         now=_NOW,
     )

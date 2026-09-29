@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..lifecycle import RunEvent
+from ..lifecycle import RunErrorInfo, RunEvent
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from .session_manager import SubmissionEvent
 
@@ -33,7 +33,16 @@ class SessionSubmissionEvent:
     event: SubmissionEvent
 
 
-type LiveFact = RuntimeStreamEvent | RunEvent | SessionSubmissionEvent
+@dataclass(frozen=True, slots=True)
+class ExecutionCleanupFailed:
+    """本次异步执行环境清理失败，run 仍等待结算而非 durable terminal。"""
+
+    run_id: str
+    session_id: str
+    error: RunErrorInfo
+
+
+type LiveFact = RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | ExecutionCleanupFailed
 
 
 class LivePublisher(Protocol):
@@ -58,4 +67,4 @@ class _RuntimeLiveSink(RuntimeEventSink):
         self._publisher.publish(event)
 
 
-__all__ = ["LiveFact", "LivePublisher", "SessionSubmissionEvent"]
+__all__ = ["ExecutionCleanupFailed", "LiveFact", "LivePublisher", "SessionSubmissionEvent"]

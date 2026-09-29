@@ -229,8 +229,9 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
     assert effects == []
     [record] = store.list_tool_calls("run-claim-recover")
     assert record.phase is ToolCallPhase.OUTCOME_UNKNOWN
-    assert [event.kind for event in store.list_events("run-claim-recover")][-3:] == [
+    assert [event.kind for event in store.list_events("run-claim-recover")][-4:] == [
         RunEventKind.ACTIVATION_ABANDONED,
+        RunEventKind.ACTIVATION_STARTED,
         RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
         RunEventKind.RUN_TERMINAL,
     ]

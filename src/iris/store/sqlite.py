@@ -78,6 +78,7 @@ from ..lifecycle.store import (
     FinalizeSubagentResult,
     FinishRun,
     ForkSession,
+    ModelStepReservationResult,
     RebindSubagentProxy,
     RecordCompactionUsage,
     RecoverActiveRun,
@@ -123,6 +124,7 @@ from ._terminal_closure import build_terminal_tool_closure
 from ._tool_results import is_preflight_result
 
 _CommandT = TypeVar("_CommandT")
+_MutationT = TypeVar("_MutationT")
 _ReadT = TypeVar("_ReadT")
 _RESPONSE_ADAPTER = TypeAdapter(HumanInteractionResponse)
 _SESSION_REVISION_ADAPTER = TypeAdapter(Annotated[int, Field(ge=0, strict=True)])
@@ -528,7 +530,7 @@ class SQLiteStore:
         """原子归档输入组与 before_model checkpoint。"""
         return self._mutate("commit_run_input", command, self._commit_run_input)
 
-    def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
+    def reserve_model_step(self, command: ReserveModelStep) -> ModelStepReservationResult:
         return self._mutate(
             "reserve_model_step",
             command,
@@ -1176,8 +1178,8 @@ class SQLiteStore:
         self,
         operation: str,
         command: _CommandT,
-        handler: Callable[[sqlite3.Connection, _CommandT], RunCommit],
-    ) -> RunCommit:
+        handler: Callable[[sqlite3.Connection, _CommandT], _MutationT],
+    ) -> _MutationT:
         with self._lock:
             try:
                 with self._connect() as connection:
@@ -1491,62 +1493,14 @@ class SQLiteStore:
         self,
         connection: sqlite3.Connection,
         command: ReserveModelStep,
-    ) -> RunCommit:
-        """增量提交 model-step reservation 或预算耗尽结算。"""
+    ) -> ModelStepReservationResult:
+        """预留模型步，或不修改 aggregate 地返回预算拒绝。"""
         operation = "reserve_model_step"
         run = self._require_active(connection, command, operation=operation)
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
         if run.usage.model_steps_reserved >= run.options.limits.max_model_steps:
-            session_metadata = cast(
-                _SessionMetadata,
-                self._select_session_metadata(connection, run.session_id, operation=operation),
-            )
-            activation = self._require_activation(
-                connection,
-                run.current_activation_id,
-                operation=operation,
-            )
-            settled = settle_activation(
-                activation,
-                outcome=ActivationOutcome.FAILED,
-                ended_at=command.now,
-            )
-            sequence = run.last_event_sequence + 1
-            updated = _replace_run(
-                run,
-                phase=RunPhase.TERMINAL,
-                stop_reason=RunStopReason.BUDGET_EXHAUSTED,
-                revision=run.revision + 1,
-                current_activation_id=None,
-                last_event_sequence=sequence,
-                updated_at=command.now,
-                finished_at=command.now,
-                terminal_session_message_count=session_metadata.message_count,
-                terminal_compaction=session_metadata.compaction,
-            )
-            event = _make_event(
-                updated,
-                RunEventKind.RUN_TERMINAL,
-                command.now,
-                sequence=sequence,
-                activation_id=activation.activation_id,
-                payload={"stop_reason": RunStopReason.BUDGET_EXHAUSTED.value},
-            )
-            self._touch_session(
-                connection,
-                run.session_id,
-                checkpoint.session_revision,
-                command.now,
-            )
-            self._update_run(connection, run, updated, checkpoint.session_revision)
-            self._update_activation(connection, activation, settled)
-            self._delete_lane(connection, run, require_match=True)
-            self._insert_event(connection, event)
-            return RunCommit(
-                run=updated,
-                checkpoint=checkpoint,
-                events=(event,),
-                result=project_result(updated),
+            return ModelStepReservationResult(
+                granted=False, commit=RunCommit(run=run, checkpoint=checkpoint)
             )
 
         usage = reserve_model_step(run.usage)
@@ -1578,10 +1532,9 @@ class SQLiteStore:
         self._update_run(connection, run, updated, checkpoint.session_revision)
         self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
         self._insert_event(connection, event)
-        return RunCommit(
-            run=updated,
-            checkpoint=updated_checkpoint,
-            events=(event,),
+        return ModelStepReservationResult(
+            granted=True,
+            commit=RunCommit(run=updated, checkpoint=updated_checkpoint, events=(event,)),
         )
 
     def _record_compaction_usage(
@@ -2267,7 +2220,7 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         command: RequestCancellation,
     ) -> RunCommit:
-        """记录首次 cancellation request，并可结算 waiting run。"""
+        """记录首次取消意图，不关闭 interaction、工具事实或 session lane。"""
         operation = "request_cancellation"
         run = self._require_run(connection, command.run_id, operation=operation)
         if run.phase is RunPhase.TERMINAL:
@@ -2278,179 +2231,46 @@ class SQLiteStore:
         elif command.activation_id is not None:
             raise IrisRunConflictError("waiting run 不应携带 activation fence")
         checkpoint = self._require_checkpoint(connection, run.run_id, operation=operation)
+        interaction = (
+            self._require_interaction(connection, run.pending_interaction_id, operation=operation)
+            if run.phase is RunPhase.WAITING
+            else None
+        )
         if run.cancellation_requested_at is not None:
-            if run.cancellation_reason == command.reason and not command.settle_waiting:
-                replay_interaction = (
-                    self._require_interaction(
-                        connection,
-                        run.pending_interaction_id,
-                        operation=operation,
-                    )
-                    if run.phase is RunPhase.WAITING
-                    else None
-                )
+            if run.cancellation_reason == command.reason:
                 return RunCommit(
                     run=run,
                     checkpoint=checkpoint,
-                    interaction=replay_interaction,
-                    events=(),
-                    result=(
-                        project_result(run, replay_interaction)
-                        if run.phase is RunPhase.WAITING
-                        else None
-                    ),
+                    interaction=interaction,
+                    result=project_result(run, interaction) if interaction is not None else None,
                 )
-            raise IrisRunConflictError(
-                "cancellation 已由其他 command 请求",
-                run_id=run.run_id,
-            )
+            raise IrisRunConflictError("cancellation 已由其他 command 请求", run_id=run.run_id)
         self._require_revision(run, command.expected_run_revision)
         sequence = run.last_event_sequence + 1
-        events = [
-            _make_event(
-                run,
-                RunEventKind.CANCELLATION_REQUESTED,
-                command.now,
-                sequence=sequence,
-                activation_id=command.activation_id,
-                payload={"reason": command.reason},
-            )
-        ]
-        interaction: HumanInteraction | None = None
-        session_metadata: _SessionMetadata | None = None
-        updated_session_revision: int | None = None
-        closure_messages: list[Msg] = []
-        updated_checkpoint = checkpoint
-        unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
-        if run.phase is RunPhase.WAITING and command.settle_waiting:
-            interaction = self._close_interaction(
-                connection,
-                run,
-                command.now,
-                command.reason,
-                operation=operation,
-            )
-            closures = self._terminal_tool_closures(
-                connection,
-                run,
-                command.now,
-                operation=operation,
-            )
-            closure_messages = [message for _, _, message in closures]
-            session_metadata = self._select_session_metadata(
-                connection,
-                run.session_id,
-                operation=operation,
-            )
-            if session_metadata is None:
-                session_metadata = _SessionMetadata(
-                    session_id=run.session_id,
-                    revision=0,
-                    message_count=0,
-                    updated_at=None,
-                )
-            if closure_messages:
-                updated_checkpoint = checkpoint.model_copy(
-                    deep=True,
-                    update={"session_revision": session_metadata.revision + 1},
-                )
-            unknown_pairs = [
-                (current_call, updated_call)
-                for current_call, updated_call, _ in closures
-                if current_call.phase is ToolCallPhase.CLAIMED
-            ]
-            for index, (_, record) in enumerate(unknown_pairs, start=1):
-                events.append(
-                    _make_event(
-                        run,
-                        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-                        command.now,
-                        sequence=sequence + index,
-                        activation_id=record.claim_activation_id,
-                        step_index=record.step_index,
-                        correlation_id=record.tool_call_id,
-                    )
-                )
-            sequence += len(unknown_pairs) + 1
-            updated = _replace_run(
-                run,
-                phase=RunPhase.TERMINAL,
-                stop_reason=RunStopReason.CANCELLED,
-                revision=run.revision + 1,
-                pending_interaction_id=None,
-                cancellation_requested_at=command.now,
-                cancellation_reason=command.reason,
-                last_event_sequence=sequence,
-                updated_at=command.now,
-                finished_at=command.now,
-                terminal_session_message_count=(
-                    session_metadata.message_count + len(closure_messages)
-                ),
-                terminal_compaction=session_metadata.compaction,
-            )
-            events.append(
-                _make_event(
-                    updated,
-                    RunEventKind.RUN_TERMINAL,
-                    command.now,
-                    sequence=sequence,
-                )
-            )
-            result = project_result(updated)
-        else:
-            updated = _replace_run(
-                run,
-                revision=run.revision + 1,
-                cancellation_requested_at=command.now,
-                cancellation_reason=command.reason,
-                last_event_sequence=sequence,
-                updated_at=command.now,
-            )
-            if run.phase is RunPhase.WAITING:
-                waiting_interaction = self._require_interaction(
-                    connection,
-                    run.pending_interaction_id,
-                    operation=operation,
-                )
-                result = project_result(updated, waiting_interaction)
-            else:
-                result = None
-
-        if closure_messages and session_metadata is not None:
-            updated_session_revision = self._update_session(
-                connection,
-                session_metadata,
-                closure_messages,
-                command.now,
-            )
-            self._update_checkpoint(connection, checkpoint, updated_checkpoint, command.now)
-        else:
-            self._touch_session(
-                connection,
-                run.session_id,
-                checkpoint.session_revision,
-                command.now,
-            )
-        self._update_run(connection, run, updated, updated_checkpoint.session_revision)
-        if interaction is not None:
-            current_interaction = self._require_interaction(
-                connection,
-                interaction.interaction_id,
-                operation=operation,
-            )
-            self._update_interaction(connection, current_interaction, interaction)
-            self._delete_lane(connection, run, require_match=False)
-        for current_call, updated_call in unknown_pairs:
-            self._update_tool_call(connection, current_call, updated_call)
-        for event in events:
-            self._insert_event(connection, event)
+        event = _make_event(
+            run,
+            RunEventKind.CANCELLATION_REQUESTED,
+            command.now,
+            sequence=sequence,
+            activation_id=command.activation_id,
+            payload={"reason": command.reason},
+        )
+        updated = _replace_run(
+            run,
+            revision=run.revision + 1,
+            cancellation_requested_at=command.now,
+            cancellation_reason=command.reason,
+            last_event_sequence=sequence,
+            updated_at=command.now,
+        )
+        self._touch_session(connection, run.session_id, checkpoint.session_revision, command.now)
+        self._update_run(connection, run, updated, checkpoint.session_revision)
+        self._insert_event(connection, event)
         return RunCommit(
             run=updated,
-            session_revision=updated_session_revision,
-            checkpoint=updated_checkpoint,
-            interaction=interaction,
-            events=tuple(events),
-            result=result,
+            checkpoint=checkpoint,
+            events=(event,),
+            result=project_result(updated, interaction) if interaction is not None else None,
         )
 
     def _finish_run(
@@ -2613,7 +2433,7 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         command: RecoverActiveRun,
     ) -> RunCommit:
-        """按 durable checkpoint/tool facts 增量恢复或终止旧 activation。"""
+        """原子接管 safe/unknown 的新 fence，或完成已知正常结果。"""
         operation = "recover_active_run"
         run = self._require_run(connection, command.run_id, operation=operation)
         self._require_revision(run, command.expected_run_revision)
@@ -2638,6 +2458,10 @@ class SQLiteStore:
             raise IrisRunRecoveryError(
                 "safe recovery 不能重放 unresolved durable claim",
                 run_id=run.run_id,
+            )
+        if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN and not claimed:
+            raise IrisRunRecoveryError(
+                "outcome_unknown recovery 缺少 unresolved durable claim", run_id=run.run_id
             )
         abandoned_outcome = (
             ActivationOutcome.OUTCOME_UNKNOWN
@@ -2665,8 +2489,7 @@ class SQLiteStore:
                 command.now,
                 operation=operation,
             )
-            if command.recovery_disposition
-            in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
+            if command.recovery_disposition is RecoveryDisposition.FINALIZE
             else []
         )
         closure_messages = [message for _, _, message in terminal_closures]
@@ -2675,10 +2498,7 @@ class SQLiteStore:
         terminal_session_message_count: int | None = None
         terminal_compaction: SessionCompaction | None = None
         terminal_checkpoint = checkpoint
-        if command.recovery_disposition in {
-            RecoveryDisposition.OUTCOME_UNKNOWN,
-            RecoveryDisposition.FINALIZE,
-        }:
+        if command.recovery_disposition is RecoveryDisposition.FINALIZE:
             session_metadata = self._select_session_metadata(
                 connection,
                 run.session_id,
@@ -2698,64 +2518,10 @@ class SQLiteStore:
                     deep=True,
                     update={"session_revision": session_metadata.revision + 1},
                 )
-        unknown_pairs: list[tuple[RunToolCallRecord, RunToolCallRecord]] = []
         activation_next: ActivationRecord | None = None
         rebound: RunCheckpoint | None = None
         delete_lane = False
-        if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
-            if not claimed:
-                raise IrisRunRecoveryError(
-                    "outcome_unknown recovery 缺少 unresolved durable claim",
-                    run_id=run.run_id,
-                )
-            unknown_pairs = [
-                (current_call, updated_call)
-                for current_call, updated_call, _ in terminal_closures
-                if current_call.phase is ToolCallPhase.CLAIMED
-            ]
-            terminal_sequence = first_sequence + len(unknown_pairs) + 1
-            updated = _replace_run(
-                run,
-                phase=RunPhase.TERMINAL,
-                stop_reason=RunStopReason.OUTCOME_UNKNOWN,
-                revision=run.revision + 1,
-                current_activation_id=None,
-                error=RunErrorInfo(
-                    code="TOOL_OUTCOME_UNKNOWN",
-                    message="工具 claim 缺少可证明的 durable result",
-                    source="tool",
-                    details={"tool_call_ids": [item.tool_call_id for item in claimed]},
-                ),
-                last_event_sequence=terminal_sequence,
-                updated_at=command.now,
-                finished_at=command.now,
-                terminal_session_message_count=terminal_session_message_count,
-                terminal_compaction=terminal_compaction,
-            )
-            unknown_events = tuple(
-                _make_event(
-                    updated,
-                    RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-                    command.now,
-                    sequence=first_sequence + index,
-                    activation_id=record.claim_activation_id,
-                    step_index=record.step_index,
-                    correlation_id=record.tool_call_id,
-                )
-                for index, (_, record) in enumerate(unknown_pairs, start=1)
-            )
-            terminal_event = _make_event(
-                updated,
-                RunEventKind.RUN_TERMINAL,
-                command.now,
-                sequence=terminal_sequence,
-                payload={"stop_reason": RunStopReason.OUTCOME_UNKNOWN.value},
-            )
-            events = (abandoned_event, *unknown_events, terminal_event)
-            result = project_result(updated)
-            output_checkpoint = terminal_checkpoint
-            delete_lane = True
-        elif command.recovery_disposition is RecoveryDisposition.FINALIZE:
+        if command.recovery_disposition is RecoveryDisposition.FINALIZE:
             if claimed:
                 raise IrisRunRecoveryError(
                     "outcome-ready recovery 不能忽略 unresolved durable claim",
@@ -2821,7 +2587,11 @@ class SQLiteStore:
                 update={
                     "sequence": checkpoint.sequence + 1,
                     "activation_id": activation_next.activation_id,
-                    "resumability": CheckpointResumability.SAFE,
+                    "resumability": (
+                        CheckpointResumability.BLOCKED_UNKNOWN
+                        if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN
+                        else CheckpointResumability.SAFE
+                    ),
                 }
             )
             start_sequence = first_sequence + 1
@@ -2863,8 +2633,6 @@ class SQLiteStore:
         self._update_activation(connection, activation, abandoned)
         if delete_lane:
             self._delete_lane(connection, run, require_match=False)
-        for current_call, unknown_call in unknown_pairs:
-            self._update_tool_call(connection, current_call, unknown_call)
         if activation_next is not None and rebound is not None:
             self._insert_activation(connection, activation_next)
             self._update_checkpoint(connection, checkpoint, rebound, command.now)
@@ -2992,45 +2760,6 @@ class SQLiteStore:
                 "initial checkpoint session revision 不匹配",
                 expected=session.revision,
                 actual=command.initial_checkpoint.session_revision,
-            )
-
-        deadline = command.options.limits.deadline_at
-        if deadline is not None and command.now >= deadline:
-            run = RunRecord(
-                run_id=run_id,
-                session_id=command.request.session_id,
-                agent_id=command.agent_id,
-                request=command.request,
-                options=command.options,
-                initial_session_message_count=session.message_count,
-                phase=RunPhase.TERMINAL,
-                stop_reason=RunStopReason.DEADLINE_EXCEEDED,
-                revision=1,
-                current_activation_id=None,
-                pending_interaction_id=None,
-                usage=RunUsage(),
-                checkpoint_sequence=0,
-                last_event_sequence=1,
-                created_at=command.now,
-                started_at=command.now,
-                updated_at=command.now,
-                finished_at=command.now,
-                terminal_session_message_count=session.message_count,
-                terminal_compaction=session.compaction,
-            )
-            event = _make_event(
-                run,
-                RunEventKind.RUN_TERMINAL,
-                command.now,
-                sequence=1,
-            )
-            self._persist_create_session(connection, session, stored_session, command.now)
-            self._insert_run(connection, run, session.revision)
-            self._insert_event(connection, event)
-            return RunCommit(
-                run=run,
-                events=(event,),
-                result=project_result(run),
             )
 
         activation = ActivationRecord(

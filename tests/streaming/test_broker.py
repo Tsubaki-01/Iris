@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from iris.harness.session_manager import SubmissionEvent
-from iris.harness.streaming import SessionSubmissionEvent
-from iris.lifecycle import RunEvent, RunEventKind
+from iris.harness.streaming import ExecutionCleanupFailed, SessionSubmissionEvent
+from iris.lifecycle import RunErrorInfo, RunEvent, RunEventKind
 from iris.message import (
     LLMResponse,
     ModelBlockDelta,
@@ -31,6 +31,34 @@ from iris.streaming.models import (
 )
 from iris.streaming.projection import project_live_fact
 from iris.tools import ToolArtifact, ToolErrorInfo, ToolResult
+
+
+def test_cleanup_failure_projects_live_error_to_exact_run_and_session() -> None:
+    """清理失败是 critical live fact，不伪造 durable terminal 或泄露诊断详情。"""
+    fact = ExecutionCleanupFailed(
+        run_id="run-cleanup",
+        session_id="session-cleanup",
+        error=RunErrorInfo(
+            code="EXECUTION_CLEANUP_FAILED",
+            source="tool",
+            message="Docker 停止未确认",
+            details={"private_path": "/host/private", "stdout": "private command output"},
+        ),
+    )
+    run, session = project_live_fact(fact)
+    assert (run.scope, run.scope_id) == ("run", "run-cleanup")
+    assert (session.scope, session.scope_id) == ("session", "session-cleanup")
+    assert run.kind == session.kind == "execution.cleanup.failed"
+    assert run.critical and session.critical
+    assert run.durable_sequence is None
+    assert run.activation_id is None
+    assert run.payload == {
+        "error": {
+            "code": "EXECUTION_CLEANUP_FAILED",
+            "source": "tool",
+            "message": "Docker 停止未确认",
+        }
+    }
 
 
 def _run_event(

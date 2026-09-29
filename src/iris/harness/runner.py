@@ -19,7 +19,6 @@ import logging
 import math
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
@@ -33,6 +32,7 @@ from ..exceptions import (
     HITLConflictError,
     IrisCancellationRequestedError,
     IrisConfigError,
+    IrisExecutionCleanupError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunObservationTimeoutError,
@@ -40,7 +40,7 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..execution.models import ExecutionMode
+from ..execution.models import ExecutionMode, ExecutionScope, ExecutionStopReceipt
 from ..hitl import (
     ApprovedToolCall,
     HumanInteraction,
@@ -78,6 +78,7 @@ from ..lifecycle import (
     snapshot_run,
 )
 from ..memory import MemoryService
+from ..message import Msg
 from ..providers import CompletionProvider
 from ..runtime import (
     AgentRuntime,
@@ -103,6 +104,13 @@ from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentPar
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._context_access import ContextAccess
 from ._events import _RunEventCollector
+from ._execution_lifecycle import (
+    ChildExecutionTarget,
+    ExecutionLifecycle,
+    ExecutionTarget,
+    PendingSettlement,
+    RootExecutionTarget,
+)
 from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
@@ -210,7 +218,6 @@ class ActiveActivation:
         activation_id (str): 该 activation 的 fence 标识，用于校验 store 侧 owner 未变。
         signal (_MutableCancellationSignal): 与 runtime 共享的协作式取消信号。
         task (asyncio.Task[RuntimeActivationResult] | None): 正在执行的 engine task。
-        deadline_task (asyncio.Task[None] | None): absolute deadline 触发器。
         settled (asyncio.Event): activation 结算完成的进程内通知，供 cancel 观察者等待。
         event_collector (_RunEventCollector): 与 commit port 共享的事件收集与同步 relay。
         steering (RuntimeSteeringPort | None): managed 组合层注入的安全边界 steering port。
@@ -220,7 +227,6 @@ class ActiveActivation:
     activation_id: str
     signal: _MutableCancellationSignal
     task: asyncio.Task[RuntimeActivationResult] | None = None
-    deadline_task: asyncio.Task[None] | None = None
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     event_collector: _RunEventCollector = field(default_factory=_RunEventCollector)
     steering: RuntimeSteeringPort | None = None
@@ -281,6 +287,9 @@ class AgentRunner:
             binding is None or binding.config.mode is ExecutionMode.NATIVE
         )
         self._closed = False
+        self._resources_closed = False
+        self._execution_lifecycle = ExecutionLifecycle(self)
+        self._execution_target: ExecutionTarget = RootExecutionTarget(self)
         self._live_publisher = live_publisher
         if live_publisher is None:
             self._stream_sink: RuntimeEventSink | None = None
@@ -324,9 +333,7 @@ class AgentRunner:
             except BaseException:
                 self._closed = True
                 try:
-                    if self._memory_maintenance is not None:
-                        await self._memory_maintenance.aclose()
-                    await self.runtime.environment.aclose()
+                    await self._close_owned_resources()
                 except Exception:
                     logger.exception("运行资源准备失败后的资源关闭失败")
                 raise
@@ -339,16 +346,25 @@ class AgentRunner:
         Raises:
             IrisRunStateError: 当前仍有 active activation，不能提前关闭资源。
         """
-        if self._closed:
+        if self._resources_closed:
             return
         if self._active or (
             self._memory_maintenance is not None and self._memory_maintenance.foreground_active
         ):
             raise IrisRunStateError("runner 仍有 active activation，不能关闭")
         self._closed = True
-        if self._memory_maintenance is not None:
-            await self._memory_maintenance.aclose()
-        await self.runtime.environment.aclose()
+        if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
+            await self._execution_lifecycle.aclose()
+        await self._close_owned_resources()
+
+    async def _close_owned_resources(self) -> None:
+        """前一资源失败也尝试后续关闭，仅全部成功后标记完成。"""
+        try:
+            if self._memory_maintenance is not None:
+                await self._memory_maintenance.aclose()
+        finally:
+            await self.runtime.environment.aclose()
+        self._resources_closed = True
 
     @classmethod
     def from_config_path(
@@ -447,6 +463,8 @@ class AgentRunner:
             live_publisher=live_publisher,
         )
         runner._subagent_controller = controller
+        if controller is not None:
+            controller.execution_lifecycle = runner._execution_lifecycle
         return runner
 
     # endregion
@@ -500,9 +518,6 @@ class AgentRunner:
             await self._memory_maintenance.register_run(created.run)
         events = self._event_collector(durable_event_callback)
         events.record(created.events)
-        if created.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(events.events)
-            return self._require_result(created.run.run_id)
         if created.checkpoint != command.initial_checkpoint:
             raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
         return await self._run_start_activation(
@@ -553,7 +568,7 @@ class AgentRunner:
         events = self._event_collector()
         events.record(self.store.list_events(run_id))
         if run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(events.events)
+            await self._deliver_events(events.take_pending_events())
             return self._require_result(run_id)
         checkpoint = self.store.load_checkpoint(run_id)
         if checkpoint is None:
@@ -662,6 +677,9 @@ class AgentRunner:
         # --- 1. 校验 run/interaction identity ---
         needs_prepare = not self._prepared
         normalized_run_id = self._required_id(run_id)
+        retried, cleanup_receipt = await self._retry_execution_settlement(normalized_run_id)
+        if retried is not None:
+            return retried
         normalized_interaction_id = self._required_id(interaction_id)
         run = self.store.load_run(normalized_run_id)
         if run is None:
@@ -695,6 +713,7 @@ class AgentRunner:
             steering=steering,
             durable_event_callback=durable_event_callback,
             activation_started=activation_started,
+            stop_receipt=cleanup_receipt,
         )
         if settled is not None:
             return settled
@@ -837,7 +856,7 @@ class AgentRunner:
             return cast(RunResult, settled)
         current = cast(RunRecord, self.store.load_run(parent_run.run_id))
         if current.phase is RunPhase.TERMINAL:
-            await self._deliver_events(event_collector.events)
+            await self._deliver_events(event_collector.take_pending_events())
             return self._require_result(current.run_id)
         settled = await self._settle_waiting_if_due(
             current, proxy, now=self._now(), event_collector=event_collector
@@ -881,7 +900,7 @@ class AgentRunner:
             rebound = adapter.rebind(
                 parent_run=parent_run, call=call, replaced_proxy=proxy, waiting=outcome
             )
-            await self._deliver_events(event_collector.events)
+            await self._deliver_events(event_collector.take_pending_events())
             return cast(RunResult, rebound.result)
         result = await self.runtime.environment.tool_bridge._normalize_subagent_result(
             cursor.tool_calls[cursor.next_tool_index],
@@ -894,7 +913,7 @@ class AgentRunner:
         )
         parent_run = cast(RunRecord, self.store.load_run(parent_run.run_id))
         if parent_run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(event_collector.events)
+            await self._deliver_events(event_collector.take_pending_events())
             return self._require_result(parent_run.run_id)
         # child 已返回确定结果，只重查 parent 的取消/deadline；不重入已完成的 child expiry。
         now = self._now()
@@ -918,20 +937,19 @@ class AgentRunner:
         if cast(asyncio.Task[object], asyncio.current_task()).cancelling():
             raise asyncio.CancelledError
         if result.is_error and parent_run.options.runtime.tool_error_policy is ToolErrorPolicy.STOP:
-            finished = self.store.finish_run(
-                FinishRun(
-                    run_id=parent_run.run_id,
-                    expected_run_revision=resumed.run.revision,
-                    activation_id=resumed.activation_id,
-                    stop_reason=RunStopReason.FAILED,
-                    assistant_message=cursor.assistant_message,
-                    error=_tool_run_error(result),
-                    now=self._now(),
-                )
+            await self._settle_execution(
+                resumed.run,
+                activation_id=resumed.activation_id,
+                stop_reason=RunStopReason.FAILED,
+                assistant_message=cursor.assistant_message,
+                error=_tool_run_error(result),
+                events=event_collector,
+                call_id=proxy.tool_call_id,
             )
-            event_collector.record(finished.events)
-            await self._deliver_events(event_collector.events)
             return self._require_result(parent_run.run_id)
+        self.runtime.environment.command_stop_slots.pop(
+            (parent_run.run_id, proxy.tool_call_id), None
+        )
         active = ActiveActivation(
             run_id=parent_run.run_id,
             activation_id=resumed.activation_id,
@@ -972,8 +990,8 @@ class AgentRunner:
         """持久化首次 cancellation request，再 signal 当前进程 activation。
 
         ``cancellation_requested`` 只是 durable fact，不等于已取消。已有 claim 的 activation
-        只接收 signal，由 executor 取消普通工具 body 并等待清理。普通 waiting run 可在同一
-        事务里结算为 terminal cancelled；linked child 由 ``cancel()`` 继续结算。重复请求幂等，
+        只接收 signal，由 executor 取消普通工具 body 并等待清理。waiting run 由异步
+        ``cancel()`` 完成环境清理和终态。重复请求幂等，
         只有首次会写入 durable 事实。
 
         Args:
@@ -996,6 +1014,8 @@ class AgentRunner:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
         if run.phase is RunPhase.TERMINAL:
             return snapshot_run(run)
+        if self._closed:
+            raise IrisRunStateError("runner 已关闭")
         if run.cancellation_requested_at is None:
             committed = self.store.request_cancellation(
                 RequestCancellation(
@@ -1005,8 +1025,6 @@ class AgentRunner:
                         run.current_activation_id if run.phase is RunPhase.ACTIVE else None
                     ),
                     reason=normalized_reason,
-                    settle_waiting=run.phase is RunPhase.WAITING
-                    and not self._is_subagent_proxy(run),
                     now=self._now(),
                 )
             )
@@ -1060,6 +1078,9 @@ class AgentRunner:
         if settlement_timeout is not None and settlement_timeout <= 0:
             raise IrisRunStateError("settlement_timeout 必须大于 0")
         normalized = self._required_id(run_id)
+        retried, cleanup_receipt = await self._retry_execution_settlement(normalized)
+        if retried is not None:
+            return retried
         before = self.store.load_run(normalized)
         if before is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
@@ -1084,7 +1105,28 @@ class AgentRunner:
                         HumanInteraction,
                         self.store.load_interaction(current.pending_interaction_id or ""),
                     )
-                    await self._settle_waiting_if_due(current, interaction, now=self._now())
+                    events = self._event_collector()
+                    # request_cancel 已同步 relay；只补异步 observer，不重复 live callback。
+                    events.record(
+                        self.store.list_events(normalized, before.last_event_sequence), relay=False
+                    )
+                    await self._settle_waiting_if_due(
+                        current,
+                        interaction,
+                        now=self._now(),
+                        event_collector=events,
+                        stop_receipt=cleanup_receipt,
+                    )
+                elif (
+                    cleanup_receipt is not None
+                    and current.phase is RunPhase.ACTIVE
+                    and normalized not in self._active
+                ):
+                    return await self._recover(
+                        normalized,
+                        expected_activation_id=current.current_activation_id,
+                        stop_receipt=cleanup_receipt,
+                    )
                 elif (
                     current.phase is RunPhase.ACTIVE
                     and normalized not in self._active
@@ -1106,11 +1148,6 @@ class AgentRunner:
                 "等待 run cancellation settlement 超时", run_id=normalized
             ) from exc
 
-    def _is_subagent_proxy(self, run: RunRecord) -> bool:
-        """在 WAITING cancellation 操作边界识别需要 child-first 的 proxy。"""
-        interaction = self.store.load_interaction(run.pending_interaction_id or "")
-        return interaction is not None and interaction.request.subagent_origin is not None
-
     async def _settle_linked_before_parent_stop(
         self, *, parent_run: RunRecord, reason: str
     ) -> None:
@@ -1126,11 +1163,16 @@ class AgentRunner:
                 )
 
     @_with_memory_foreground
-    async def recover(
+    async def recover(self, run_id: str, *, expected_activation_id: str | None = None) -> RunResult:
+        """按精确 activation fence 恢复；先完成本进程已有的清理结算。"""
+        return await self._recover(run_id, expected_activation_id=expected_activation_id)
+
+    async def _recover(
         self,
         run_id: str,
         *,
         expected_activation_id: str | None = None,
+        stop_receipt: ExecutionStopReceipt | None = None,
     ) -> RunResult:
         """根据精确 activation fence 与 durable facts 显式恢复 run。
 
@@ -1156,6 +1198,11 @@ class AgentRunner:
         # --- 1. 按 phase 分派 recovery 入口 ---
         needs_prepare = not self._prepared
         normalized = self._required_id(run_id)
+        retried, cleanup_receipt = await self._retry_execution_settlement(normalized)
+        if retried is not None:
+            return retried
+        if cleanup_receipt is not None:
+            stop_receipt = cleanup_receipt
         run = self.store.load_run(normalized)
         if run is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
@@ -1169,11 +1216,15 @@ class AgentRunner:
                 raise IrisRunRecoveryError(
                     "waiting run 缺少 durable interaction", run_id=run.run_id
                 )
-            settled = await self._settle_waiting_if_due(run, interaction, now=self._now())
+            settled = await self._settle_waiting_if_due(
+                run, interaction, now=self._now(), stop_receipt=stop_receipt
+            )
             if settled is not None:
                 return settled
             if needs_prepare and self._prepared:
-                return await self.recover(run_id, expected_activation_id=expected_activation_id)
+                return await self._recover(
+                    run_id, expected_activation_id=expected_activation_id, stop_receipt=stop_receipt
+                )
             if (
                 interaction.status is InteractionStatus.RESOLVED
                 and interaction.request.tool_call.tool_name == "subagent"
@@ -1212,7 +1263,9 @@ class AgentRunner:
             await self.aprepare()
             if needs_prepare:
                 # 保留调用方 fence，重新读取 phase、checkpoint 与可能新出现的 claim。
-                return await self.recover(run_id, expected_activation_id=expected_activation_id)
+                return await self._recover(
+                    run_id, expected_activation_id=expected_activation_id, stop_receipt=stop_receipt
+                )
             recovered_cursor = self._validate_recovery_checkpoint(run, checkpoint)
             if (
                 checkpoint.resumability is CheckpointResumability.OUTCOME_READY
@@ -1230,9 +1283,9 @@ class AgentRunner:
                     run_id=run.run_id,
                 )
         # --- 4. 原子 abandon 旧 activation ---
-        # 只有 RESUME 需要新一代 activation；FINALIZE 与 OUTCOME_UNKNOWN 都在同一事务里 terminal。
+        # UNKNOWN 也先取得新 fence，再异步清理；FINALIZE 保持正常完成捷径。
         new_activation_id = (
-            f"act_{uuid.uuid4().hex}" if disposition is RecoveryDisposition.RESUME else None
+            f"act_{uuid.uuid4().hex}" if disposition is not RecoveryDisposition.FINALIZE else None
         )
         recovered = self.store.recover_active_run(
             RecoverActiveRun(
@@ -1248,10 +1301,44 @@ class AgentRunner:
         recovered_events = self._event_collector()
         recovered_events.record(recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
-            await self._deliver_events(recovered_events.events)
+            self._execution_lifecycle.terminal(run.run_id)
+            await self._deliver_events(recovered_events.take_pending_events())
             return self._require_result(run.run_id)
+        if disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
+            result = await self._settle_execution(
+                recovered.run,
+                activation_id=new_activation_id,
+                stop_reason=RunStopReason.OUTCOME_UNKNOWN,
+                error=RunErrorInfo(
+                    code="TOOL_OUTCOME_UNKNOWN",
+                    message="恢复发现未结算的工具 claim，不能重放",
+                    source="tool",
+                    details={"tool_call_ids": [item.tool_call_id for item in claimed]},
+                ),
+                events=recovered_events,
+                receipt=stop_receipt,
+            )
+            return cast(RunResult, result)
         if recovered.checkpoint is None or recovered_cursor is None or new_activation_id is None:
             raise IrisRunRecoveryError("recover commit 缺少 rebound activation facts")
+        if stop_receipt is not None:
+            deadline = recovered.run.options.limits.deadline_at
+            reason = (
+                RunStopReason.CANCELLED
+                if recovered.run.cancellation_requested_at is not None
+                else RunStopReason.DEADLINE_EXCEEDED
+                if deadline is not None and self._now() >= deadline
+                else None
+            )
+            if reason is not None:
+                result = await self._settle_execution(
+                    recovered.run,
+                    activation_id=new_activation_id,
+                    stop_reason=reason,
+                    events=recovered_events,
+                    receipt=stop_receipt,
+                )
+                return cast(RunResult, result)
         if recovered.checkpoint.engine_cursor != recovered_cursor.model_dump(mode="json"):
             raise IrisRunConflictError("recover rebound checkpoint cursor 已变化")
 
@@ -1393,6 +1480,10 @@ class AgentRunner:
             result = self.store.load_result(run_id)
             if result is not None and result.run.phase is RunPhase.TERMINAL:
                 return result
+            pending = self._execution_lifecycle.pending.get(run_id)
+            if pending is not None and pending.attempt is not None:
+                await asyncio.shield(pending.attempt)
+                continue
             remaining = None if deadline is None else deadline - loop.time()
             if remaining is not None and remaining <= 0:
                 raise IrisRunObservationTimeoutError(
@@ -1495,10 +1586,11 @@ class AgentRunner:
         durable_event_callback: Callable[[RunEvent], None] | None = None,
         activation_started: asyncio.Event | None = None,
         event_collector: _RunEventCollector | None = None,
+        stop_receipt: ExecutionStopReceipt | None = None,
     ) -> RunResult | None:
         """把已到期的 waiting run 就地结算为 terminal，否则返回 None。
 
-        waiting run 不占用 engine，只能在 resume/recover 等外部触点上判断到期。优先级为
+        waiting run 不占用 engine，root timer 或 resume/recover 触点都可推进。优先级为
         cancellation > deadline / interaction 过期；两者同时到期时取更早的时间点作为原因。
         """
         origin = interaction.request.subagent_origin
@@ -1538,6 +1630,7 @@ class AgentRunner:
                     durable_event_callback=durable_event_callback,
                     activation_started=activation_started,
                     event_collector=event_collector,
+                    stop_receipt=stop_receipt,
                 )
             checkpoint = self.store.load_checkpoint(run.run_id)
             if checkpoint is None:
@@ -1551,7 +1644,9 @@ class AgentRunner:
             if current.cancellation_requested_at is not None or (
                 deadline is not None and self._now() >= deadline
             ):
-                return await self._settle_waiting_if_due(current, interaction, now=self._now())
+                return await self._settle_waiting_if_due(
+                    current, interaction, now=self._now(), stop_receipt=stop_receipt
+                )
             return await self._complete_subagent_proxy(
                 parent_run=current,
                 proxy=interaction,
@@ -1590,30 +1685,18 @@ class AgentRunner:
         event_cursor = run.last_event_sequence
         if activation_started is not None:
             activation_started.set()
-        await self._settle_linked_before_parent_stop(parent_run=run, reason=stop_reason.value)
-        run = cast(RunRecord, self.store.load_run(run.run_id))
-        if run.phase is RunPhase.TERMINAL:
-            if event_collector is not None:
-                await self._deliver_events(event_collector.events)
-            return self._require_result(run.run_id)
-        if run.cancellation_requested_at is not None:
-            stop_reason = RunStopReason.CANCELLED
-            close_reason = "cancelled"
-        committed = self.store.finish_run(
-            FinishRun(
-                run_id=run.run_id,
-                expected_run_revision=run.revision,
-                stop_reason=stop_reason,
-                interaction_close_reason=close_reason,
-                now=now,
-            )
-        )
-        if committed.result is None:
-            raise IrisRunStateError("waiting settlement 缺少 durable result", run_id=run.run_id)
         events = event_collector or self._event_collector(durable_event_callback)
+        result = await self._settle_execution(
+            run,
+            activation_id=None,
+            stop_reason=stop_reason,
+            interaction_close_reason=close_reason,
+            events=events,
+            receipt=stop_receipt,
+        )
         events.record(self.store.list_events(run.run_id, event_cursor))
-        await self._deliver_events(events.events)
-        return committed.result
+        await self._deliver_events(events.take_pending_events())
+        return result
 
     # endregion
 
@@ -1700,9 +1783,18 @@ class AgentRunner:
             IrisRunPersistenceError: 当 durable 写入失败时。
             IrisRunStateError: 当出现不可解释的 phase/outcome 组合，或缺少 durable result 时。
         """
-        # --- 1. 启动 deadline timer 与 engine task ---
+        # --- 1. 注册跨 activation 的 deadline，并驱动 engine ---
         try:
-            active.deadline_task = self._start_deadline_task(active, port)
+            deadline = port.run.options.limits.deadline_at
+            if deadline is not None and self._now() >= deadline:
+                await self._settle_execution(
+                    port.run,
+                    activation_id=active.activation_id,
+                    stop_reason=RunStopReason.DEADLINE_EXCEEDED,
+                    events=active.event_collector,
+                )
+                return self._require_result(active.run_id)
+            self._execution_lifecycle.register_deadline(port.run, self._execution_target)
             active.task = asyncio.create_task(
                 self.runtime.execute(
                     activation,
@@ -1715,19 +1807,30 @@ class AgentRunner:
             # --- 2. 把每种退出路径映射为 durable outcome ---
             try:
                 engine_result = await active.task
-                if engine_result.outcome is not RuntimeActivationOutcome.SUSPENDED:
-                    await self._settle_linked_before_parent_stop(
-                        parent_run=port.run, reason="parent execution finished"
-                    )
-                self._settle_engine_result(active, engine_result, port)
+                await self._settle_engine_result(active, engine_result, port)
             except asyncio.CancelledError:
                 # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
                 if not active.signal.requested:
+                    cleanup = asyncio.create_task(
+                        self._settle_execution(
+                            port.run,
+                            activation_id=active.activation_id,
+                            stop_reason=None,
+                            events=active.event_collector,
+                        )
+                    )
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            continue
+                    cleanup.result()
                     raise
-                await self._settle_linked_before_parent_stop(
-                    parent_run=port.run, reason="parent interrupted"
-                )
-                self._finish_cancelled_task(active, port)
+                await self._finish_cancelled_task(active, port)
+            except IrisExecutionCleanupError as exc:
+                if active.run_id not in self._execution_lifecycle.pending:
+                    await self._finish_unexpected(active, exc, port, initial_cleanup_error=exc)
+                raise
             except (
                 IrisRunConflictError,
                 IrisRunNotFoundError,
@@ -1738,7 +1841,7 @@ class AgentRunner:
                 # lifecycle 一致性错误说明 durable 事实已不可信，不再尝试写入 terminal。
                 raise
             except Exception as exc:
-                self._finish_unexpected(active, exc, port)
+                await self._finish_unexpected(active, exc, port)
         # --- 3. 收口 live resources 并投递事件 ---
         finally:
             # 先 revoke 再释放资源，阻止迟到的 child 继续写入本 activation 的事实。
@@ -1751,10 +1854,10 @@ class AgentRunner:
                 if current is active:
                     self._active.pop(active.run_id, None)
                 active.settled.set()
-            await self._deliver_events(active.event_collector.events)
+            await self._deliver_events(active.event_collector.take_pending_events())
         return self._require_result(active.run_id)
 
-    def _finish_cancelled_task(
+    async def _finish_cancelled_task(
         self,
         active: ActiveActivation,
         port: StoreRuntimeCommitPort,
@@ -1787,19 +1890,15 @@ class AgentRunner:
         else:
             stop_reason = RunStopReason.CANCELLED
             error = None
-        committed = self.store.finish_run(
-            FinishRun(
-                run_id=active.run_id,
-                expected_run_revision=current.revision,
-                activation_id=active.activation_id,
-                stop_reason=stop_reason,
-                error=error,
-                now=self._now(),
-            )
+        await self._settle_execution(
+            current,
+            activation_id=active.activation_id,
+            stop_reason=stop_reason,
+            error=error,
+            events=active.event_collector,
         )
-        active.event_collector.record(committed.events)
 
-    def _settle_engine_result(
+    async def _settle_engine_result(
         self,
         active: ActiveActivation,
         result: RuntimeActivationResult,
@@ -1832,7 +1931,7 @@ class AgentRunner:
             RuntimeActivationOutcome.CANCELLED,
             RuntimeActivationOutcome.FAILED,
         }:
-            self._finish_cancelled_task(active, port)
+            await self._finish_cancelled_task(active, port)
             return
         stop_reason = {
             RuntimeActivationOutcome.COMPLETED: RunStopReason.COMPLETED,
@@ -1844,24 +1943,24 @@ class AgentRunner:
         }.get(outcome)
         if stop_reason is None:
             raise IrisRunStateError("未知 engine activation outcome")
-        committed = self.store.finish_run(
-            FinishRun(
-                run_id=active.run_id,
-                expected_run_revision=current.revision,
-                activation_id=active.activation_id,
-                stop_reason=stop_reason,
-                assistant_message=result.assistant_message,
-                error=result.error,
-                now=self._now(),
-            )
+        await self._settle_execution(
+            current,
+            activation_id=active.activation_id,
+            stop_reason=stop_reason,
+            assistant_message=result.assistant_message,
+            error=result.error,
+            events=active.event_collector,
+            receipt=result.stop_receipt,
+            call_id=result.stop_call_id,
         )
-        active.event_collector.record(committed.events)
 
-    def _finish_unexpected(
+    async def _finish_unexpected(
         self,
         active: ActiveActivation,
         error: Exception,
         port: StoreRuntimeCommitPort,
+        *,
+        initial_cleanup_error: IrisExecutionCleanupError | None = None,
     ) -> None:
         """把 engine 的未预期异常结算为 failed 或 outcome unknown。"""
         del port  # settlement 走 runner 自己的 finish_run，不复用已收口的 activation port。
@@ -1892,41 +1991,135 @@ class AgentRunner:
                 message=str(error) or type(error).__name__,
                 source="runtime",
             )
-        committed = self.store.finish_run(
-            FinishRun(
-                run_id=active.run_id,
-                expected_run_revision=current.revision,
-                activation_id=active.activation_id,
-                stop_reason=stop_reason,
-                error=run_error,
-                now=self._now(),
-            )
+        await self._settle_execution(
+            current,
+            activation_id=active.activation_id,
+            stop_reason=stop_reason,
+            error=run_error,
+            events=active.event_collector,
+            initial_cleanup_error=initial_cleanup_error,
         )
-        active.event_collector.record(committed.events)
 
-    def _start_deadline_task(
+    async def _retry_execution_settlement(
+        self, run_id: str
+    ) -> tuple[RunResult | None, ExecutionStopReceipt | None]:
+        """业务分派之前只重试既有清理，不改写原原因。"""
+        if self._closed:
+            run = self.store.load_run(run_id)
+            if run is not None and run.phase is RunPhase.TERMINAL:
+                return None, None
+            raise IrisRunStateError("runner 已关闭")
+        pending = self._execution_lifecycle.pending.get(run_id)
+        if pending is None:
+            return None, None
+        result = await self._execution_lifecycle.join(pending)
+        return result, pending.receipt if pending.stop_reason is None else None
+
+    async def _settle_execution(
         self,
-        active: ActiveActivation,
-        port: StoreRuntimeCommitPort,
-    ) -> asyncio.Task[None] | None:
-        """为配置了 absolute deadline 的 run 启动到期中断 timer。"""
-        remaining = port.remaining_deadline_seconds()
-        if remaining is None:
-            return None
+        run: RunRecord,
+        *,
+        activation_id: str | None,
+        stop_reason: RunStopReason | None,
+        events: _RunEventCollector,
+        error: RunErrorInfo | None = None,
+        assistant_message: Msg | None = None,
+        interaction_close_reason: str | None = None,
+        receipt: ExecutionStopReceipt | None = None,
+        call_id: str | None = None,
+        initial_cleanup_error: IrisExecutionCleanupError | None = None,
+    ) -> RunResult | None:
+        """在任何清理 await 前保存结算意图，并加入唯一 attempt。"""
+        lifecycle = self._execution_lifecycle
+        pending = lifecycle.pending.get(run.run_id)
+        if pending is None:
+            pending = PendingSettlement(
+                target=self._execution_target,
+                run_id=run.run_id,
+                activation_id=activation_id,
+                stop_reason=stop_reason,
+                error=error,
+                assistant_message=assistant_message,
+                interaction_close_reason=interaction_close_reason,
+                events=events,
+                receipt=receipt,
+                call_id=call_id,
+                initial_error=initial_cleanup_error,
+            )
+            lifecycle.pending[run.run_id] = pending
+        return await lifecycle.join(pending)
 
-        async def request_at_deadline() -> None:
-            await asyncio.sleep(remaining)
+    async def _perform_execution_settlement(self, pending: PendingSettlement) -> RunResult | None:
+        """单个 attempt 独占 child-first、排空和终态提交。"""
+        run = cast(RunRecord, self.store.load_run(pending.run_id))
+        # 操作边界只确认本次结算的 ownership，不重新校验可信配置或历史。
+        if run.phase is RunPhase.ACTIVE and run.current_activation_id != pending.activation_id:
+            raise IrisRunConflictError("清理结算的 activation fence 已变化", run_id=run.run_id)
+        await self._settle_linked_before_parent_stop(
+            parent_run=run, reason="parent execution finished"
+        )
+        slots = self.runtime.environment.command_stop_slots
+        if pending.receipt is None:
+            for (owner_run, call_id), slot in slots.items():
+                if owner_run == run.run_id and slot.receipt is not None:
+                    pending.receipt = slot.receipt
+                    pending.call_id = call_id
+                    break
+        binding = self.runtime.environment.execution_binding
+        if pending.stop_reason is not RunStopReason.COMPLETED and binding is not None:
+            if pending.receipt is None:
+                operation = binding.service.stop(ExecutionScope(run.run_id, run.session_id))
+                pending.receipt = await operation.wait_drained()
+            else:
+                await binding.service.wait_drained(pending.receipt)
+        result: RunResult | None = None
+        if pending.stop_reason is not None:
+            current = cast(RunRecord, self.store.load_run(run.run_id))
+            committed = self.store.finish_run(
+                FinishRun(
+                    run_id=run.run_id,
+                    expected_run_revision=current.revision,
+                    activation_id=pending.activation_id,
+                    stop_reason=pending.stop_reason,
+                    error=pending.error,
+                    assistant_message=pending.assistant_message,
+                    interaction_close_reason=pending.interaction_close_reason,
+                    now=self._now(),
+                )
+            )
+            pending.events.record(committed.events)
+            result = committed.result
+            self._execution_lifecycle.terminal(run.run_id)
+            if pending.receipt is not None and isinstance(
+                self._execution_target, ChildExecutionTarget
+            ):
+                self._execution_lifecycle.settled_receipts[run.run_id] = pending.receipt
+        for key in tuple(slots):
+            if key[0] == run.run_id:
+                del slots[key]
+        self._execution_lifecycle.pending.pop(run.run_id)
+        await self._deliver_events(pending.events.take_pending_events())
+        return result
+
+    def _take_settlement_receipt(self, run_id: str) -> ExecutionStopReceipt | None:
+        """从本次 child 结算取得父调用所需的停止事实。"""
+        return self._execution_lifecycle.take_settlement_receipt(run_id)
+
+    async def _execution_deadline_due(self, run_id: str) -> None:
+        """timer 只影响目标 run，WAITING 也有异步结算 owner。"""
+        active = self._active.get(run_id)
+        if active is not None:
             self._interrupt_active(active, deadline=True)
-
-        return asyncio.create_task(request_at_deadline())
+            return
+        run = cast(RunRecord, self.store.load_run(run_id))
+        if run.phase is RunPhase.WAITING:
+            interaction = cast(
+                HumanInteraction, self.store.load_interaction(run.pending_interaction_id or "")
+            )
+            await self._settle_waiting_if_due(run, interaction, now=self._now())
 
     async def _settle_live_resources(self, active: ActiveActivation) -> None:
-        """释放 activation 的进程内资源，确保没有悬挂 timer。"""
-        if active.deadline_task is not None:
-            active.deadline_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await active.deadline_task
-            active.deadline_task = None
+        """释放 activation 资源；run timer 由 root 另行管理。"""
         active.task = None
 
     async def _deliver_events(self, events: list[RunEvent]) -> None:
@@ -2031,6 +2224,8 @@ class AgentRunner:
 
     def _publish_live_fact(self, fact: LiveFact) -> None:
         """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
+        from .streaming import ExecutionCleanupFailed
+
         publisher = self._live_publisher
         if publisher is None:
             return
@@ -2044,6 +2239,11 @@ class AgentRunner:
             run_id = fact.run_id
             session_id = fact.session_id
             activation_id = fact.activation_id
+        elif isinstance(fact, ExecutionCleanupFailed):
+            fact_kind = "execution.cleanup.failed"
+            run_id = fact.run_id
+            session_id = fact.session_id
+            activation_id = None
         else:
             fact_kind = f"submission.{fact.event.state}"
             run_id = fact.event.run_id
