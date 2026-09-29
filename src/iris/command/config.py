@@ -14,7 +14,7 @@ class DockerConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    image: str = Field(default="python:3.12-slim", min_length=1)
+    image: str = Field(default="iris-command:local", min_length=1)
     endpoint: str | None = None
     network: Literal["none", "bridge"] = "none"
     cpus: float = Field(default=2.0, gt=0, allow_inf_nan=False)

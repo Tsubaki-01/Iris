@@ -274,7 +274,7 @@ async def test_prepare_once_explicit_local_endpoint_without_container(
     await asyncio.gather(service.prepare(), service.prepare())
     assert driver.kwargs["url"].startswith(("unix:///", "npipe:////"))
     assert driver.info_calls == 1
-    assert driver.image_calls == ["python:3.12-slim"]
+    assert driver.image_calls == ["iris-command:local"]
     assert not driver.containers.created
     await service.aclose()
     assert driver.closed
@@ -292,8 +292,11 @@ async def test_prepare_failure_never_falls_back(
     else:
         driver.image_missing = True
     service = DockerCommandService(tmp_path, DockerConfig(), workspace_writable=True)
-    with pytest.raises(IrisCommandError):
+    with pytest.raises(IrisCommandError) as caught:
         await service.prepare()
+    if problem == "missing-image":
+        assert "显式构建" in str(caught.value)
+        assert "iris-command:local" in str(caught.value)
     assert not driver.containers.created
     await service.aclose()
 
@@ -318,7 +321,9 @@ async def test_real_result_protocol_preserves_exit_codes(
 async def test_shared_container_configuration_and_child_cwd(
     tmp_path: Path, driver: FakeClient
 ) -> None:
-    config = DockerConfig(network="bridge", environment={"CUSTOM": "value"})
+    config = DockerConfig(
+        image="my-command:local", network="bridge", environment={"CUSTOM": "value"}
+    )
     service = DockerCommandService(tmp_path, config, workspace_writable=False)
     child = tmp_path / "中文 space"
     child.mkdir()
@@ -328,6 +333,8 @@ async def test_shared_container_configuration_and_child_cwd(
     )
     assert len(driver.containers.created) == 1
     container_config, _name = driver.containers.created[0]
+    assert driver.image_calls == ["my-command:local"]
+    assert container_config["Image"] == "my-command:local"
     host = container_config["HostConfig"]
     assert host["Mounts"] == [
         {"Type": "bind", "Source": str(tmp_path), "Target": "/workspace", "ReadOnly": True}

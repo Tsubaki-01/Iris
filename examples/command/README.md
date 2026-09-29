@@ -20,16 +20,18 @@ Native 使用宿主用户权限；workspace/cwd 是文件工具范围与命令�
 
 ## Docker：同 root 复用与停止后重启
 
-先自行准备本机 Linux engine 与 `python:3.12-slim` 镜像，例如在需要联网准备的阶段执行
-`docker pull python:3.12-slim`。示例本身不会 pull/build、联网安装依赖或访问外部网络。
-已有其他包含 Python 标准库的 Linux 镜像时，可以传入 `--image IMAGE`。
+先准备本机 Linux engine，再从仓库根目录显式构建默认命令镜像。示例本身不会 pull/build、
+联网安装依赖或访问外部网络。构建可能联网，且必须使用 Iris endpoint 对应的同一本地 engine；
+自定义依赖与引擎选择见 [command 文档](../../src/iris/command/README.md#本地-docker)。
 
 ```powershell
 $env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+docker build --load -t iris-command:local .
 uv run --extra sandbox python -X utf8 -m examples.command.docker --run-docker
 ```
 
-没有 `--run-docker` 时，CLI 直接提示显式启用，不探测引擎。
+没有 `--run-docker` 时，CLI 直接提示显式启用，不探测引擎。默认镜像取自下面的 YAML，
+需要使用其他满足后端要求的本地镜像时，传入 `--image IMAGE` 覆盖它。
 [docker.yaml](docker.yaml) 设置 `network: none`、1 CPU、256 MiB 内存、64 PID 和 15 秒单命令期限。
 容器内的 loopback 服务不需要外网或端口发布。脚本执行以下流程：
 

@@ -17,17 +17,18 @@ def test_agent_command_defaults_without_implicit_tool() -> None:
     assert "command" not in config.model_fields_set
 
 
-def test_explicit_docker_config_preserves_field_source() -> None:
+@pytest.mark.parametrize("docker", [{}, {"image": "my-command:local"}])
+def test_explicit_docker_config_preserves_field_source(docker: dict[str, str]) -> None:
     """child 装配可以根据来源区分默认配置与显式 override。"""
     config = AgentConfig.model_validate(
         {
             "name": "agent",
             "model": "openai/model",
             "system": "system",
-            "command": {"mode": "docker"},
+            "command": {"mode": "docker", "docker": docker},
         }
     )
-    assert config.command.docker == DockerConfig()
+    assert config.command.docker.image == docker.get("image", "iris-command:local")
     assert "command" in config.model_fields_set
     assert config.model_dump(mode="json")["command"]["mode"] == "docker"
 

@@ -19,7 +19,7 @@ def test_default_command_is_native_without_docker_configuration() -> None:
 def test_docker_mode_supplies_resource_defaults() -> None:
     config = CommandConfig.model_validate({"mode": "docker"})
     assert config.docker == DockerConfig()
-    assert config.docker.image == "python:3.12-slim"
+    assert config.docker.image == "iris-command:local"
     assert config.docker.network == "none"
     assert (config.docker.cpus, config.docker.memory_mb, config.docker.pids_limit) == (
         2.0,

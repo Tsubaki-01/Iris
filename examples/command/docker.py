@@ -22,18 +22,19 @@ from ._scripted import (
 )
 
 
-async def run_example(workspace: Path, *, image: str = "python:3.12-slim") -> dict[str, Any]:
+async def run_example(workspace: Path, *, image: str | None = None) -> dict[str, Any]:
     """两个 session 共用一个 root，正常结果与命令均经 Runner 持久化。"""
     workspace = workspace.resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     config = config_for_workspace("docker.yaml", workspace)
-    config = config.model_copy(
-        update={
-            "command": config.command.model_copy(
-                update={"docker": config.command.docker.model_copy(update={"image": image})}
-            )
-        }
-    )
+    if image is not None:
+        config = config.model_copy(
+            update={
+                "command": config.command.model_copy(
+                    update={"docker": config.command.docker.model_copy(update={"image": image})}
+                )
+            }
+        )
     provider = ScriptedProvider()
     runner = AgentRunner.from_config(config, provider=provider)
     confirmed: list[str] = []
@@ -136,10 +137,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-docker", action="store_true", help="显式连接本地 Linux engine")
     parser.add_argument("--workspace", type=Path)
-    parser.add_argument("--image", default="python:3.12-slim", help="已经准备好的本地镜像")
+    parser.add_argument("--image", help="已显式构建的本地镜像；默认读取 docker.yaml")
     args = parser.parse_args()
     if not args.run_docker:
-        parser.error("请准备本地镜像后显式传入 --run-docker；示例不自动拉取镜像")
+        parser.error("请显式构建本地镜像后传入 --run-docker；示例不自动构建或拉取镜像")
     workspace = args.workspace or Path("tmp") / f"docker-{uuid4().hex[:8]} 中文 workspace"
     print(
         json.dumps(
