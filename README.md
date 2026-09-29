@@ -28,6 +28,78 @@ Agent 默认自动压缩长上下文：可用输入预算为 96,000 tokens（已
 
 Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 
+## 本地命令与可选 Docker 沙箱
+
+普通文件、Python 扩展和 MCP 工具在宿主执行。只有显式声明的 `exec.command` 使用所选
+命令环境，模型看到的工具名为 `exec_command`。Native 是默认模式，无需 Docker：
+
+```yaml
+name: local-command-agent
+model: deepseek/deepseek-chat
+system: 根据任务使用文件和命令工具，先检查结果再继续。
+tools:
+  builtin: [file.read, file.write, exec.command]
+permissions:
+  workspace: .
+  writes: confirm
+  execute: confirm
+execution:
+  mode: native
+  timeout_seconds: 120
+```
+
+`execute` 默认需要确认，独立于原生文件写权限。Native 用宿主用户权限运行：Windows 为
+`cmd.exe`，Linux 为 `/bin/sh`，它不是 OS 隔离沙箱。`cwd` 只决定起始目录；原生只读
+workspace 不允许注册命令工具。移动端可保留普通工具而不提供代码执行。
+
+需要本地隔离时，先安装并启动 Linux Docker Engine 或 Docker Desktop 的 Linux engine，
+显式准备可选依赖和镜像：
+
+```powershell
+uv sync --extra sandbox
+docker pull python:3.12-slim
+```
+
+下面是完整的 Docker Agent 配置；运行时不会自行拉镜像，也不会在 Docker 不可用时回退宿主：
+
+```yaml
+name: docker-command-agent
+model: deepseek/deepseek-chat
+system: 命令运行在本地Linux容器，按工具说明使用共享项目文件。
+tools:
+  builtin: [file.read, file.write, exec.command]
+permissions:
+  workspace: .
+  writes: allow
+  execute: confirm
+execution:
+  mode: docker
+  timeout_seconds: 120
+  docker:
+    image: python:3.12-slim
+    network: none
+    cpus: 2
+    memory_mb: 1024
+    pids_limit: 128
+```
+
+一个 root runner 拥有一个容器，其 session 和 child 共用 `/workspace`、依赖、后台服务与
+额度；不同 root 实例各自独立。只挂载 root 项目目录，child workspace 仅指定默认 cwd，
+并不隔离 root 里的其他文件。Docker child 的 `writes: deny` 仍可开放命令：它只限制原生
+文件工具，命令能否写入取决于 root 的实际挂载；不能据此称 child 整体只读。
+
+每次命令启动新 shell，`cd`/`export` 不跨调用保留。单命令超时只停止该命令；run 取消、
+总期限、预算或模型失败会停止共享容器，其他 session 的模型推理和 HITL 继续。停止保留文件
+和已安装依赖，下次命令重启容器，后台服务须重新启动；`runner.aclose()` 删除其拥有的容器，
+保留宿主项目文件。未知结果不自动重放，停止也不回滚已写文件。Native 不追踪历次后台后代。
+
+清理无法确认时 run 保留原状态与占用，随后调用可重试清理；错误会通知宿主。
+模式、镜像、挂载及额度在 root 构建时固定，调整后关闭并重建 runner，不承诺运行中切换的行为。
+Iris 实现的是工具权限、命令生命周期和 run 结算协调；OS 隔离由 Docker 提供。
+
+不需要模型 API key 的可重复示例见 [`examples/execution`](examples/execution/README.md)，
+后端约束与平台验证范围见 [`iris.execution`](src/iris/execution/README.md)。
+
 ## Context Engineering
 
 Compaction、Offload 与回读、Pruning 与 Trim、动态上下文、统一上下文预算和工具按需披露，
