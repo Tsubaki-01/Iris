@@ -10,9 +10,11 @@ import pytest
 from iris.command import (
     CommandMode,
     CommandOutcome,
+    CommandOutputStats,
     CommandRequest,
     CommandScope,
     CommandStatus,
+    ShellCommand,
     StopOperation,
 )
 from iris.exceptions import IrisCommandCleanupError
@@ -284,7 +286,7 @@ async def test_timer_terminal_child_hands_old_receipt_to_delayed_parent_stop(
             0,
             "new environment",
             "",
-            False,
+            CommandOutputStats(15, 0, 15, 0, frozenset()),
             0,
             "/workspace",
         )
@@ -305,7 +307,7 @@ async def test_timer_terminal_child_hands_old_receipt_to_delayed_parent_stop(
         assert child_id in runner._command_lifecycle.settled_receipts
         await service.execute(
             CommandScope("independent", "other-session"),
-            CommandRequest("b", "echo next", tmp_path, 10),
+            CommandRequest("b", ShellCommand("echo next"), tmp_path, 10),
         )
         result = await runner.recover("parent")
         assert result.run.stop_reason is RunStopReason.FAILED

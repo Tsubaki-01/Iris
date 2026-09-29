@@ -14,7 +14,7 @@ from iris.command.models import CommandMode, CommandStopSlot
 from iris.command.native import NativeCommandService
 from iris.exceptions import IrisCommandError, IrisConfigError, IrisMCPError
 from iris.harness import AgentRunner
-from iris.lifecycle import AgentRunRequest
+from iris.lifecycle import AgentRunRequest, SessionContextWindow
 from iris.runtime import RuntimeFactory
 from iris.runtime._assembly import (
     RuntimeAssemblyBoundary,
@@ -80,6 +80,9 @@ def test_factory_roots_own_independent_native_bindings_without_optional_driver(
         ("Windows", "docker", "Linux", "/bin/sh"),
     ],
 )
+@pytest.mark.parametrize(
+    "builtin,tool_name", [("exec.command", "exec_command"), ("exec.python", "run_python")]
+)
 def test_registered_command_uses_binding_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -87,25 +90,35 @@ def test_registered_command_uses_binding_environment(
     mode: str,
     command_os: str,
     shell: str,
+    builtin: str,
+    tool_name: str,
 ) -> None:
     """命令说明使用实际选定 backend，而不是从宿主 OS 猜容器 shell。"""
     monkeypatch.setattr(platform, "system", lambda: host_os)
-    environment = RuntimeFactory.from_config(
-        _config(tmp_path, command={"mode": mode}, tools={"builtin": ["exec.command"]}),
+    runtime = RuntimeFactory.from_config(
+        _config(tmp_path, command={"mode": mode}, tools={"builtin": [builtin]}),
         provider=StaticProvider(),
-    ).environment
+    )
+    environment = runtime.environment
     descriptor = environment.command_environment
     assert descriptor is environment.command_binding.environment
     assert descriptor.host_os == environment.host_os == host_os
     assert descriptor.mode is CommandMode(mode)
     assert descriptor.command_os == command_os
     assert descriptor.command_shell == shell
-    assert environment.tool_bridge.tool_view.get("exec_command") is not None
+    assert environment.tool_bridge.tool_view.get(tool_name) is not None
+    system = runtime._system_addendum(SessionContextWindow())
+    assert f"command_mode: {mode}" in system
+    assert f"command_os: {command_os}" in system
+    if builtin == "exec.python":
+        description = environment.tool_bridge.tool_view.get(tool_name).definition.description
+        assert ("Iris 当前进程" if mode == "native" else "镜像内的 Python") in description
 
 
 @pytest.mark.parametrize("root_writes,child_writes", [("allow", "deny"), ("deny", "allow")])
+@pytest.mark.parametrize("builtin", ["exec.command", "exec.python"])
 def test_docker_child_borrows_root_binding_with_narrow_file_scope(
-    tmp_path: Path, root_writes: str, child_writes: str
+    tmp_path: Path, root_writes: str, child_writes: str, builtin: str
 ) -> None:
     """D21 允许只读 child 命令，root bind 的真实写属性不随 child 改变。"""
     config = _config(
@@ -118,7 +131,7 @@ def test_docker_child_borrows_root_binding_with_narrow_file_scope(
         _config(
             tmp_path,
             permissions={"workspace": str(tmp_path / "child"), "writes": child_writes},
-            tools={"builtin": ["exec.command"]},
+            tools={"builtin": [builtin]},
         ),
         parent,
     )
@@ -139,8 +152,9 @@ def test_docker_child_borrows_root_binding_with_narrow_file_scope(
 
 
 @pytest.mark.parametrize("child_scope", [False, True])
+@pytest.mark.parametrize("builtin", ["exec.command", "exec.python"])
 def test_native_readonly_command_configuration_is_rejected(
-    tmp_path: Path, child_scope: bool
+    tmp_path: Path, child_scope: bool, builtin: str
 ) -> None:
     """Native D12 在唯一有效 workspace 边界拒绝只读命令组合。"""
     parent = resolve_runtime_boundary(
@@ -148,7 +162,7 @@ def test_native_readonly_command_configuration_is_rejected(
     )
     config = _config(
         tmp_path,
-        tools={"builtin": ["exec.command"]},
+        tools={"builtin": [builtin]},
         permissions={"workspace": str(tmp_path), "writes": "allow" if child_scope else "deny"},
     )
     with pytest.raises(IrisConfigError, match="Native"):

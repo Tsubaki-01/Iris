@@ -33,7 +33,7 @@ class CommandService(Protocol):
         ...
 
     async def execute(self, scope: CommandScope, request: CommandRequest) -> CommandOutcome:
-        """执行已解析的请求，返回确认事实或抛出 unknown。"""
+        """执行已解析的 shell/Python 请求，返回确认事实或抛出 unknown。"""
         ...
 
     def stop(self, scope: CommandScope) -> StopOperation:

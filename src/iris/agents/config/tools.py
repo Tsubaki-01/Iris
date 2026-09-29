@@ -27,11 +27,17 @@ from ...tools.builtin.file import (
     ReadFileTool,
     WriteFileTool,
 )
+from ...tools.builtin.python import RunPythonTool
 from ...tools.builtin.web import WebFetchTool, WebSearchTool
 from .base import ToolsConfig
 
 _FileToolFactory = Callable[[WorkspaceFileService], BaseTool]
 _ToolFactory = Callable[[], BaseTool]
+
+_BUILTIN_COMMAND_TOOL_CLASSES: dict[str, type[ExecCommandTool] | type[RunPythonTool]] = {
+    "exec.command": ExecCommandTool,
+    "exec.python": RunPythonTool,
+}
 
 _BUILTIN_FILE_TOOL_FACTORIES: dict[str, _FileToolFactory] = {
     "file.read": lambda service: ReadFileTool(file_service=service),
@@ -64,7 +70,7 @@ def build_tool_registry(
         config (ToolsConfig): 已校验的工具配置。
         memory_service: 来源工厂已解析的服务，存在时自动绑定双读工具及文件读取范围。
         memory_config: 绑定工具的读取范围和单个写入 namespace。
-        command_binding: root 已装配的命令服务与环境；仅显式 exec.command 消费。
+        command_binding: root 已装配的命令服务与环境；显式 exec.command/exec.python 消费。
 
     Returns:
         ToolRegistry: 已注册配置声明工具的注册表。
@@ -115,10 +121,10 @@ def _register_builtin_tools(
         )
     )
     for name in names:
-        if name == "exec.command":
+        if name in _BUILTIN_COMMAND_TOOL_CLASSES:
             if command_binding is None:
-                raise IrisConfigError("exec.command 需要装配层提供 command_binding", tool=name)
-            registry.register(ExecCommandTool(command_binding))
+                raise IrisConfigError(f"{name} 需要装配层提供 command_binding", tool=name)
+            registry.register(_BUILTIN_COMMAND_TOOL_CLASSES[name](command_binding))
         elif name in ("memory.search", "memory.fetch"):
             raise IrisConfigError(
                 "memory 读取工具由 memory.enabled 自动启用，请移除手工声明", tool=name

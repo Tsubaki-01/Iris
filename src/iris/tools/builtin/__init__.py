@@ -13,6 +13,7 @@ from .file import (
     register_file_tools,
 )
 from .human import AskQuestionInput, AskQuestionTool
+from .python import RunPythonInput, RunPythonTool
 from .web import WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "GrepSearchInput",
     "ListFilesInput",
     "ReadFileInput",
+    "RunPythonInput",
+    "RunPythonTool",
     "WebFetchInput",
     "WebFetchTool",
     "WebSearchInput",

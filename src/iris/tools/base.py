@@ -107,6 +107,7 @@ class ToolDefinition(BaseModel):
         deferred (bool): 标识是否延迟计算或初始化。
         max_result_chars (int): 执行结果文本的最长限制，防止输出撑爆上下文。
         preview_chars (int): 输出超长截断时提供给人类审查的最大字数。
+        preview_mode (Literal["head", "head_tail"]): 正文预览保留前缀或头尾。
         context_retention (Literal["keep", "observation"]): 历史正文保留声明。
         metadata (dict[str, Any]): 存放其他拓展属性。
 
@@ -123,6 +124,7 @@ class ToolDefinition(BaseModel):
     deferred: bool = False
     max_result_chars: int = 50000
     preview_chars: int = 8000
+    preview_mode: Literal["head", "head_tail"] = "head"
     context_retention: Literal["keep", "observation"] = "keep"
     metadata: dict[str, Any] = Field(default_factory=dict)
 

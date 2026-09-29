@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from iris.command.models import CommandMode, CommandRequest, CommandScope, CommandStatus
+from iris.command.models import (
+    CommandMode,
+    CommandRequest,
+    CommandScope,
+    CommandStatus,
+    ShellCommand,
+)
 from iris.command.native import NativeCommandService
 from iris.exceptions import IrisCommandCleanupError, IrisToolOutcomeUnknownError
 
@@ -24,7 +30,7 @@ def _request(cwd: Path, code: str, *, call_id: str = "call", timeout: float = 5)
     script.write_text(code, encoding="utf-8")
     arguments = [sys.executable, "-u", str(script)]
     command = subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
-    return CommandRequest(call_id, command, cwd, timeout)
+    return CommandRequest(call_id, ShellCommand(command), cwd, timeout)
 
 
 async def _wait_file(path: Path) -> str:
@@ -133,7 +139,9 @@ async def test_native_drains_output_after_limit(tmp_path: Path) -> None:
         await service.aclose()
     assert result.status is CommandStatus.EXITED
     assert result.exit_code == 0
-    assert len(result.stdout) + len(result.stderr) == 1024 * 1024
+    assert result.output_stats.stdout_retained_bytes == 512 * 1024
+    assert result.output_stats.stderr_retained_bytes == 512 * 1024
+    assert result.output_stats.stdout_bytes == result.output_stats.stderr_bytes == 2 * 1024 * 1024
     assert result.output_truncated
 
 

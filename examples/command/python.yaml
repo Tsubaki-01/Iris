@@ -1,0 +1,27 @@
+name: command-python-example
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  timeout: 30
+
+system: |
+  使用 run_python 执行标准库计算，并将需要保留的报告写入工作区。
+  每次调用使用独立 Python 进程，使用 print 返回结果，不依赖上次调用的变量。
+
+tools:
+  builtin:
+    - exec.python
+
+permissions:
+  workspace: workspace
+  writes: allow
+  execute: confirm
+
+command:
+  mode: native
+  timeout_seconds: 15
+
+session:
+  backend: none

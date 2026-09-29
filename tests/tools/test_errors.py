@@ -6,7 +6,13 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from iris.command.models import CommandMode, CommandOutcome, CommandStatus, CommandStopReceipt
+from iris.command.models import (
+    CommandMode,
+    CommandOutcome,
+    CommandOutputStats,
+    CommandStatus,
+    CommandStopReceipt,
+)
 from iris.exceptions import (
     IrisCommandCleanupError,
     IrisCommandError,
@@ -70,7 +76,7 @@ def test_cleanup_known_outcome_is_separate_from_error_details() -> None:
         exit_code=7,
         stdout="known stdout",
         stderr="known stderr",
-        output_truncated=False,
+        output_stats=CommandOutputStats(12, 12, 12, 12, frozenset()),
         duration_seconds=0.5,
         cwd=".",
     )

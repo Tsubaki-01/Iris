@@ -674,7 +674,9 @@ class ToolExecutor:
             }
         )
         return artifact_store_for(
-            context, preview_chars=tool.definition.preview_chars
+            context,
+            preview_chars=tool.definition.preview_chars,
+            preview_mode=tool.definition.preview_mode,
         ).persist_if_large(
             normalized,
             max_chars=tool.definition.max_result_chars,

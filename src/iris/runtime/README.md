@@ -21,6 +21,10 @@ shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定�
 root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 由 harness 在 admission
 前准备，并在 WAITING/结束后关闭独立资源，恢复时重建。
 
+`exec.command` 与 `exec.python` 借用同一个 root 命令服务；只注册 `exec.python` 的 root/child
+同样获得 command_environment 与对应 system 环境提示。Native 有效 writes=deny 时，两个入口
+都会在装配时被拒绝。Python 异常作为普通工具结果回到现有模型循环，不新增 Python 专属恢复路径。
+
 装配先解析 provider，再由 memory 配置工厂统一处理 `memory.enabled`。关闭时不接入服务，
 即使传入 `memory_service` 也不挂载；开启时优先复用注入对象，否则将同一 provider、
 `model.name`、`memory.overview` 与 `memory.generation` 配置绑定到新建的 SQLite service。

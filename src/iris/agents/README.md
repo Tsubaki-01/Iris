@@ -284,6 +284,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 - `file.edit`
 - `human.ask`
 - `exec.command`
+- `exec.python`
 - `web.search`
 - `web.fetch`
 - `memory.remember`、`memory.update`、`memory.forget`
@@ -357,7 +358,8 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 ### `CommandConfig`
 
 `CommandConfig` 与 `DockerConfig` 从 `iris.agents` 和 `iris.agents.config` 导出。只有显式
-声明 `exec.command` 才暴露命令；普通文件、Web、Memory 与 Python 工具仍在宿主运行。
+声明 `exec.command` / `exec.python` 才分别暴露 `exec_command` / `run_python`；普通文件、Web、Memory
+以及通过 Python SDK 注册的自定义工具仍在宿主运行。两种执行入口可以单独启用，也可以共存。
 
 ```yaml
 command:
@@ -388,7 +390,7 @@ root 在构造时拥有配置和服务，child 不得显式声明自己的 `comm
 child 借用 root 的环境和整个挂载项目；窄 workspace 只确定命令默认 cwd 与原生文件范围。
 Docker child 的 `writes: deny` 只限制原生文件工具，不保证命令只读；命令写入取 root bind，
 授权仍取 effective execute。Native 没有只读挂载能力，因此 effective writes deny 的 scope
-注册 exec 会在装配时报配置错误。cwd 不构成 Native 的 OS 访问边界。
+注册任一命令工具会在装配时报配置错误。cwd 不构成 Native 的 OS 访问边界。
 后端范围与共享环境约定见 [command](../command/README.md)，工具参数见
 [tools](../tools/README.md#显式命令执行)。
 
@@ -421,8 +423,8 @@ Docker child 的 `writes: deny` 只限制原生文件工具，不保证命令只
 此处只消费来源工厂已解析的 service，不重新判断 enabled。实际工具名称或别名冲突继续
 由 `ToolRegistry` 报错。需要按 YAML 自动创建服务时使用完整 runner
 或 RuntimeFactory；此函数不解析 workspace 或打开数据库。
-显式 `exec.command` 必须传入已装配的 `CommandBinding`，否则直接报 `IrisConfigError`；
-此函数不创建、准备或关闭命令服务，仅选择模式也不会增加该工具。
+显式 `exec.command` 或 `exec.python` 必须传入已装配的 `CommandBinding`，否则直接报 `IrisConfigError`；
+此函数不创建、准备或关闭命令服务，仅选择模式也不会增加这些工具。
 
 ## 边界
 

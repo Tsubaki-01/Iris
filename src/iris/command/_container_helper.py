@@ -1,9 +1,10 @@
 """在 Linux 容器内直接执行的标准库助手，不依赖 Iris 的安装。
 
-argv 依次为命令文本、前台期限和框架生成的结果路径。
+argv 依次为同源启动器、载荷种类/内容、前台期限和框架生成的结果路径。
 """
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -14,16 +15,22 @@ from pathlib import Path
 _TERM_GRACE_SECONDS = 0.5
 
 
-def run(command: str, timeout_seconds: float, result_path: Path) -> None:
+def run(loader: str, kind: str, payload: str, timeout_seconds: float, result_path: Path) -> None:
     """转发输出，等待前台退出，单独记录真实退出与业务期限。
 
     Args:
-        command (str): 交给 /bin/sh 的命令文本。
+        loader (str): 框架维护的同源 Python 启动器。
+        kind (str): shell 或 python。
+        payload (str): shell 文本或本次临时源码路径。
         timeout_seconds (float): 已由工具边界确定的前台期限。
         result_path (Path): 当前调用独有的临时结果文件。
     """
     process = subprocess.Popen(
-        ["/bin/sh", "-c", command],
+        (
+            [sys.executable, "-X", "utf8", "-u", "-c", loader, payload]
+            if kind == "python"
+            else ["/bin/sh", "-c", payload]
+        ),
         stdin=subprocess.DEVNULL,
         start_new_session=True,
     )
@@ -62,8 +69,15 @@ def run(command: str, timeout_seconds: float, result_path: Path) -> None:
 
 def main() -> None:
     """消费框架生成的固定 argv；异常由宿主按缺失结果处理。"""
-    command, timeout, result_path = sys.argv[1:]
-    run(command, float(timeout), Path(result_path))
+    loader, kind, payload, timeout, result_path = sys.argv[1:]
+    try:
+        run(loader, kind, payload, float(timeout), Path(result_path))
+    finally:
+        if kind == "python":
+            try:
+                Path(payload).unlink(missing_ok=True)
+            except OSError:
+                logging.getLogger(__name__).debug("容器临时 Python 源码删除失败", exc_info=True)
 
 
 if __name__ == "__main__":

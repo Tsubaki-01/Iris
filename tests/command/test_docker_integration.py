@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shlex
 import sys
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -20,6 +20,8 @@ from iris.command import (
     CommandScope,
     CommandStatus,
     DockerConfig,
+    PythonCode,
+    ShellCommand,
 )
 from iris.command.docker import DockerCommandService
 
@@ -52,8 +54,31 @@ async def _python(
 ) -> CommandOutcome:
     return await service.execute(
         CommandScope(f"run-{session}", session),
-        CommandRequest(uuid4().hex, shlex.join(["python", "-c", code]), cwd, timeout),
+        CommandRequest(uuid4().hex, PythonCode(code), cwd, timeout),
     )
+
+
+@pytest.mark.asyncio
+async def test_real_python_source_is_removed_after_normal_completion(
+    docker_service: DockerCommandService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths: list[str] = []
+    launch = docker_service._launch
+
+    async def record_source(call: Any, result_path: str) -> Any:
+        execution = await launch(call, result_path)
+        paths.append(call.source_path)
+        return execution
+
+    monkeypatch.setattr(docker_service, "_launch", record_source)
+    result = await _python(docker_service, tmp_path, "print('prepared')")
+    assert result.exit_code == 0, result.stderr
+    observed = await _python(
+        docker_service,
+        tmp_path,
+        f"from pathlib import Path; print(Path({paths[0]!r}).exists())",
+    )
+    assert observed.exit_code == 0 and observed.stdout.strip() == "False"
 
 
 @pytest.mark.asyncio
@@ -217,7 +242,9 @@ async def test_real_offline_dependency_and_background_service_are_shared(
         CommandScope("install", "a"),
         CommandRequest(
             uuid4().hex,
-            f"python -m pip install --user --no-index --no-deps --no-compile /workspace/{wheel}",
+            ShellCommand(
+                f"python -m pip install --user --no-index --no-deps --no-compile /workspace/{wheel}"
+            ),
             tmp_path,
             15,
         ),
@@ -237,7 +264,10 @@ async def test_real_offline_dependency_and_background_service_are_shared(
     started = await docker_service.execute(
         CommandScope("server", "a"),
         CommandRequest(
-            uuid4().hex, "python /workspace/server.py >/tmp/server.log 2>&1 &", tmp_path, 5
+            uuid4().hex,
+            ShellCommand("python /workspace/server.py >/tmp/server.log 2>&1 &"),
+            tmp_path,
+            5,
         ),
     )
     assert started.exit_code == 0
@@ -281,7 +311,8 @@ async def test_real_large_output_and_background_pipe_return_bounded(
     assert result.status is CommandStatus.EXITED
     assert result.exit_code == 0
     assert result.output_truncated
-    assert len(result.stdout) == 1024 * 1024
+    assert result.output_stats.stdout_retained_bytes == 512 * 1024
+    assert result.output_stats.stdout_bytes == 2 * 1024 * 1024
     assert result.duration_seconds < 10
 
 

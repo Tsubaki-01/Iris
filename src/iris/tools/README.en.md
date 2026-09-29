@@ -72,6 +72,16 @@ configuration selects the environment; the model cannot change the mode, image, 
 `ExecCommandTool(CommandBinding(config, service, environment))`; the host owns service preparation
 and closure.
 
+Declare `exec.python` to expose `run_python(code, cwd='.', timeout_seconds=None)`, or register
+`RunPythonTool` through the SDK. Both command tools share the root CommandBinding, EXECUTE policy,
+and stopping rules. Code must contain non-whitespace text. Native uses Iris's `sys.executable`;
+Docker uses Python from the selected image, with dependencies prepared by the developer. Each call
+starts a fresh process and passes source through a temporary file without shell quoting. Variables
+do not persist; workspace files do. Use `print` for text output. Tracebacks go to stderr for the next
+model turn. Imports resolve from cwd, and tracebacks retain source lines under `<iris-python>`.
+There is no real script-path contract or persistent kernel. Use `exec_command` for existing scripts
+or another interpreter.
+
 `WorkspacePolicy` resolves cwd once within the current Agent workspace. Native commands run with
 host-user access; cwd is not a filesystem boundary. Docker root and child calls share the root
 `/workspace` mount. A narrower child workspace sets its default cwd and native file-tool scope;
@@ -81,7 +91,7 @@ access. Each command uses a fresh shell without persistent `cd/export`, interact
 `DefaultPermissionPolicy(execute_mode="confirm"|"allow"|"deny")` handles EXECUTE independently,
 defaulting to confirmation. Commands retain preflight, HITL, permission refresh, effect claim,
 and the existing non-read-only serial barrier. `BaseTool.timeout_owner` defaults to
-`ToolTimeoutOwner.RUNTIME`; Exec uses `TOOL` and takes the minimum of the configured, requested,
+`ToolTimeoutOwner.RUNTIME`; both command tools use `TOOL` and take the minimum of the configured, requested,
 and context `tool_timeout_seconds` limits. The outer run owner handles the run deadline.
 
 Exit zero succeeds; a nonzero exit, including 124/137, becomes `COMMAND_FAILED`. Local timeout is
@@ -90,8 +100,12 @@ and `COMMAND_ENVIRONMENT_INTERRUPTED`. A known unstarted command is `COMMAND_UNA
 Error messages contain exit status and diagnostics. Unknown execution propagates
 `IrisToolOutcomeUnknownError` without replaying the command.
 
-Output uses the existing artifact path. Result `data` holds only small mode/status/exit/cwd/duration/
-truncation metadata. Live receipts and cleanup failures use excluded `context.command_stop_slot`,
+Both backends retain bounded output heads and tails, and the final model preview also keeps both
+ends. Status and collection details precede stdout, with stderr last. Result `data` holds mode,
+status, exit code, cwd, duration, derived `output_truncated`, and an `output_stats` object containing
+collected/retained byte counts and truncation reasons. It does not duplicate stdout/stderr. Artifacts
+save the retained body after middleware; discarded raw log bytes cannot be retrieved.
+Live receipts and cleanup failures use excluded `context.command_stop_slot`,
 whose identity survives context copying and middleware result replacement. A known result with
 failed cleanup is returned for normal commit while the slot retains `cleanup_error` for outer
 settlement. Cleanup errors without known facts propagate directly, including through middleware.
@@ -100,7 +114,7 @@ See [command](../command/README.md) for backend behavior and stopping scope.
 ## Definitions, registry, and schemas
 
 `ToolDefinition` holds the validated name, description, object JSON schema, capabilities, group,
-aliases, deferred flag, output limits, `context_retention`, and metadata. `ToolExecutionContext` carries call, workspace,
+aliases, deferred flag, output limits, `preview_mode`, `context_retention`, and metadata. `ToolExecutionContext` carries call, workspace,
 session, agent, permission, metadata, shared read-state information, and a shared live
 `cancellation` signal that serialization excludes. `ToolResult` is the single result boundary;
 `model_content` produces model-facing text and `to_block_metadata()` keeps the supported metadata
@@ -335,7 +349,10 @@ preview and path. If the notice and prefix alone exceed the budget, finalization
 `ARTIFACT_ERROR` rather than emitting an incomplete reference or exceeding the character limit.
 Preflight errors are clipped without writing files.
 
-`ToolDefinition.preview_chars` is the sole preview setting; `ToolExecutor` no longer accepts
+`ToolDefinition.preview_mode` defaults to `head`; both command tools use `head_tail`.
+`ToolArtifact.preview` and final model text share the preview algorithm. The character budget
+includes the error prefix, complete retrieval notice, and omission marker.
+`ToolDefinition.preview_chars` controls preview length; `ToolExecutor` no longer accepts
 `artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
 Default permissions allow only locally trusted read-only MCP tools.

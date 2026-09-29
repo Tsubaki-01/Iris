@@ -212,6 +212,65 @@ async def test_each_tool_owns_its_preview_length(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_head_tail_preview_keeps_diagnostics_and_final_budget(
+    tmp_path: Path, failed: bool
+) -> None:
+    """头尾预览在错误前缀和完整回读提示之外分配预算，不丢末尾诊断。"""
+    full_text = "status: exited; exit_code: 7\n" + "middle" * 3000 + "\nstderr: FINAL_ERROR"
+
+    def produce() -> ToolResult:
+        """提供包含末尾诊断的成功或错误正文。"""
+        return ToolResult(
+            tool_use_id="",
+            tool_name="produce",
+            content=[TextBlock(text=full_text)],
+            is_error=failed,
+            error=ToolErrorInfo(code="FAILED", message=full_text) if failed else None,
+        )
+
+    registry = ToolRegistry()
+    tool = registry.register_function(produce)
+    tool.definition = tool.definition.model_copy(
+        update={"max_result_chars": 700, "preview_chars": 1000, "preview_mode": "head_tail"}
+    )
+    result = await ToolExecutor(registry).execute_one(
+        ToolUseBlock(id="head-tail", name="produce", input={}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert len(result.model_content) <= 700
+    assert "status: exited; exit_code: 7" in result.model_content
+    assert "stderr: FINAL_ERROR" in result.model_content
+    assert result.artifact is not None
+    assert "FINAL_ERROR" in result.artifact.preview
+    assert str(result.artifact.path) in result.model_content
+    assert "已保存的工具结果正文" in result.model_content
+    assert result.artifact.path.read_text(encoding="utf-8") == (
+        f"Error[FAILED]: {full_text}" if failed else full_text
+    )
+    if failed:
+        assert result.error is not None and result.error.code == "FAILED"
+        assert result.content[0].text == result.error.message
+
+
+@pytest.mark.parametrize("preview_chars", [0, 1, 5, 20])
+def test_head_tail_preview_respects_even_small_preview_budgets(
+    tmp_path: Path, preview_chars: int
+) -> None:
+    """省略标记本身也包含在正文预览额度内。"""
+    store = ToolArtifactStore(tmp_path, preview_chars=preview_chars, preview_mode="head_tail")
+    result = store.persist_if_large(
+        ToolResult(
+            tool_use_id="small-preview", tool_name="x", content=[TextBlock(text="x" * 1000)]
+        ),
+        max_chars=600,
+    )
+    assert result.artifact is not None
+    assert len(result.artifact.preview) <= preview_chars
+    assert len(result.model_content) <= 600
+
+
+@pytest.mark.asyncio
 async def test_raised_error_is_bounded_and_preserved(tmp_path: Path) -> None:
     """工具抛出的长异常也经过最终保存，避免错误出口绕过预算。"""
 

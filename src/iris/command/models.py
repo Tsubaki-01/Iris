@@ -3,8 +3,13 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from ..exceptions import IrisCommandCleanupError
+
+type OutputTruncationReason = Literal[
+    "byte_limit", "drain_timeout", "stream_error", "stream_closed"
+]
 
 
 class CommandMode(StrEnum):
@@ -42,11 +47,25 @@ class CommandScope:
 
 
 @dataclass(frozen=True, slots=True)
+class ShellCommand:
+    """按当前环境 shell 语法执行的命令文本。"""
+
+    command: str
+
+
+@dataclass(frozen=True, slots=True)
+class PythonCode:
+    """由当前环境 Python 独立执行的完整源码。"""
+
+    code: str
+
+
+@dataclass(frozen=True, slots=True)
 class CommandRequest:
     """工具边界已解析的命令、宿主工作目录与最终前台期限。"""
 
     call_id: str
-    command: str
+    payload: ShellCommand | PythonCode
     cwd: Path
     timeout_seconds: float
 
@@ -68,6 +87,17 @@ class CommandStopSlot:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandOutputStats:
+    """已采集与已保留的原始字节；不完整采集时不推测后续输出量。"""
+
+    stdout_bytes: int
+    stderr_bytes: int
+    stdout_retained_bytes: int
+    stderr_retained_bytes: int
+    truncation_reasons: frozenset[OutputTruncationReason]
+
+
+@dataclass(frozen=True, slots=True)
 class CommandOutcome:
     """前台执行事实；取消及连带中断均不伪造退出码。"""
 
@@ -76,19 +106,28 @@ class CommandOutcome:
     exit_code: int | None
     stdout: str
     stderr: str
-    output_truncated: bool
+    output_stats: CommandOutputStats
     duration_seconds: float
     cwd: str
     stop_receipt: CommandStopReceipt | None = None
+
+    @property
+    def output_truncated(self) -> bool:
+        """由输出事实派生是否存在额度截断或不完整采集。"""
+        return bool(self.output_stats.truncation_reasons)
 
 
 __all__ = [
     "CommandEnvironment",
     "CommandOutcome",
+    "CommandOutputStats",
     "CommandRequest",
     "CommandStatus",
     "CommandStopSlot",
     "CommandMode",
     "CommandScope",
     "CommandStopReceipt",
+    "OutputTruncationReason",
+    "PythonCode",
+    "ShellCommand",
 ]

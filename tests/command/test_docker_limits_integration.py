@@ -20,6 +20,7 @@ from iris.command import (
     CommandScope,
     CommandStatus,
     DockerConfig,
+    ShellCommand,
 )
 from iris.command.docker import DockerCommandService
 
@@ -77,7 +78,7 @@ async def _python(service: DockerCommandService, cwd: Path, code: str) -> Comman
     """由真实命令入口执行有限 Python 负载，保留助手的真实结果语义。"""
     result = await service.execute(
         CommandScope("limit-probe", "probe"),
-        CommandRequest(uuid4().hex, shlex.join(["python", "-c", code]), cwd, 15),
+        CommandRequest(uuid4().hex, ShellCommand(shlex.join(["python", "-c", code])), cwd, 15),
     )
     assert result.status is CommandStatus.EXITED, result
     assert result.exit_code == 0, result.stderr

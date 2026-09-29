@@ -82,6 +82,14 @@ root 的 `command` 配置确定，模型不能修改模式、镜像或挂载；�
 [agents](../agents/README.md#commandconfig)。直接构造工具时使用
 `ExecCommandTool(CommandBinding(config, service, environment))`，服务准备与关闭归 host。
 
+显式声明 `exec.python` 则暴露 `run_python(code, cwd='.', timeout_seconds=None)`，SDK 类为
+`RunPythonTool`。两个工具可以分别启用，共用 root 的 CommandBinding、EXECUTE 权限和
+停止规则。`code` 必须非空白；Native 使用 Iris 的 `sys.executable`，Docker 使用镜像 Python，
+依赖由开发者预先准备。每次新建 Python 进程，代码通过临时文件传入，不拼接 shell；变量不保留，
+工作目录文件保留。使用 `print` 返回文本，异常的 traceback 进入 stderr，交给下一轮模型修正。
+cwd 内模块可正常导入，回溯显示 `<iris-python>` 和原代码行；不提供真实脚本路径或持久 kernel。
+执行现有 `.py` 文件或选择其他解释器仍可使用 `exec_command`。
+
 `cwd` 由 `WorkspacePolicy` 在当前 Agent 的 workspace 内解析一次，再交给后端。
 Native 在宿主用户权限下执行，cwd 不限制命令内部访问其他路径。Docker 的 root/child
 共用 root 的 `/workspace` 挂载；child 的窄 workspace 只决定默认 cwd 和原生文件工具范围。
@@ -90,7 +98,7 @@ child 的 `writes: deny` 不保证 Docker 命令只读；所有命令的挂载�
 
 `DefaultPermissionPolicy(execute_mode="confirm"|"allow"|"deny")` 独立裁决 EXECUTE，默认确认。
 命令仍经过预检、HITL、执行前权限刷新和 effect claim，沿现有非只读屏障串行执行。
-`BaseTool.timeout_owner` 默认 `ToolTimeoutOwner.RUNTIME`；Exec 为 `TOOL`，使用配置期限、
+`BaseTool.timeout_owner` 默认 `ToolTimeoutOwner.RUNTIME`；两种命令工具均为 `TOOL`，使用配置期限、
 请求期限与 `ToolExecutionContext.tool_timeout_seconds` 的最小值。run 总期限由外层管理。
 
 | 后端事实 | 工具结果 |
@@ -102,8 +110,11 @@ child 的 `writes: deny` 不保证 Docker 命令只读；所有命令的挂载�
 | 明确未启动 | `COMMAND_UNAVAILABLE` |
 | 执行结果无法确认 | 原样抛出 `IrisToolOutcomeUnknownError`，不重放命令 |
 
-输出沿用既有 artifact 处理；`ToolResult.data` 只保留模式、状态、退出码、cwd、耗时和截断
-标记，不重复存放大段输出。停止收据与未完成清理异常保留在 excluded 的
+两种命令工具的后端输出均保留有界头尾，最终模型预览也保留头尾。状态、退出码和采集说明在开头，
+stderr 在末尾，避免长日志裁掉最后的错误。`ToolResult.data` 保留模式、状态、退出码、cwd、耗时、
+派生的 `output_truncated` 和嵌套 `output_stats`，后者包含两条流的采集/保留字节数及原因数组；
+不重复存放 stdout/stderr。artifact 保存 middleware 后的已保留正文，无法找回后端已丢弃的中间日志。
+停止收据与未完成清理异常保留在 excluded 的
 `context.command_stop_slot`，context 副本共享同一个槽；middleware 替换结果不会清空它。
 已知结果伴随清理失败时，Exec 先返回已知工具事实并记录 `cleanup_error`，供 runtime 提交后
 交给外层结算；没有已知事实的 `IrisCommandCleanupError` 原样传播。控制异常不会转换为
@@ -172,7 +183,7 @@ Extract 不传服务端 timeout，使用 basic 默认值。
 - `ToolExecutionMode`: 执行模式枚举，包含 `SYNC`、`ASYNC`、`STREAM`。
 - `CallableExecutionMode`: 同步 callable 的本地执行位置，包含默认的 `INLINE` 和显式
   opt-in 的 `THREAD`；它不进入 provider schema。
-- `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`context_retention`、`metadata`。
+- `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`preview_mode`、`context_retention`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`、`tool_timeout_seconds`，以及不参与序列化的共享 `cancellation` signal 与 `command_stop_slot`。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
@@ -501,7 +512,9 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 最终预算计入错误前缀和完整取回提示，错误的预览与路径写入 `error.message`。若阈值连提示和
 错误前缀都放不下，返回 `ARTIFACT_ERROR`，不输出残缺引用或放宽字符预算。
 
-预览长度唯一由 `ToolDefinition.preview_chars` 决定；`ToolExecutor` 不再接受
+`ToolDefinition.preview_mode` 默认 `head`，两种命令工具使用 `head_tail`；`ToolArtifact.preview`
+与最终模型正文复用同一个头尾算法。最终预算包含错误前缀、完整回读提示和省略标记。
+预览长度由 `ToolDefinition.preview_chars` 决定；`ToolExecutor` 不再接受
 `artifact_preview_chars`。工具异常与 middleware 错误也走相同的最终保存出口，落盘失败只返回
 错误而不重复尝试保存。预检拒绝和熔断等 effect 前短路只裁剪说明。
 

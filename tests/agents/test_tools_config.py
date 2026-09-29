@@ -10,16 +10,29 @@ from iris.command import CommandBinding, CommandConfig, CommandEnvironment, Comm
 from iris.command.native import NativeCommandService
 from iris.exceptions import IrisConfigError
 from iris.memory import MemoryConfig, MemoryService, MemoryTool, SQLiteMemoryStore
-from iris.tools import ExecCommandTool
+from iris.tools import ExecCommandTool, RunPythonTool
 
 
-def test_exec_builtin_requires_an_explicit_command_binding() -> None:
+@pytest.mark.parametrize("builtin", ["exec.command", "exec.python"])
+def test_exec_builtin_requires_an_explicit_command_binding(builtin: str) -> None:
     """registry 不自行创建服务，只有显式入口才要求注入 binding。"""
     with pytest.raises(IrisConfigError, match="command_binding"):
-        build_tool_registry(ToolsConfig(builtin=["exec.command"]))
+        build_tool_registry(ToolsConfig(builtin=[builtin]))
 
 
-def test_exec_registry_borrows_binding_only_when_explicitly_selected(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "builtin,tool_name,tool_type",
+    [
+        ("exec.command", "exec_command", ExecCommandTool),
+        ("exec.python", "run_python", RunPythonTool),
+    ],
+)
+def test_exec_registry_borrows_binding_only_when_explicitly_selected(
+    tmp_path: Path,
+    builtin: str,
+    tool_name: str,
+    tool_type: type[ExecCommandTool] | type[RunPythonTool],
+) -> None:
     """注入执行环境本身不增加工具；显式选择后借用原对象。"""
     binding = CommandBinding(
         CommandConfig(),
@@ -28,10 +41,15 @@ def test_exec_registry_borrows_binding_only_when_explicitly_selected(tmp_path: P
     )
     ordinary = build_tool_registry(ToolsConfig(builtin=["file.read"]), command_binding=binding)
     assert [tool.name for tool in ordinary.view().active_tools] == ["read_file"]
-    registry = build_tool_registry(ToolsConfig(builtin=["exec.command"]), command_binding=binding)
-    tool = registry.get("exec_command")
-    assert isinstance(tool, ExecCommandTool)
+    registry = build_tool_registry(ToolsConfig(builtin=[builtin]), command_binding=binding)
+    tool = registry.get(tool_name)
+    assert isinstance(tool, tool_type)
     assert tool.binding is binding
+    combined = build_tool_registry(
+        ToolsConfig(builtin=["exec.command", "exec.python"]), command_binding=binding
+    )
+    assert {tool.name for tool in combined.view().active_tools} == {"exec_command", "run_python"}
+    assert combined.get("exec_command").binding is combined.get("run_python").binding is binding
 
 
 def test_resolved_memory_service_registers_read_pair_before_selected_tools(tmp_path: Path) -> None:

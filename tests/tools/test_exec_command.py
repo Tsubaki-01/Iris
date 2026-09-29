@@ -1,5 +1,6 @@
 """命令工具、业务期限和进程内清理事实的集成契约。"""
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +12,15 @@ from iris.command import (
     CommandEnvironment,
     CommandMode,
     CommandOutcome,
+    CommandOutputStats,
     CommandRequest,
     CommandScope,
     CommandStatus,
     CommandStopReceipt,
+    ShellCommand,
     StopOperation,
 )
+from iris.command._output import OutputBuffer
 from iris.exceptions import (
     IrisCommandCleanupError,
     IrisCommandError,
@@ -27,6 +31,7 @@ from iris.tools import (
     BaseTool,
     DefaultPermissionPolicy,
     ExecCommandTool,
+    RunPythonTool,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
@@ -93,10 +98,25 @@ def outcome(
     *,
     receipt: CommandStopReceipt | None = None,
     stdout: str = "hello",
+    stderr: str = "diagnostic",
 ) -> CommandOutcome:
     """构造已验证的后端事实。"""
     return CommandOutcome(
-        CommandMode.DOCKER, status, exit_code, stdout, "diagnostic", False, 0.2, "child", receipt
+        CommandMode.DOCKER,
+        status,
+        exit_code,
+        stdout,
+        stderr,
+        CommandOutputStats(
+            len(stdout.encode()),
+            len(stderr.encode()),
+            len(stdout.encode()),
+            len(stderr.encode()),
+            frozenset(),
+        ),
+        0.2,
+        "child",
+        receipt,
     )
 
 
@@ -158,6 +178,8 @@ async def test_exec_resolves_child_cwd_and_owns_shortest_business_deadline(
     assert request.cwd == child.resolve()
     assert request.timeout_seconds == expected
     assert request.call_id == "call"
+    assert request.payload == ShellCommand("echo hello")
+    assert tool.definition.preview_mode == "head_tail"
     assert result.is_error is False
     assert "hello" in result.model_content
     assert "stdout" not in result.data and "stderr" not in result.data
@@ -346,6 +368,52 @@ async def test_exec_artifact_keeps_bounded_model_text_and_stop_slot(tmp_path: Pa
     assert len(result.model_content) <= tool.definition.max_result_chars
     assert "stdout" not in result.data
     assert context.command_stop_slot.receipt is receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [ExecCommandTool, RunPythonTool])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_backend_and_artifact_truncation_preserve_status_and_final_diagnostic(
+    tmp_path: Path, tool_type: type[ExecCommandTool] | type[RunPythonTool], failed: bool
+) -> None:
+    """两条流先经真实字节头尾缓存，再经 executor 字符预览，错误尾部仍可见。"""
+    buffer = OutputBuffer(limit=4096)
+    buffer.append(1, b"STDOUT_HEAD\n" + b"o" * 20_000 + b"\nSTDOUT_TAIL")
+    buffer.append(2, b"STDERR_HEAD\n" + b"e" * 20_000 + b"\nFINAL_TRACEBACK")
+    response = replace(
+        outcome(exit_code=7 if failed else 0),
+        stdout=buffer.stdout,
+        stderr=buffer.stderr,
+        output_stats=buffer.stats,
+    )
+    registry = ToolRegistry()
+    tool = tool_type(binding(FakeCommandService(response)))
+    tool.definition = tool.definition.model_copy(
+        update={"max_result_chars": 1200, "preview_chars": 1000}
+    )
+    registry.register(tool)
+    executor = ToolExecutor(
+        registry, permission_policy=DefaultPermissionPolicy(execute_mode="allow")
+    )
+    argument = "code" if tool.name == "run_python" else "command"
+    result = await executor.execute_one(
+        ToolUseBlock(id="two-limits", name=tool.name, input={argument: "x"}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert result.is_error is failed
+    assert len(result.model_content) <= 1200
+    assert "status: exited" in result.model_content
+    assert f"exit_code: {7 if failed else 0}" in result.model_content
+    assert "FINAL_TRACEBACK" in result.model_content
+    assert result.data["output_truncated"] is True
+    assert result.data["output_stats"]["truncation_reasons"] == ["byte_limit"]
+    assert "后续未知" not in result.model_content
+    assert result.artifact is not None
+    saved = result.artifact.path.read_text(encoding="utf-8")
+    for marker in ("STDOUT_HEAD", "STDOUT_TAIL", "STDERR_HEAD", "FINAL_TRACEBACK"):
+        assert marker in saved
+    assert "FINAL_TRACEBACK" in result.artifact.preview
+    assert "o" * 20_000 not in saved
 
 
 @pytest.mark.asyncio

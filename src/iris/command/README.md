@@ -1,6 +1,6 @@
 # 命令执行
 
-本包提供 Native 与可选本地 Docker 命令环境。两种后端可直接通过服务调用，也可由 Agent 显式注册 `exec_command` 使用；普通工具仍在宿主执行。
+本包提供 Native 与可选本地 Docker 命令环境。两种后端可直接通过服务调用，也可由 Agent 显式注册 `exec_command` 或 `run_python` 使用；普通工具仍在宿主执行。
 
 ```python
 from iris.command import CommandConfig
@@ -11,7 +11,7 @@ docker = CommandConfig.model_validate({"mode": "docker"})
 
 `DockerConfig` 默认使用显式构建的 `iris-command:local` 镜像、`none` 网络、2 CPU、1024 MiB 内存和 128 PID。`endpoint` 只接受本地 Unix socket 或 Windows named pipe。配置解析和导入本包都不连接 Docker；Native 模式显式声明 `docker` 块会报错。
 
-`CommandService.execute(scope, request)` 接收已解析的宿主 cwd 和最终命令期限，返回前台执行事实。服务不拥有工具权限、生命周期历史或模型调用。
+`CommandService.execute(scope, request)` 接收已解析的宿主 cwd、最终命令期限和 typed payload：`ShellCommand(command)` 或 `PythonCode(code)`，返回前台执行事实。两种载荷共用同一服务的停止与排空，不创建独立 Python 环境。服务不拥有工具权限、生命周期历史或模型调用。
 
 停止分为两个完成点：同步 `stop(scope)` 立即登记并调度操作；工具 body 只等待 `wait_stopped()` 的物理停止证明，外层结算等待 `wait_drained()` 确认旧调用收尾。`CommandStopReceipt` 仅标识一次已证实的停止，不包含 Future 或资源句柄，不持久化。消费旧收据不得再次停止之后重启的环境。
 
@@ -25,7 +25,7 @@ docker = CommandConfig.model_validate({"mode": "docker"})
 import asyncio
 from pathlib import Path
 
-from iris.command import CommandRequest, CommandScope
+from iris.command import CommandRequest, CommandScope, ShellCommand
 from iris.command.native import NativeCommandService
 
 
@@ -37,7 +37,7 @@ async def main() -> None:
         result = await service.execute(
             CommandScope(run_id="example", session_id="local"),
             CommandRequest(
-                call_id="hello", command="echo hello", cwd=workspace, timeout_seconds=5
+                call_id="hello", payload=ShellCommand("echo hello"), cwd=workspace, timeout_seconds=5
             ),
         )
         print(result.status, result.exit_code, result.stdout)
@@ -50,11 +50,13 @@ asyncio.run(main())
 
 Windows 使用系统目录中的 `cmd.exe`，POSIX 使用 `/bin/sh`。每次命令创建新 shell，继承宿主环境和 PATH，无交互 stdin、无 TTY，不保留上次的 `cd` 或环境变量修改。Windows 进程隐藏窗口，host 必须使用支持 subprocess 的事件循环；库不更改全局 event loop policy。
 
-Native **不是 OS 级隔离沙箱**。直接服务调用接收已解析的宿主目录，不代替工具层的 workspace 和权限裁决。普通退出保留实际退出码，包括 124/137；期限终止使用独立的 `timed_out` 状态。stdout/stderr 合计保留 1 MiB，继续排空超额数据，以 UTF-8 replacement 解码。前台退出后管道最多再排空 1 秒，后台继承管道时标记可能截断并返回。
+Python 载荷使用 `PythonCode("print(1 + 2)")`。Native 直接启动 `sys.executable`，不经过 shell；代码写入调用专属的系统临时文件，正常结束后删除。每次新进程，依赖来自运行 Iris 的同一 Python 环境；变量不延续，工作区文件保留。cwd 是项目模块的默认导入位置，回溯使用 `<iris-python>` 与原代码行；不承诺真实脚本 `__file__`。输出使用 UTF-8 和非缓冲模式，末尾表达式不会自动显示，应使用 `print`。
+
+Native **不是 OS 级隔离沙箱**。直接服务调用接收已解析的宿主目录，不代替工具层的 workspace 和权限裁决。普通退出保留实际退出码，包括 124/137；期限终止使用独立的 `timed_out` 状态。stdout/stderr 各保留最多 512 KiB，各自一半头部、一半最新尾部；未超额时内容完整。持续排空超额数据，以 UTF-8 replacement 解码。前台退出后管道最多再排空 1 秒，后台继承管道时标记可能截断并返回。
+
+`CommandOutcome.output_stats` 记录两条流的实际采集字节数、保留字节数及截断原因：`byte_limit`、`drain_timeout`、`stream_error`、`stream_closed`。`output_truncated` 由原因集合派生。提前结束采集时，计数只表示已读取字节，后续数量未知；被丢弃的原始输出不能从工具结果存档找回。
 
 单命令期限仅停止当前调用。`stop(scope)` 停止该 session 的当前调用，不影响独立 session；`aclose()` 停止所有仍持有的调用并拒绝新执行。POSIX 对本命令组发 TERM、有限等待后 KILL；Windows 用隐藏的 taskkill 尽力终止子树，再确认所持有前台退出。服务不追踪历次命令留下的后台程序，也不承诺回收宿主所有后代。重复取消不会打断已经开始的必要收尾；停止无法确认时抛出公共 unknown 并保留可重试的清理状态。
-
-当前已用 Windows / Python 3.12.12 与 WSL Ubuntu / Python 3.12.3 的真实进程验证：中文与空格 cwd、stdout/stderr、真实退出码、4 MiB 输出、局部超时、重复取消、启动中的取消、后台继承管道、session 停止范围、旧收据不会停止新调用，以及关闭后拒绝新命令。Linux 还验证了前台响应 TERM 后，同组忽略 TERM 的子进程仍被 KILL；这不扩展为历次后台进程的回收保证。
 
 ## 本地 Docker
 
@@ -93,7 +95,9 @@ service = DockerCommandService(workspace, DockerConfig(), workspace_writable=Tru
 
 镜像需提供 Python 3.12+、`/bin/sh`、`sleep infinity` 和可写 `/tmp`，不要求安装 Iris。Linux Engine 使用宿主 UID:GID，Docker Desktop 使用 `1000:1000`。`HOME=/tmp`、`PYTHONUSERBASE=/tmp/.local`，用户 bin 前置 PATH；环境由镜像、运行默认和显式 environment 覆盖组成，不复制宿主环境。依赖可在用户目录安装，不设置 `PIP_USER`。网络和 CPU/内存/PID 限额固定为整个容器的共享配置。
 
-标准库助手在自己的命令组外管理 `/bin/sh -c`；单命令超时只终止该组，其他命令和服务继续。前台结果以独立的 reason/returncode 回传，用户退出 124/137 不会被猜成超时。输出规则与 Native 相同；读取结果后的临时文件删除失败不改写已知退出结果。
+标准库助手在自己的命令组外管理 `/bin/sh -c` 或镜像内的 Python 进程；单命令超时只终止该组，其他命令和服务继续。Python 源码在启动前上传到容器 `/tmp`，因此只读 workspace 挂载仍能执行不写工作区的代码。两后端使用同源 Python 启动器，不要求镜像安装 Iris，也不自动安装用户代码依赖。
+
+前台结果以独立的 reason/returncode 回传，用户退出 124/137 不会被猜成超时。输出规则与 Native 相同；读取结果后的临时文件删除失败不改写已知退出结果。容器停止后不会为了删除本次临时源码而自动重启，残留随服务最终删除容器一起清理。
 
 本调用自己的环境清理无法确认时，抛出 `IrisCommandCleanupError`。若前台结果已知，独立 `command_outcome` 属性保留结果；明确尚未发出命令时，context 中保留 `started=False`。调用者不能把清理失败当作普通未启动错误后宣告资源已经停止。该属性是进程内事实，不写入通用错误详情；工具/runtime 先提交已知工具结果，再交给 run owner 等待清理。Harness 的 pending、deadline 与 child 交接见 [运行结算](../harness/README.md#cancellation-与-recovery)。
 

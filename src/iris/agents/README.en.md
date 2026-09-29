@@ -107,7 +107,8 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   Streaming is selected by host injection of the runner's `live_publisher`; model configuration
   has no `stream` field.
 - `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`, and
-  `human.ask` and `exec.command`, exposing `ask_question` and `exec_command` respectively.
+  `human.ask`, `exec.command`, and `exec.python`, exposing `ask_question`, `exec_command`, and
+  `run_python` respectively.
 - `tools.python.functions` imports a callable `module:function` and registers it. `registrars`
   imports a callable receiving the registry. Inline Python and mixed lists are rejected.
 - `PermissionsConfig` defaults to workspace `.`, writes `confirm`, and execute `confirm`; enforcement belongs to the
@@ -206,7 +207,7 @@ binds read and write namespaces, defaulting to `MemoryConfig()`; this helper doe
 Actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
-An explicit `exec.command` requires an already assembled `CommandBinding`, otherwise this helper
+An explicit `exec.command` or `exec.python` requires an already assembled `CommandBinding`, otherwise this helper
 raises `IrisConfigError`. It never creates, prepares, or closes command services.
 
 `AgentConfig.compaction` defaults to `CompactionConfig`, exported from both `iris.agents` and
@@ -291,7 +292,9 @@ database, or an ORM.
 ## Command environment
 
 `AgentConfig.command` defaults to native execution with a 120-second command limit. Selecting a
-mode does not register a tool; declare `exec.command` explicitly. `CommandConfig` and
+mode does not register a tool; declare `exec.command` and/or `exec.python` explicitly. They expose
+`exec_command` and `run_python` and share the root service. Ordinary tools, including Python SDK
+extensions, still run on the host. `CommandConfig` and
 `DockerConfig` are exported from both Agent configuration entry points.
 
 ```yaml
