@@ -18,17 +18,24 @@ uv run python -X utf8 -m examples.command.native
 Native 使用宿主用户权限；workspace/cwd 是文件工具范围与命令起始位置，不是命令的 OS 沙箱。
 基础安装即可运行，不需要 Docker extra，也不连接 Docker。
 
-## Python：直接提交代码并生成报告
+## Python：直接提交代码并发布报告
 
 ```powershell
 $env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
 uv run python -X utf8 -m examples.command.python
 ```
 
-[python.yaml](python.yaml) 只注册 `exec.python`。模型侧直接提交代码，由当前 Iris 的 Python
-解释器在独立进程中计算并生成 `report.json`，宿主读取文件；报告包含工具次序、权限确认和
-`{"rows": 3, "total": 12}`。该示例不需要预先写入脚本或处理 shell 引号。
-代码以 `print` 返回文本，跨调用保留文件而不保留变量；使用当前 Python 环境预装的依赖。
+[python.yaml](python.yaml) 显式注册 `file.write`、`exec.python`、`file.publish`。工具链先准备 CSV，
+再执行一段列名错误的 Python 代码；真实 traceback 进入下一次 provider 请求后，脚本 provider
+提交修正代码生成 `report.json`，最后调用 `publish_artifact` 复制并交付报告。
+
+宿主输出工具次序、两次 Python 执行的权限确认、真正收到的错误反馈、`{"rows": 3, "total": 12}`
+以及发布副本的 path/MIME/size。原文件后续修改或删除不会改变该副本，runner 关闭后仍可读取。
+示例沿默认 RETURN_TO_MODEL 错误策略，只允许第一次预期的 Python 错误。
+固定响应验证工具与模型请求的接线，不代表真实模型自主修正质量。
+
+Python 使用当前 Iris 的解释器和预装依赖，以 `print` 返回文本；跨调用保留文件而不保留变量。
+代码直接提交，无需预先写脚本或处理 shell 引号。发布只复制明确指定的本地文件，不自动上传。
 
 ## Docker：同 root 复用与停止后重启
 

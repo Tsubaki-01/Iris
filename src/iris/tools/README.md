@@ -383,7 +383,7 @@ executor = ToolExecutor(
 )
 ```
 
-内置工具按稳定顺序注册：
+`register_file_tools()` 默认按稳定顺序注册以下五个工具：
 
 | 工具名 | 输入模型 | 能力 | 行为 |
 | --- | --- | --- | --- |
@@ -392,6 +392,20 @@ executor = ToolExecutor(
 | `grep_search` | `GrepSearchInput` | `READ` | 流式逐行执行 Python 正则搜索，下降前跳过 `.iris`，达到全局 `max_results` 后立即停止 |
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
 | `edit_file` | `EditFileInput` | `WRITE` | 对已读且未变化的文件执行唯一字符串替换 |
+
+### 显式发布文件产物
+
+在 YAML 中增加 `file.publish`，模型即可调用 `publish_artifact(file_path)`；SDK 可显式注册
+`PublishArtifactTool(file_service=...)`。它不加入 `register_file_tools()` 的默认集合。工具按 READ
+权限解析有效 workspace 内的文件，不要求先调用 `read_file`，也不更新编辑所需的读取状态。
+
+发布前先完成文件生成。工具分块复制指定文件到当前 session 的 `.iris/tool-results` 唯一路径，
+保留扩展名并返回 `ToolResult.artifact` 的本地 path、MIME、实际 size 和短 preview。原文件后续修改、
+删除或 runner 关闭不影响已发布副本。复制失败返回工具错误并清理本次部分副本，不自动重试。
+该操作不扫描目录、不上传云端，也不把图片/PDF 等二进制直接送入模型。
+
+宿主从结果或 `AgentRunner.list_tool_calls(run_id)` 对应记录获取 artifact 路径；SSE/WS 只提供
+摘要与调用 identity，由宿主实现展示/下载接口。完整用法见 [Python 报告示例](../../../examples/command/README.md)。
 
 ### 文件工具的分层设计
 
@@ -405,7 +419,7 @@ flowchart LR
     Adapter --> Impl["Read/Edit/...Tool._impl()"]
     Impl --> Service["WorkspaceFileService"]
     Service --> Boundary["WorkspacePolicy / ReadFileState / Filesystem"]
-    Impl --> Result["FileTool._text_result() -> ToolResult"]
+    Impl --> Result["ToolResult: 文本 / file_change / artifact"]
 ```
 
 职责划分如下：
@@ -416,7 +430,7 @@ flowchart LR
   `input_type`、`capabilities`，并在 `_impl()` 中将已校验参数转给文件服务、包装结果。
 - `WorkspaceFileService`: 处理实际文件规则，包括 workspace 路径约束、读后写状态记录、
   stale 检查、符号链接边界、原子写入和具体文件操作。
-- `register_file_tools()`: 为全部具体工具注入同一个 `WorkspaceFileService`，使同一
+- `register_file_tools()`: 为上述五个默认工具注入同一个 `WorkspaceFileService`，使同一
   registry 中的路径策略和读取状态语义保持一致。
 
 这种拆分让工具的模型可见协议稳定，而文件安全规则集中在服务层维护。新增同类文件工具时，
@@ -531,6 +545,7 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 
 `persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
 取得 store。MCP adapter 见 [iris.mcp](../mcp/README.md)，复用现有 executor 与取消桥。
+`persist_file(tool_use_id, source, preview=...)` 保存已解析源文件的副本，供显式文件发布工具使用。
 默认策略仅允许本地受信只读 MCP，其余仍需确认。
 `IrisToolOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
 这是普通工具与 MCP 共用的 unknown 异常；可选 `stop_receipt` 单独保存进程内停止事实，

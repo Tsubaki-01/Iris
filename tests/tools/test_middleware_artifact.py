@@ -15,6 +15,7 @@ from iris.tools import (
     PermissionDecision,
     PermissionEffect,
     PermissionPolicy,
+    PublishArtifactTool,
     ToolDefinition,
     ToolErrorInfo,
     ToolExecutionContext,
@@ -24,6 +25,43 @@ from iris.tools import (
     ToolResult,
 )
 from iris.tools.artifacts import ToolArtifactStore
+
+
+@pytest.mark.asyncio
+async def test_published_binary_keeps_its_path_when_middleware_expands_text(tmp_path: Path) -> None:
+    """发布副本不被超额模型正文替换；两份内容分别沿 path/text_path 交付。"""
+    source = tmp_path / "plot.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nbinary-content")
+    full_text = "expanded publication result\n" * 1000
+    published: list[Path] = []
+
+    class ExpandPublished(ToolMiddleware):
+        """保留原副本，只扩展最终模型正文。"""
+
+        async def after_call(
+            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
+        ) -> ToolResult:
+            """记录已复制文件路径，让 executor 为新正文执行普通存档。"""
+            assert result.artifact is not None
+            published.append(result.artifact.path)
+            return result.model_copy(update={"content": [TextBlock(text=full_text)]})
+
+    registry = ToolRegistry()
+    tool = PublishArtifactTool(max_result_chars=1200)
+    registry.register(tool)
+    result = await ToolExecutor(registry, middleware=[ExpandPublished()]).execute_one(
+        ToolUseBlock(id="published", name="publish_artifact", input={"file_path": "plot.png"}),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert not result.is_error and result.artifact is not None
+    assert result.artifact.path == published[0]
+    assert result.artifact.path.read_bytes() == source.read_bytes()
+    assert result.artifact.mime_type == "image/png"
+    assert (
+        result.artifact.text_path is not None and result.artifact.text_path != result.artifact.path
+    )
+    assert result.artifact.text_path.read_text(encoding="utf-8") == full_text
+    assert len(result.model_content) <= 1200
 
 
 def test_repeated_call_id_preserves_each_full_text(tmp_path: Path) -> None:

@@ -1,5 +1,6 @@
 """离线 provider 驱动真实文件工具与命令示例。"""
 
+import json
 import os
 import platform
 from pathlib import Path
@@ -48,18 +49,27 @@ async def test_native_example_writes_executes_and_reads_in_unicode_workspace(
 
 
 @pytest.mark.asyncio
-async def test_python_example_uses_python_only_tool_and_keeps_report(tmp_path: Path) -> None:
-    """仅启用 Python 工具也经过真实 Runner、命令确认和工作区文件交付。"""
+async def test_python_example_repairs_error_and_publishes_report_copy(tmp_path: Path) -> None:
+    """真实错误进入后续请求，修正后的报告通过发布工具形成独立副本。"""
     config = load_agent_config(EXAMPLES / "python.yaml")
-    assert config.tools.builtin == ["exec.python"]
+    assert config.tools.builtin == ["file.write", "exec.python", "file.publish"]
     assert config.permissions.execute == "confirm"
     workspace = tmp_path / "Python 中文 workspace"
     report = await run_python(workspace)
-    assert report["tool_names"] == ["run_python"]
-    assert report["confirmed_tools"] == ["run_python"]
+    assert report["tool_names"] == ["write_file", "run_python", "run_python", "publish_artifact"]
+    assert report["confirmed_tools"] == ["run_python", "run_python"]
     assert report["output"] == {"rows": 3, "total": 12}
-    assert (workspace / "report.json").is_file()
-    assert "12" in report["model_result"]
+    assert "KeyError" in report["error_feedback"] and "Traceback" in report["error_feedback"]
+    assert "<iris-python>" in report["error_feedback"]
+    source = workspace / "report.json"
+    published = Path(report["artifact"]["path"])
+    assert published != source and published.is_relative_to(workspace / ".iris" / "tool-results")
+    assert report["artifact"]["mime_type"] == "application/json"
+    assert report["artifact"]["size_bytes"] == published.stat().st_size
+    source.write_text("changed after publication", encoding="utf-8")
+    assert json.loads(published.read_text(encoding="utf-8")) == report["output"]
+    source.unlink()
+    assert json.loads(published.read_text(encoding="utf-8")) == report["output"]
 
 
 @pytest.mark.asyncio

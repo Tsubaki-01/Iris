@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import threading
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
 from iris.exceptions import IrisToolExecutionError
 from iris.message import ToolUseBlock
 from iris.tools import (
+    PublishArtifactTool,
     ReadFileRecord,
     ReadFileState,
     ToolArtifact,
@@ -118,6 +121,47 @@ async def test_file_mutation_runs_in_worker_and_merges_only_its_record(
     assert "STALE_FILE_STATE" in waiting_result.message
     if name == "edit_file":
         assert "+after\n" in result.data["file_change"]["patch"]
+
+
+@pytest.mark.asyncio
+async def test_publish_copy_runs_once_and_returns_result_after_repeated_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """发布复制在线程中执行，重复取消等待不能遗留未收回的副本写入。"""
+    source = tmp_path / "report.csv"
+    source.write_bytes(b"value\n42\n")
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    workers: list[int] = []
+    copy = shutil.copyfileobj
+
+    def blocked_copy(original: BinaryIO, output: BinaryIO, length: int) -> None:
+        workers.append(threading.get_ident())
+        entered.set()
+        assert release.wait(2)
+        copy(original, output, length=length)
+
+    monkeypatch.setattr("iris.tools.artifacts.shutil.copyfileobj", blocked_copy)
+    tool = PublishArtifactTool()
+    context = ToolExecutionContext(workspace_root=tmp_path, call_id="publish")
+    operation = asyncio.create_task(
+        tool.arun(tool.validate_input({"file_path": "report.csv"}), context)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        operation.cancel()
+        await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done()
+    finally:
+        release.set()
+        [result] = await asyncio.gather(operation, return_exceptions=True)
+    assert not isinstance(result, BaseException)
+    assert result.artifact is not None
+    assert result.artifact.path.read_bytes() == b"value\n42\n"
+    assert len(workers) == 1 and workers[0] != loop_thread
+    assert context.read_state is None
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from ...memory import (
 )
 from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
+from ...tools.builtin.artifact import PublishArtifactTool
 from ...tools.builtin.exec import ExecCommandTool
 from ...tools.builtin.file import (
     EditFileTool,
@@ -45,6 +46,7 @@ _BUILTIN_FILE_TOOL_FACTORIES: dict[str, _FileToolFactory] = {
     "file.grep": lambda service: GrepSearchTool(file_service=service),
     "file.write": lambda service: WriteFileTool(file_service=service),
     "file.edit": lambda service: EditFileTool(file_service=service),
+    "file.publish": lambda service: PublishArtifactTool(file_service=service),
 }
 
 _BUILTIN_HUMAN_TOOL_FACTORIES: dict[str, _ToolFactory] = {

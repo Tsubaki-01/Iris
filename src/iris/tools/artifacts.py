@@ -1,8 +1,9 @@
-"""工具大结果 artifact 存储。
+"""工具结果正文与显式文件产物的本地存储。
 
 用于处理执行结果体积过大时的内容截断与外部文件持久化机制。
 如果输出短，直接返回原始结果；如果输出长，则自动将原始内容存入隐藏工作区，
 向 LLM 返回提示信息和有界正文预览，避免 token 超限。
+显式发布文件时保存独立二进制副本，并返回供宿主使用的产物引用。
 
 Example:
     store = ToolArtifactStore(Path(".iris/tool-results"))
@@ -12,6 +13,8 @@ Example:
 from __future__ import annotations
 
 import json
+import mimetypes
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +29,7 @@ from .base import ToolArtifact, ToolExecutionContext, ToolResult
 
 
 class ToolArtifactStore:
-    """将超大工具结果写入 `.iris/tool-results`。
+    """将工具结果正文和发布文件副本写入 `.iris/tool-results`。
 
     在长内容导致 LLM 无法容纳上下文时，自动提取负载并放入文件中，原位放置小尺寸报告文件。
 
@@ -63,6 +66,37 @@ class ToolArtifactStore:
         self.preview_chars = preview_chars
         self.preview_mode = preview_mode
 
+    def persist_file(self, tool_use_id: str, source: Path, *, preview: str) -> ToolArtifact:
+        """分块复制已解析源文件，完整关闭后交付独立副本；失败删除本次半成品。"""
+        created = False
+        try:
+            path = self._new_path(tool_use_id, source.suffix)
+            with source.open("rb") as original, path.open("xb") as output:
+                created = True
+                shutil.copyfileobj(original, output, length=1024 * 1024)
+                size = output.tell()
+            mime_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+        except (OSError, ValueError) as exc:
+            if created:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    raise IrisToolExecutionError(
+                        "ARTIFACT_ERROR: 复制失败且部分副本无法删除"
+                    ) from cleanup_error
+            raise IrisToolExecutionError("ARTIFACT_ERROR: 复制发布文件失败") from exc
+        return ToolArtifact(path=path, mime_type=mime_type, size_bytes=size, preview=preview)
+
+    def _new_path(self, tool_use_id: str, suffix: str) -> Path:
+        """统一生成当前 store 下尚未写入的唯一结果路径。"""
+        root = self.root.resolve(strict=False)
+        root.mkdir(parents=True, exist_ok=True)
+        path = (root / f"{safe_path_segment(tool_use_id)}-{uuid4().hex}{suffix}").resolve(
+            strict=False
+        )
+        path.relative_to(root)
+        return path
+
     def persist_json(
         self,
         tool_use_id: str,
@@ -90,12 +124,7 @@ class ToolArtifactStore:
     ) -> ToolArtifact:
         """复用单一路径编码和写入边界。"""
         try:
-            root = self.root.resolve(strict=False)
-            root.mkdir(parents=True, exist_ok=True)
-            path = (root / f"{safe_path_segment(tool_use_id)}-{uuid4().hex}{suffix}").resolve(
-                strict=False
-            )
-            path.relative_to(root)
+            path = self._new_path(tool_use_id, suffix)
             with path.open("xb") as output:
                 size = output.write(content.encode("utf-8"))
         except (OSError, ValueError) as exc:
