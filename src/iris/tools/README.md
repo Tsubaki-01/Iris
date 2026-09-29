@@ -78,9 +78,9 @@ assert result.model_content == "你好，Iris"
 
 在 Agent YAML 的 `tools.builtin` 中声明 `exec.command`，模型工具名为 `exec_command`。
 工具只接受 `command`、`cwd`（默认 `.`）和可选的正数 `timeout_seconds`。执行环境由
-root 的 `execution` 配置确定，模型不能修改模式、镜像或挂载；配置示例见
-[agents](../agents/README.md#executionconfig)。直接构造工具时使用
-`ExecCommandTool(ExecutionBinding(config, service, environment))`，服务准备与关闭归 host。
+root 的 `command` 配置确定，模型不能修改模式、镜像或挂载；配置示例见
+[agents](../agents/README.md#commandconfig)。直接构造工具时使用
+`ExecCommandTool(CommandBinding(config, service, environment))`，服务准备与关闭归 host。
 
 `cwd` 由 `WorkspacePolicy` 在当前 Agent 的 workspace 内解析一次，再交给后端。
 Native 在宿主用户权限下执行，cwd 不限制命令内部访问其他路径。Docker 的 root/child
@@ -97,17 +97,17 @@ child 的 `writes: deny` 不保证 Docker 命令只读；所有命令的挂载�
 | --- | --- |
 | exit 0 | 成功，正文包含 stdout/stderr |
 | 普通非零 exit（含 124/137） | `COMMAND_FAILED`，错误正文含真实退出码与诊断 |
-| 单命令期限到达 | `EXECUTION_TIMEOUT`，可按现有错误策略返回模型 |
-| 已确认取消 / 共享停止连带中断 | `EXECUTION_CANCELLED` / `EXECUTION_ENVIRONMENT_INTERRUPTED` |
-| 明确未启动 | `EXECUTION_UNAVAILABLE` |
+| 单命令期限到达 | `COMMAND_TIMEOUT`，可按现有错误策略返回模型 |
+| 已确认取消 / 共享停止连带中断 | `COMMAND_CANCELLED` / `COMMAND_ENVIRONMENT_INTERRUPTED` |
+| 明确未启动 | `COMMAND_UNAVAILABLE` |
 | 执行结果无法确认 | 原样抛出 `IrisToolOutcomeUnknownError`，不重放命令 |
 
 输出沿用既有 artifact 处理；`ToolResult.data` 只保留模式、状态、退出码、cwd、耗时和截断
 标记，不重复存放大段输出。停止收据与未完成清理异常保留在 excluded 的
 `context.command_stop_slot`，context 副本共享同一个槽；middleware 替换结果不会清空它。
 已知结果伴随清理失败时，Exec 先返回已知工具事实并记录 `cleanup_error`，供 runtime 提交后
-交给外层结算；没有已知事实的 `IrisExecutionCleanupError` 原样传播。控制异常不会转换为
-普通 middleware 错误。后端与停止范围见 [execution](../execution/README.md)。
+交给外层结算；没有已知事实的 `IrisCommandCleanupError` 原样传播。控制异常不会转换为
+普通 middleware 错误。后端与停止范围见 [command](../command/README.md)。
 
 ## Web 搜索与网页读取
 

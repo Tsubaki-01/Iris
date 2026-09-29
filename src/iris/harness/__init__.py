@@ -25,14 +25,14 @@ from .session_manager import (
     SubmissionEvent,
     SubmitReceipt,
 )
-from .streaming import ExecutionCleanupFailed, LiveFact, LivePublisher, SessionSubmissionEvent
+from .streaming import CommandCleanupFailed, LiveFact, LivePublisher, SessionSubmissionEvent
 
 __all__ = [
     "AgentRunOptions",
     "AgentRunRequest",
     "AgentRunner",
     "ChildProviderFactory",
-    "ExecutionCleanupFailed",
+    "CommandCleanupFailed",
     "LiveFact",
     "LivePublisher",
     "ResumeReceipt",

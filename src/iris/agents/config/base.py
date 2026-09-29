@@ -17,8 +17,8 @@ from pydantic import (
     model_validator,
 )
 
+from ...command.config import CommandConfig, DockerConfig
 from ...exceptions import IrisConfigError, IrisValidationError
-from ...execution.config import DockerConfig, ExecutionConfig
 from ...memory.config import MemoryConfig
 from ...providers import ModelRoute, parse_model_route
 from .compaction import CompactionConfig
@@ -239,7 +239,7 @@ class AgentConfig(BaseModel):
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
-        execution (ExecutionConfig): root 命令环境配置，不自动注册工具。
+        command (CommandConfig): root 命令环境配置，不自动注册工具。
         session (SessionConfig): 会话配置。
     """
 
@@ -254,7 +254,7 @@ class AgentConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
-    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    command: CommandConfig = Field(default_factory=CommandConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -340,7 +340,7 @@ __all__ = [
     "AgentConfig",
     "AgentSkillsConfig",
     "DockerConfig",
-    "ExecutionConfig",
+    "CommandConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",

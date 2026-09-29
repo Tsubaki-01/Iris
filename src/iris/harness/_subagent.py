@@ -13,16 +13,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
+from ..command import CommandStopSlot
 from ..exceptions import (
+    IrisCommandError,
     IrisConfigError,
-    IrisExecutionError,
     IrisMCPError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..execution import CommandStopSlot
 from ..hitl.models import (
     HumanInteraction,
     HumanInteractionResponse,
@@ -57,7 +57,7 @@ from ..tools.subagent import (
 )
 
 if TYPE_CHECKING:
-    from ._execution_lifecycle import ExecutionLifecycle
+    from ._command_lifecycle import CommandLifecycle
     from .runner import AgentRunner, Clock
 
 logger = logging.getLogger(__name__)
@@ -96,7 +96,7 @@ class HarnessSubagentController:
         self.parent_boundary = parent_boundary
         self.child_provider_factory = child_provider_factory
         self.clock = clock
-        self.execution_lifecycle: ExecutionLifecycle | None = None
+        self.command_lifecycle: CommandLifecycle | None = None
         self._live_children: dict[str, tuple[AgentRunner, asyncio.Task[RunResult]]] = {}
 
     async def execute(self, invocation: SubagentInvocation) -> SubagentExecutionOutcome:
@@ -124,7 +124,7 @@ class HarnessSubagentController:
         async with self._owned_child_runner(runner):
             try:
                 await runner.aprepare()
-            except (IrisConfigError, IrisMCPError, IrisExecutionError):
+            except (IrisConfigError, IrisMCPError, IrisCommandError):
                 return _error_result(
                     route.selector,
                     "SUBAGENT_PREPARE_ERROR",
@@ -196,8 +196,8 @@ class HarnessSubagentController:
 
     def _assemble_child(self, route: SubagentRoute) -> AgentRunner:
         """只加载 selected ordinary config，直接消费 CHILD boundary 与独立 provider。"""
+        from ._command_lifecycle import ChildCommandTarget
         from ._context_access import ContextAccess
-        from ._execution_lifecycle import ChildExecutionTarget
         from .runner import AgentRunner
 
         config = load_agent_config(route.config_path)
@@ -223,14 +223,14 @@ class HarnessSubagentController:
             context_access=ContextAccess(self.store),
         )
         runner = AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
-        runner._execution_lifecycle = cast("ExecutionLifecycle", self.execution_lifecycle)
-        runner._execution_target = ChildExecutionTarget(self, route)
+        runner._command_lifecycle = cast("CommandLifecycle", self.command_lifecycle)
+        runner._command_target = ChildCommandTarget(self, route)
         if runner._subagent_controller is not None:
-            runner._subagent_controller.execution_lifecycle = self.execution_lifecycle
+            runner._subagent_controller.command_lifecycle = self.command_lifecycle
         return runner
 
     @asynccontextmanager
-    async def open_execution_target(
+    async def open_command_target(
         self, route: SubagentRoute, run_id: str
     ) -> AsyncIterator[AgentRunner]:
         """按 exact run 借用活动 child，或重建仅供期限/清理结算的临时 runner。"""
@@ -245,7 +245,7 @@ class HarnessSubagentController:
         self, parent_run_id: str, parent_tool_call_id: str, child_run_id: str
     ) -> None:
         """消费当前 child 终态的一次停止事实，交给当前父调用而不写入历史。"""
-        receipt = cast("ExecutionLifecycle", self.execution_lifecycle).take_settlement_receipt(
+        receipt = cast("CommandLifecycle", self.command_lifecycle).take_settlement_receipt(
             child_run_id
         )
         if receipt is not None:

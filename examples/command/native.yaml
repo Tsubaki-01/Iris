@@ -1,0 +1,30 @@
+name: command-native-example
+
+model:
+  provider: deepseek
+  name: deepseek-chat
+  temperature: 0
+  timeout: 30
+
+system: |
+  使用文件工具准备 CSV 与脚本，通过 exec 生成 JSON，再用文件工具读取结果。
+  Native 使用当前宿主 shell，命令以宿主用户权限运行；它不是 OS 沙箱。
+
+tools:
+  builtin:
+    - file.write
+    - file.read
+    - exec.command
+
+permissions:
+  workspace: workspace
+  writes: allow
+  # execute 省略时默认 confirm；示例显式展示该默认值。
+  execute: confirm
+
+command:
+  mode: native
+  timeout_seconds: 15
+
+session:
+  backend: none

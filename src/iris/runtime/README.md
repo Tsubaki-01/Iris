@@ -365,7 +365,7 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 或成功压缩才采用新版概览。Fork 的目标窗口为 `None`，首输入重新采用。
 
 统一请求构造入口通过 `system_addendum` 追加一次运行环境段，再追加已采用的 memory 概览。
-环境段始终提供 host OS；显式注册命令工具时另提供实际 execution mode、command OS 与 shell，
+环境段始终提供 host OS；显式注册命令工具时另提供实际 command mode、command OS 与 shell，
 指导模型选择命令语法。两段都计入最终 system 的长度限制，不写入 BCI 或历史。
 `RuntimeEnvironment.memory_service is None` 时只省略概览，即使 session 保存着旧概览也不追加。
 普通请求与恢复不因此读取或改写窗口，也不额外

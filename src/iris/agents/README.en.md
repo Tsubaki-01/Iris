@@ -98,7 +98,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 ## Public models and APIs
 
 `iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ContextPolicyConfig`, `ModelConfig`,
-`PermissionsConfig`, `ExecutionConfig`, `DockerConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
+`PermissionsConfig`, `CommandConfig`, `DockerConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
@@ -199,14 +199,14 @@ The switch is fixed when constructing the Agent. Rebuild it and start a new sess
 the setting; hot switching is not supported. Static context memory and existing history remain.
 `include_tools=False` still controls whether a request sends tool schemas.
 
-`build_tool_registry(config, *, memory_service=None, memory_config=None, execution_binding=None)` registers Search/Fetch
+`build_tool_registry(config, *, memory_service=None, memory_config=None, command_binding=None)` registers Search/Fetch
 when given a resolved service, then declared builtins and Python extensions. Explicit memory writes
 require a service; manual read declarations are rejected at this assembly boundary. `memory_config`
 binds read and write namespaces, defaulting to `MemoryConfig()`; this helper does not recheck enabled.
 Actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
-An explicit `exec.command` requires an already assembled `ExecutionBinding`, otherwise this helper
+An explicit `exec.command` requires an already assembled `CommandBinding`, otherwise this helper
 raises `IrisConfigError`. It never creates, prepares, or closes command services.
 
 `AgentConfig.compaction` defaults to `CompactionConfig`, exported from both `iris.agents` and
@@ -290,12 +290,12 @@ database, or an ORM.
 
 ## Command environment
 
-`AgentConfig.execution` defaults to native execution with a 120-second command limit. Selecting a
-mode does not register a tool; declare `exec.command` explicitly. `ExecutionConfig` and
+`AgentConfig.command` defaults to native execution with a 120-second command limit. Selecting a
+mode does not register a tool; declare `exec.command` explicitly. `CommandConfig` and
 `DockerConfig` are exported from both Agent configuration entry points.
 
 ```yaml
-execution:
+command:
   mode: docker
   timeout_seconds: 120
   docker:
@@ -320,11 +320,11 @@ The optional endpoint accepts only a local Unix socket or Windows named pipe, de
 dependency and rejects a docker block.
 
 The root owns the startup configuration and service. Children may register commands but cannot
-declare an execution override. They share the root mount and environment; their workspace only
+declare a command override. They share the root mount and environment; their workspace only
 sets default command cwd and native file-tool scope. A Docker child's `writes: deny` does not make
 its commands read-only; the root bind controls writes and effective execute controls authorization.
 Native has no read-only mount, so registering commands in an effectively write-denied scope fails
-at assembly. Native cwd is not an OS access boundary. See [execution](../execution/README.md) and
+at assembly. Native cwd is not an OS access boundary. See [command](../command/README.md) and
 [command tools](../tools/README.en.md#explicit-command-execution) for limits and results.
 
 ## Maintenance

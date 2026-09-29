@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ..execution.models import CommandStopSlot
+from ..command.models import CommandStopSlot
 from ..message import Msg, ToolUseBlock
 from ..tools import (
     CancellationSignal,

@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
+from iris.command.service import CommandBinding
 from iris.exceptions import (
     IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
     IrisRunStateError,
 )
-from iris.execution.service import ExecutionBinding
 from iris.harness import AgentRunner, ChildProviderFactory, SessionManager
 from iris.hitl import (
     InteractionStatus,
@@ -1456,13 +1456,13 @@ def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
         *,
         memory_service: MemoryService | None = None,
         memory_config: MemoryConfig | None = None,
-        execution_binding: ExecutionBinding | None = None,
+        command_binding: CommandBinding | None = None,
     ) -> ToolRegistry:
         registry = build_tool_registry(
             config,
             memory_service=memory_service,
             memory_config=memory_config,
-            execution_binding=execution_binding,
+            command_binding=command_binding,
         )
         if "human.ask" in config.builtin:
             registry.register_function(tool.run, name="blocking_child")

@@ -433,7 +433,7 @@ overviews. Fork starts the target with `context_window=None` and adopts on its f
 
 The shared request builder uses `system_addendum` for one runtime environment section followed by
 the adopted memory overview. The environment always states the host OS; agents explicitly registering
-the command tool also receive the execution mode, command OS, and shell. Both sections count toward
+the command tool also receive the command mode, command OS, and shell. Both sections count toward
 the final system length limit and remain outside BCI and history.
 When `RuntimeEnvironment.memory_service is None`, only the overview is omitted, even if the session
 retains a previous overview. Ordinary requests and recovery

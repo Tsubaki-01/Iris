@@ -67,7 +67,7 @@ subscription offer path triggers this slow-consumer transition, producing one ga
 
 ## Gateway and commands
 
-The root publishes `ExecutionCleanupFailed` as critical `execution.cleanup.failed` for both the
+The root publishes `CommandCleanupFailed` as critical `command.cleanup.failed` for both the
 exact run and its session. Payloads include only error code/source/message, with no live exception,
 stop receipt, full command output, or durable sequence. Each failed cleanup attempt publishes once.
 The fact does not imply a terminal run or a released lane. The CLI prints a short error while leaving

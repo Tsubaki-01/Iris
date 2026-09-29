@@ -22,9 +22,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
+from ..command.models import CommandEnvironment, CommandStopSlot
+from ..command.service import CommandBinding
 from ..context import ContextBuilder, ContextBuildInput, ContextSource
-from ..execution.models import CommandEnvironment, CommandStopSlot
-from ..execution.service import ExecutionBinding
 from ..memory import MemoryService
 from ..message import LLMRequest, ModelStreamEvent
 from ..providers.protocols import CompletionProvider
@@ -115,7 +115,7 @@ class RuntimeEnvironment:
         skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
         execution_scope (RuntimeExecutionScope): 明确的 ROOT/CHILD 装配范围。
-        execution_binding (ExecutionBinding | None): root 拥有、child 借用的命令服务与配置。
+        command_binding (CommandBinding | None): root 拥有、child 借用的命令服务与配置。
         command_environment (CommandEnvironment | None): 本 Agent 注册命令工具时的环境事实。
         host_os (str): Iris 进程所在宿主操作系统。
         command_stop_slots (dict): root/child 共享的当前调用停止事实槽。
@@ -135,7 +135,7 @@ class RuntimeEnvironment:
     skill_registry: SkillRegistry | None = None
     mcp_manager: MCPManager | None = None
     execution_scope: RuntimeExecutionScope = RuntimeExecutionScope.ROOT
-    execution_binding: ExecutionBinding | None = None
+    command_binding: CommandBinding | None = None
     command_environment: CommandEnvironment | None = None
     host_os: str = field(default_factory=platform.system)
     command_stop_slots: dict[tuple[str, str], CommandStopSlot] = field(default_factory=dict)
@@ -149,8 +149,8 @@ class RuntimeEnvironment:
 
     async def aprepare(self) -> MCPCatalogSnapshot | None:
         """准备绑定的命令服务和本环境自有 MCP，返回 MCP 目录快照。"""
-        if self.execution_binding is not None:
-            await self.execution_binding.service.prepare()
+        if self.command_binding is not None:
+            await self.command_binding.service.prepare()
         if self.mcp_manager is not None:
             return await self.mcp_manager.prepare()
         return None
@@ -163,9 +163,9 @@ class RuntimeEnvironment:
         finally:
             if (
                 self.execution_scope is RuntimeExecutionScope.ROOT
-                and self.execution_binding is not None
+                and self.command_binding is not None
             ):
-                await self.execution_binding.service.aclose()
+                await self.command_binding.service.aclose()
 
 
 __all__ = [

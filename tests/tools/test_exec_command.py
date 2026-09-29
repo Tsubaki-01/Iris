@@ -5,22 +5,22 @@ from typing import Any
 
 import pytest
 
-from iris.exceptions import (
-    IrisExecutionCleanupError,
-    IrisExecutionError,
-    IrisToolOutcomeUnknownError,
-)
-from iris.execution import (
+from iris.command import (
+    CommandBinding,
+    CommandConfig,
     CommandEnvironment,
+    CommandMode,
     CommandOutcome,
     CommandRequest,
+    CommandScope,
     CommandStatus,
-    ExecutionBinding,
-    ExecutionConfig,
-    ExecutionMode,
-    ExecutionScope,
-    ExecutionStopReceipt,
+    CommandStopReceipt,
     StopOperation,
+)
+from iris.exceptions import (
+    IrisCommandCleanupError,
+    IrisCommandError,
+    IrisToolOutcomeUnknownError,
 )
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
@@ -43,8 +43,8 @@ def test_command_context_keeps_live_slot_identity_and_excludes_serialization(
     """深复制 context 也不能复制 live 收据槽或把控制异常放入 JSON。"""
     context = ToolExecutionContext(workspace_root=tmp_path, tool_timeout_seconds=4)
     slot = context.command_stop_slot
-    slot.receipt = ExecutionStopReceipt("service", "stop")
-    slot.cleanup_error = IrisExecutionCleanupError("等待重试")
+    slot.receipt = CommandStopReceipt("service", "stop")
+    slot.cleanup_error = IrisCommandCleanupError("等待重试")
     copied = context.model_copy(deep=True)
     assert copied.command_stop_slot is slot
     assert copied.tool_timeout_seconds == 4
@@ -52,8 +52,7 @@ def test_command_context_keeps_live_slot_identity_and_excludes_serialization(
     assert "command_stop_slot" not in context.model_dump_json()
     assert ToolTimeoutOwner.RUNTIME.value == "runtime"
     assert (
-        CommandEnvironment("Windows", ExecutionMode.DOCKER, "Linux", "/bin/sh").command_os
-        == "Linux"
+        CommandEnvironment("Windows", CommandMode.DOCKER, "Linux", "/bin/sh").command_os == "Linux"
     )
 
 
@@ -62,24 +61,24 @@ class FakeCommandService:
 
     def __init__(self, result: CommandOutcome | Exception) -> None:
         self.result = result
-        self.calls: list[tuple[ExecutionScope, CommandRequest]] = []
+        self.calls: list[tuple[CommandScope, CommandRequest]] = []
 
     async def prepare(self) -> None:
         """命令工具不负责服务准备。"""
         raise AssertionError("tool must not prepare service")
 
-    async def execute(self, scope: ExecutionScope, request: CommandRequest) -> CommandOutcome:
+    async def execute(self, scope: CommandScope, request: CommandRequest) -> CommandOutcome:
         """记录请求并提供可控后端结果。"""
         self.calls.append((scope, request))
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
 
-    def stop(self, scope: ExecutionScope) -> StopOperation:
+    def stop(self, scope: CommandScope) -> StopOperation:
         """命令工具不另发一次停止。"""
         raise AssertionError("tool must not repeat backend stop")
 
-    async def wait_drained(self, receipt: ExecutionStopReceipt) -> None:
+    async def wait_drained(self, receipt: CommandStopReceipt) -> None:
         """工具 body 不等待包括自身的排空。"""
         raise AssertionError("tool must not wait for drained")
 
@@ -92,21 +91,21 @@ def outcome(
     status: CommandStatus = CommandStatus.EXITED,
     exit_code: int | None = 0,
     *,
-    receipt: ExecutionStopReceipt | None = None,
+    receipt: CommandStopReceipt | None = None,
     stdout: str = "hello",
 ) -> CommandOutcome:
     """构造已验证的后端事实。"""
     return CommandOutcome(
-        ExecutionMode.DOCKER, status, exit_code, stdout, "diagnostic", False, 0.2, "child", receipt
+        CommandMode.DOCKER, status, exit_code, stdout, "diagnostic", False, 0.2, "child", receipt
     )
 
 
-def binding(service: FakeCommandService) -> ExecutionBinding:
+def binding(service: FakeCommandService) -> CommandBinding:
     """工具说明与 service 使用同一启动配置。"""
-    return ExecutionBinding(
-        ExecutionConfig(mode="docker", timeout_seconds=120),
+    return CommandBinding(
+        CommandConfig(mode="docker", timeout_seconds=120),
         service,
-        CommandEnvironment("Windows", ExecutionMode.DOCKER, "Linux", "/bin/sh"),
+        CommandEnvironment("Windows", CommandMode.DOCKER, "Linux", "/bin/sh"),
     )
 
 
@@ -155,7 +154,7 @@ async def test_exec_resolves_child_cwd_and_owns_shortest_business_deadline(
     assert "Linux" in tool.definition.description
     result = await executor.execute_prepared(prepared, context)
     scope, request = service.calls[0]
-    assert scope == ExecutionScope("run", "session")
+    assert scope == CommandScope("run", "session")
     assert request.cwd == child.resolve()
     assert request.timeout_seconds == expected
     assert request.call_id == "call"
@@ -193,15 +192,15 @@ async def test_invalid_exec_arguments_never_reach_service(
     ("status", "exit_code", "code"),
     [
         (CommandStatus.EXITED, 124, "COMMAND_FAILED"),
-        (CommandStatus.TIMED_OUT, None, "EXECUTION_TIMEOUT"),
-        (CommandStatus.CANCELLED, None, "EXECUTION_CANCELLED"),
-        (CommandStatus.ENVIRONMENT_INTERRUPTED, None, "EXECUTION_ENVIRONMENT_INTERRUPTED"),
+        (CommandStatus.TIMED_OUT, None, "COMMAND_TIMEOUT"),
+        (CommandStatus.CANCELLED, None, "COMMAND_CANCELLED"),
+        (CommandStatus.ENVIRONMENT_INTERRUPTED, None, "COMMAND_ENVIRONMENT_INTERRUPTED"),
     ],
 )
 async def test_exec_errors_are_model_visible_and_stop_fact_stays_in_slot(
     tmp_path: Path, status: CommandStatus, exit_code: int | None, code: str
 ) -> None:
-    receipt = ExecutionStopReceipt("service", "stop")
+    receipt = CommandStopReceipt("service", "stop")
     service = FakeCommandService(outcome(status, exit_code, receipt=receipt))
     executor, _tool = executor_for(service)
     context = ToolExecutionContext(workspace_root=tmp_path)
@@ -218,7 +217,7 @@ async def test_exec_errors_are_model_visible_and_stop_fact_stays_in_slot(
 
 @pytest.mark.asyncio
 async def test_exec_unknown_records_receipt_before_executor_propagates(tmp_path: Path) -> None:
-    receipt = ExecutionStopReceipt("service", "stop")
+    receipt = CommandStopReceipt("service", "stop")
     error = IrisToolOutcomeUnknownError("connection lost", stop_receipt=receipt)
     executor, _tool = executor_for(FakeCommandService(error))
     context = ToolExecutionContext(workspace_root=tmp_path)
@@ -235,8 +234,8 @@ async def test_exec_unknown_records_receipt_before_executor_propagates(tmp_path:
 async def test_exec_cleanup_failure_keeps_known_fact_and_excluded_error(
     tmp_path: Path, known: str
 ) -> None:
-    receipt = ExecutionStopReceipt("service", "stop")
-    error = IrisExecutionCleanupError(
+    receipt = CommandStopReceipt("service", "stop")
+    error = IrisCommandCleanupError(
         "cleanup failed",
         command_outcome=outcome(exit_code=7, receipt=receipt) if known == "outcome" else None,
         **({"started": False} if known == "not-started" else {}),
@@ -254,16 +253,14 @@ async def test_exec_cleanup_failure_keeps_known_fact_and_excluded_error(
     context = ToolExecutionContext(workspace_root=tmp_path)
     call = ToolUseBlock(id="call", name="exec_command", input={"command": "x"})
     if known == "unknown":
-        with pytest.raises(IrisExecutionCleanupError) as caught:
+        with pytest.raises(IrisCommandCleanupError) as caught:
             await executor.execute_one(call, context)
         assert caught.value is error
         return
     result = await executor.execute_one(call, context)
     assert context.command_stop_slot.cleanup_error is error
     assert result.error is not None
-    assert result.error.code == (
-        "COMMAND_FAILED" if known == "outcome" else "EXECUTION_UNAVAILABLE"
-    )
+    assert result.error.code == ("COMMAND_FAILED" if known == "outcome" else "COMMAND_UNAVAILABLE")
     if known == "outcome":
         assert context.command_stop_slot.receipt is receipt
         assert "7" in result.model_content
@@ -280,7 +277,7 @@ async def test_middleware_replacement_cannot_erase_command_stop_slot(tmp_path: P
         ) -> ToolResult:
             return ToolResult(tool_use_id="", tool_name="", content=[TextBlock(text="replacement")])
 
-    receipt = ExecutionStopReceipt("service", "stop")
+    receipt = CommandStopReceipt("service", "stop")
     service = FakeCommandService(
         outcome(CommandStatus.ENVIRONMENT_INTERRUPTED, None, receipt=receipt)
     )
@@ -296,13 +293,13 @@ async def test_middleware_replacement_cannot_erase_command_stop_slot(tmp_path: P
 @pytest.mark.asyncio
 async def test_unavailable_command_is_known_error_not_unknown(tmp_path: Path) -> None:
     executor, _tool = executor_for(
-        FakeCommandService(IrisExecutionError("image not ready", started=False))
+        FakeCommandService(IrisCommandError("image not ready", started=False))
     )
     result = await executor.execute_one(
         ToolUseBlock(id="call", name="exec_command", input={"command": "x"}),
         ToolExecutionContext(workspace_root=tmp_path),
     )
-    assert result.error is not None and result.error.code == "EXECUTION_UNAVAILABLE"
+    assert result.error is not None and result.error.code == "COMMAND_UNAVAILABLE"
     assert "image not ready" in result.model_content
 
 
@@ -324,9 +321,9 @@ async def test_exec_confirmation_and_claim_precede_backend_execution(tmp_path: P
         """模拟 durable claim 拒绝，阻止副作用开始。"""
 
         def before_effect(self, prepared: Any) -> None:
-            raise IrisExecutionError("claim refused")
+            raise IrisCommandError("claim refused")
 
-    with pytest.raises(IrisExecutionError, match="claim refused"):
+    with pytest.raises(IrisCommandError, match="claim refused"):
         await executor.execute_prepared(
             prepared, context, approved_tool_call_id="call", effect_guard=RefuseClaim()
         )
@@ -335,7 +332,7 @@ async def test_exec_confirmation_and_claim_precede_backend_execution(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_exec_artifact_keeps_bounded_model_text_and_stop_slot(tmp_path: Path) -> None:
-    receipt = ExecutionStopReceipt("service", "stop")
+    receipt = CommandStopReceipt("service", "stop")
     service = FakeCommandService(
         outcome(CommandStatus.ENVIRONMENT_INTERRUPTED, None, receipt=receipt, stdout="x" * 60_000)
     )
@@ -356,7 +353,7 @@ async def test_exec_artifact_keeps_bounded_model_text_and_stop_slot(tmp_path: Pa
 async def test_cleanup_control_error_from_middleware_is_not_rewritten(
     tmp_path: Path, stage: str
 ) -> None:
-    error = IrisExecutionCleanupError("cleanup remains pending")
+    error = IrisCommandCleanupError("cleanup remains pending")
 
     class CleanupMiddleware(ToolMiddleware):
         """在当前阶段报告未完成资源清理。"""
@@ -380,10 +377,10 @@ async def test_cleanup_control_error_from_middleware_is_not_rewritten(
             raise error
 
     service = FakeCommandService(
-        IrisExecutionError("body failure") if stage == "on_error" else outcome()
+        IrisCommandError("body failure") if stage == "on_error" else outcome()
     )
     executor, _tool = executor_for(service, middleware=[CleanupMiddleware()])
-    with pytest.raises(IrisExecutionCleanupError) as caught:
+    with pytest.raises(IrisCommandCleanupError) as caught:
         await executor.execute_one(
             ToolUseBlock(id="call", name="exec_command", input={"command": "x"}),
             ToolExecutionContext(workspace_root=tmp_path),

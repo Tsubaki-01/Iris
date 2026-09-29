@@ -4,20 +4,20 @@ from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ...command.models import (
+    CommandMode,
+    CommandOutcome,
+    CommandRequest,
+    CommandScope,
+    CommandStatus,
+)
+from ...command.service import CommandBinding
 from ...exceptions import (
-    IrisExecutionCleanupError,
-    IrisExecutionError,
+    IrisCommandCleanupError,
+    IrisCommandError,
     IrisToolOutcomeUnknownError,
     IrisToolValidationError,
 )
-from ...execution.models import (
-    CommandOutcome,
-    CommandRequest,
-    CommandStatus,
-    ExecutionMode,
-    ExecutionScope,
-)
-from ...execution.service import ExecutionBinding
 from ...message import TextBlock
 from ..base import (
     BaseTool,
@@ -49,14 +49,14 @@ class ExecCommandTool(BaseTool):
 
     timeout_owner = ToolTimeoutOwner.TOOL
 
-    def __init__(self, binding: ExecutionBinding) -> None:
+    def __init__(self, binding: CommandBinding) -> None:
         """绑定同源配置、环境说明和已有服务。"""
         self.binding = binding
         self._workspace_policy = WorkspacePolicy()
         environment = binding.environment
         boundary = (
             "命令以宿主用户权限运行；cwd 仅指定起始目录，不限制其他宿主路径访问。"
-            if environment.mode is ExecutionMode.NATIVE
+            if environment.mode is CommandMode.NATIVE
             else "所有 session/child 共用 root 的 /workspace 挂载与容器文件层。"
             "child workspace 只确定默认 cwd；child writes=deny 只限制原生文件工具，"
             "不保证 Docker 命令只读，命令写入取决于 root 挂载。"
@@ -104,13 +104,13 @@ class ExecCommandTool(BaseTool):
         if context.tool_timeout_seconds is not None:
             limits.append(context.tool_timeout_seconds)
         request = CommandRequest(context.call_id, inputs.command, cwd, min(limits))
-        scope = ExecutionScope(str(context.metadata.get("run_id", "")), context.session_id)
+        scope = CommandScope(str(context.metadata.get("run_id", "")), context.session_id)
         try:
             result = await self.binding.service.execute(scope, request)
         except IrisToolOutcomeUnknownError as error:
             context.command_stop_slot.receipt = error.stop_receipt
             raise
-        except IrisExecutionCleanupError as error:
+        except IrisCommandCleanupError as error:
             if error.command_outcome is not None:
                 context.command_stop_slot.cleanup_error = error
                 return self._known_result(error.command_outcome, context)
@@ -118,7 +118,7 @@ class ExecCommandTool(BaseTool):
                 context.command_stop_slot.cleanup_error = error
                 return self._unavailable(error, context)
             raise
-        except IrisExecutionError as error:
+        except IrisCommandError as error:
             if error.context.get("started") is False:
                 return self._unavailable(error, context)
             raise
@@ -143,9 +143,9 @@ class ExecCommandTool(BaseTool):
         if outcome.output_truncated:
             text += "\n\n输出已截断：达到输出额度或前台退出后的排空期限。"
         error_code = {
-            CommandStatus.TIMED_OUT: "EXECUTION_TIMEOUT",
-            CommandStatus.CANCELLED: "EXECUTION_CANCELLED",
-            CommandStatus.ENVIRONMENT_INTERRUPTED: "EXECUTION_ENVIRONMENT_INTERRUPTED",
+            CommandStatus.TIMED_OUT: "COMMAND_TIMEOUT",
+            CommandStatus.CANCELLED: "COMMAND_CANCELLED",
+            CommandStatus.ENVIRONMENT_INTERRUPTED: "COMMAND_ENVIRONMENT_INTERRUPTED",
         }.get(outcome.status)
         if outcome.status is CommandStatus.EXITED and outcome.exit_code != 0:
             error_code = "COMMAND_FAILED"
@@ -165,12 +165,12 @@ class ExecCommandTool(BaseTool):
             },
         )
 
-    def _unavailable(self, error: IrisExecutionError, context: ToolExecutionContext) -> ToolResult:
+    def _unavailable(self, error: IrisCommandError, context: ToolExecutionContext) -> ToolResult:
         return ToolResult(
             tool_use_id=context.call_id,
             tool_name=self.name,
             is_error=True,
-            error=ToolErrorInfo(code="EXECUTION_UNAVAILABLE", message=f"命令尚未启动：{error}"),
+            error=ToolErrorInfo(code="COMMAND_UNAVAILABLE", message=f"命令尚未启动：{error}"),
             data={"mode": self.binding.environment.mode.value, "started": False},
         )
 

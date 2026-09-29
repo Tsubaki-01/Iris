@@ -15,7 +15,7 @@ from typing import Literal, assert_never, cast
 
 from pydantic import JsonValue
 
-from ..harness.streaming import ExecutionCleanupFailed, LiveFact, SessionSubmissionEvent
+from ..harness.streaming import CommandCleanupFailed, LiveFact, SessionSubmissionEvent
 from ..lifecycle import RunEvent
 from ..message import (
     ModelBlockCompleted,
@@ -68,12 +68,12 @@ def project_live_fact(fact: LiveFact) -> tuple[_ProjectedLiveFact, ...]:
     if isinstance(fact, RuntimeStreamEvent):
         projected = _project_runtime_event(fact)
         return _run_and_session(projected)
-    if isinstance(fact, ExecutionCleanupFailed):
+    if isinstance(fact, CommandCleanupFailed):
         return _run_and_session(
             _ProjectedLiveFact(
                 scope="run",
                 scope_id=fact.run_id,
-                kind="execution.cleanup.failed",
+                kind="command.cleanup.failed",
                 run_id=fact.run_id,
                 session_id=fact.session_id,
                 activation_id=None,

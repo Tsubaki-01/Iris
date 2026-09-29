@@ -66,10 +66,10 @@ result = await executor.execute_one(
 ## Explicit command execution
 
 Declare `exec.command` in Agent `tools.builtin` to expose `exec_command`. Its only parameters are
-`command`, `cwd` (default `.`), and an optional positive `timeout_seconds`. Root `execution`
+`command`, `cwd` (default `.`), and an optional positive `timeout_seconds`. Root `command`
 configuration selects the environment; the model cannot change the mode, image, or mount. See
 [agents](../agents/README.en.md#command-environment). SDK callers can construct
-`ExecCommandTool(ExecutionBinding(config, service, environment))`; the host owns service preparation
+`ExecCommandTool(CommandBinding(config, service, environment))`; the host owns service preparation
 and closure.
 
 `WorkspacePolicy` resolves cwd once within the current Agent workspace. Native commands run with
@@ -85,8 +85,8 @@ and the existing non-read-only serial barrier. `BaseTool.timeout_owner` defaults
 and context `tool_timeout_seconds` limits. The outer run owner handles the run deadline.
 
 Exit zero succeeds; a nonzero exit, including 124/137, becomes `COMMAND_FAILED`. Local timeout is
-`EXECUTION_TIMEOUT`; confirmed cancellation and shared-stop interruption are `EXECUTION_CANCELLED`
-and `EXECUTION_ENVIRONMENT_INTERRUPTED`. A known unstarted command is `EXECUTION_UNAVAILABLE`.
+`COMMAND_TIMEOUT`; confirmed cancellation and shared-stop interruption are `COMMAND_CANCELLED`
+and `COMMAND_ENVIRONMENT_INTERRUPTED`. A known unstarted command is `COMMAND_UNAVAILABLE`.
 Error messages contain exit status and diagnostics. Unknown execution propagates
 `IrisToolOutcomeUnknownError` without replaying the command.
 
@@ -95,7 +95,7 @@ truncation metadata. Live receipts and cleanup failures use excluded `context.co
 whose identity survives context copying and middleware result replacement. A known result with
 failed cleanup is returned for normal commit while the slot retains `cleanup_error` for outer
 settlement. Cleanup errors without known facts propagate directly, including through middleware.
-See [execution](../execution/README.md) for backend behavior and stopping scope.
+See [command](../command/README.md) for backend behavior and stopping scope.
 
 ## Definitions, registry, and schemas
 

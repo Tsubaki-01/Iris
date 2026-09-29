@@ -27,12 +27,13 @@ from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
 
 from ..agents import AgentConfig, load_agent_config
 from ..agents.config.subagent import load_subagent_catalog
+from ..command.models import CommandMode, CommandScope, CommandStopReceipt
 from ..context import ContextSource
 from ..exceptions import (
     HITLConflictError,
     IrisCancellationRequestedError,
+    IrisCommandCleanupError,
     IrisConfigError,
-    IrisExecutionCleanupError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunObservationTimeoutError,
@@ -40,7 +41,6 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..execution.models import ExecutionMode, ExecutionScope, ExecutionStopReceipt
 from ..hitl import (
     ApprovedToolCall,
     HumanInteraction,
@@ -101,16 +101,16 @@ from ..runtime.runtime import _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
+from ._command_lifecycle import (
+    ChildCommandTarget,
+    CommandLifecycle,
+    CommandTarget,
+    PendingSettlement,
+    RootCommandTarget,
+)
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._context_access import ContextAccess
 from ._events import _RunEventCollector
-from ._execution_lifecycle import (
-    ChildExecutionTarget,
-    ExecutionLifecycle,
-    ExecutionTarget,
-    PendingSettlement,
-    RootExecutionTarget,
-)
 from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
@@ -282,14 +282,14 @@ class AgentRunner:
         self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
-        binding = runtime.environment.execution_binding
+        binding = runtime.environment.command_binding
         self._prepared = runtime.environment.mcp_manager is None and (
-            binding is None or binding.config.mode is ExecutionMode.NATIVE
+            binding is None or binding.config.mode is CommandMode.NATIVE
         )
         self._closed = False
         self._resources_closed = False
-        self._execution_lifecycle = ExecutionLifecycle(self)
-        self._execution_target: ExecutionTarget = RootExecutionTarget(self)
+        self._command_lifecycle = CommandLifecycle(self)
+        self._command_target: CommandTarget = RootCommandTarget(self)
         self._live_publisher = live_publisher
         if live_publisher is None:
             self._stream_sink: RuntimeEventSink | None = None
@@ -354,7 +354,7 @@ class AgentRunner:
             raise IrisRunStateError("runner 仍有 active activation，不能关闭")
         self._closed = True
         if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
-            await self._execution_lifecycle.aclose()
+            await self._command_lifecycle.aclose()
         await self._close_owned_resources()
 
     async def _close_owned_resources(self) -> None:
@@ -464,7 +464,7 @@ class AgentRunner:
         )
         runner._subagent_controller = controller
         if controller is not None:
-            controller.execution_lifecycle = runner._execution_lifecycle
+            controller.command_lifecycle = runner._command_lifecycle
         return runner
 
     # endregion
@@ -677,7 +677,7 @@ class AgentRunner:
         # --- 1. 校验 run/interaction identity ---
         needs_prepare = not self._prepared
         normalized_run_id = self._required_id(run_id)
-        retried, cleanup_receipt = await self._retry_execution_settlement(normalized_run_id)
+        retried, cleanup_receipt = await self._retry_command_settlement(normalized_run_id)
         if retried is not None:
             return retried
         normalized_interaction_id = self._required_id(interaction_id)
@@ -937,7 +937,7 @@ class AgentRunner:
         if cast(asyncio.Task[object], asyncio.current_task()).cancelling():
             raise asyncio.CancelledError
         if result.is_error and parent_run.options.runtime.tool_error_policy is ToolErrorPolicy.STOP:
-            await self._settle_execution(
+            await self._settle_command(
                 resumed.run,
                 activation_id=resumed.activation_id,
                 stop_reason=RunStopReason.FAILED,
@@ -1078,7 +1078,7 @@ class AgentRunner:
         if settlement_timeout is not None and settlement_timeout <= 0:
             raise IrisRunStateError("settlement_timeout 必须大于 0")
         normalized = self._required_id(run_id)
-        retried, cleanup_receipt = await self._retry_execution_settlement(normalized)
+        retried, cleanup_receipt = await self._retry_command_settlement(normalized)
         if retried is not None:
             return retried
         before = self.store.load_run(normalized)
@@ -1172,7 +1172,7 @@ class AgentRunner:
         run_id: str,
         *,
         expected_activation_id: str | None = None,
-        stop_receipt: ExecutionStopReceipt | None = None,
+        stop_receipt: CommandStopReceipt | None = None,
     ) -> RunResult:
         """根据精确 activation fence 与 durable facts 显式恢复 run。
 
@@ -1198,7 +1198,7 @@ class AgentRunner:
         # --- 1. 按 phase 分派 recovery 入口 ---
         needs_prepare = not self._prepared
         normalized = self._required_id(run_id)
-        retried, cleanup_receipt = await self._retry_execution_settlement(normalized)
+        retried, cleanup_receipt = await self._retry_command_settlement(normalized)
         if retried is not None:
             return retried
         if cleanup_receipt is not None:
@@ -1301,11 +1301,11 @@ class AgentRunner:
         recovered_events = self._event_collector()
         recovered_events.record(recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
-            self._execution_lifecycle.terminal(run.run_id)
+            self._command_lifecycle.terminal(run.run_id)
             await self._deliver_events(recovered_events.take_pending_events())
             return self._require_result(run.run_id)
         if disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
-            result = await self._settle_execution(
+            result = await self._settle_command(
                 recovered.run,
                 activation_id=new_activation_id,
                 stop_reason=RunStopReason.OUTCOME_UNKNOWN,
@@ -1331,7 +1331,7 @@ class AgentRunner:
                 else None
             )
             if reason is not None:
-                result = await self._settle_execution(
+                result = await self._settle_command(
                     recovered.run,
                     activation_id=new_activation_id,
                     stop_reason=reason,
@@ -1480,7 +1480,7 @@ class AgentRunner:
             result = self.store.load_result(run_id)
             if result is not None and result.run.phase is RunPhase.TERMINAL:
                 return result
-            pending = self._execution_lifecycle.pending.get(run_id)
+            pending = self._command_lifecycle.pending.get(run_id)
             if pending is not None and pending.attempt is not None:
                 await asyncio.shield(pending.attempt)
                 continue
@@ -1586,7 +1586,7 @@ class AgentRunner:
         durable_event_callback: Callable[[RunEvent], None] | None = None,
         activation_started: asyncio.Event | None = None,
         event_collector: _RunEventCollector | None = None,
-        stop_receipt: ExecutionStopReceipt | None = None,
+        stop_receipt: CommandStopReceipt | None = None,
     ) -> RunResult | None:
         """把已到期的 waiting run 就地结算为 terminal，否则返回 None。
 
@@ -1686,7 +1686,7 @@ class AgentRunner:
         if activation_started is not None:
             activation_started.set()
         events = event_collector or self._event_collector(durable_event_callback)
-        result = await self._settle_execution(
+        result = await self._settle_command(
             run,
             activation_id=None,
             stop_reason=stop_reason,
@@ -1787,14 +1787,14 @@ class AgentRunner:
         try:
             deadline = port.run.options.limits.deadline_at
             if deadline is not None and self._now() >= deadline:
-                await self._settle_execution(
+                await self._settle_command(
                     port.run,
                     activation_id=active.activation_id,
                     stop_reason=RunStopReason.DEADLINE_EXCEEDED,
                     events=active.event_collector,
                 )
                 return self._require_result(active.run_id)
-            self._execution_lifecycle.register_deadline(port.run, self._execution_target)
+            self._command_lifecycle.register_deadline(port.run, self._command_target)
             active.task = asyncio.create_task(
                 self.runtime.execute(
                     activation,
@@ -1812,7 +1812,7 @@ class AgentRunner:
                 # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
                 if not active.signal.requested:
                     cleanup = asyncio.create_task(
-                        self._settle_execution(
+                        self._settle_command(
                             port.run,
                             activation_id=active.activation_id,
                             stop_reason=None,
@@ -1827,8 +1827,8 @@ class AgentRunner:
                     cleanup.result()
                     raise
                 await self._finish_cancelled_task(active, port)
-            except IrisExecutionCleanupError as exc:
-                if active.run_id not in self._execution_lifecycle.pending:
+            except IrisCommandCleanupError as exc:
+                if active.run_id not in self._command_lifecycle.pending:
                     await self._finish_unexpected(active, exc, port, initial_cleanup_error=exc)
                 raise
             except (
@@ -1890,7 +1890,7 @@ class AgentRunner:
         else:
             stop_reason = RunStopReason.CANCELLED
             error = None
-        await self._settle_execution(
+        await self._settle_command(
             current,
             activation_id=active.activation_id,
             stop_reason=stop_reason,
@@ -1943,7 +1943,7 @@ class AgentRunner:
         }.get(outcome)
         if stop_reason is None:
             raise IrisRunStateError("未知 engine activation outcome")
-        await self._settle_execution(
+        await self._settle_command(
             current,
             activation_id=active.activation_id,
             stop_reason=stop_reason,
@@ -1960,7 +1960,7 @@ class AgentRunner:
         error: Exception,
         port: StoreRuntimeCommitPort,
         *,
-        initial_cleanup_error: IrisExecutionCleanupError | None = None,
+        initial_cleanup_error: IrisCommandCleanupError | None = None,
     ) -> None:
         """把 engine 的未预期异常结算为 failed 或 outcome unknown。"""
         del port  # settlement 走 runner 自己的 finish_run，不复用已收口的 activation port。
@@ -1991,7 +1991,7 @@ class AgentRunner:
                 message=str(error) or type(error).__name__,
                 source="runtime",
             )
-        await self._settle_execution(
+        await self._settle_command(
             current,
             activation_id=active.activation_id,
             stop_reason=stop_reason,
@@ -2000,22 +2000,22 @@ class AgentRunner:
             initial_cleanup_error=initial_cleanup_error,
         )
 
-    async def _retry_execution_settlement(
+    async def _retry_command_settlement(
         self, run_id: str
-    ) -> tuple[RunResult | None, ExecutionStopReceipt | None]:
+    ) -> tuple[RunResult | None, CommandStopReceipt | None]:
         """业务分派之前只重试既有清理，不改写原原因。"""
         if self._closed:
             run = self.store.load_run(run_id)
             if run is not None and run.phase is RunPhase.TERMINAL:
                 return None, None
             raise IrisRunStateError("runner 已关闭")
-        pending = self._execution_lifecycle.pending.get(run_id)
+        pending = self._command_lifecycle.pending.get(run_id)
         if pending is None:
             return None, None
-        result = await self._execution_lifecycle.join(pending)
+        result = await self._command_lifecycle.join(pending)
         return result, pending.receipt if pending.stop_reason is None else None
 
-    async def _settle_execution(
+    async def _settle_command(
         self,
         run: RunRecord,
         *,
@@ -2025,16 +2025,16 @@ class AgentRunner:
         error: RunErrorInfo | None = None,
         assistant_message: Msg | None = None,
         interaction_close_reason: str | None = None,
-        receipt: ExecutionStopReceipt | None = None,
+        receipt: CommandStopReceipt | None = None,
         call_id: str | None = None,
-        initial_cleanup_error: IrisExecutionCleanupError | None = None,
+        initial_cleanup_error: IrisCommandCleanupError | None = None,
     ) -> RunResult | None:
         """在任何清理 await 前保存结算意图，并加入唯一 attempt。"""
-        lifecycle = self._execution_lifecycle
+        lifecycle = self._command_lifecycle
         pending = lifecycle.pending.get(run.run_id)
         if pending is None:
             pending = PendingSettlement(
-                target=self._execution_target,
+                target=self._command_target,
                 run_id=run.run_id,
                 activation_id=activation_id,
                 stop_reason=stop_reason,
@@ -2049,7 +2049,7 @@ class AgentRunner:
             lifecycle.pending[run.run_id] = pending
         return await lifecycle.join(pending)
 
-    async def _perform_execution_settlement(self, pending: PendingSettlement) -> RunResult | None:
+    async def _perform_command_settlement(self, pending: PendingSettlement) -> RunResult | None:
         """单个 attempt 独占 child-first、排空和终态提交。"""
         run = cast(RunRecord, self.store.load_run(pending.run_id))
         # 操作边界只确认本次结算的 ownership，不重新校验可信配置或历史。
@@ -2065,10 +2065,10 @@ class AgentRunner:
                     pending.receipt = slot.receipt
                     pending.call_id = call_id
                     break
-        binding = self.runtime.environment.execution_binding
+        binding = self.runtime.environment.command_binding
         if pending.stop_reason is not RunStopReason.COMPLETED and binding is not None:
             if pending.receipt is None:
-                operation = binding.service.stop(ExecutionScope(run.run_id, run.session_id))
+                operation = binding.service.stop(CommandScope(run.run_id, run.session_id))
                 pending.receipt = await operation.wait_drained()
             else:
                 await binding.service.wait_drained(pending.receipt)
@@ -2089,23 +2089,21 @@ class AgentRunner:
             )
             pending.events.record(committed.events)
             result = committed.result
-            self._execution_lifecycle.terminal(run.run_id)
-            if pending.receipt is not None and isinstance(
-                self._execution_target, ChildExecutionTarget
-            ):
-                self._execution_lifecycle.settled_receipts[run.run_id] = pending.receipt
+            self._command_lifecycle.terminal(run.run_id)
+            if pending.receipt is not None and isinstance(self._command_target, ChildCommandTarget):
+                self._command_lifecycle.settled_receipts[run.run_id] = pending.receipt
         for key in tuple(slots):
             if key[0] == run.run_id:
                 del slots[key]
-        self._execution_lifecycle.pending.pop(run.run_id)
+        self._command_lifecycle.pending.pop(run.run_id)
         await self._deliver_events(pending.events.take_pending_events())
         return result
 
-    def _take_settlement_receipt(self, run_id: str) -> ExecutionStopReceipt | None:
+    def _take_settlement_receipt(self, run_id: str) -> CommandStopReceipt | None:
         """从本次 child 结算取得父调用所需的停止事实。"""
-        return self._execution_lifecycle.take_settlement_receipt(run_id)
+        return self._command_lifecycle.take_settlement_receipt(run_id)
 
-    async def _execution_deadline_due(self, run_id: str) -> None:
+    async def _command_deadline_due(self, run_id: str) -> None:
         """timer 只影响目标 run，WAITING 也有异步结算 owner。"""
         active = self._active.get(run_id)
         if active is not None:
@@ -2224,7 +2222,7 @@ class AgentRunner:
 
     def _publish_live_fact(self, fact: LiveFact) -> None:
         """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
-        from .streaming import ExecutionCleanupFailed
+        from .streaming import CommandCleanupFailed
 
         publisher = self._live_publisher
         if publisher is None:
@@ -2239,8 +2237,8 @@ class AgentRunner:
             run_id = fact.run_id
             session_id = fact.session_id
             activation_id = fact.activation_id
-        elif isinstance(fact, ExecutionCleanupFailed):
-            fact_kind = "execution.cleanup.failed"
+        elif isinstance(fact, CommandCleanupFailed):
+            fact_kind = "command.cleanup.failed"
             run_id = fact.run_id
             session_id = fact.session_id
             activation_id = None

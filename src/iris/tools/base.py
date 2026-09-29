@@ -22,12 +22,12 @@ from typing import Any, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from ..command.models import CommandStopSlot
 from ..exceptions import (
     IrisCancellationRequestedError,
     IrisToolExecutionError,
     IrisToolValidationError,
 )
-from ..execution.models import CommandStopSlot
 from ..message import Msg, Role, TextBlock, ToolResultBlock
 from ._read_state import ReadFileState
 from .schema import (

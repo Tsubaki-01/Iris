@@ -34,7 +34,7 @@ class SessionSubmissionEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCleanupFailed:
+class CommandCleanupFailed:
     """本次异步执行环境清理失败，run 仍等待结算而非 durable terminal。"""
 
     run_id: str
@@ -42,7 +42,7 @@ class ExecutionCleanupFailed:
     error: RunErrorInfo
 
 
-type LiveFact = RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | ExecutionCleanupFailed
+type LiveFact = RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | CommandCleanupFailed
 
 
 class LivePublisher(Protocol):
@@ -67,4 +67,4 @@ class _RuntimeLiveSink(RuntimeEventSink):
         self._publisher.publish(event)
 
 
-__all__ = ["ExecutionCleanupFailed", "LiveFact", "LivePublisher", "SessionSubmissionEvent"]
+__all__ = ["CommandCleanupFailed", "LiveFact", "LivePublisher", "SessionSubmissionEvent"]

@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-from ..execution.models import ExecutionStopReceipt
+from ..command.models import CommandStopReceipt
 from ..hitl import HumanInteraction
 from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions
 from ..message import Msg, ToolUseBlock
@@ -144,7 +144,7 @@ class RuntimeActivationResult(_FrozenRuntimeModel):
     assistant_message: Msg | None = None
     suspension: HumanInteraction | None = None
     error: RunErrorInfo | None = None
-    stop_receipt: ExecutionStopReceipt | None = Field(default=None, exclude=True)
+    stop_receipt: CommandStopReceipt | None = Field(default=None, exclude=True)
     stop_call_id: str | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")

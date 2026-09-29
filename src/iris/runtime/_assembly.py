@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from ..agents import AgentConfig, build_tool_registry
+from ..command.config import CommandConfig, DockerConfig
+from ..command.models import CommandEnvironment, CommandMode, CommandStopSlot
+from ..command.native import NativeCommandService
+from ..command.service import CommandBinding, CommandService
 from ..context import (
     ContextBuildInput,
     ContextSection,
@@ -18,10 +22,6 @@ from ..context import (
     load_context_build_input,
 )
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
-from ..execution.config import DockerConfig, ExecutionConfig
-from ..execution.models import CommandEnvironment, CommandStopSlot, ExecutionMode
-from ..execution.native import NativeCommandService
-from ..execution.service import CommandService, ExecutionBinding
 from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
@@ -57,7 +57,7 @@ class RuntimeAssemblyBoundary:
     workspace_root: Path
     permission_policy: PermissionPolicy
     workspace_writable: bool
-    execution_binding: ExecutionBinding
+    command_binding: CommandBinding
     command_stop_slots: dict[tuple[str, str], CommandStopSlot]
 
 
@@ -77,8 +77,8 @@ def resolve_runtime_boundary(
     parent_boundary: RuntimeAssemblyBoundary | None = None,
 ) -> RuntimeAssemblyBoundary:
     """解析 ROOT 边界，或将 CHILD 的 workspace/policy 收窄到父边界。"""
-    if parent_boundary is not None and "execution" in config.model_fields_set:
-        raise IrisConfigError("child 不能显式声明 execution，必须继承 root 执行配置")
+    if parent_boundary is not None and "command" in config.model_fields_set:
+        raise IrisConfigError("child 不能显式声明 command，必须继承 root 执行配置")
     workspace = _resolve_relative_to_base(
         config.permissions.workspace, base_dir=_base_dir(config_path)
     ).resolve()
@@ -91,7 +91,7 @@ def resolve_runtime_boundary(
                 write_mode=config.permissions.writes, execute_mode=config.permissions.execute
             )
         )
-        binding = _create_execution_binding(config.execution, workspace, writable=writable)
+        binding = _create_command_binding(config.command, workspace, writable=writable)
         slots: dict[tuple[str, str], CommandStopSlot] = {}
     else:
         parent_root = parent_boundary.workspace_root
@@ -112,10 +112,10 @@ def resolve_runtime_boundary(
                 write_mode=config.permissions.writes, execute_mode=config.permissions.execute
             ),
         )
-        binding = parent_boundary.execution_binding
+        binding = parent_boundary.command_binding
         slots = parent_boundary.command_stop_slots
     if (
-        binding.config.mode is ExecutionMode.NATIVE
+        binding.config.mode is CommandMode.NATIVE
         and not writable
         and "exec.command" in config.tools.builtin
     ):
@@ -123,25 +123,25 @@ def resolve_runtime_boundary(
     return RuntimeAssemblyBoundary(workspace, policy, writable, binding, slots)
 
 
-def _create_execution_binding(
-    config: ExecutionConfig, workspace_root: Path, *, writable: bool
-) -> ExecutionBinding:
+def _create_command_binding(
+    config: CommandConfig, workspace_root: Path, *, writable: bool
+) -> CommandBinding:
     """构造 root 的轻量执行 owner，不连接 Docker 或启动命令。"""
     host_os = platform.system()
     service: CommandService
-    if config.mode is ExecutionMode.NATIVE:
+    if config.mode is CommandMode.NATIVE:
         service = NativeCommandService(workspace_root)
         command_os = host_os
         command_shell = "cmd.exe" if host_os == "Windows" else "/bin/sh"
     else:
-        from ..execution.docker import DockerCommandService
+        from ..command.docker import DockerCommandService
 
         service = DockerCommandService(
             workspace_root, cast(DockerConfig, config.docker), workspace_writable=writable
         )
         command_os = "Linux"
         command_shell = "/bin/sh"
-    return ExecutionBinding(
+    return CommandBinding(
         config=config,
         service=service,
         environment=CommandEnvironment(
@@ -209,7 +209,7 @@ def assemble_runtime(
         config.tools,
         memory_service=memory_service,
         memory_config=config.memory,
-        execution_binding=boundary.execution_binding,
+        command_binding=boundary.command_binding,
     )
     if config.context_policy.enabled:
         access = cast(ContextAccessPort, context_access)
@@ -274,13 +274,11 @@ def assemble_runtime(
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
         execution_scope=execution_scope,
-        execution_binding=boundary.execution_binding,
+        command_binding=boundary.command_binding,
         command_environment=(
-            boundary.execution_binding.environment
-            if "exec.command" in config.tools.builtin
-            else None
+            boundary.command_binding.environment if "exec.command" in config.tools.builtin else None
         ),
-        host_os=boundary.execution_binding.environment.host_os,
+        host_os=boundary.command_binding.environment.host_os,
         command_stop_slots=boundary.command_stop_slots,
         context_source=context_source,
     )

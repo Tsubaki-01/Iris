@@ -6,14 +6,14 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
+from iris.command.models import CommandMode, CommandOutcome, CommandStatus, CommandStopReceipt
 from iris.exceptions import (
-    IrisExecutionCleanupError,
-    IrisExecutionError,
+    IrisCommandCleanupError,
+    IrisCommandError,
     IrisMCPError,
     IrisToolError,
     IrisToolOutcomeUnknownError,
 )
-from iris.execution.models import CommandOutcome, CommandStatus, ExecutionMode, ExecutionStopReceipt
 from iris.message import ToolUseBlock
 from iris.runtime.runtime import _normalize_run_error
 from iris.tools import (
@@ -30,11 +30,11 @@ from iris.tools import (
 @pytest.mark.parametrize(
     ("error_type", "code"),
     [
-        (IrisExecutionError, "EXECUTION_ERROR"),
-        (IrisExecutionCleanupError, "EXECUTION_CLEANUP_FAILED"),
+        (IrisCommandError, "COMMAND_ERROR"),
+        (IrisCommandCleanupError, "COMMAND_CLEANUP_FAILED"),
     ],
 )
-def test_execution_errors_keep_tool_source(error_type: type[IrisExecutionError], code: str) -> None:
+def test_command_errors_keep_tool_source(error_type: type[IrisCommandError], code: str) -> None:
     """执行与清理异常沿用 tool 来源，保留各自错误码和普通诊断。"""
     error = error_type("执行环境失败", operation="stop")
 
@@ -48,7 +48,7 @@ def test_execution_errors_keep_tool_source(error_type: type[IrisExecutionError],
 
 def test_unknown_stop_receipt_is_separate_from_error_context() -> None:
     """停止证明保持对象身份，但不进入会被归档的通用错误详情。"""
-    receipt = ExecutionStopReceipt(service_id="service", stop_id="stop")
+    receipt = CommandStopReceipt(service_id="service", stop_id="stop")
     error = IrisToolOutcomeUnknownError("命令结果无法确认", stop_receipt=receipt, operation="exec")
 
     normalized = _normalize_run_error(error)
@@ -65,7 +65,7 @@ def test_unknown_stop_receipt_is_separate_from_error_context() -> None:
 def test_cleanup_known_outcome_is_separate_from_error_details() -> None:
     """已知命令事实供结算使用，输出与收据不能混入通用错误详情。"""
     outcome = CommandOutcome(
-        mode=ExecutionMode.DOCKER,
+        mode=CommandMode.DOCKER,
         status=CommandStatus.EXITED,
         exit_code=7,
         stdout="known stdout",
@@ -74,19 +74,19 @@ def test_cleanup_known_outcome_is_separate_from_error_details() -> None:
         duration_seconds=0.5,
         cwd=".",
     )
-    error = IrisExecutionCleanupError(
+    error = IrisCommandCleanupError(
         "已知命令结束但环境清理失败", command_outcome=outcome, operation="stop"
     )
     assert error.command_outcome is outcome
     assert error.context == {"operation": "stop"}
     assert _normalize_run_error(error).details == {"operation": "stop"}
-    assert IrisExecutionCleanupError("没有已知结果", started=False).command_outcome is None
+    assert IrisCommandCleanupError("没有已知结果", started=False).command_outcome is None
 
 
 @pytest.mark.asyncio
 async def test_non_mcp_unknown_bypasses_middleware_and_executor(tmp_path: Path) -> None:
     """普通 BaseTool 同样原样透传 unknown，不让错误 middleware 吞掉收据。"""
-    receipt = ExecutionStopReceipt(service_id="service", stop_id="stop")
+    receipt = CommandStopReceipt(service_id="service", stop_id="stop")
     unknown = IrisToolOutcomeUnknownError("结果未知", stop_receipt=receipt)
 
     class UnknownTool(BaseTool):
