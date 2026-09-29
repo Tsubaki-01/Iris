@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from ..agents import AgentConfig, build_tool_registry
-from ..command.config import CommandConfig, DockerConfig
+from ..command.config import CommandConfig
 from ..command.models import CommandEnvironment, CommandMode, CommandStopSlot
 from ..command.native import NativeCommandService
 from ..command.service import CommandBinding, CommandService
@@ -25,6 +25,7 @@ from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidation
 from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
+from ..sandbox import DockerConfig
 from ..skill import (
     CATALOG_SLOT_NAME,
     LoadSkillTool,

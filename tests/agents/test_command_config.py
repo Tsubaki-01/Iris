@@ -3,8 +3,9 @@
 import pytest
 from pydantic import ValidationError
 
-from iris.agents import AgentConfig, CommandConfig, DockerConfig, PermissionsConfig
+from iris.agents import AgentConfig, CommandConfig, PermissionsConfig
 from iris.command.models import CommandMode
+from iris.sandbox import DockerConfig
 
 
 def test_agent_command_defaults_without_implicit_tool() -> None:
@@ -30,7 +31,9 @@ def test_explicit_docker_config_preserves_field_source(docker: dict[str, str]) -
     )
     assert config.command.docker.image == docker.get("image", "iris-command:local")
     assert "command" in config.model_fields_set
-    assert config.model_dump(mode="json")["command"]["mode"] == "docker"
+    serialized = config.model_dump(mode="json")["command"]
+    assert serialized["mode"] == "docker"
+    assert serialized["docker"] == config.command.docker.model_dump(mode="json")
 
 
 def test_native_rejects_docker_block_at_config_boundary() -> None:

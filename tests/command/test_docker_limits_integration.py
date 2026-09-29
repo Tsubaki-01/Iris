@@ -19,10 +19,10 @@ from iris.command import (
     CommandRequest,
     CommandScope,
     CommandStatus,
-    DockerConfig,
     ShellCommand,
 )
 from iris.command.docker import DockerCommandService
+from iris.sandbox import DockerConfig
 
 
 @pytest.fixture(autouse=True)

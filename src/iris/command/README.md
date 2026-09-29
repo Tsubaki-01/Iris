@@ -1,6 +1,6 @@
 # 命令执行
 
-本包提供 Native 与可选本地 Docker 命令环境。两种后端可直接通过服务调用，也可由 Agent 显式注册 `exec_command` 或 `run_python` 使用；普通工具仍在宿主执行。
+本包提供 Native 与可选本地 Docker 命令执行。两种后端可直接通过服务调用，也可由 Agent 显式注册 `exec_command` 或 `run_python` 使用；普通工具仍在宿主执行。Docker 容器的物理资源管理由 [`iris.sandbox`](../sandbox/README.md) 提供，命令服务保留调用、输出与停止协调。
 
 ```python
 from iris.command import CommandConfig
@@ -9,7 +9,7 @@ native = CommandConfig()  # 默认 120 秒
 docker = CommandConfig.model_validate({"mode": "docker"})
 ```
 
-`DockerConfig` 默认使用显式构建的 `iris-command:local` 镜像、`none` 网络、2 CPU、1024 MiB 内存和 128 PID。`endpoint` 只接受本地 Unix socket 或 Windows named pipe。配置解析和导入本包都不连接 Docker；Native 模式显式声明 `docker` 块会报错。
+`CommandConfig` 组合 `iris.sandbox.DockerConfig`，YAML 仍使用 `command.docker`。镜像、挂载及资源配置见 [sandbox](../sandbox/README.md)。配置解析和导入本包都不连接 Docker；Native 模式显式声明 `docker` 块会报错。
 
 `CommandService.execute(scope, request)` 接收已解析的宿主 cwd、最终命令期限和 typed payload：`ShellCommand(command)` 或 `PythonCode(code)`，返回前台执行事实。两种载荷共用同一服务的停止与排空，不创建独立 Python 环境。服务不拥有工具权限、生命周期历史或模型调用。
 
@@ -60,40 +60,23 @@ Native **不是 OS 级隔离沙箱**。直接服务调用接收已解析的宿�
 
 ## 本地 Docker
 
-开发环境先准备 Linux Docker Engine，或 Windows Docker Desktop 的 Linux engine，再从仓库根目录安装 extra 并显式构建镜像：
-
-```console
-uv sync --extra sandbox
-docker build --load -t iris-command:local .
-```
-
-根目录 [Dockerfile](../../../Dockerfile) 仅以 `python:3.12-slim` 为基底，不预装项目无关的工具；[.dockerignore](../../../.dockerignore) 排除本地环境、缓存和私有文档等无关构建内容。`--load` 将构建结果载入本地镜像库。首次获取基础镜像或安装包可能联网；运行时 `network: none` 不限制开发者显式执行的 build。
-
-服务不会安装 Docker、构建或拉取镜像，也不会回退 Native。基础导入不加载 aiodocker；仅 Docker 的 `prepare()` 导入驱动并检查本地引擎、Linux 容器模式和预备镜像。默认 endpoint 在 Windows 为 `npipe:////./pipe/docker_engine`，Linux 为 `unix:///var/run/docker.sock`；显式传给驱动，不由 Docker CLI context 或 `DOCKER_HOST` 改写。因此 build 必须使用该 endpoint 对应的同一本地 engine；CLI 使用其他 context 时，切换回对应引擎或用 `docker --host ENDPOINT build --load -t iris-command:local .` 指定它。
-
-按需编辑 Dockerfile 即可预装依赖。例如需要 HTTP 客户端时，可采用：
-
-```dockerfile
-FROM python:3.12-slim
-RUN python -m pip install --no-cache-dir httpx
-```
-
-用 `docker build --load -t my-agent-command:local .` 构建后，将 `command.docker.image` 设为 `my-agent-command:local`。只有已安装 Iris wheel 的开发者，也可在自己的目录保存上述配方再构建。预装依赖应全局安装，或通过 `COPY` 放入所有运行用户可读的目录（如 `/opt/agent-tools`）；不要安装到 `/root/.local`，也不要放在会被项目挂载覆盖的 `/workspace`。命令 helper 保留在 Iris 包中，执行时传入容器，不需要把 Iris 安装到镜像里。
-
-Dockerfile 只声明依赖环境；runtime 继续决定 root 挂载、运行用户、工作目录、常驻启动命令、网络和资源限额。已有容器不会随镜像 tag 重建而替换：使用新镜像前先关闭旧 root，再创建新 runner；普通 stop/start 仍复用原容器。
+先按 [sandbox 的镜像准备说明](../sandbox/README.md#准备镜像) 安装可选 extra 并显式构建镜像。
+`DockerCommandService` 内部拥有一个 `DockerSandbox`；`prepare()` 委托它检查驱动、引擎与镜像，
+不创建容器。配置失败不回退 Native。根目录 Dockerfile 与 YAML 使用方式不变。
 
 在前面的调用示例中，可将服务构造替换为：
 
 ```python
-from iris.command import DockerConfig
 from iris.command.docker import DockerCommandService
+from iris.sandbox import DockerConfig
 
 service = DockerCommandService(workspace, DockerConfig(), workspace_writable=True)
 ```
 
 一个服务只拥有一个容器，同服务的 session 与 child scope 共用文件、依赖、后台服务和资源额度；两个服务各自独立。首次实际命令才创建和启动容器，正常退出不会停容器。root 目录单一挂载到 `/workspace`，child cwd 相对 root 投影；命令可以访问整个 root 挂载，不获得每个 session/child 独立的目录隔离。挂载只读由 `workspace_writable` 决定，授权模型命令不等于逐次拦截 shell 内部文件操作。
 
-镜像需提供 Python 3.12+、`/bin/sh`、`sleep infinity` 和可写 `/tmp`，不要求安装 Iris。Linux Engine 使用宿主 UID:GID，Docker Desktop 使用 `1000:1000`。`HOME=/tmp`、`PYTHONUSERBASE=/tmp/.local`，用户 bin 前置 PATH；环境由镜像、运行默认和显式 environment 覆盖组成，不复制宿主环境。依赖可在用户目录安装，不设置 `PIP_USER`。网络和 CPU/内存/PID 限额固定为整个容器的共享配置。
+命令服务拥有唯一的准入与控制锁，按原有顺序协调资源层的 create/start/stop 操作。资源层不管理
+session、调用、停止收据或排空；harness 和工具继续只依赖既有 `CommandService`。
 
 标准库助手在自己的命令组外管理 `/bin/sh -c` 或镜像内的 Python 进程；单命令超时只终止该组，其他命令和服务继续。Python 源码在启动前上传到容器 `/tmp`，因此只读 workspace 挂载仍能执行不写工作区的代码。两后端使用同源 Python 启动器，不要求镜像安装 Iris，也不自动安装用户代码依赖。
 

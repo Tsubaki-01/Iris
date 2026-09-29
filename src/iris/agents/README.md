@@ -361,7 +361,8 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 
 ### `CommandConfig`
 
-`CommandConfig` 与 `DockerConfig` 从 `iris.agents` 和 `iris.agents.config` 导出。只有显式
+`CommandConfig` 从 `iris.agents` 和 `iris.agents.config` 导出；容器配置 `DockerConfig` 从
+[`iris.sandbox`](../sandbox/README.md) 导入，YAML 的 `command.docker` 层级不变。只有显式
 声明 `exec.command` / `exec.python` 才分别暴露 `exec_command` / `run_python`；普通文件、Web、Memory
 以及通过 Python SDK 注册的自定义工具仍在宿主运行。两种执行入口可以单独启用，也可以共存。
 

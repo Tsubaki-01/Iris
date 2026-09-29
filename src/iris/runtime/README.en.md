@@ -28,6 +28,8 @@ their independent resources at WAITING/completion, rebuilding on recovery.
 only `exec.python` still receives command_environment and its system environment information.
 Native assembly rejects either entry point when effective writes are denied. Python exceptions
 return through the ordinary tool-result/model loop without a separate Python recovery path.
+The Docker command service owns its [`DockerSandbox`](../sandbox/README.md) resource object.
+Runtime still manages only the existing `CommandBinding`, with no separate sandbox lifecycle.
 
 Assembly resolves the provider first, then lets the memory factory handle `memory.enabled`.
 Disabled memory does not attach even an injected service. When enabled, injection takes precedence;

@@ -38,6 +38,7 @@ from .exceptions import (
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
+    IrisSandboxError,
     # Skill
     IrisSkillError,
     IrisSkillFormatError,
@@ -84,6 +85,7 @@ __all__ = [
     "IrisToolOutcomeUnknownError",
     "IrisCommandError",
     "IrisCommandCleanupError",
+    "IrisSandboxError",
     "IrisMCPError",
     "IrisMCPToolError",
     "IrisMCPCallError",

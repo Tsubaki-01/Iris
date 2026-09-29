@@ -1,11 +1,10 @@
-"""root 独占的本地 Docker 容器与受控命令调用。"""
+"""共享 Docker 沙箱中的受控命令调用与停止结算。"""
 
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
-import os
 import tarfile
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -15,10 +14,16 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..exceptions import IrisCommandCleanupError, IrisCommandError, IrisToolOutcomeUnknownError
+from ..exceptions import (
+    IrisCommandCleanupError,
+    IrisCommandError,
+    IrisSandboxError,
+    IrisToolOutcomeUnknownError,
+)
+from ..sandbox import DockerConfig
+from ..sandbox.docker import CONTROL_SECONDS, DockerSandbox
 from ._output import OutputBuffer
 from ._python import PYTHON_LOADER_SOURCE
-from .config import DockerConfig
 from .models import (
     CommandMode,
     CommandOutcome,
@@ -30,13 +35,10 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from aiodocker import Docker
     from aiodocker.containers import DockerContainer
     from aiodocker.execs import Exec
     from aiodocker.stream import Stream
-    from aiohttp import ClientTimeout
 
-_CONTROL_SECONDS = 10.0
 _DRAIN_SECONDS = 1.0
 _POLL_SECONDS = 0.05
 _HELPER_GRACE_SECONDS = 1.0
@@ -143,22 +145,12 @@ class DockerCommandService:
         self, workspace_root: Path, config: DockerConfig, *, workspace_writable: bool
     ) -> None:
         self._workspace_root = workspace_root
-        self._config = config
-        self._workspace_writable = workspace_writable
         self._service_id = uuid4().hex
-        self._container_name = f"iris-command-{self._service_id}"
-        self._client: Docker | None = None
-        self._container: DockerContainer | None = None
-        self._image_environment: dict[str, str] = {}
-        self._user = "1000:1000"
-        self._control_timeout: ClientTimeout | None = None
-        self._errors: tuple[type[Exception], ...] = (OSError, TimeoutError)
-        self._docker_error: type[Exception] = OSError
+        self._sandbox = DockerSandbox(
+            workspace_root, config, workspace_writable=workspace_writable, owner_id=self._service_id
+        )
         self._prepare_task: asyncio.Task[None] | None = None
         self._control_lock = asyncio.Lock()
-        self._creation_issued = False
-        self._needs_stop = False
-        self._running = False
         self._calls: dict[tuple[str, str], _Call] = {}
         self._stop_operation: _DockerStopOperation | None = None
         self._operations: dict[str, _DockerStopOperation] = {}
@@ -180,38 +172,9 @@ class DockerCommandService:
 
     async def _prepare(self) -> None:
         try:
-            from aiodocker import Docker
-            from aiodocker.exceptions import DockerError
-            from aiohttp import ClientError, ClientTimeout
-        except ImportError as error:
-            raise IrisCommandError(
-                "Docker 模式需要安装 Iris 的 sandbox extra", started=False
-            ) from error
-        self._errors = (DockerError, ClientError, OSError, TimeoutError)
-        self._docker_error = DockerError
-        self._control_timeout = ClientTimeout(total=_CONTROL_SECONDS)
-        endpoint = self._config.endpoint or (
-            "npipe:////./pipe/docker_engine" if os.name == "nt" else "unix:///var/run/docker.sock"
-        )
-        try:
-            self._client = Docker(url=endpoint, timeout=self._control_timeout)
-            async with asyncio.timeout(_CONTROL_SECONDS):
-                info = await self._client.system.info()
-                if info["OSType"] != "linux":
-                    raise IrisCommandError("Docker 模式只支持 Linux containers", started=False)
-                image = await self._client.images.inspect(self._config.image)
-            if os.name != "nt" and "docker desktop" not in info["OperatingSystem"].lower():
-                self._user = f"{os.getuid()}:{os.getgid()}"
-            self._image_environment = dict(
-                entry.split("=", 1) for entry in image["Config"].get("Env", [])
-            )
-        except self._errors as error:
-            raise IrisCommandError(
-                "Docker 准备失败；请确认本地引擎可用，并将配置的镜像预先显式构建到该引擎",
-                started=False,
-                image=self._config.image,
-                error=str(error),
-            ) from error
+            await self._sandbox.prepare()
+        except IrisSandboxError as error:
+            raise IrisCommandError(error.message, started=False, **error.context) from error
 
     async def execute(self, scope: CommandScope, request: CommandRequest) -> CommandOutcome:
         """并发运行命令，外层取消只登记一次共享停止并保护必要收尾。"""
@@ -274,56 +237,10 @@ class DockerCommandService:
             await asyncio.gather(asyncio.shield(self._prepare_task), return_exceptions=True)
         await self.stop(CommandScope("", "")).wait_drained()
         try:
-            if self._container is not None:
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    await self._container.delete(timeout=self._control_timeout)
-                self._container = None
-                self._creation_issued = False
-            if self._client is not None:
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    await self._client.close()
-                self._client = None
-        except self._errors as error:
-            raise IrisCommandCleanupError("Docker 资源关闭未完成", error=str(error)) from error
+            await self._sandbox.aclose()
+        except IrisSandboxError as error:
+            raise IrisCommandCleanupError(error.message, **error.context) from error
         self._closed = True
-
-    def _container_config(self) -> dict[str, Any]:
-        environment = dict(self._image_environment)
-        environment.update(
-            HOME="/tmp",
-            PYTHONUSERBASE="/tmp/.local",
-            PATH=f"/tmp/.local/bin:{environment.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
-        )
-        environment.update(self._config.environment)
-        return {
-            "Image": self._config.image,
-            "Entrypoint": ["sleep"],
-            "Cmd": ["infinity"],
-            "User": self._user,
-            "WorkingDir": "/workspace",
-            "Env": [f"{key}={value}" for key, value in environment.items()],
-            "Labels": {"iris.sandbox": "true", "iris.command.owner": self._service_id},
-            "HostConfig": {
-                "Mounts": [
-                    {
-                        "Type": "bind",
-                        "Source": str(self._workspace_root),
-                        "Target": "/workspace",
-                        "ReadOnly": not self._workspace_writable,
-                    }
-                ],
-                "Privileged": False,
-                "CapDrop": ["ALL"],
-                "SecurityOpt": ["no-new-privileges:true"],
-                "Init": True,
-                "AutoRemove": False,
-                "RestartPolicy": {"Name": "no"},
-                "NetworkMode": self._config.network,
-                "NanoCpus": int(self._config.cpus * 1_000_000_000),
-                "Memory": self._config.memory_mb * 1024 * 1024,
-                "PidsLimit": self._config.pids_limit,
-            },
-        }
 
     async def _launch(self, call: _Call, result_path: str) -> Exec | None:
         while True:
@@ -338,28 +255,13 @@ class DockerCommandService:
                 raise IrisCommandError("Docker 执行服务正在关闭", started=False)
             call.admitted = True
             self._calls[(call.scope.run_id, call.request.call_id)] = call
-            if self._container is None:
-                self._creation_issued = True
-                self._needs_stop = True
-                try:
-                    async with asyncio.timeout(_CONTROL_SECONDS):
-                        self._container = await cast("Docker", self._client).containers.create(
-                            self._container_config(), name=self._container_name
-                        )
-                except self._docker_error as error:
-                    if 400 <= error.status < 500:
-                        self._creation_issued = False
-                        self._needs_stop = False
-                    raise
+            await self._sandbox.create()
             if call.stop_operation is not None:
                 return None
-            if not self._running:
-                self._needs_stop = True
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    await self._container.start()
-                self._running = True
+            await self._sandbox.start()
             if call.stop_operation is not None:
                 return None
+            container = cast("DockerContainer", self._sandbox.container)
             payload = call.request.payload
             if isinstance(payload, PythonCode):
                 name = f"iris-python-{uuid4().hex}.py"
@@ -370,10 +272,10 @@ class DockerCommandService:
                     entry = tarfile.TarInfo(name)
                     entry.size = len(source)
                     entry.mode = 0o444
-                    entry.uid, entry.gid = (int(value) for value in self._user.split(":"))
+                    entry.uid, entry.gid = (int(value) for value in self._sandbox.user.split(":"))
                     archive.addfile(entry, io.BytesIO(source))
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    await self._container.put_archive("/tmp", archive_bytes.getvalue())
+                async with asyncio.timeout(CONTROL_SECONDS):
+                    await container.put_archive("/tmp", archive_bytes.getvalue())
                 if call.stop_operation is not None:
                     return None
                 kind, value = "python", call.source_path
@@ -383,8 +285,8 @@ class DockerCommandService:
             relative = call.request.cwd.relative_to(self._workspace_root).as_posix()
             if relative != ".":
                 cwd += f"/{relative}"
-            async with asyncio.timeout(_CONTROL_SECONDS):
-                execution = await self._container.exec(
+            async with asyncio.timeout(CONTROL_SECONDS):
+                execution = await container.exec(
                     [
                         "python",
                         "-c",
@@ -398,11 +300,11 @@ class DockerCommandService:
                     stdin=False,
                     tty=False,
                     workdir=cwd,
-                    user=self._user,
+                    user=self._sandbox.user,
                 )
                 if call.stop_operation is not None:
                     return None
-                call.stream = execution.start(detach=False, timeout=self._control_timeout)
+                call.stream = execution.start(detach=False, timeout=self._sandbox.control_timeout)
                 call.dispatched = True
                 await call.stream.__aenter__()
             call.reader = asyncio.create_task(self._consume(call.stream, call.output))
@@ -417,7 +319,7 @@ class DockerCommandService:
             execution = await self._launch(call, result_path)
             if execution is not None and call.stop_operation is None:
                 supervision = (
-                    call.request.timeout_seconds + _HELPER_GRACE_SECONDS + 2 * _CONTROL_SECONDS
+                    call.request.timeout_seconds + _HELPER_GRACE_SECONDS + 2 * CONTROL_SECONDS
                 )
                 async with asyncio.timeout(supervision):
                     await self._monitor(execution, call)
@@ -427,7 +329,7 @@ class DockerCommandService:
                     if payload is not None:
                         call.result = _CommandResult.model_validate_json(payload)
                         deletion_errors: tuple[type[Exception], ...] = (
-                            *self._errors,
+                            *self._sandbox.driver_errors,
                             IrisCommandError,
                         )
                         try:
@@ -441,7 +343,12 @@ class DockerCommandService:
         except asyncio.CancelledError:
             # execute 只取消尚未准入的 body；此时没有用户 exec 或待收回控制操作。
             return self._outcome(call.request, CommandStatus.CANCELLED, started)
-        except (*self._errors, ValidationError, IrisCommandError) as error:
+        except (
+            *self._sandbox.driver_errors,
+            ValidationError,
+            IrisCommandError,
+            IrisSandboxError,
+        ) as error:
             if not call.admitted:
                 raise
             owns_stop = call.stop_operation is None
@@ -483,7 +390,7 @@ class DockerCommandService:
             reader = cast("asyncio.Task[None]", call.reader)
             if reader.done():
                 reader.result()
-            async with asyncio.timeout(_CONTROL_SECONDS):
+            async with asyncio.timeout(CONTROL_SECONDS):
                 state = await execution.inspect()
             if not state["Running"]:
                 return
@@ -493,7 +400,7 @@ class DockerCommandService:
         try:
             while (message := await stream.read_out()) is not None:
                 output.append(message.stream, message.data)
-        except self._errors:
+        except self._sandbox.driver_errors:
             output.mark_truncated("stream_error")
             raise
 
@@ -512,13 +419,16 @@ class DockerCommandService:
                 return None
             stream = None
             try:
-                async with asyncio.timeout(_CONTROL_SECONDS):
-                    execution = await cast("DockerContainer", self._container).exec(
-                        ["python", "-c", source, path], stdin=False, tty=False, user=self._user
+                async with asyncio.timeout(CONTROL_SECONDS):
+                    execution = await cast("DockerContainer", self._sandbox.container).exec(
+                        ["python", "-c", source, path],
+                        stdin=False,
+                        tty=False,
+                        user=self._sandbox.user,
                     )
                     if self._stop_operation is not None:
                         return None
-                    stream = execution.start(detach=False, timeout=self._control_timeout)
+                    stream = execution.start(detach=False, timeout=self._sandbox.control_timeout)
                     await stream.__aenter__()
                     output = OutputBuffer()
                     await self._consume(stream, output)
@@ -531,7 +441,7 @@ class DockerCommandService:
                     return output.stdout
             finally:
                 if stream is not None:
-                    async with asyncio.timeout(_CONTROL_SECONDS):
+                    async with asyncio.timeout(CONTROL_SECONDS):
                         await stream.close()
 
     async def _release_call(self, call: _Call) -> None:
@@ -542,9 +452,9 @@ class DockerCommandService:
             await asyncio.gather(call.reader, return_exceptions=True)
         if call.stream is not None:
             try:
-                async with asyncio.timeout(_CONTROL_SECONDS):
+                async with asyncio.timeout(CONTROL_SECONDS):
                     await call.stream.close()
-            except self._errors as error:
+            except self._sandbox.driver_errors as error:
                 raise IrisCommandCleanupError("Docker 输出流关闭失败", error=str(error)) from error
         call.released = True
         self._calls.pop((call.scope.run_id, call.request.call_id), None)
@@ -552,26 +462,9 @@ class DockerCommandService:
     async def _physical_stop(self) -> None:
         async with self._control_lock:
             try:
-                if self._container is None and self._creation_issued:
-                    async with asyncio.timeout(_CONTROL_SECONDS):
-                        self._container = await cast("Docker", self._client).containers.get(
-                            self._container_name
-                        )
-                if self._container is not None and self._needs_stop:
-                    try:
-                        async with asyncio.timeout(_CONTROL_SECONDS):
-                            await self._container.stop(t=0, timeout=self._control_timeout)
-                    except self._errors as error:
-                        async with asyncio.timeout(_CONTROL_SECONDS):
-                            state = await self._container.show()
-                        if state["State"]["Running"]:
-                            raise IrisCommandCleanupError(
-                                "Docker 容器仍运行，停止未确认"
-                            ) from error
-                self._running = False
-                self._needs_stop = False
-            except self._errors as error:
-                raise IrisCommandCleanupError("Docker 容器停止未确认", error=str(error)) from error
+                await self._sandbox.stop()
+            except IrisSandboxError as error:
+                raise IrisCommandCleanupError(error.message, **error.context) from error
 
     def _call_outcome(
         self, call: _Call, started: float, receipt: CommandStopReceipt | None

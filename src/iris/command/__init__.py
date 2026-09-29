@@ -1,6 +1,6 @@
 """命令执行契约；导入此包不加载可选 Docker 驱动。"""
 
-from .config import CommandConfig, DockerConfig
+from .config import CommandConfig
 from .models import (
     CommandEnvironment,
     CommandMode,
@@ -24,7 +24,6 @@ __all__ = [
     "CommandService",
     "CommandStatus",
     "CommandStopSlot",
-    "DockerConfig",
     "CommandBinding",
     "CommandConfig",
     "CommandMode",

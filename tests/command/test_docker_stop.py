@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from iris.command.config import DockerConfig
 from iris.command.docker import DockerCommandService
 from iris.command.models import CommandScope, CommandStatus
 from iris.exceptions import IrisCommandCleanupError, IrisCommandError
+from iris.sandbox import DockerConfig
 
 from .test_docker import FakeClient, FakeDockerError, driver, request, started
 

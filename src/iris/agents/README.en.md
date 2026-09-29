@@ -98,7 +98,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 ## Public models and APIs
 
 `iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ContextPolicyConfig`, `ModelConfig`,
-`PermissionsConfig`, `CommandConfig`, `DockerConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
+`PermissionsConfig`, `CommandConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
@@ -295,8 +295,9 @@ database, or an ORM.
 `AgentConfig.command` defaults to native execution with a 120-second command limit. Selecting a
 mode does not register a tool; declare `exec.command` and/or `exec.python` explicitly. They expose
 `exec_command` and `run_python` and share the root service. Ordinary tools, including Python SDK
-extensions, still run on the host. `CommandConfig` and
-`DockerConfig` are exported from both Agent configuration entry points.
+extensions, still run on the host. `CommandConfig` is exported from both Agent configuration entry
+points. Import `DockerConfig` from [`iris.sandbox`](../sandbox/README.md); the YAML
+`command.docker` structure is unchanged.
 
 ```yaml
 command:

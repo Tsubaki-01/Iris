@@ -14,7 +14,6 @@ from typing import Any
 
 import pytest
 
-from iris.command.config import DockerConfig
 from iris.command.docker import DockerCommandService
 from iris.command.models import (
     CommandRequest,
@@ -23,6 +22,7 @@ from iris.command.models import (
     ShellCommand,
 )
 from iris.exceptions import IrisCommandError, IrisToolOutcomeUnknownError
+from iris.sandbox import DockerConfig
 
 
 class FakeDockerError(Exception):

@@ -216,6 +216,15 @@ class IrisAuthenticationError(IrisProviderError):
     """提供者 API 身份认证失败时抛出。"""
 
 
+# ----- 沙箱资源 (Sandbox) 领域 -----
+
+
+class IrisSandboxError(IrisError):
+    """本地隔离环境资源操作失败，不携带命令或运行结算事实。"""
+
+    runtime_error_code = "SANDBOX_ERROR"
+
+
 # ----- 工具 (Tool) 领域 -----
 
 

@@ -142,7 +142,7 @@ def test_docker_child_borrows_root_binding_with_narrow_file_scope(
     assert child.command_environment is parent.command_binding.environment
     assert isinstance(child.command_binding.service, DockerCommandService)
     assert child.command_binding.service._workspace_root == tmp_path
-    assert child.command_binding.service._workspace_writable is (root_writes != "deny")
+    assert child.command_binding.service._sandbox._workspace_writable is (root_writes != "deny")
     assert not resolve_runtime_boundary(
         child.agent_config, parent_boundary=parent
     ).workspace_writable

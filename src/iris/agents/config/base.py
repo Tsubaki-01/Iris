@@ -17,7 +17,7 @@ from pydantic import (
     model_validator,
 )
 
-from ...command.config import CommandConfig, DockerConfig
+from ...command.config import CommandConfig
 from ...exceptions import IrisConfigError, IrisValidationError
 from ...memory.config import MemoryConfig
 from ...providers import ModelRoute, parse_model_route
@@ -339,7 +339,6 @@ __all__ = [
     "AgentContextConfig",
     "AgentConfig",
     "AgentSkillsConfig",
-    "DockerConfig",
     "CommandConfig",
     "ModelConfig",
     "PermissionsConfig",

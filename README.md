@@ -99,7 +99,8 @@ command:
 Iris 实现的是工具权限、命令生命周期和 run 结算协调；OS 隔离由 Docker 提供。
 
 不需要模型 API key 的可重复示例见 [`examples/command`](examples/command/README.md)，
-后端约束与平台验证范围见 [`iris.command`](src/iris/command/README.md)。
+命令执行契约见 [`iris.command`](src/iris/command/README.md)，镜像与容器配置见
+[`iris.sandbox`](src/iris/sandbox/README.md)。
 
 ## Context Engineering
 
