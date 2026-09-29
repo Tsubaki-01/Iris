@@ -359,6 +359,53 @@ async def test_native_drain_failure_keeps_physical_stop_receipt(
 
 
 @pytest.mark.asyncio
+async def test_native_cancel_reports_failed_stop_before_business_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """外层取消后停止失败立即反馈 unknown，长业务期限不能阻挡 close 重试。"""
+    marker = tmp_path / "cancel-failed-stop.pid"
+    service = NativeCommandService(tmp_path)
+    original = service._terminate_process
+    stop_attempts = 0
+
+    async def failed_stop(protocol: Any) -> None:
+        nonlocal stop_attempts
+        stop_attempts += 1
+        raise IrisExecutionCleanupError("模拟外层取消的停止控制失败")
+
+    monkeypatch.setattr(service, "_terminate_process", failed_stop)
+    task = asyncio.create_task(
+        service.execute(
+            ExecutionScope("run", "session"),
+            _request(
+                tmp_path,
+                "import os, pathlib, time\n"
+                f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                "time.sleep(30)\n",
+                timeout=120,
+            ),
+        )
+    )
+    try:
+        pid = int(await _wait_file(marker))
+        task.cancel()
+        completed, _pending = await asyncio.wait({task}, timeout=1)
+        assert task in completed, "停止已经失败，不应继续等待 120 秒业务期限"
+        with pytest.raises(IrisToolOutcomeUnknownError) as caught:
+            await task
+        assert caught.value.stop_receipt is None
+        assert stop_attempts == 1
+        assert _alive(pid)
+        monkeypatch.setattr(service, "_terminate_process", original)
+        await service.aclose()
+        assert not _alive(pid)
+    finally:
+        monkeypatch.setattr(service, "_terminate_process", original)
+        await service.aclose()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_native_cancel_during_admission_does_not_launch_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

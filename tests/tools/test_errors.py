@@ -13,7 +13,7 @@ from iris.exceptions import (
     IrisToolError,
     IrisToolOutcomeUnknownError,
 )
-from iris.execution.models import ExecutionStopReceipt
+from iris.execution.models import CommandOutcome, CommandStatus, ExecutionMode, ExecutionStopReceipt
 from iris.message import ToolUseBlock
 from iris.runtime.runtime import _normalize_run_error
 from iris.tools import (
@@ -60,6 +60,27 @@ def test_unknown_stop_receipt_is_separate_from_error_context() -> None:
     assert normalized.code == "TOOL_OUTCOME_UNKNOWN"
     assert normalized.details == {"operation": "exec"}
     assert IrisToolOutcomeUnknownError("无停止证明").stop_receipt is None
+
+
+def test_cleanup_known_outcome_is_separate_from_error_details() -> None:
+    """已知命令事实供结算使用，输出与收据不能混入通用错误详情。"""
+    outcome = CommandOutcome(
+        mode=ExecutionMode.DOCKER,
+        status=CommandStatus.EXITED,
+        exit_code=7,
+        stdout="known stdout",
+        stderr="known stderr",
+        output_truncated=False,
+        duration_seconds=0.5,
+        cwd=".",
+    )
+    error = IrisExecutionCleanupError(
+        "已知命令结束但环境清理失败", command_outcome=outcome, operation="stop"
+    )
+    assert error.command_outcome is outcome
+    assert error.context == {"operation": "stop"}
+    assert _normalize_run_error(error).details == {"operation": "stop"}
+    assert IrisExecutionCleanupError("没有已知结果", started=False).command_outcome is None
 
 
 @pytest.mark.asyncio
