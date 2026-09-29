@@ -20,11 +20,11 @@ from ..exceptions import (
     IrisContextCompactionError,
     IrisContextError,
     IrisError,
-    IrisMCPOutcomeUnknownError,
     IrisProviderStreamError,
     IrisProviderStreamInterruptedError,
     IrisRateLimitExceededError,
     IrisRunConflictError,
+    IrisToolOutcomeUnknownError,
 )
 from ..hitl import (
     HumanInteractionRequest,
@@ -456,7 +456,7 @@ class AgentRuntime:
                     )
                     completion = await _execute_tool_with_timeout(operation, timeout)
                     result, tool_timed_out = completion.result, completion.timed_out
-                except IrisMCPOutcomeUnknownError as error:
+                except IrisToolOutcomeUnknownError as error:
                     return _unknown_tool_outcome(cursor, prepared, error.message)
                 except IrisCancellationRequestedError:
                     if guard.claim_for(prepared.tool_use.id) is not None:

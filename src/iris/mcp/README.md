@@ -91,7 +91,8 @@ shared assembly 将 context policy 的开关作为同一个 `defer_tools` 参数
 不改变远端 schema 或按需重建 adapter。
 
 默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
-SDK 调用不明按该只读策略回灌错误或进入 OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时
+SDK 调用不明按该只读策略回灌错误，或抛公共 `IrisToolOutcomeUnknownError` 进入
+OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时
 包括只读在内都沿现有 unknown 路径处理。MCP 工具首版不进入并行窗口。
 取消通过现有 executor 传入 SDK，请求清理结束后才结算；这不证明远端副作用已经终止。
 CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后收尾输出和后台 loop。

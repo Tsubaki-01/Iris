@@ -14,13 +14,14 @@ from .exceptions import (
     IrisContextCompactionError,
     IrisContextError,
     IrisError,
+    IrisExecutionCleanupError,
+    IrisExecutionError,
     IrisHITLError,
     # Lifecycle / Run
     IrisLifecycleSchemaError,
     # MCP
     IrisMCPCallError,
     IrisMCPError,
-    IrisMCPOutcomeUnknownError,
     IrisMCPToolError,
     # Memory
     IrisMemoryError,
@@ -49,6 +50,7 @@ from .exceptions import (
     IrisToolError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
+    IrisToolOutcomeUnknownError,
     IrisToolValidationError,
     IrisValidationError,
 )
@@ -79,10 +81,12 @@ __all__ = [
     "IrisToolNotFoundError",
     "IrisToolExecutionError",
     "IrisToolValidationError",
+    "IrisToolOutcomeUnknownError",
+    "IrisExecutionError",
+    "IrisExecutionCleanupError",
     "IrisMCPError",
     "IrisMCPToolError",
     "IrisMCPCallError",
-    "IrisMCPOutcomeUnknownError",
     "IrisMemoryError",
     "IrisLifecycleSchemaError",
     "IrisRunConflictError",
