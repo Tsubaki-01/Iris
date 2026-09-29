@@ -9,13 +9,13 @@ from .exceptions import (
     IrisAuthenticationError,
     # Runtime control
     IrisCancellationRequestedError,
+    IrisCommandCleanupError,
+    IrisCommandError,
     # Core / Config
     IrisConfigError,
     IrisContextCompactionError,
     IrisContextError,
     IrisError,
-    IrisExecutionCleanupError,
-    IrisExecutionError,
     IrisHITLError,
     # Lifecycle / Run
     IrisLifecycleSchemaError,
@@ -82,8 +82,8 @@ __all__ = [
     "IrisToolExecutionError",
     "IrisToolValidationError",
     "IrisToolOutcomeUnknownError",
-    "IrisExecutionError",
-    "IrisExecutionCleanupError",
+    "IrisCommandError",
+    "IrisCommandCleanupError",
     "IrisMCPError",
     "IrisMCPToolError",
     "IrisMCPCallError",

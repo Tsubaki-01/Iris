@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..exceptions import (
     IrisCancellationRequestedError,
-    IrisExecutionCleanupError,
+    IrisCommandCleanupError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
     IrisToolOutcomeUnknownError,
@@ -557,7 +557,7 @@ class ToolExecutor:
                 except (
                     IrisCancellationRequestedError,
                     IrisToolOutcomeUnknownError,
-                    IrisExecutionCleanupError,
+                    IrisCommandCleanupError,
                 ):
                     raise
                 except Exception as exc:
@@ -575,7 +575,7 @@ class ToolExecutor:
         except (
             IrisCancellationRequestedError,
             IrisToolOutcomeUnknownError,
-            IrisExecutionCleanupError,
+            IrisCommandCleanupError,
         ):
             raise
         except (IrisToolValidationError, ValidationError) as exc:
@@ -786,7 +786,7 @@ class ToolExecutor:
             except (
                 IrisCancellationRequestedError,
                 IrisToolOutcomeUnknownError,
-                IrisExecutionCleanupError,
+                IrisCommandCleanupError,
             ):
                 raise
             except Exception as exc:
@@ -811,7 +811,7 @@ class ToolExecutor:
             except (
                 IrisCancellationRequestedError,
                 IrisToolOutcomeUnknownError,
-                IrisExecutionCleanupError,
+                IrisCommandCleanupError,
             ):
                 raise
             except Exception as exc:
@@ -835,7 +835,7 @@ class ToolExecutor:
             except (
                 IrisCancellationRequestedError,
                 IrisToolOutcomeUnknownError,
-                IrisExecutionCleanupError,
+                IrisCommandCleanupError,
             ):
                 raise
             except Exception as exc:

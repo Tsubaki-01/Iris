@@ -43,7 +43,7 @@ permissions:
   workspace: .
   writes: confirm
   execute: confirm
-execution:
+command:
   mode: native
   timeout_seconds: 120
 ```
@@ -72,7 +72,7 @@ permissions:
   workspace: .
   writes: allow
   execute: confirm
-execution:
+command:
   mode: docker
   timeout_seconds: 120
   docker:
@@ -97,8 +97,8 @@ execution:
 模式、镜像、挂载及额度在 root 构建时固定，调整后关闭并重建 runner，不承诺运行中切换的行为。
 Iris 实现的是工具权限、命令生命周期和 run 结算协调；OS 隔离由 Docker 提供。
 
-不需要模型 API key 的可重复示例见 [`examples/execution`](examples/execution/README.md)，
-后端约束与平台验证范围见 [`iris.execution`](src/iris/execution/README.md)。
+不需要模型 API key 的可重复示例见 [`examples/command`](examples/command/README.md)，
+后端约束与平台验证范围见 [`iris.command`](src/iris/command/README.md)。
 
 ## Context Engineering
 

@@ -19,7 +19,7 @@ import pytest
 
 from iris.cli.chat import ChatOptions, _ChatLiveOutput, run_chat_loop
 from iris.harness import AgentRunner
-from iris.harness.streaming import ExecutionCleanupFailed
+from iris.harness.streaming import CommandCleanupFailed
 from iris.lifecycle import RunErrorInfo, RunEvent, RunEventKind
 from iris.message import (
     LLMRequest,
@@ -48,11 +48,11 @@ def test_chat_cleanup_failure_is_visible_without_terminal() -> None:
     output: list[str] = []
     live = _ChatLiveOutput(output.append)
     live.publish(
-        ExecutionCleanupFailed(
+        CommandCleanupFailed(
             run_id="run-cleanup",
             session_id="session-cleanup",
             error=RunErrorInfo(
-                code="EXECUTION_CLEANUP_FAILED", source="tool", message="Docker 停止未确认"
+                code="COMMAND_CLEANUP_FAILED", source="tool", message="Docker 停止未确认"
             ),
         )
     )

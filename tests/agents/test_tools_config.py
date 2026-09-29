@@ -6,29 +6,29 @@ import pytest
 
 import iris.config as iris_config
 from iris.agents import PythonToolsConfig, ToolsConfig, build_tool_registry, load_agent_config
+from iris.command import CommandBinding, CommandConfig, CommandEnvironment, CommandMode
+from iris.command.native import NativeCommandService
 from iris.exceptions import IrisConfigError
-from iris.execution import CommandEnvironment, ExecutionBinding, ExecutionConfig, ExecutionMode
-from iris.execution.native import NativeCommandService
 from iris.memory import MemoryConfig, MemoryService, MemoryTool, SQLiteMemoryStore
 from iris.tools import ExecCommandTool
 
 
-def test_exec_builtin_requires_an_explicit_execution_binding() -> None:
+def test_exec_builtin_requires_an_explicit_command_binding() -> None:
     """registry 不自行创建服务，只有显式入口才要求注入 binding。"""
-    with pytest.raises(IrisConfigError, match="execution_binding"):
+    with pytest.raises(IrisConfigError, match="command_binding"):
         build_tool_registry(ToolsConfig(builtin=["exec.command"]))
 
 
 def test_exec_registry_borrows_binding_only_when_explicitly_selected(tmp_path: Path) -> None:
     """注入执行环境本身不增加工具；显式选择后借用原对象。"""
-    binding = ExecutionBinding(
-        ExecutionConfig(),
+    binding = CommandBinding(
+        CommandConfig(),
         NativeCommandService(tmp_path),
-        CommandEnvironment("Windows", ExecutionMode.NATIVE, "Windows", "cmd.exe"),
+        CommandEnvironment("Windows", CommandMode.NATIVE, "Windows", "cmd.exe"),
     )
-    ordinary = build_tool_registry(ToolsConfig(builtin=["file.read"]), execution_binding=binding)
+    ordinary = build_tool_registry(ToolsConfig(builtin=["file.read"]), command_binding=binding)
     assert [tool.name for tool in ordinary.view().active_tools] == ["read_file"]
-    registry = build_tool_registry(ToolsConfig(builtin=["exec.command"]), execution_binding=binding)
+    registry = build_tool_registry(ToolsConfig(builtin=["exec.command"]), command_binding=binding)
     tool = registry.get("exec_command")
     assert isinstance(tool, ExecCommandTool)
     assert tool.binding is binding

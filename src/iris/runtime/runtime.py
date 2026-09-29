@@ -11,6 +11,7 @@ from math import floor
 from pathlib import Path
 from typing import Any, cast
 
+from ..command.models import CommandStopReceipt
 from ..context import ContextBuildOutput, ContextBuildScope, ContextSnapshot
 from ..context.source import render_context_snapshot
 from ..exceptions import (
@@ -26,7 +27,6 @@ from ..exceptions import (
     IrisRunConflictError,
     IrisToolOutcomeUnknownError,
 )
-from ..execution.models import ExecutionStopReceipt
 from ..hitl import (
     HumanInteractionRequest,
     PermissionPrompt,
@@ -588,7 +588,7 @@ class AgentRuntime:
                 )
             self.environment.command_stop_slots.pop((activation.run_id, prepared.tool_use.id), None)
 
-    def _stop_receipt(self, run_id: str, call_id: str) -> ExecutionStopReceipt | None:
+    def _stop_receipt(self, run_id: str, call_id: str) -> CommandStopReceipt | None:
         """只读取当前调用的进程内停止事实，不从历史结果推断。"""
         slot = self.environment.command_stop_slots.get((run_id, call_id))
         return None if slot is None else slot.receipt
@@ -1105,7 +1105,7 @@ class AgentRuntime:
         if command is not None:
             lines.extend(
                 [
-                    f"execution_mode: {command.mode.value}",
+                    f"command_mode: {command.mode.value}",
                     f"command_os: {command.command_os}",
                     f"command_shell: {command.command_shell}",
                     "编写命令时，以 command_os 和 command_shell 为准。",
@@ -2074,7 +2074,7 @@ def _unknown_tool_outcome(
     prepared: PreparedToolCall,
     message: str,
     *,
-    stop_receipt: ExecutionStopReceipt | None = None,
+    stop_receipt: CommandStopReceipt | None = None,
 ) -> RuntimeActivationResult:
     """构造 claim 已存在但缺少 durable result 的 unknown fact。"""
     return RuntimeActivationResult(

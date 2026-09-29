@@ -63,8 +63,8 @@ subscription 的 offer 路径进入，并只产生一组 gap/terminal。
 
 ## Gateway 与命令
 
-命令环境清理失败通过 root 的 `ExecutionCleanupFailed` 投影为 critical
-`execution.cleanup.failed`，同时面向 exact run 与 session。payload 只有错误 code/source/message，
+命令环境清理失败通过 root 的 `CommandCleanupFailed` 投影为 critical
+`command.cleanup.failed`，同时面向 exact run 与 session。payload 只有错误 code/source/message，
 不包含活异常、停止收据或完整命令输出，也没有 durable sequence。每次失败清理 attempt 发布一次；
 它不代表 run 已终态或 lane 已释放。CLI 显示短错误，保留后续重试与真实终态反馈。
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from ..execution.models import CommandOutcome, ExecutionStopReceipt
+    from ..command.models import CommandOutcome, CommandStopReceipt
 
 
 class IrisError(Exception):
@@ -247,30 +247,30 @@ class IrisToolOutcomeUnknownError(IrisToolError):
         self,
         message: str,
         *,
-        stop_receipt: ExecutionStopReceipt | None = None,
+        stop_receipt: CommandStopReceipt | None = None,
         **context: Any,
     ) -> None:
         """分开保存执行结果未知的诊断与进程内停止事实。
 
         Args:
             message (str): 结果无法确认的说明。
-            stop_receipt (ExecutionStopReceipt | None): 已确认的停止事实，不进入通用 context。
+            stop_receipt (CommandStopReceipt | None): 已确认的停止事实，不进入通用 context。
             **context (Any): 可用于普通错误详情的诊断字段。
         """
         super().__init__(message, **context)
         self.stop_receipt = stop_receipt
 
 
-class IrisExecutionError(IrisToolError):
+class IrisCommandError(IrisToolError):
     """命令执行环境准备或使用失败。"""
 
-    runtime_error_code = "EXECUTION_ERROR"
+    runtime_error_code = "COMMAND_ERROR"
 
 
-class IrisExecutionCleanupError(IrisExecutionError):
+class IrisCommandCleanupError(IrisCommandError):
     """无法确认命令环境停止或必要收尾完成。"""
 
-    runtime_error_code = "EXECUTION_CLEANUP_FAILED"
+    runtime_error_code = "COMMAND_CLEANUP_FAILED"
 
     def __init__(
         self, message: str, *, command_outcome: CommandOutcome | None = None, **context: Any

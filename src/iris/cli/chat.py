@@ -31,7 +31,7 @@ from ..harness import (
     SessionManager,
     SubmissionEvent,
 )
-from ..harness.streaming import ExecutionCleanupFailed, LiveFact
+from ..harness.streaming import CommandCleanupFailed, LiveFact
 from ..hitl import (
     HumanInteraction,
     PermissionInteractionResponse,
@@ -229,7 +229,7 @@ class _ChatLiveOutput:
 
     def publish(self, fact: LiveFact) -> None:
         """显示摘要短状态与模型文本；durable 与 submission 由 manager 处理。"""
-        if isinstance(fact, ExecutionCleanupFailed):
+        if isinstance(fact, CommandCleanupFailed):
             self._finish_text(fact.run_id)
             self._write(f"执行环境清理失败 [{fact.run_id}]: {fact.error.message}\n")
             return

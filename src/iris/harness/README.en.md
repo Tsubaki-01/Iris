@@ -437,8 +437,8 @@ causal receipt waits for that stop operation without stopping an environment alr
 
 Process-local `PendingSettlement` retains the original outcome/error, typed target, and receipt.
 Concurrent callers join one stop/drain/finish task; cancelling a waiter does not cancel settlement.
-`IrisExecutionCleanupError` leaves ACTIVE/WAITING and its lane intact, reaches direct callers, and
-publishes a small root-owned `ExecutionCleanupFailed` live fact (or logs without a publisher).
+`IrisCommandCleanupError` leaves ACTIVE/WAITING and its lane intact, reaches direct callers, and
+publishes a small root-owned `CommandCleanupFailed` live fact (or logs without a publisher).
 The next cancel/recover/resume retries the original settlement before ordinary dispatch. It neither
 changes the original failure cause nor reruns models or commands. Known tool results commit before
 cleanup errors propagate and never revert to unknown claims.

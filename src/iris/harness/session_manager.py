@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
-from ..exceptions import IrisExecutionCleanupError, IrisRunNotFoundError, IrisRunStateError
+from ..exceptions import IrisCommandCleanupError, IrisRunNotFoundError, IrisRunStateError
 from ..hitl import HumanInteractionResponse
 from ..lifecycle import (
     AgentRunOptions,
@@ -974,7 +974,7 @@ class SessionManager:
         """收回 WAITING 旧事件投递，或重试无人推进的 ACTIVE 清理。"""
         if previous is not None:
             settled = await asyncio.gather(previous, return_exceptions=True)
-            if isinstance(settled[0], IrisExecutionCleanupError):
+            if isinstance(settled[0], IrisCommandCleanupError):
                 raise settled[0]
         return await self._runner.cancel(run_id, reason=reason)
 

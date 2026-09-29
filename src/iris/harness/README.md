@@ -378,8 +378,8 @@ Docker 停整个共享容器，其他独立 run 的模型/原生工具/HITL 继�
 的当前命令。当前调用已有停止收据时只等待那一轮排空，不再停止已重启的环境。
 
 `PendingSettlement` 只在进程内保留原 outcome/error、typed target 和当前 receipt。并发调用
-共用一个“停止→排空→终态”任务；取消某个等待者不会取消它。`IrisExecutionCleanupError`
-保留 ACTIVE/WAITING 和 lane，直接调用者收到异常，并通过 root 发布 `ExecutionCleanupFailed`
+共用一个“停止→排空→终态”任务；取消某个等待者不会取消它。`IrisCommandCleanupError`
+保留 ACTIVE/WAITING 和 lane，直接调用者收到异常，并通过 root 发布 `CommandCleanupFailed`
 小型 live fact；没有 publisher 时记录错误。下一次 cancel/recover/resume 优先只重试原结算，
 不改写原失败原因或重跑模型/命令。已知工具结果在清理错误传播前提交，不倒退成未知 claim。
 
