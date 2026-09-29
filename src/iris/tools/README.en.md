@@ -63,6 +63,40 @@ result = await executor.execute_one(
 )
 ```
 
+## Explicit command execution
+
+Declare `exec.command` in Agent `tools.builtin` to expose `exec_command`. Its only parameters are
+`command`, `cwd` (default `.`), and an optional positive `timeout_seconds`. Root `execution`
+configuration selects the environment; the model cannot change the mode, image, or mount. See
+[agents](../agents/README.en.md#command-environment). SDK callers can construct
+`ExecCommandTool(ExecutionBinding(config, service, environment))`; the host owns service preparation
+and closure.
+
+`WorkspacePolicy` resolves cwd once within the current Agent workspace. Native commands run with
+host-user access; cwd is not a filesystem boundary. Docker root and child calls share the root
+`/workspace` mount. A narrower child workspace sets its default cwd and native file-tool scope;
+child `writes: deny` does not make Docker commands read-only. The root mount controls their write
+access. Each command uses a fresh shell without persistent `cd/export`, interactive stdin, or TTY.
+
+`DefaultPermissionPolicy(execute_mode="confirm"|"allow"|"deny")` handles EXECUTE independently,
+defaulting to confirmation. Commands retain preflight, HITL, permission refresh, effect claim,
+and the existing non-read-only serial barrier. `BaseTool.timeout_owner` defaults to
+`ToolTimeoutOwner.RUNTIME`; Exec uses `TOOL` and takes the minimum of the configured, requested,
+and context `tool_timeout_seconds` limits. The outer run owner handles the run deadline.
+
+Exit zero succeeds; a nonzero exit, including 124/137, becomes `COMMAND_FAILED`. Local timeout is
+`EXECUTION_TIMEOUT`; confirmed cancellation and shared-stop interruption are `EXECUTION_CANCELLED`
+and `EXECUTION_ENVIRONMENT_INTERRUPTED`. A known unstarted command is `EXECUTION_UNAVAILABLE`.
+Error messages contain exit status and diagnostics. Unknown execution propagates
+`IrisToolOutcomeUnknownError` without replaying the command.
+
+Output uses the existing artifact path. Result `data` holds only small mode/status/exit/cwd/duration/
+truncation metadata. Live receipts and cleanup failures use excluded `context.command_stop_slot`,
+whose identity survives context copying and middleware result replacement. A known result with
+failed cleanup is returned for normal commit while the slot retains `cleanup_error` for outer
+settlement. Cleanup errors without known facts propagate directly, including through middleware.
+See [execution](../execution/README.md) for backend behavior and stopping scope.
+
 ## Definitions, registry, and schemas
 
 `ToolDefinition` holds the validated name, description, object JSON schema, capabilities, group,
@@ -137,10 +171,11 @@ docstring argument descriptions. Unsupported parameter types produce validation 
 
 ## Execution and HITL preflight
 
-`execute_one()` always returns `ToolResult`, mapping not-found, validation, permission, execution,
+`execute_one()` returns `ToolResult` for ordinary failures, mapping not-found, validation, permission, execution,
 middleware, and open-circuit failures to stable error codes. `execute_many()` runs consecutive
 read-only concurrency-safe calls concurrently and serializes writes or unsafe calls while preserving
 result order and shared file read state. Classification failure conservatively falls back to serial.
+Cancellation, unknown execution, and incomplete-cleanup control exceptions propagate.
 
 `register(tool)` adds a `BaseTool` and raises a validation error on name or alias conflicts.
 `prepare_many()` performs registry lookup, input-schema validation, and the initial policy check
@@ -380,7 +415,7 @@ and batch recovery.
 ## Public surface and boundaries
 
 The exact top-level API is `src/iris/tools/__init__.py::__all__`, including
-`CallableExecutionMode`, and covering models, base/adapters,
+`CallableExecutionMode`, `ToolTimeoutOwner`, `ExecCommandInput`, `ExecCommandTool`, and covering models, base/adapters,
 registry/view, executor/preflight, permission/artifact/middleware/breaker types, file/human tools,
 deferred discovery, schema helpers, and `tool`. Protected `_impl()` hooks and executor private
 lifecycle methods are internal.

@@ -1,5 +1,6 @@
 """内置工具集合。"""
 
+from .exec import ExecCommandInput, ExecCommandTool
 from .file import (
     FILE_TOOL_CLASSES,
     EditFileInput,
@@ -18,6 +19,8 @@ __all__ = [
     "AskQuestionInput",
     "AskQuestionTool",
     "EditFileInput",
+    "ExecCommandInput",
+    "ExecCommandTool",
     "FILE_TOOL_CLASSES",
     "FileTool",
     "GrepSearchInput",

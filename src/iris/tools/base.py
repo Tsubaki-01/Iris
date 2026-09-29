@@ -27,6 +27,7 @@ from ..exceptions import (
     IrisToolExecutionError,
     IrisToolValidationError,
 )
+from ..execution.models import CommandStopSlot
 from ..message import Msg, Role, TextBlock, ToolResultBlock
 from ._read_state import ReadFileState
 from .schema import (
@@ -54,6 +55,13 @@ class ToolExecutionMode(StrEnum):
     SYNC = "sync"
     ASYNC = "async"
     STREAM = "stream"
+
+
+class ToolTimeoutOwner(StrEnum):
+    """单工具业务期限由 runtime 包装器或工具自身拥有。"""
+
+    RUNTIME = "runtime"
+    TOOL = "tool"
 
 
 class CallableExecutionMode(StrEnum):
@@ -216,6 +224,8 @@ class ToolExecutionContext(BaseModel):
         permission_mode (str): 操作受限时的静默降级或拦截等级许可。
         metadata (dict[str, Any]): 附加运行态透传的配置或临时钩子容器字典。
         read_state (ReadFileState | None): 文件读后写入的类型化状态。
+        tool_timeout_seconds (float | None): runtime 提供的原始单工具期限。
+        command_stop_slot (CommandStopSlot): 不参与序列化的当前命令结算事实。
 
     Example:
         ctx = ToolExecutionContext(workspace_root=Path("."))
@@ -230,6 +240,8 @@ class ToolExecutionContext(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     read_state: ReadFileState | None = None
     cancellation: CancellationSignal | None = Field(default=None, exclude=True)
+    tool_timeout_seconds: float | None = None
+    command_stop_slot: CommandStopSlot = Field(default_factory=CommandStopSlot, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -239,10 +251,12 @@ class ToolExecutionContext(BaseModel):
         update: Mapping[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
-        """复制 context，同时保持 live cancellation signal identity。"""
+        """复制 context，同时保留 live cancellation 与命令结算槽 identity。"""
         copied = super().model_copy(update=update, deep=deep)
         if update is None or "cancellation" not in update:
             copied.cancellation = self.cancellation
+        if update is None or "command_stop_slot" not in update:
+            copied.command_stop_slot = self.command_stop_slot
         return copied
 
 
@@ -427,6 +441,7 @@ class BaseTool(ABC):
     """
 
     definition: ToolDefinition
+    timeout_owner: ToolTimeoutOwner = ToolTimeoutOwner.RUNTIME
 
     # ==========================================
     #               Public API Methods

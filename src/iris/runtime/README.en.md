@@ -16,7 +16,9 @@ read-only SDK failures remain ordinary ToolResults governed by ToolErrorPolicy. 
 separate cancellation watcher.
 
 Shared assembly reads `AgentConfig.mcp` declarations and binds an `MCPManager` to the original
-registry without connecting. `RuntimeEnvironment.aprepare()` / `aclose()` delegate to that manager.
+registry without connecting. `RuntimeEnvironment.aprepare()` prepares the command service and that
+manager. `aclose()` closes independent MCP resources; only the root environment closes the shared
+command service, which children borrow.
 Low-level callers prepare before execute and close after all execution finishes. The environment
 does not close injected providers, memory, or stores. Root runners prepare automatically and reuse
 one fixed catalog and connections across runs. Harness prepares children before admission and closes
@@ -410,6 +412,15 @@ Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concu
 conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
 delta/merge/lock/hash model.
 
+## Command deadlines and stop facts
+
+Command tools declare `ToolTimeoutOwner.TOOL` and own their command deadline and process cleanup.
+Runtime passes the raw tool timeout without wrapping execution in its generic tool timeout; the
+outer owner still handles the run deadline. A shared `CommandStopSlot` retains the current call's
+receipt and cleanup error. Terminal/unknown exits pass live receipt fields to harness; known results
+commit before cleanup errors propagate. Accepting the result and returning to the model releases
+the slot. Receipts never enter history or checkpoints.
+
 ## Memory overview windows and model-directed reads
 
 When an effective memory service exists and a session's `context_window` is `None`, runtime calls
@@ -420,8 +431,12 @@ An explicit empty window is already initialized. With a service, later runs, too
 and recovery after the input commit reuse saved text. A new session or successful compaction adopts current
 overviews. Fork starts the target with `context_window=None` and adopts on its first input.
 
-When `RuntimeEnvironment.memory_service is None`, the shared request builder passes an empty
-`system_addendum`, even if the session retains a previous overview. Ordinary requests and recovery
+The shared request builder uses `system_addendum` for one runtime environment section followed by
+the adopted memory overview. The environment always states the host OS; agents explicitly registering
+the command tool also receive the execution mode, command OS, and shell. Both sections count toward
+the final system length limit and remain outside BCI and history.
+When `RuntimeEnvironment.memory_service is None`, only the overview is omitted, even if the session
+retains a previous overview. Ordinary requests and recovery
 do not read or rewrite that window or advance the session revision just to suppress it. Static memory,
 BCI, and ordinary history, including prior tool results, remain available. Successful compaction
 commits the new summary and an empty window in the existing transaction. Failure preserves the previous

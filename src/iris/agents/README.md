@@ -124,7 +124,8 @@ model: openai/gpt-4o-mini
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
-- `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`。
+- `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`、`execute: confirm`。
+- `execution`: `ExecutionConfig`，默认 native 与 120 秒命令期限；不自动注册命令工具。
 - `session`: `SessionConfig`，默认 `backend: none`。
 
 ### `AgentContextConfig`
@@ -282,6 +283,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 - `file.write`
 - `file.edit`
 - `human.ask`
+- `exec.command`
 - `web.search`
 - `web.fetch`
 - `memory.remember`、`memory.update`、`memory.forget`
@@ -348,8 +350,46 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 
 - `workspace`: 文件工具工作区路径。
 - `writes`: 写入策略，取值为 `confirm`、`allow` 或 `deny`。
+- `execute`: 独立命令执行策略，默认 `confirm`，另可取 `allow` 或 `deny`。
 
 具体执行权限仍由工具层的 permission policy 和 executor 决定。
+
+### `ExecutionConfig`
+
+`ExecutionConfig` 与 `DockerConfig` 从 `iris.agents` 和 `iris.agents.config` 导出。只有显式
+声明 `exec.command` 才暴露命令；普通文件、Web、Memory 与 Python 工具仍在宿主运行。
+
+```yaml
+execution:
+  mode: docker
+  timeout_seconds: 120
+  docker:
+    image: python:3.12-slim
+    network: none
+    cpus: 2
+    memory_mb: 1024
+    pids_limit: 128
+    environment: {}
+permissions:
+  workspace: .
+  writes: confirm
+  execute: confirm
+tools:
+  builtin: [file.read, exec.command]
+```
+
+默认 `mode: native` 不依赖 Docker，在宿主执行；native 不能同时声明 `docker` 块。
+`mode: docker` 省略该块时使用以上默认值，需要 sandbox extra、本地 Linux engine 和预备
+镜像；不自动拉镜像或回退宿主。`docker.endpoint` 可指定本地 unix socket / Windows named
+pipe；默认分别为 `unix:///var/run/docker.sock`、`npipe:////./pipe/docker_engine`。
+
+root 在构造时拥有配置和服务，child 不得显式声明自己的 `execution`，但可自行注册入口。
+child 借用 root 的环境和整个挂载项目；窄 workspace 只确定命令默认 cwd 与原生文件范围。
+Docker child 的 `writes: deny` 只限制原生文件工具，不保证命令只读；命令写入取 root bind，
+授权仍取 effective execute。Native 没有只读挂载能力，因此 effective writes deny 的 scope
+注册 exec 会在装配时报配置错误。cwd 不构成 Native 的 OS 访问边界。
+后端范围与共享环境约定见 [execution](../execution/README.md)，工具参数见
+[tools](../tools/README.md#显式命令执行)。
 
 ### `SessionConfig`
 
@@ -365,7 +405,7 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 读取 UTF-8 YAML 文件并返回 `AgentConfig`。配置缺失、YAML 格式错误、字段类型错误、
 未知字段、不可读路径都会包装为 `IrisConfigError`。
 
-### `build_tool_registry(config, *, memory_service=None, memory_config=None)`
+### `build_tool_registry(config, *, memory_service=None, memory_config=None, execution_binding=None)`
 
 根据 `ToolsConfig` 构建 `ToolRegistry`：
 
@@ -380,6 +420,8 @@ Skill 目录约定和 `SKILL.md` 格式见 [`iris.skill`](../skill/README.md)。
 此处只消费来源工厂已解析的 service，不重新判断 enabled。实际工具名称或别名冲突继续
 由 `ToolRegistry` 报错。需要按 YAML 自动创建服务时使用完整 runner
 或 RuntimeFactory；此函数不解析 workspace 或打开数据库。
+显式 `exec.command` 必须传入已装配的 `ExecutionBinding`，否则直接报 `IrisConfigError`；
+此函数不创建、准备或关闭命令服务，仅选择模式也不会增加该工具。
 
 ## 边界
 

@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..exceptions import (
     IrisCancellationRequestedError,
+    IrisExecutionCleanupError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
     IrisToolOutcomeUnknownError,
@@ -43,6 +44,7 @@ from .base import (
     ToolErrorInfo,
     ToolExecutionContext,
     ToolResult,
+    ToolTimeoutOwner,
 )
 from .circuit import CircuitBreaker
 from .middleware import ToolMiddleware
@@ -80,6 +82,7 @@ class PreparedToolCall:
     permission: PermissionDecision | None = None
     human_request: HumanInteractionRequest | None = None
     preflight_result: ToolResult | None = None
+    timeout_owner: ToolTimeoutOwner = ToolTimeoutOwner.RUNTIME
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +345,7 @@ class ToolExecutor:
                 tool=tool,
                 validated_input=validated_input,
                 arguments=arguments,
+                timeout_owner=tool.timeout_owner,
             )
         except IrisToolNotFoundError:
             return PreparedToolCall(
@@ -550,7 +554,11 @@ class ToolExecutor:
                     result = await self._run_tool_body(tool, validated_input, context)
                     if isinstance(tool, ToolSearchTool) and not result.is_error:
                         revealed_tools = tuple(result.metadata["context_revealed_tools"])
-                except (IrisCancellationRequestedError, IrisToolOutcomeUnknownError):
+                except (
+                    IrisCancellationRequestedError,
+                    IrisToolOutcomeUnknownError,
+                    IrisExecutionCleanupError,
+                ):
                     raise
                 except Exception as exc:
                     handled = await self._run_on_error(tool, exc, context)
@@ -564,7 +572,11 @@ class ToolExecutor:
                     }
                 )
                 result = await self._run_after_call(tool, normalized, context)
-        except (IrisCancellationRequestedError, IrisToolOutcomeUnknownError):
+        except (
+            IrisCancellationRequestedError,
+            IrisToolOutcomeUnknownError,
+            IrisExecutionCleanupError,
+        ):
             raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
@@ -771,6 +783,12 @@ class ToolExecutor:
         for middleware in self.middleware:
             try:
                 await middleware.before_call(tool, params, context)
+            except (
+                IrisCancellationRequestedError,
+                IrisToolOutcomeUnknownError,
+                IrisExecutionCleanupError,
+            ):
+                raise
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),
@@ -790,6 +808,12 @@ class ToolExecutor:
         for middleware in self.middleware:
             try:
                 current = await middleware.after_call(tool, current, context)
+            except (
+                IrisCancellationRequestedError,
+                IrisToolOutcomeUnknownError,
+                IrisExecutionCleanupError,
+            ):
+                raise
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),
@@ -808,6 +832,12 @@ class ToolExecutor:
         for middleware in self.middleware:
             try:
                 replacement = await middleware.on_error(tool, error, context)
+            except (
+                IrisCancellationRequestedError,
+                IrisToolOutcomeUnknownError,
+                IrisExecutionCleanupError,
+            ):
+                raise
             except Exception as exc:
                 return self._error_result(
                     _tool_use_from_context(context),

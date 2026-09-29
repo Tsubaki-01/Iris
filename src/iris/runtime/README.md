@@ -15,7 +15,8 @@ MCPTool 经普通工具链进入串行执行。公共 `IrisToolOutcomeUnknownErr
 SDK 错误仍是普通 ToolResult，遵守 ToolErrorPolicy。MCP 不另建取消 watcher。
 
 shared assembly 同步读取 `AgentConfig.mcp` 声明，将 `MCPManager` 绑定到原 registry，构造时
-不连接。`RuntimeEnvironment.aprepare()` / `aclose()` 直接委托该 manager；低层调用者必须
+不连接。`RuntimeEnvironment.aprepare()` 准备命令服务与该 manager；`aclose()` 关闭独立 MCP
+资源，root 环境还关闭其命令服务，child 只借用共享服务。低层调用者必须
 在 execute 前准备并在所有执行结束后关闭。环境不关闭外部注入的 provider、memory 或 store。
 root runner 自动管理准备时机，多 run 复用同一固定目录与连接；child 由 harness 在 admission
 前准备，并在 WAITING/结束后关闭独立资源，恢复时重建。
@@ -348,6 +349,13 @@ thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来
 retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
 引入 delta/merge/lock/hash 模型。
 
+## 命令期限与停止事实
+
+命令工具声明 `ToolTimeoutOwner.TOOL`，自行持有单命令期限和进程收尾。Runtime 传入原始
+tool timeout，不再套普通工具超时；run 总期限仍由外层 owner 管理。当前调用的停止收据与
+清理错误保存在共享 `CommandStopSlot`，终止/unknown 出口通过进程内字段交给 harness；
+已知结果先提交再传播清理错误。模型接受结果继续运行时释放该槽，收据不进入历史或 checkpoint。
+
 ## Memory 概览窗口与自主读取
 
 有效 memory service 存在且 session 的 `context_window` 尚为 `None` 时，Runtime 按 `read_namespaces` 的配置顺序
@@ -356,8 +364,11 @@ retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当�
 Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交后的 recovery 复用已提交文本；只有新 session
 或成功压缩才采用新版概览。Fork 的目标窗口为 `None`，首输入重新采用。
 
-`RuntimeEnvironment.memory_service is None` 时，统一请求构造入口传入空 `system_addendum`，
-即使 session 保存着旧概览也不追加到 system。普通请求与恢复不因此读取或改写窗口，也不额外
+统一请求构造入口通过 `system_addendum` 追加一次运行环境段，再追加已采用的 memory 概览。
+环境段始终提供 host OS；显式注册命令工具时另提供实际 execution mode、command OS 与 shell，
+指导模型选择命令语法。两段都计入最终 system 的长度限制，不写入 BCI 或历史。
+`RuntimeEnvironment.memory_service is None` 时只省略概览，即使 session 保存着旧概览也不追加。
+普通请求与恢复不因此读取或改写窗口，也不额外
 推进 session revision；静态 memory、BCI 和包含既有工具结果的普通历史继续保留。成功压缩沿
 原事务一起提交新摘要与空窗口；失败保留旧摘要和窗口，后续无 Service 请求仍屏蔽该概览。
 

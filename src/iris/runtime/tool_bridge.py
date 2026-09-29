@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ..execution.models import CommandStopSlot
 from ..message import Msg, ToolUseBlock
 from ..tools import (
     CancellationSignal,
@@ -44,6 +45,7 @@ class ToolBridge:
         self.tool_view = tool_view
         self.tool_executor = tool_executor
         self._read_states: dict[str, ReadFileState] = {}
+        self.command_stop_slots: dict[tuple[str, str], CommandStopSlot] = {}
 
     def preflight_once(
         self,
@@ -136,6 +138,7 @@ class ToolBridge:
         cancellation: CancellationSignal,
         effect_guard: ToolEffectGuard,
         approved_tool_call_id: str | None = None,
+        tool_timeout_seconds: float | None = None,
     ) -> ToolResult:
         """用 shared signal 与 required effect guard 执行一条预检调用。"""
         context = self._execution_context(
@@ -146,6 +149,8 @@ class ToolBridge:
             permission_mode=permission_mode,
             metadata=metadata,
             cancellation=cancellation,
+            tool_call_id=prepared.tool_use.id,
+            tool_timeout_seconds=tool_timeout_seconds,
         )
         result = await self.tool_executor.execute_prepared(
             prepared,
@@ -204,6 +209,7 @@ class ToolBridge:
             permission_mode=permission_mode,
             metadata=metadata,
             cancellation=cancellation,
+            tool_call_id=prepared.tool_use.id,
         )
         return await self.tool_executor.execute_subagent_prepared(
             prepared,
@@ -234,6 +240,7 @@ class ToolBridge:
             permission_mode=permission_mode,
             metadata=metadata,
             cancellation=None,
+            tool_call_id=tool_use.id,
         )
         return await self.tool_executor._finalize_result(
             tool_use=tool_use,
@@ -252,8 +259,15 @@ class ToolBridge:
         permission_mode: str,
         metadata: Mapping[str, Any] | None,
         cancellation: CancellationSignal | None,
+        tool_call_id: str | None = None,
+        tool_timeout_seconds: float | None = None,
     ) -> ToolExecutionContext:
         """构造复用同一 read state 与 cancellation 的工具上下文。"""
+        stop_slot = (
+            CommandStopSlot()
+            if tool_call_id is None
+            else self.command_stop_slots.setdefault((run_id, tool_call_id), CommandStopSlot())
+        )
         return ToolExecutionContext(
             workspace_root=workspace_root,
             session_id=session_id,
@@ -262,6 +276,8 @@ class ToolBridge:
             metadata={**dict(metadata or {}), "run_id": run_id},
             read_state=self._read_states.get(session_id),
             cancellation=cancellation,
+            tool_timeout_seconds=tool_timeout_seconds,
+            command_stop_slot=stop_slot,
         )
 
 

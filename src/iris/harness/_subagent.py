@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from ..agents import AgentConfig, load_agent_config
 from ..exceptions import (
     IrisConfigError,
+    IrisExecutionError,
     IrisMCPError,
     IrisRunConflictError,
     IrisRunNotFoundError,
@@ -120,11 +121,11 @@ class HarnessSubagentController:
         async with self._owned_child_runner(runner):
             try:
                 await runner.aprepare()
-            except (IrisConfigError, IrisMCPError):
+            except (IrisConfigError, IrisMCPError, IrisExecutionError):
                 return _error_result(
                     route.selector,
                     "SUBAGENT_PREPARE_ERROR",
-                    "Selected child MCP preparation failed",
+                    "Selected child resource preparation failed",
                 )
             request = AgentRunRequest.model_construct(
                 input=invocation.call.prompt,

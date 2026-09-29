@@ -2,6 +2,7 @@
 
 from .config import DockerConfig, ExecutionConfig
 from .models import (
+    CommandEnvironment,
     CommandOutcome,
     CommandRequest,
     CommandStatus,
@@ -10,15 +11,17 @@ from .models import (
     ExecutionScope,
     ExecutionStopReceipt,
 )
-from .service import CommandService, StopOperation
+from .service import CommandService, ExecutionBinding, StopOperation
 
 __all__ = [
+    "CommandEnvironment",
     "CommandOutcome",
     "CommandRequest",
     "CommandService",
     "CommandStatus",
     "CommandStopSlot",
     "DockerConfig",
+    "ExecutionBinding",
     "ExecutionConfig",
     "ExecutionMode",
     "ExecutionScope",
