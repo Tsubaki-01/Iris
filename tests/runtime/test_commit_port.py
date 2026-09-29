@@ -23,6 +23,7 @@ from iris.lifecycle import (
     RunCommit,
     RunControlSnapshot,
     RunEvent,
+    RunLimits,
     RunPhase,
     RunRecord,
     RunToolCallRecord,
@@ -49,6 +50,7 @@ FINGERPRINT = "a" * 64
 def _store_commit_port(
     *,
     event_collector: _RunEventCollector | None = None,
+    max_model_steps: int = 20,
 ) -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
     store = InMemoryLifecycleStore()
     initial = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
@@ -56,7 +58,7 @@ def _store_commit_port(
     created = store.create_run(
         CreateRun(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
-            options=AgentRunOptions(),
+            options=AgentRunOptions(limits=RunLimits(max_model_steps=max_model_steps)),
             agent_id="agent_1",
             start_activation_id="activation_1",
             initial_checkpoint=RunCheckpoint(
@@ -423,6 +425,33 @@ def test_store_commit_port_maps_same_activation_cancel_claim_race(
     assert store.list_tool_calls("run_1")[0].phase == "prepared"
     assert relayed == collector.events
     assert len({(event.run_id, event.sequence) for event in relayed}) == len(relayed)
+
+
+def test_model_budget_refusal_returns_runtime_fact_without_terminalizing_store() -> None:
+    """Store 的显式 refusal 投影给 runtime，当前 run/fence/lane 等待外层清理结算。"""
+    store, port, call = _store_commit_port(max_model_steps=1)
+    claim = port.claim_tool_call(call)
+    result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
+    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
+    port.commit_tool_result(
+        RuntimeToolResultCommit(
+            tool_call=call,
+            claim=claim,
+            result=result,
+            message_delta=(result.to_msg(),),
+            cursor_after=cursor,
+        )
+    )
+    before = port.run
+    events_before = store.list_events(before.run_id)
+    reservation = port.reserve_model_step(cursor)
+    assert not reservation.granted
+    assert reservation.cursor == cursor and reservation.step_index == 1
+    assert port.run == before == store.load_run(before.run_id)
+    assert before.phase is RunPhase.ACTIVE
+    assert store.load_session_lane(before.session_id) == before.run_id
+    assert store.load_result(before.run_id) is None
+    assert store.list_events(before.run_id) == events_before
 
 
 def test_compaction_usage_refreshes_control_without_events_and_survives_model_commit() -> None:

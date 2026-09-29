@@ -233,22 +233,25 @@ async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, fl
 async def test_active_parent_deadline_drains_child_before_parent(tmp_path: Path) -> None:
     clock = FrozenClock()
     store = RecordingInMemoryLifecycleStore()
+    child_provider = BlockingProvider()
     runner = AgentRunner.from_config_path(
         _write_configs(tmp_path),
         provider=_parent_provider(),
         store=store,
         clock=clock,
-        child_provider_factory=ChildProviders(BlockingProvider()),
+        child_provider_factory=ChildProviders(child_provider),
     )
-    result = await asyncio.wait_for(
+    task = asyncio.create_task(
         runner.start(
             AgentRunRequest(input="Start", run_id="parent"),
             options=AgentRunOptions(
                 limits=RunLimits(deadline_at=clock.now() + timedelta(seconds=0.02))
             ),
-        ),
-        timeout=1,
+        )
     )
+    await asyncio.wait_for(child_provider.started.wait(), timeout=1)
+    clock.advance(seconds=0.03)
+    result = await asyncio.wait_for(task, timeout=1)
     child_id = store.load_subagent_link("parent", "delegate").child_run_id
     assert result.run.stop_reason == RunStopReason.DEADLINE_EXCEEDED
     assert store.finished == [child_id, "parent"]
@@ -688,9 +691,12 @@ async def test_manager_interrupt_keeps_child_cleanup_owner_and_blocks_follow_up(
         snapshot = await asyncio.wait_for(manager.interrupt(), timeout=1)
         assert snapshot.phase == RunPhase.WAITING
         await asyncio.wait_for(started.wait(), timeout=1)
+        interrupt_owner = manager._current_task
+        assert interrupt_owner is manager._interrupt_task
         if resuming:
-            assert manager._current_task is continuation
+            assert not continuation.done()
         await asyncio.wait_for(manager.interrupt(), timeout=1)
+        assert manager._current_task is interrupt_owner
         follow = await manager.submit("Next run", mode="follow_up")
         assert runner.store.load_run(follow.run_id) is None
         assert runner.store.load_run(current.run_id).phase == RunPhase.WAITING
@@ -1411,6 +1417,8 @@ async def test_proxy_managed_admission_releases_lock_and_rejects_second_response
             await manager.admit_resume(interaction_id=proxy.interaction_id, response=response)
     finally:
         blocker.release.set()
+        if manager._current_task is not None:
+            await manager._current_task
         await manager.close()
 
 
@@ -1542,7 +1550,7 @@ def _prepare_parent(
             activation_id=command.start_activation_id,
             now=runner.clock.now(),
         )
-    )
+    ).commit
     tool_use = ToolUseBlock(id="delegate", name="subagent", input={"prompt": "Child task"})
     if selector is not None:
         tool_use.input["agent"] = selector

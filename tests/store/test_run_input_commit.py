@@ -236,7 +236,7 @@ def test_compaction_replaces_window_and_fork_starts_uninitialized(store: Lifecyc
             activation_id=command.activation_id,
             now=NOW,
         )
-    )
+    ).commit
     compact = replace(_compaction_command(ready), context_window=_window(2))
     committed = store.commit_compaction(compact)
     saved = store.load_session("session")
@@ -284,7 +284,7 @@ def test_compaction_failure_preserves_initialized_window(
             activation_id=command.activation_id,
             now=NOW,
         )
-    )
+    ).commit
     if failure == "cancelled":
         ready = store.request_cancellation(
             RequestCancellation(

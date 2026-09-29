@@ -46,15 +46,19 @@ Both refresh the port's session revision. The latter delegates to the store's
 anchors, and requested discovery projection. Public `get_session()` still returns complete raw history.
 
 Root connections span multiple runs. Stop new calls and await the original start/resume/recover calls
-fully before `aclose()`. A cancel result or observation timeout does not prove body cleanup or event
-delivery finished. Active closure raises; repeated closure is idempotent, and durable queries remain
-available. `SessionManager.close()` does not own runner resources: use `close(cancel_run=True)` before
+fully before `aclose()`. A cancelled terminal includes required command cleanup but does not prove
+the original call's event delivery has exited; an observation timeout does not prove settlement.
+Active closure raises. Repeated closure is idempotent after success; failed cleanup remains retryable
+while new business calls stay closed. Durable queries remain available.
+`SessionManager.close()` does not own runner resources: use `close(cancel_run=True)` before
 closing the runner.
 
 Ordinary child YAML can configure MCP independently. Fresh children prepare
 before admission. Failure returns `SUBAGENT_PREPARE_ERROR` without a child run/link. Every child
-WAITING/completion, recovery failure, or early return closes its resources. WAITING retains only durable
-links; resume/recover rebuilds with current configuration. Parent and child connections remain
+WAITING/completion, recovery failure, or early return closes its child-owned resources. Resume/recover
+rebuilds with current configuration. The root command service, absolute deadline timers, and pending
+cleanup survive temporary child runner closure; settlement reopens the exact child run through its route.
+Parent and child connections remain
 independent, with the more restrictive combined permission policy. Live cancellation borrows the runner
 and waits for its original task; the creating scope closes resources. Closure failures are logged without
 replacing outcomes. Non-live cancellation persists its request before any required preparation.
@@ -195,7 +199,9 @@ rejects concurrent answers.
 Parent cancellation, deadline, and parent-owned proxy expiry settle the exact child before ending
 the parent. `request_cancel()` leaves a linked proxy WAITING; `cancel()` or the manager's settlement
 task completes it. `settlement_timeout` covers child cleanup and parent observation, preserving
-durable cancellation on timeout so later `cancel()`/`recover()` can finish. Repeated interrupts share
+durable cancellation on timeout so later `cancel()`/`recover()` can finish. A child stop receipt belongs
+only to the current parent call. If a timer already finished the child, delayed proxy handling still
+consumes that receipt rather than stopping a later environment. Repeated interrupts share
 the cleanup task; follow-ups start only after true parent terminal settlement.
 
 Child interaction/deadline expiry and outer tool timeout settle the child, then commit
@@ -248,7 +254,7 @@ recoverable parent/child state.
 - `start()` atomically creates a run/start activation and advances it to waiting or terminal.
 - `resume()` consumes the exact waiting interaction.
 - `request_cancel()` guarantees only that the first request is durable. A local active activation
-  is signalled after commit; a waiting run can settle cancelled in the same transaction.
+  is signalled after commit; waiting remains waiting until asynchronous cleanup and settlement.
 - `cancel()` requests cancellation and observes durable settlement. Observation timeout writes no
   new fact, and settlement does not imply that the original `start()` / `resume()` call has exited.
 - `recover()` requires the exact active activation fence. Safe checkpoints create a recover
@@ -368,14 +374,21 @@ HITL responses use `manager.resume(interaction_id=..., response=...)` to wait fo
 or `admit_resume(...)` to return `ResumeReceipt(run_id, interaction_id)` after activation admission.
 Both share one admission owner; the manager/runner retains background execution ownership and the
 response never enters the ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
-cancellation request is not terminal, so follow-ups still wait for actual settlement. `close()`
+cancellation request is not terminal, so follow-ups still wait for actual settlement. For WAITING runs
+and ACTIVE runs left without a live continuation after cleanup failure, the manager owns one async
+cancel task. A later interrupt retries pending cleanup; a new run never inherits the old cancel owner.
+`close()`
 rejects later operations, fails every pending input with `session_closed`, and ends the event
 stream, but neither cancels nor waits for the current run.
 
 A host about to close its event loop uses `close(cancel_run=True, reason=...)`: close admission and
 fail pending input first, prevent another follow-up from starting, then cancel and await the current
-run through the runner. It then waits for the original managed `start()` / `resume()` task to end,
-including a WAITING parent continuing to await its child. CLI `/exit`, EOF, Ctrl-C, and error exits
+run through the runner. It then waits for owned managed tasks to end, including a WAITING parent
+awaiting its child and an earlier terminal run still delivering events. Failed cleanup keeps admission
+closed while retaining the original run/tasks for a later `close()` retry. Closure becomes idempotent
+only after success; cancelling a close waiter does not cancel the owned close task.
+The mixed event stream ends even when cleanup fails, so its consumer cannot block host exit.
+CLI `/exit`, EOF, Ctrl-C, and error exits
 all use this path.
 
 The queue, receipt state, submission events, claims, and durable event watermarks exist only in the
@@ -416,8 +429,28 @@ runs only on its first collection. Callback failures do not block the subsequent
 
 ## Cancellation and recovery
 
+The root owns one command service shared across its sessions and children. Normal COMPLETED/WAITING
+keeps the environment. Abnormal exits settle linked children, stop and drain command work, then
+call `FinishRun` to release the session lane. Docker stops the shared container without cancelling
+other runs' model/native/HITL work; Native stops current commands in the target session. A current
+causal receipt waits for that stop operation without stopping an environment already restarted.
+
+Process-local `PendingSettlement` retains the original outcome/error, typed target, and receipt.
+Concurrent callers join one stop/drain/finish task; cancelling a waiter does not cancel settlement.
+`IrisExecutionCleanupError` leaves ACTIVE/WAITING and its lane intact, reaches direct callers, and
+publishes a small root-owned `ExecutionCleanupFailed` live fact (or logs without a publisher).
+The next cancel/recover/resume retries the original settlement before ordinary dispatch. It neither
+changes the original failure cause nor reruns models or commands. Known tool results commit before
+cleanup errors propagate and never revert to unknown claims.
+
+Root-owned deadline timers survive WAITING and temporary child runner closure. Typed child routes
+rebuild the runner when needed; terminal settlement removes its timer. Root close cancels unfired
+timers, waits for fired settlement and pending work, then closes resources. A failed close can be
+retried, while new business calls remain closed. Already-expired starts acquire ACTIVE/fence/lane
+without committing input, and budget refusal does not terminalize in the store: both await cleanup.
+
 When settling failure, the runner checks the absolute deadline against its injected Clock,
-independently of timer scheduling. Provider exceptions, `response.failed`, and cancellation cleanup
+independently of timer scheduling. Provider exceptions, `response.failed`, and provider cancellation cleanup
 failures after the deadline settle as `DEADLINE_EXCEEDED`; errors before it remain `FAILED`.
 An uncommitted tool claim still takes precedence as `OUTCOME_UNKNOWN`.
 
@@ -433,7 +466,8 @@ through postprocessing and the existing ordered durable commit before the run se
 Finite local file and artifact IO recovers its known result after cancellation and commits the tool
 fact before responding to task cancellation, timeout, or sibling cancellation. Parallel results
 still commit only a contiguous ordinal prefix. External task cancellation without an Iris signal
-continues to propagate, leaving recoverable ACTIVE facts rather than impersonating user cancellation.
+first cleans command resources and linked children, then propagates, leaving recoverable ACTIVE facts.
+Repeated task cancellation does not skip that cleanup; failures retain cleanup-only pending work.
 Unresolved claims still settle the run as
 `TOOL_OUTCOME_UNKNOWN`, including read-only calls. Custom THREAD callable workers may continue, but late returns
 cannot change the durable result, history, checkpoint, or events.
@@ -458,7 +492,8 @@ settlement closes every unresolved claim for that activation in one aggregate tr
 
 Active recovery validates checkpoint v3, session revision, usage counters, and cursor.
 Tools are never replayed while unresolved claims exist. Recovery atomically
-abandons the old activation, closes every claim as outcome unknown, and creates the terminal result.
+abandons the old activation and acquires a new RECOVER fence with a BLOCKED_UNKNOWN checkpoint.
+Only after cleanup does it close claims as unknown and create the terminal result.
 Normal parent/control/infrastructure exit waits for runtime children to drain before revoking the
 commit port, preventing late child writes. Synchronous blocking callables have no concurrency
 speedup guarantee and may still delay settlement.

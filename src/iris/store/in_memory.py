@@ -48,7 +48,6 @@ from ..lifecycle.models import (
     RecoveryDisposition,
     RunCheckpoint,
     RunControlSnapshot,
-    RunErrorInfo,
     RunEvent,
     RunEventKind,
     RunPhase,
@@ -74,6 +73,7 @@ from ..lifecycle.store import (
     FinalizeSubagentResult,
     FinishRun,
     ForkSession,
+    ModelStepReservationResult,
     RebindSubagentProxy,
     RecordCompactionUsage,
     RecoverActiveRun,
@@ -411,39 +411,6 @@ class InMemoryLifecycleStore:
                     actual=command.initial_checkpoint.session_revision,
                 )
 
-            deadline = command.options.limits.deadline_at
-            if deadline is not None and command.now >= deadline:
-                run = RunRecord(
-                    run_id=run_id,
-                    session_id=command.request.session_id,
-                    agent_id=command.agent_id,
-                    request=command.request,
-                    initial_session_message_count=len(session.snapshot.messages),
-                    options=command.options,
-                    phase=RunPhase.TERMINAL,
-                    stop_reason=RunStopReason.DEADLINE_EXCEEDED,
-                    terminal_session_message_count=len(session.snapshot.messages),
-                    terminal_compaction=session.snapshot.compaction,
-                    revision=1,
-                    current_activation_id=None,
-                    pending_interaction_id=None,
-                    usage=RunUsage(),
-                    checkpoint_sequence=0,
-                    last_event_sequence=1,
-                    created_at=command.now,
-                    started_at=command.now,
-                    updated_at=command.now,
-                    finished_at=command.now,
-                )
-                events = (self._event(run, RunEventKind.RUN_TERMINAL, command.now, sequence=1),)
-                result = project_result(run)
-                commit = RunCommit(run=run, events=events, result=result)
-                self._runs[run_id] = deepcopy(run)
-                self._sessions.setdefault(session.snapshot.session_id, session)
-                self._events[run_id] = deepcopy(list(events))
-                self._results[run_id] = deepcopy(result)
-                return deepcopy(commit)
-
             activation = ActivationRecord(
                 activation_id=command.start_activation_id,
                 run_id=run_id,
@@ -625,13 +592,13 @@ class InMemoryLifecycleStore:
                 )
             )
 
-    def reserve_model_step(self, command: ReserveModelStep) -> RunCommit:
+    def reserve_model_step(self, command: ReserveModelStep) -> ModelStepReservationResult:
         """在 provider effect 前增加 durable model-step reservation。"""
         command = deepcopy(command)
         with self._lock:
             run = self._require_active(command)
             if run.usage.model_steps_reserved >= run.options.limits.max_model_steps:
-                return self._finish_budget_exhausted(run, command.now)
+                return ModelStepReservationResult(granted=False, commit=self._current_commit(run))
             usage = reserve_model_step(run.usage)
             checkpoint = self._require_checkpoint(run.run_id).model_copy(
                 update={"model_steps_reserved": usage.model_steps_reserved}
@@ -660,7 +627,7 @@ class InMemoryLifecycleStore:
             self._runs[run.run_id] = deepcopy(updated)
             self._checkpoints[run.run_id] = deepcopy(checkpoint)
             self._events[run.run_id].append(deepcopy(event))
-            return deepcopy(commit)
+            return ModelStepReservationResult(granted=True, commit=deepcopy(commit))
 
     def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit:
         """独立记录摘要 response 用量，不推进主步骤或事件序号。"""
@@ -1075,7 +1042,7 @@ class InMemoryLifecycleStore:
             return deepcopy(commit)
 
     def request_cancellation(self, command: RequestCancellation) -> RunCommit:
-        """记录首次 cancellation request，并按显式要求结算 waiting run。"""
+        """记录首次取消意图，保持当前 activation 或 waiting interaction 与 lane。"""
         command = deepcopy(command)
         with self._lock:
             run = self._require_run(command.run_id)
@@ -1087,126 +1054,42 @@ class InMemoryLifecycleStore:
             elif command.activation_id is not None:
                 raise IrisRunConflictError("waiting run 不应携带 activation fence")
             if run.cancellation_requested_at is not None:
-                if run.cancellation_reason == command.reason and not command.settle_waiting:
-                    replay_interaction = (
+                if run.cancellation_reason == command.reason:
+                    interaction = (
                         self._require_interaction(run.pending_interaction_id)
                         if run.phase is RunPhase.WAITING
                         else None
                     )
-                    return self._current_commit(run, interaction=replay_interaction)
+                    return self._current_commit(run, interaction=interaction)
                 raise IrisRunConflictError("cancellation 已由其他 command 请求", run_id=run.run_id)
             self._require_revision(run, command.expected_run_revision)
             checkpoint = self._require_checkpoint(run.run_id)
             sequence = run.last_event_sequence + 1
-            events = [
-                self._event(
-                    run,
-                    RunEventKind.CANCELLATION_REQUESTED,
-                    command.now,
-                    sequence=sequence,
-                    activation_id=command.activation_id,
-                    payload={"reason": command.reason},
-                )
-            ]
-            interaction: HumanInteraction | None = None
-            updated_session: _MemorySession | None = None
-            updated_checkpoint = checkpoint
-            claimed_closures: list[RunToolCallRecord] = []
-            if run.phase is RunPhase.WAITING and command.settle_waiting:
-                interaction = self._close_interaction(run, command.now, command.reason)
-                closures = self._terminal_tool_closures(run, command.now)
-                closure_messages = [message for _, _, message in closures]
-                current_session = self._sessions.get(
-                    run.session_id,
-                    _empty_session(run.session_id),
-                )
-                appended_session = self._append_messages(current_session, closure_messages)
-                if closure_messages:
-                    updated_session = appended_session
-                    updated_checkpoint = checkpoint.model_copy(
-                        deep=True,
-                        update={"session_revision": appended_session.snapshot.revision},
-                    )
-                claimed_closures = [
-                    updated_call
-                    for current_call, updated_call, _ in closures
-                    if current_call.phase is ToolCallPhase.CLAIMED
-                ]
-                for index, record in enumerate(claimed_closures, start=1):
-                    events.append(
-                        self._event(
-                            run,
-                            RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-                            command.now,
-                            sequence=sequence + index,
-                            activation_id=record.claim_activation_id,
-                            step_index=record.step_index,
-                            correlation_id=record.tool_call_id,
-                        )
-                    )
-                sequence += len(claimed_closures) + 1
-                updated = self._replace_run(
-                    run,
-                    phase=RunPhase.TERMINAL,
-                    stop_reason=RunStopReason.CANCELLED,
-                    terminal_session_message_count=len(appended_session.snapshot.messages),
-                    terminal_compaction=appended_session.snapshot.compaction,
-                    revision=run.revision + 1,
-                    pending_interaction_id=None,
-                    cancellation_requested_at=command.now,
-                    cancellation_reason=command.reason,
-                    last_event_sequence=sequence,
-                    updated_at=command.now,
-                    finished_at=command.now,
-                )
-                events.append(
-                    self._event(
-                        updated,
-                        RunEventKind.RUN_TERMINAL,
-                        command.now,
-                        sequence=sequence,
-                    )
-                )
-                result = project_result(updated)
-                self._lanes.pop(run.session_id, None)
-                self._results[run.run_id] = deepcopy(result)
-            else:
-                updated = self._replace_run(
-                    run,
-                    revision=run.revision + 1,
-                    cancellation_requested_at=command.now,
-                    cancellation_reason=command.reason,
-                    last_event_sequence=sequence,
-                    updated_at=command.now,
-                )
-                result = self._results.get(run.run_id)
-                if run.phase is RunPhase.WAITING:
-                    result = project_result(
-                        updated, self._require_interaction(run.pending_interaction_id)
-                    )
-                    self._results[run.run_id] = deepcopy(result)
-            commit = RunCommit(
-                run=updated,
-                session_revision=updated_session.snapshot.revision
-                if updated_session is not None
-                else None,
-                checkpoint=updated_checkpoint,
-                interaction=interaction,
-                events=tuple(events),
-                result=result,
+            event = self._event(
+                run,
+                RunEventKind.CANCELLATION_REQUESTED,
+                command.now,
+                sequence=sequence,
+                activation_id=command.activation_id,
+                payload={"reason": command.reason},
             )
+            updated = self._replace_run(
+                run,
+                revision=run.revision + 1,
+                cancellation_requested_at=command.now,
+                cancellation_reason=command.reason,
+                last_event_sequence=sequence,
+                updated_at=command.now,
+            )
+            result = None
+            if run.phase is RunPhase.WAITING:
+                result = project_result(
+                    updated, self._require_interaction(run.pending_interaction_id)
+                )
+                self._results[run.run_id] = deepcopy(result)
+            commit = RunCommit(run=updated, checkpoint=checkpoint, events=(event,), result=result)
             self._runs[run.run_id] = deepcopy(updated)
-            if (
-                updated_session is not None
-                and updated_session.snapshot.revision != checkpoint.session_revision
-            ):
-                self._sessions[run.session_id] = updated_session
-                self._checkpoints[run.run_id] = deepcopy(updated_checkpoint)
-            if interaction is not None:
-                self._interactions[interaction.interaction_id] = deepcopy(interaction)
-            for record in claimed_closures:
-                self._set_tool_call(record)
-            self._events[run.run_id].extend(deepcopy(events))
+            self._events[run.run_id].append(deepcopy(event))
             return deepcopy(commit)
 
     def finish_run(self, command: FinishRun) -> RunCommit:
@@ -1332,7 +1215,7 @@ class InMemoryLifecycleStore:
             return deepcopy(commit)
 
     def recover_active_run(self, command: RecoverActiveRun) -> RunCommit:
-        """按 durable checkpoint/tool facts 放弃并恢复或终止旧 activation。"""
+        """接管 safe/unknown 的新 fence，或完成已知正常结果。"""
         command = deepcopy(command)
         with self._lock:
             run = self._require_run(command.run_id)
@@ -1354,6 +1237,10 @@ class InMemoryLifecycleStore:
                 raise IrisRunRecoveryError(
                     "safe recovery 不能重放 unresolved durable claim", run_id=run.run_id
                 )
+            if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN and not claimed:
+                raise IrisRunRecoveryError(
+                    "outcome_unknown recovery 缺少 unresolved durable claim", run_id=run.run_id
+                )
             abandoned_outcome = (
                 ActivationOutcome.OUTCOME_UNKNOWN
                 if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN
@@ -1374,15 +1261,13 @@ class InMemoryLifecycleStore:
             )
             terminal_closures = (
                 self._terminal_tool_closures(run, command.now)
-                if command.recovery_disposition
-                in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
+                if command.recovery_disposition is RecoveryDisposition.FINALIZE
                 else []
             )
             closure_messages = [message for _, _, message in terminal_closures]
             terminal_message_count = (
                 len(self._sessions[run.session_id].snapshot.messages) + len(closure_messages)
-                if command.recovery_disposition
-                in {RecoveryDisposition.OUTCOME_UNKNOWN, RecoveryDisposition.FINALIZE}
+                if command.recovery_disposition is RecoveryDisposition.FINALIZE
                 else None
             )
             updated_session: _MemorySession | None = None
@@ -1397,70 +1282,7 @@ class InMemoryLifecycleStore:
                     deep=True,
                     update={"session_revision": updated_session.snapshot.revision},
                 )
-            if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
-                if not claimed:
-                    raise IrisRunRecoveryError(
-                        "outcome_unknown recovery 缺少 unresolved durable claim", run_id=run.run_id
-                    )
-                unknown_calls = [
-                    updated_call
-                    for current_call, updated_call, _ in terminal_closures
-                    if current_call.phase is ToolCallPhase.CLAIMED
-                ]
-                terminal_sequence = first_sequence + len(unknown_calls) + 1
-                updated = self._replace_run(
-                    run,
-                    phase=RunPhase.TERMINAL,
-                    stop_reason=RunStopReason.OUTCOME_UNKNOWN,
-                    terminal_session_message_count=terminal_message_count,
-                    terminal_compaction=self._sessions[run.session_id].snapshot.compaction,
-                    revision=run.revision + 1,
-                    current_activation_id=None,
-                    error=RunErrorInfo(
-                        code="TOOL_OUTCOME_UNKNOWN",
-                        message="工具 claim 缺少可证明的 durable result",
-                        source="tool",
-                        details={"tool_call_ids": [item.tool_call_id for item in claimed]},
-                    ),
-                    last_event_sequence=terminal_sequence,
-                    updated_at=command.now,
-                    finished_at=command.now,
-                )
-                unknown_events = tuple(
-                    self._event(
-                        updated,
-                        RunEventKind.TOOL_CALL_OUTCOME_UNKNOWN,
-                        command.now,
-                        sequence=first_sequence + index,
-                        activation_id=record.claim_activation_id,
-                        step_index=record.step_index,
-                        correlation_id=record.tool_call_id,
-                    )
-                    for index, record in enumerate(unknown_calls, start=1)
-                )
-                terminal_event = self._event(
-                    updated,
-                    RunEventKind.RUN_TERMINAL,
-                    command.now,
-                    sequence=terminal_sequence,
-                    payload={"stop_reason": RunStopReason.OUTCOME_UNKNOWN.value},
-                )
-                events = (abandoned_event, *unknown_events, terminal_event)
-                result = project_result(updated)
-                commit = RunCommit(
-                    run=updated,
-                    session_revision=(
-                        updated_session.snapshot.revision if updated_session is not None else None
-                    ),
-                    checkpoint=terminal_checkpoint,
-                    events=events,
-                    result=result,
-                )
-                self._lanes.pop(run.session_id, None)
-                self._results[run.run_id] = deepcopy(result)
-                for item in unknown_calls:
-                    self._set_tool_call(item)
-            elif command.recovery_disposition is RecoveryDisposition.FINALIZE:
+            if command.recovery_disposition is RecoveryDisposition.FINALIZE:
                 if claimed:
                     raise IrisRunRecoveryError(
                         "outcome-ready recovery 不能忽略 unresolved durable claim",
@@ -1530,7 +1352,11 @@ class InMemoryLifecycleStore:
                     update={
                         "sequence": checkpoint.sequence + 1,
                         "activation_id": activation_next.activation_id,
-                        "resumability": CheckpointResumability.SAFE,
+                        "resumability": (
+                            CheckpointResumability.BLOCKED_UNKNOWN
+                            if command.recovery_disposition is RecoveryDisposition.OUTCOME_UNKNOWN
+                            else CheckpointResumability.SAFE
+                        ),
                     }
                 )
                 start_sequence = first_sequence + 1
@@ -2126,52 +1952,6 @@ class InMemoryLifecycleStore:
                 result=self._results.get(run.run_id),
             )
         )
-
-    def _finish_budget_exhausted(
-        self,
-        run: RunRecord,
-        now: datetime,
-    ) -> RunCommit:
-        activation = self._require_activation(run.current_activation_id)
-        settled = settle_activation(
-            activation,
-            outcome=ActivationOutcome.FAILED,
-            ended_at=now,
-        )
-        sequence = run.last_event_sequence + 1
-        updated = self._replace_run(
-            run,
-            phase=RunPhase.TERMINAL,
-            stop_reason=RunStopReason.BUDGET_EXHAUSTED,
-            terminal_session_message_count=len(self._sessions[run.session_id].snapshot.messages),
-            terminal_compaction=self._sessions[run.session_id].snapshot.compaction,
-            revision=run.revision + 1,
-            current_activation_id=None,
-            last_event_sequence=sequence,
-            updated_at=now,
-            finished_at=now,
-        )
-        event = self._event(
-            updated,
-            RunEventKind.RUN_TERMINAL,
-            now,
-            sequence=sequence,
-            activation_id=activation.activation_id,
-            payload={"stop_reason": RunStopReason.BUDGET_EXHAUSTED.value},
-        )
-        result = project_result(updated)
-        commit = RunCommit(
-            run=updated,
-            checkpoint=self._checkpoints.get(run.run_id),
-            events=(event,),
-            result=result,
-        )
-        self._runs[run.run_id] = deepcopy(updated)
-        self._activations[activation.activation_id] = deepcopy(settled)
-        self._lanes.pop(run.session_id, None)
-        self._events[run.run_id].append(deepcopy(event))
-        self._results[run.run_id] = deepcopy(result)
-        return deepcopy(commit)
 
 
 __all__ = ["InMemoryLifecycleStore"]

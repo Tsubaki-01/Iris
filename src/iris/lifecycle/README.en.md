@@ -65,6 +65,22 @@ provider clients, tasks, locks, signals, or callbacks.
 cancellation/finish/recover commands plus run/session/lane/interaction/checkpoint/tool/result/event
 reads.
 
+Abnormal settlement separates synchronous facts from asynchronous resource cleanup by the owner:
+
+- `CreateRun` returns an ACTIVE run, initial checkpoint, activation, and lane even after its deadline.
+  The owner skips the engine and calls `FinishRun(DEADLINE_EXCEEDED)` after cleanup.
+- `reserve_model_step()` returns `ModelStepReservationResult(granted, commit)`, whose `commit` is a
+  `RunCommit`. Budget refusal returns `granted=False` with current facts, consuming no step and
+  changing no revision or event. It neither terminalizes the run nor releases its lane; runtime
+  returns the refusal to the owner for settlement.
+- `RequestCancellation` persists only the first request. A WAITING interaction and lane remain
+  until the asynchronous owner cleans up and closes them through `FinishRun`.
+- RESUME and OUTCOME_UNKNOWN in `RecoverActiveRun` both require `new_activation_id`. UNKNOWN
+  atomically abandons the old fence, creates a RECOVER activation, and marks the checkpoint
+  `blocked_unknown`. The run remains ACTIVE with its original claims and committed history until
+  cleanup and `FinishRun(OUTCOME_UNKNOWN)`. FINALIZE accepts no new activation and still directly
+  completes the known normal result.
+
 `load_session_header(session_id)` returns `SessionHeader(session_id, revision, message_count,
 context_window)` without reading messages, the summary, or discovery state. An absent session returns
 zero counts and no window. `load_run_context(run_id, *, include_tool_discovery)` returns a consistent

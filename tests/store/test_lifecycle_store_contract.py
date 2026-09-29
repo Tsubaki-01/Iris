@@ -152,6 +152,24 @@ def _create(store: LifecycleStore, **kwargs: object) -> RunCommit:
     return store.create_run(_create_command(**kwargs))
 
 
+def _finish(store: LifecycleStore, current: RunCommit, reason: RunStopReason) -> RunCommit:
+    """模拟异步 owner 完成清理后，使用当前 fence 提交统一终态。"""
+    return store.finish_run(
+        FinishRun(
+            run_id=current.run.run_id,
+            expected_run_revision=current.run.revision,
+            activation_id=current.run.current_activation_id,
+            stop_reason=reason,
+            error=(
+                RunErrorInfo(code="TOOL_OUTCOME_UNKNOWN", message="结果无法确认", source="tool")
+                if reason is RunStopReason.OUTCOME_UNKNOWN
+                else None
+            ),
+            now=_T3,
+        )
+    )
+
+
 def _compaction_ready(store: LifecycleStore) -> RunCommit:
     """同一个 run 先提交原文，再保留下一次主请求的 reservation。"""
     created = _create(store, max_model_steps=2)
@@ -162,7 +180,7 @@ def _compaction_ready(store: LifecycleStore) -> RunCommit:
             activation_id="activation-1",
             now=_T1,
         )
-    )
+    ).commit
     committed = store.commit_model_step(
         CommitModelStep(
             run_id="run-1",
@@ -195,7 +213,7 @@ def _compaction_ready(store: LifecycleStore) -> RunCommit:
             activation_id="activation-1",
             now=_T2,
         )
-    )
+    ).commit
 
 
 def _compaction_command(current: RunCommit, *, count: int = 2) -> CommitCompaction:
@@ -561,15 +579,15 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
             )
         )
         assert waiting.run.usage.compaction.total_tokens == 22000
-        terminal = lifecycle_store.request_cancellation(
+        requested = lifecycle_store.request_cancellation(
             RequestCancellation(
                 run_id="run-1",
                 expected_run_revision=waiting.run.revision,
                 reason="stop",
-                settle_waiting=True,
                 now=_T3,
             )
         )
+        terminal = _finish(lifecycle_store, requested, RunStopReason.CANCELLED)
     elif path in {"unknown", "finalize"}:
         if path == "unknown":
             committed = lifecycle_store.claim_tool_call(
@@ -591,11 +609,14 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
             recovery_disposition=RecoveryDisposition.OUTCOME_UNKNOWN
             if path == "unknown"
             else RecoveryDisposition.FINALIZE,
+            new_activation_id="recovered" if path == "unknown" else None,
             now=_T3,
         )
         terminal = lifecycle_store.recover_active_run(recovery)
         with pytest.raises(IrisRunConflictError):
             lifecycle_store.recover_active_run(recovery)
+        if path == "unknown":
+            terminal = _finish(lifecycle_store, terminal, RunStopReason.OUTCOME_UNKNOWN)
     elif path == "budget":
         terminal = lifecycle_store.reserve_model_step(
             ReserveModelStep(
@@ -604,7 +625,8 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
                 activation_id="activation-1",
                 now=_T3,
             )
-        )
+        ).commit
+        terminal = _finish(lifecycle_store, terminal, RunStopReason.BUDGET_EXHAUSTED)
     else:
         finish = FinishRun(
             run_id="run-1",
@@ -630,6 +652,7 @@ def test_compaction_terminal_snapshot_covers_every_settlement_path(
                     ),
                 )
             )
+            terminal = _finish(lifecycle_store, terminal, RunStopReason.DEADLINE_EXCEEDED)
             assert terminal.run.initial_session_message_count == 3
     assert terminal.run.terminal_compaction == summary
     session = lifecycle_store.load_session("session-1")
@@ -671,7 +694,7 @@ def test_fork_uses_frozen_compaction_when_source_compacts_again(
             activation_id="activation-2",
             now=_T3,
         )
-    )
+    ).commit
     lifecycle_store.commit_compaction(_compaction_command(reserved))
     assert lifecycle_store.load_session("session-1").compaction.covered_message_count == 2
     with pytest.raises(IrisRunConflictError):
@@ -698,7 +721,7 @@ def test_fork_uses_frozen_compaction_when_source_compacts_again(
             activation_id="branch-activation",
             now=_T3,
         )
-    )
+    ).commit
     lifecycle_store.commit_compaction(_compaction_command(branch_reserved))
     assert lifecycle_store.load_run("run-1").terminal_compaction == old.terminal_compaction
 
@@ -721,7 +744,7 @@ def _complete_history_turn(store: LifecycleStore, *, run_id: str, session_id: st
             activation_id=activation_id,
             now=_T1,
         )
-    )
+    ).commit
     assistant = Msg.assistant(run_id)
     committed = store.commit_model_step(
         CommitModelStep(
@@ -919,7 +942,8 @@ def test_deadline_empty_history_fork_can_start_a_fresh_run(lifecycle_store: Life
             options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
         )
     )
-    assert expired.checkpoint is None
+    assert expired.checkpoint is not None
+    _finish(lifecycle_store, expired, RunStopReason.DEADLINE_EXCEEDED)
     preview = lifecycle_store.load_session_at_run("run-1")
     assert preview.messages == ()
     assert preview.point.input == "start"
@@ -942,12 +966,13 @@ def test_fork_rejects_existing_target_without_changes(
     """已有目标即使历史为空也冲突，来源与目标均保持原样。"""
     _complete_history_turn(lifecycle_store, run_id="r1", session_id="main")
     if target != "main":
-        lifecycle_store.create_run(
+        expired = lifecycle_store.create_run(
             replace(
                 _create_command(run_id="expired", session_id="empty"),
                 options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
             )
         )
+        _finish(lifecycle_store, expired, RunStopReason.DEADLINE_EXCEEDED)
         if target == "empty-fork":
             lifecycle_store.fork_session(
                 ForkSession(source_run_id="expired", target_session_id=target, now=_T1)
@@ -1071,7 +1096,7 @@ def _prepare_tool(store: LifecycleStore) -> RunCommit:
             activation_id="activation-1",
             now=_T1,
         )
-    )
+    ).commit
     assistant = Msg.assistant([ToolUseBlock(id="call-tool", name="probe", input={"value": "A"})])
     prepared = RunToolCallRecord(
         run_id="run-1",
@@ -1121,7 +1146,7 @@ def _prepare_tool_batch(
             activation_id="activation-1",
             now=_T1,
         )
-    )
+    ).commit
     uses = tuple(
         ToolUseBlock(id=f"call-{ordinal}", name="probe", input={"value": ordinal})
         for ordinal in range(1, 4)
@@ -1187,20 +1212,28 @@ def test_terminal_cutoff_counts_messages_after_closure(
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
 
 
-def test_deadline_at_creation_has_zero_cutoff_without_checkpoint(
+def test_deadline_at_creation_holds_activation_lane_until_finish(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """创建时已过期的 run 没有提交输入，仍保留零消息截点。"""
+    """过期创建先保留 active/fence/lane，清理后 finish 才冻结零输入截点。"""
     expired = lifecycle_store.create_run(
         replace(
             _create_command(),
             options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
         )
     )
-    assert expired.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
-    assert expired.run.terminal_session_message_count == 0
+    assert expired.run.phase.value == "active"
+    assert expired.run.current_activation_id == "activation-1"
+    assert expired.run.terminal_session_message_count is None
+    assert expired.result is None
+    assert expired.checkpoint == _create_command().initial_checkpoint
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    assert [event.kind.value for event in expired.events] == ["run.started", "activation.started"]
+    terminal = _finish(lifecycle_store, expired, RunStopReason.DEADLINE_EXCEEDED)
+    assert terminal.run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 0
-    assert lifecycle_store.load_checkpoint("run-1") is None
+    assert lifecycle_store.load_checkpoint("run-1") == expired.checkpoint
+    assert lifecycle_store.load_session_lane("session-1") is None
 
 
 def test_deadline_at_creation_keeps_existing_history_cutoff(
@@ -1223,11 +1256,13 @@ def test_deadline_at_creation_keeps_existing_history_cutoff(
             options=AgentRunOptions(limits=RunLimits(deadline_at=_NOW)),
         )
     )
-    assert expired.run.terminal_session_message_count == 4
+    assert expired.run.terminal_session_message_count is None
+    terminal = _finish(lifecycle_store, expired, RunStopReason.DEADLINE_EXCEEDED)
+    assert terminal.run.terminal_session_message_count == 4
     assert lifecycle_store.load_run("run-2").terminal_session_message_count == 4
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
     assert len(lifecycle_store.load_session("session-1").messages) == 4
-    assert lifecycle_store.load_checkpoint("run-2") is None
+    assert lifecycle_store.load_checkpoint("run-2") == expired.checkpoint
 
 
 @pytest.mark.parametrize("include_tool_history", [False, True])
@@ -1243,15 +1278,21 @@ def test_waiting_cancellation_records_terminal_cutoff(
     )
     _assert_session_projection(lifecycle_store, "run-1")
     assert waiting.run.terminal_session_message_count is None
-    terminal = lifecycle_store.request_cancellation(
-        RequestCancellation(
-            run_id="run-1",
-            expected_run_revision=waiting.run.revision,
-            reason="stop",
-            settle_waiting=True,
-            now=_T2,
-        )
+    command = RequestCancellation(
+        run_id="run-1",
+        expected_run_revision=waiting.run.revision,
+        reason="stop",
+        now=_T2,
     )
+    requested = lifecycle_store.request_cancellation(command)
+    assert requested.run.phase.value == "waiting"
+    assert requested.run.pending_interaction_id == waiting.run.pending_interaction_id
+    assert requested.run.terminal_session_message_count is None
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    assert lifecycle_store.load_interaction(_INTERACTION_ID).status is InteractionStatus.PENDING
+    assert [event.kind.value for event in requested.events] == ["run.cancellation_requested"]
+    assert lifecycle_store.request_cancellation(command).events == ()
+    terminal = _finish(lifecycle_store, requested, RunStopReason.CANCELLED)
     expected_count = 2 if include_tool_history else 1
     assert terminal.run.stop_reason is RunStopReason.CANCELLED
     assert terminal.run.terminal_session_message_count == expected_count
@@ -1272,7 +1313,7 @@ def test_recovery_without_closer_keeps_committed_message_cutoff(
             activation_id="activation-1",
             now=_T1,
         )
-    )
+    ).commit
     assistant = Msg.assistant("done")
     committed = lifecycle_store.commit_model_step(
         CommitModelStep(
@@ -1485,10 +1526,10 @@ def test_session_lane_read_tracks_non_terminal_owner_without_mutation(
     assert lifecycle_store.load_session_lane("session-1") is None
 
 
-def test_reserve_rejects_stale_command_and_budget_exhaustion_is_terminal(
+def test_reserve_rejects_stale_command_and_budget_refusal_preserves_active_run(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """旧 reservation 冲突且不增加 revision/event，下一 reservation 报预算耗尽。"""
+    """旧 reservation 冲突；预算拒绝只回传事实，保持当前 fence/lane 直到 finish。"""
     created = _create(lifecycle_store, max_model_steps=1)
     command = ReserveModelStep(
         run_id="run-1",
@@ -1496,7 +1537,9 @@ def test_reserve_rejects_stale_command_and_budget_exhaustion_is_terminal(
         activation_id="activation-1",
         now=_T1,
     )
-    first = lifecycle_store.reserve_model_step(command)
+    reservation = lifecycle_store.reserve_model_step(command)
+    assert reservation.granted
+    first = reservation.commit
     events_after_first = lifecycle_store.list_events("run-1")
 
     with pytest.raises(IrisRunConflictError):
@@ -1525,7 +1568,8 @@ def test_reserve_rejects_stale_command_and_budget_exhaustion_is_terminal(
             now=_T1,
         )
     )
-    terminal = lifecycle_store.reserve_model_step(
+    events_before_refusal = lifecycle_store.list_events("run-1")
+    refused = lifecycle_store.reserve_model_step(
         ReserveModelStep(
             run_id="run-1",
             expected_run_revision=committed.run.revision,
@@ -1533,6 +1577,14 @@ def test_reserve_rejects_stale_command_and_budget_exhaustion_is_terminal(
             now=_T2,
         )
     )
+    assert not refused.granted
+    assert refused.commit.run == committed.run
+    assert refused.commit.checkpoint == committed.checkpoint
+    assert refused.commit.events == () and refused.commit.result is None
+    assert lifecycle_store.load_run("run-1") == committed.run
+    assert lifecycle_store.list_events("run-1") == events_before_refusal
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    terminal = _finish(lifecycle_store, refused.commit, RunStopReason.BUDGET_EXHAUSTED)
     assert terminal.run.stop_reason == "budget_exhausted"
     assert terminal.result is not None
     assert terminal.run.terminal_session_message_count == 2
@@ -2219,7 +2271,7 @@ def test_safe_recovery_rejects_unresolved_durable_claim(
 def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     lifecycle_store: LifecycleStore,
 ) -> None:
-    """Recovery 原子关闭多个 claim，重开后保留 activation/tool 精确事实。"""
+    """Unknown 先接管 fence 并保留 claim，随后 finish 原子闭合历史。"""
     prepared = _prepare_tool_batch(lifecycle_store)
     _assert_session_projection(lifecycle_store, "run-1")
     first_claimed = lifecycle_store.claim_tool_call(
@@ -2245,6 +2297,8 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
         )
     )
 
+    session_before = lifecycle_store.load_session("session-1")
+    calls_before = lifecycle_store.list_tool_calls("run-1")
     recovered = lifecycle_store.recover_active_run(
         RecoverActiveRun(
             run_id="run-1",
@@ -2252,13 +2306,46 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
             expected_activation_id="activation-1",
             expected_checkpoint_sequence=claimed.checkpoint.sequence,
             recovery_disposition=RecoveryDisposition.OUTCOME_UNKNOWN,
+            new_activation_id="activation-recovery",
             now=_T3,
         )
     )
+    assert recovered.run.phase.value == "active"
+    assert recovered.run.current_activation_id == "activation-recovery"
+    assert recovered.run.terminal_session_message_count is None
+    assert recovered.result is None
+    assert recovered.checkpoint.sequence == claimed.checkpoint.sequence + 1
+    assert recovered.checkpoint.activation_id == "activation-recovery"
+    assert recovered.checkpoint.resumability is CheckpointResumability.BLOCKED_UNKNOWN
+    assert recovered.checkpoint.engine_cursor == claimed.checkpoint.engine_cursor
+    assert recovered.run.usage == claimed.run.usage
+    assert lifecycle_store.load_session_lane("session-1") == "run-1"
+    assert lifecycle_store.load_session("session-1") == session_before
+    assert lifecycle_store.list_tool_calls("run-1") == calls_before
+    assert [event.kind.value for event in recovered.events] == [
+        "activation.abandoned",
+        "activation.started",
+    ]
+    if isinstance(lifecycle_store, SQLiteStore):
+        reopened = SQLiteStore(lifecycle_store.path)
+        assert reopened.load_run("run-1") == recovered.run
+        assert reopened.load_checkpoint("run-1") == recovered.checkpoint
+        assert reopened.list_tool_calls("run-1") == calls_before
+        assert reopened.load_session_lane("session-1") == "run-1"
+    with pytest.raises(IrisRunConflictError, match="fence"):
+        lifecycle_store.finish_run(
+            FinishRun(
+                run_id="run-1",
+                expected_run_revision=recovered.run.revision,
+                activation_id="activation-1",
+                stop_reason=RunStopReason.CANCELLED,
+                now=_T3,
+            )
+        )
+    recovered = _finish(lifecycle_store, recovered, RunStopReason.OUTCOME_UNKNOWN)
     _assert_session_projection(lifecycle_store, "run-1")
 
     assert [event.kind for event in recovered.events] == [
-        "activation.abandoned",
         "tool_call.outcome_unknown",
         "tool_call.outcome_unknown",
         "run.terminal",
@@ -2275,7 +2362,7 @@ def test_outcome_unknown_recovery_roundtrips_exact_activation_and_tool_facts(
     assert [result.tool_use_id for result in tool_results] == ["call-1", "call-2", "call-3"]
     assert recovered.session_revision == session.revision
     assert recovered.checkpoint is not None
-    assert recovered.checkpoint.sequence == claimed.checkpoint.sequence
+    assert recovered.checkpoint.sequence == claimed.checkpoint.sequence + 1
     assert recovered.checkpoint.session_revision == session.revision
     assert recovered.run.terminal_session_message_count == 4
     assert lifecycle_store.load_run("run-1").terminal_session_message_count == 4
@@ -2329,7 +2416,7 @@ def _subagent_parent(store: LifecycleStore) -> RunCommit:
             activation_id="parent-a",
             now=_NOW,
         )
-    )
+    ).commit
     assistant = Msg.assistant(
         [ToolUseBlock(id="delegate", name="subagent", input={"prompt": "work"})]
     )

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
-from ..exceptions import IrisRunNotFoundError, IrisRunStateError
+from ..exceptions import IrisExecutionCleanupError, IrisRunNotFoundError, IrisRunStateError
 from ..hitl import HumanInteractionResponse
 from ..lifecycle import (
     AgentRunOptions,
@@ -697,7 +697,12 @@ class SessionManager:
         self._current_run_id: str | None = None
         self._current_task: asyncio.Task[RunResult] | None = None
         self._interrupt_task: asyncio.Task[RunResult] | None = None
+        self._managed_tasks: set[asyncio.Task[RunResult]] = set()
         self._closed = False
+        self._close_complete = False
+        self._close_task: asyncio.Task[None] | None = None
+        self._close_run_id: str | None = None
+        self._close_owned_tasks: tuple[asyncio.Task[RunResult], ...] = ()
         self._event_consumer_started = False
         self._steering = _SessionSteeringPort(self)
         self._follow_up_admissions: dict[str, _FollowUpAdmission] = {}
@@ -943,17 +948,35 @@ class SessionManager:
             )
             if snapshot.phase is RunPhase.TERMINAL:
                 await self._handle_terminal_locked(run_id)
-            elif snapshot.phase is RunPhase.WAITING:
-                if self._current_task is not None and not self._current_task.done():
-                    if self._interrupt_task is not self._current_task:
-                        self._current_task.cancel()
-                else:
-                    task = asyncio.create_task(self._runner.cancel(run_id, reason=reason))
+            elif (
+                snapshot.phase is RunPhase.WAITING
+                or self._current_task is None
+                or self._current_task.done()
+            ):
+                if self._interrupt_task is None or self._interrupt_task.done():
+                    previous = self._current_task
+                    if previous is not None and previous.done():
+                        previous = None
+                    if previous is not None and not previous.done():
+                        previous.cancel()
+                    task = asyncio.create_task(
+                        self._cancel_after_delivery(run_id, previous, reason=reason)
+                    )
                     self._current_task = task
+                    self._interrupt_task = task
                     self._attach_settlement_callback(task, run_id, submission=None)
                 # 连续 interrupt 共享已有 cleanup owner，不能取消正在执行的 settlement。
-                self._interrupt_task = self._current_task
             return snapshot
+
+    async def _cancel_after_delivery(
+        self, run_id: str, previous: asyncio.Task[RunResult] | None, *, reason: str | None
+    ) -> RunResult:
+        """收回 WAITING 旧事件投递，或重试无人推进的 ACTIVE 清理。"""
+        if previous is not None:
+            settled = await asyncio.gather(previous, return_exceptions=True)
+            if isinstance(settled[0], IrisExecutionCleanupError):
+                raise settled[0]
+        return await self._runner.cancel(run_id, reason=reason)
 
     def events(self) -> AsyncIterator[SessionEvent]:
         """返回唯一 mixed event consumer；不回放 manager 创建前的 durable events。
@@ -988,47 +1011,62 @@ class SessionManager:
             尚未成型才以 ``session_closed`` 失败并取消其 task。
         """
         async with self._lock:
-            if self._closed:
+            if self._close_complete:
                 return
-            self._closed = True
-            run_id = self._current_run_id
-            current_task = self._current_task
-            # claim 与 acknowledge/fail 之间不允许 await，因此持锁时不应存在悬挂 claim。
-            assert not self._claimed_steer, "claim 到 callback 之间不得出现 await"
-            for admission in tuple(self._follow_up_admissions.values()):
-                try:
-                    self._runner.get_run(admission.item.run_id)
-                except IrisRunNotFoundError:
-                    self._follow_up_admissions.pop(admission.item.submission_id, None)
-                    self._emit_submission_event(
-                        admission.item,
-                        "failed",
-                        reason="session_closed",
-                    )
-                    admission.task.cancel()
-                    self._cancel_follow_up_helpers(admission)
-                    if self._event_buffer is not None:
-                        self._event_buffer.discard_run(admission.item.run_id)
-                    if run_id == admission.item.run_id:
-                        run_id = None
-                else:
-                    self._complete_follow_up_success_locked(admission)
-            self._fail_items(self._pending.drain_all_pending(), reason="session_closed")
-            for pending_run_id in tuple(self._memory_handoffs):
-                self._release_memory_handoff(pending_run_id)
-            self._current_run_id = None
-            self._current_task = None
+            if not self._closed:
+                self._closed = True
+                run_id = self._current_run_id
+                # claim 与 acknowledge/fail 之间不允许 await。
+                assert not self._claimed_steer, "claim 到 callback 之间不得出现 await"
+                for admission in tuple(self._follow_up_admissions.values()):
+                    try:
+                        self._runner.get_run(admission.item.run_id)
+                    except IrisRunNotFoundError:
+                        self._follow_up_admissions.pop(admission.item.submission_id, None)
+                        self._emit_submission_event(
+                            admission.item, "failed", reason="session_closed"
+                        )
+                        admission.task.cancel()
+                        self._cancel_follow_up_helpers(admission)
+                        if self._event_buffer is not None:
+                            self._event_buffer.discard_run(admission.item.run_id)
+                        if run_id == admission.item.run_id:
+                            run_id = None
+                    else:
+                        self._complete_follow_up_success_locked(admission)
+                self._fail_items(self._pending.drain_all_pending(), reason="session_closed")
+                for pending_run_id in tuple(self._memory_handoffs):
+                    self._release_memory_handoff(pending_run_id)
+                if cancel_run:
+                    self._close_run_id = run_id
+                    self._close_owned_tasks = tuple(self._managed_tasks)
+            if self._close_task is None or self._close_task.done():
+                self._close_task = asyncio.create_task(self._finish_close(reason=reason))
+            task = self._close_task
         try:
-            if cancel_run and run_id is not None:
-                before = self._runner.get_run(run_id)
-                await self._runner.cancel(run_id, reason=reason)
-                if current_task is not None:
-                    await asyncio.shield(current_task)
-                for event in self._runner.list_events(run_id, before.last_event_sequence):
-                    self._relay_run_event(event)
+            await asyncio.shield(task)
         finally:
+            # host 即使因清理失败退出，也必须能结束 mixed event consumer。
             if self._event_buffer is not None:
                 self._event_buffer.close()
+
+    async def _finish_close(self, *, reason: str | None) -> None:
+        """关闭失败保留原 run 与任务引用；重试只补尚未完成的收尾。"""
+        run_id = self._close_run_id
+        if run_id is not None:
+            before = self._runner.get_run(run_id)
+            await self._runner.cancel(run_id, reason=reason)
+            for event in self._runner.list_events(run_id, before.last_event_sequence):
+                self._relay_run_event(event)
+        # 旧 terminal 的投递任务不再占当前 lane，但仍由 manager 负责关闭时排空。
+        await asyncio.gather(*self._close_owned_tasks, return_exceptions=True)
+        async with self._lock:
+            self._current_run_id = None
+            self._current_task = None
+            self._interrupt_task = None
+            self._close_owned_tasks = ()
+            self._close_run_id = None
+            self._close_complete = True
 
     # endregion
 
@@ -1096,8 +1134,10 @@ class SessionManager:
 
         # done callback 是同步上下文，收口需要取锁，因此只在这里派发一个 task。
         def schedule(completed: asyncio.Task[RunResult]) -> None:
+            self._managed_tasks.discard(completed)
             asyncio.create_task(self._settle_managed_task(completed, run_id, submission=submission))
 
+        self._managed_tasks.add(task)
         task.add_done_callback(schedule)
 
     async def _wait_for_admission(
@@ -1230,6 +1270,7 @@ class SessionManager:
         self._fail_items(self._pending.drain_steers_for_run(run_id), reason="target_terminal")
         self._current_run_id = None
         self._current_task = None
+        self._interrupt_task = None
         if not self._closed:
             await self._start_next_follow_up_locked()
 

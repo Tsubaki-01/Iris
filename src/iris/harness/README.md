@@ -41,13 +41,16 @@ port 持有的 session revision。后者由 store 的 `load_run_context(run_id, 
 后缀及当前 run 保护锚点，按需包含发现投影。公开 `get_session()` 仍返回完整原文。
 
 root 连接跨 run 复用。host 停止新调用后，须等待原 start/resume/recover 完整返回再 `aclose()`；
-cancel 的 durable result 或观察超时不代表 body 清理、事件投递已经结束。active 时关闭会报错，
-重复关闭幂等；关闭后仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，
+cancel 的 terminal 已包含必要命令收尾，但不代表原调用的事件投递已经退出；观察超时也不代表结算。
+active 时关闭会报错，
+关闭成功后重复关闭幂等；清理失败保留 pending 和资源关闭状态，再次 `aclose()` 会继续清理。
+开始关闭后不再接收业务调用，但仍可查询 durable 结果。`SessionManager.close()` 不接管 runner 资源，
 使用它时先 `close(cancel_run=True)` 再关闭 runner。
 
 child 的普通 YAML 可独立配置 MCP。fresh child 在 admission 前准备；准备失败返回
 `SUBAGENT_PREPARE_ERROR`，不创建 child run/link。每次 child WAITING/结束、恢复失败或提前返回
-均关闭本次资源；WAITING 只保留 durable link，下次 resume/recover 按当前配置重建。
+均关闭本次 child 自有资源，下次 resume/recover 按当前配置重建。root 命令服务、绝对期限
+timer 和失败清理 pending 不随临时 child runner 关闭；它们通过 exact child run 与 route 重建结算。
 父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
 创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
@@ -168,7 +171,8 @@ activation。SessionManager 在第一次 child await 前完成 resume admission�
 Parent 取消、deadline 或 parent-owned proxy 到期先结算 exact child，再结束 parent。
 Linked proxy 的 `request_cancel()` 返回仍为 WAITING 的请求快照；`cancel()` 或 manager
 settlement task 完成后才 terminal。`settlement_timeout` 覆盖 child 等待和 parent observation，
-超时保留 durable cancellation，后续 `cancel()` / `recover()` 可继续结算。连续 interrupt
+超时保留 durable cancellation，后续 `cancel()` / `recover()` 可继续结算。child 的停止收据只交给
+当前父调用；即使 child 已由 timer 终态，父 proxy 延后处理仍消费原收据，不重停后续环境。连续 interrupt
 共享原 cleanup task，follow-up 等到 parent 真正 terminal 才启动。
 
 Child interaction/deadline 或 outer tool timeout 先结算 child，再提交 `SUBAGENT_TIMEOUT`。
@@ -219,7 +223,7 @@ Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE 
 - `start(request, options=None)`：原子创建 run/start activation，并推进到 waiting 或 terminal；
 - `resume(run_id, interaction_id=..., response=...)`：消费 exact waiting interaction；
 - `request_cancel(run_id, reason=None)`：只保证首次请求持久化；active 本地 activation 在提交后
-  才收到 signal，waiting 可同事务 terminal cancelled；
+  才收到 signal，waiting 保留原状态，由异步 `cancel()` 清理后 terminal；
 - `cancel(..., settlement_timeout=None)`：request + 观察 durable terminal result；观察超时不写
   新事实；观察到结算不代表原 `start()` / `resume()` 调用已经退出；
 - `recover(run_id, expected_activation_id=...)`：对 active run 要求精确 fence。safe checkpoint
@@ -323,12 +327,17 @@ HITL response 通过 `manager.resume(interaction_id=..., response=...)` 等待�
 `admit_resume(...)` 在 activation 已接纳后返回 `ResumeReceipt(run_id, interaction_id)`。
 两者共享同一 admission owner；后台执行仍由 manager/runner 持有，不进入普通输入队列。
 `interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
-仍等待真实 settlement。`close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
+仍等待真实 settlement。WAITING 或清理失败后已无活动 continuation 的 ACTIVE run，由 manager
+持有唯一异步 cancel task；再次 interrupt 可重试 pending 清理。新 run 不继承旧 run 的 cancel owner。
+`close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
 event stream，但不取消或等待当前 run。
 
 即将关闭 event loop 的 host 使用 `close(cancel_run=True, reason=...)`：先关闭 admission 并
 失败掉 pending input，阻止启动下一条 follow-up，再通过 runner 取消并等待当前 run 结算。
-随后等待原 managed `start()` / `resume()` task 结束，包括 WAITING parent 正在继续等待 child 的情况。
+随后等待原 managed task 结束，包括 WAITING parent 正在继续等待 child、旧 terminal 尚在投递事件
+的情况。清理失败后 admission 保持关闭，但原 run/task 引用仍保留；再次 `close()` 只重试收尾，
+成功后重复关闭才幂等返回。取消某个 close 等待者不会取消 manager 持有的关闭任务。
+即使关闭清理失败，mixed event stream 也会结束，避免 host 的 consumer 阻挡退出。
 CLI 的 `/exit`、EOF、Ctrl-C 和错误退出均使用这条路径。
 
 Queue、receipt 状态、submission events、claim 和 durable event 水位都只存在于当前进程。Durable
@@ -363,8 +372,24 @@ Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mut
 
 ## Cancellation 与 recovery
 
+命令环境由 root 拥有，一个服务覆盖其 session 与 child。正常 COMPLETED/WAITING 保留环境；
+非正常结束先结算关联 child，再停止并排空命令调用，最后 `FinishRun` 释放 session lane。
+Docker 停整个共享容器，其他独立 run 的模型/原生工具/HITL 继续；Native 只覆盖目标 session
+的当前命令。当前调用已有停止收据时只等待那一轮排空，不再停止已重启的环境。
+
+`PendingSettlement` 只在进程内保留原 outcome/error、typed target 和当前 receipt。并发调用
+共用一个“停止→排空→终态”任务；取消某个等待者不会取消它。`IrisExecutionCleanupError`
+保留 ACTIVE/WAITING 和 lane，直接调用者收到异常，并通过 root 发布 `ExecutionCleanupFailed`
+小型 live fact；没有 publisher 时记录错误。下一次 cancel/recover/resume 优先只重试原结算，
+不改写原失败原因或重跑模型/命令。已知工具结果在清理错误传播前提交，不倒退成未知 claim。
+
+总期限 timer 由 root 持有，跨 WAITING 和临时 child runner 关闭继续有效；child 由 typed route
+重建，终态撤销 timer。root close 先撤销尚未触发 timer，等待已触发结算和 pending，再关闭资源。
+期限已经过期的 start 仍先取得 ACTIVE/fence/lane，但不提交输入；预算拒绝不写终态。
+两种路径都由 runner 清理后再结束，不能通过 store 捷径越过异步清理。
+
 结算失败时，runner 使用注入的 Clock 核对 absolute deadline，不依赖 timer 是否已经获得调度。
-到期后的 provider 异常、`response.failed` 和取消清理失败结算为 `DEADLINE_EXCEEDED`；
+到期后的 provider 异常、`response.failed` 和 provider 取消收尾错误结算为 `DEADLINE_EXCEEDED`；
 到期前的 provider 错误保持 `FAILED`。未提交的工具 claim 仍优先结算为
 `OUTCOME_UNKNOWN`。
 
@@ -377,7 +402,8 @@ callable、自定义异步 `BaseTool` 或 THREAD callable 的 body task 取消�
 body 已完成，或响应 signal 取消后仍正常返回时，结果经过后处理并按既有顺序 durable commit 后再结算
 cancelled。有限本地文件 IO 和 artifact 作业会在取消后收回确定结果，先提交工具事实再响应
 task cancellation、timeout 或 sibling cancellation；并行结果仍只提交无空洞的 ordinal 前缀。
-没有 signal 的外层 task cancellation 继续传播，留下可恢复的 ACTIVE 事实，不冒充用户取消。
+没有 signal 的外层 task cancellation 先完成命令环境和关联 child 清理，再传播，留下可恢复的
+ACTIVE 事实，不冒充用户取消。重复 task.cancel 不提前跳过这项收尾；失败保留 cleanup-only pending。
 未结算 claim 仍使 run 以 `TOOL_OUTCOME_UNKNOWN` 收口，包括只读调用；
 自定义 THREAD callable 的 worker 可以继续运行，晚到返回不能改写 durable result、history、checkpoint 或 events。
 
@@ -397,8 +423,9 @@ claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown
 settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
 
 active recovery 会验证 checkpoint v3、session revision、usage counters
-与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 会原子 abandon 旧 activation，
-把全部 claims 关闭为 outcome unknown，再形成 terminal result。正常 parent/control/
+与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 原子 abandon 旧 activation，
+取得新 RECOVER fence 并保存 BLOCKED_UNKNOWN checkpoint，清理后再关闭 claims 并写 unknown 终态。
+正常 parent/control/
 infrastructure 退出会先等待 runtime children drain，随后 revoke commit port；不会允许迟到 child
 继续写入。同步阻塞 callable 不保证并发加速，并且仍可能延迟 settlement。
 

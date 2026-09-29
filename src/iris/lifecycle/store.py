@@ -262,13 +262,12 @@ class ResolveInteraction:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestCancellation:
-    """记录首次 cancellation request，可显式结算 waiting run。"""
+    """只记录首次 cancellation request，不结算 run 或释放 lane。"""
 
     run_id: str
     expected_run_revision: int
     activation_id: str | None = None
     reason: str
-    settle_waiting: bool = False
     now: datetime
 
 
@@ -288,7 +287,7 @@ class FinishRun:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RecoverActiveRun:
-    """根据 durable effect facts 放弃并恢复或终止旧 activation。"""
+    """接管旧 activation 的恢复或 unknown 清理，或直接完成正常结果。"""
 
     run_id: str
     expected_run_revision: int
@@ -300,10 +299,10 @@ class RecoverActiveRun:
 
     def __post_init__(self) -> None:
         """校验 recovery disposition 与新 activation 的组合。"""
-        if (self.recovery_disposition is RecoveryDisposition.RESUME) != (
+        if (self.recovery_disposition is not RecoveryDisposition.FINALIZE) != (
             self.new_activation_id is not None
         ):
-            raise ValueError("resume recovery 必须且只能包含 new_activation_id")
+            raise ValueError("resume/outcome_unknown recovery 必须且只能包含 new_activation_id")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -316,6 +315,14 @@ class RunCommit:
     interaction: HumanInteraction | None = None
     events: tuple[RunEvent, ...] = ()
     result: RunResult | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelStepReservationResult:
+    """模型步准入事实及当前 aggregate 回执；拒绝不提交终态。"""
+
+    granted: bool
+    commit: RunCommit
 
 
 class LifecycleStore(Protocol):
@@ -340,7 +347,7 @@ class LifecycleStore(Protocol):
 
     def commit_run_input(self, command: CommitRunInput) -> RunCommit: ...
 
-    def reserve_model_step(self, command: ReserveModelStep) -> RunCommit: ...
+    def reserve_model_step(self, command: ReserveModelStep) -> ModelStepReservationResult: ...
 
     def record_compaction_usage(self, command: RecordCompactionUsage) -> RunCommit: ...
 
@@ -446,6 +453,7 @@ __all__ = [
     "CreateRun",
     "FinishRun",
     "LifecycleStore",
+    "ModelStepReservationResult",
     "RecoverActiveRun",
     "RequestCancellation",
     "ReserveModelStep",

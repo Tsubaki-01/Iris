@@ -354,7 +354,9 @@ async def test_waiting_interrupt_settles_old_run_then_starts_follow_up(tmp_path:
     events = await _collect_until_closed(stream)
 
     assert interrupted.run_id == current.run_id
-    assert interrupted.stop_reason is RunStopReason.CANCELLED
+    assert interrupted.phase is RunPhase.WAITING
+    assert interrupted.cancellation_requested_at is not None
+    assert store.load_run(current.run_id).stop_reason is RunStopReason.CANCELLED
     run_events = [event for event in events if isinstance(event, RunEvent)]
     assert len({(event.run_id, event.sequence) for event in run_events}) == len(run_events)
     delivered_index = next(
@@ -370,6 +372,75 @@ async def test_waiting_interrupt_settles_old_run_then_starts_follow_up(tmp_path:
         and event.kind is RunEventKind.RUN_STARTED
         for event in events[:delivered_index]
     )
+
+
+@pytest.mark.asyncio
+async def test_waiting_interrupt_always_has_async_cancel_owner_after_old_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAITING 旧 task 尚在投递时，取消它之后仍须实际 await runner.cancel。"""
+    registry = ToolRegistry()
+    registry.register_function(
+        lambda: "write", name="write", description="write", capabilities={ToolCapability.WRITE}
+    )
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="write", name="write", input={}))
+            ),
+        ),
+        store=store,
+    )
+    manager = SessionManager(runner, "waiting-owner")
+    receipt = await manager.submit("wait")
+    initial = manager._current_task
+    assert initial is not None
+    result = await initial
+    assert result.run.phase is RunPhase.WAITING
+    await _wait_until(
+        lambda: store.load_result(receipt.run_id) is not None and manager._current_task is None
+    )
+    order: list[str] = []
+    old_entered = asyncio.Event()
+    cancel_entered = asyncio.Event()
+    release_cancel = asyncio.Event()
+
+    async def old_delivery() -> object:
+        old_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            order.append("old-finished")
+
+    async def cancel(run_id: str, *, reason: str | None = None) -> object:
+        order.append("async-cancel")
+        cancel_entered.set()
+        await release_cancel.wait()
+        return store.load_result(run_id)
+
+    monkeypatch.setattr(runner, "request_cancel", lambda run_id, **kwargs: runner.get_run(run_id))
+    monkeypatch.setattr(runner, "cancel", cancel)
+    previous = asyncio.create_task(old_delivery())
+    manager._current_task = previous
+    await old_entered.wait()
+    try:
+        await manager.interrupt()
+        await asyncio.wait_for(cancel_entered.wait(), 1)
+        current = manager._interrupt_task
+        await manager.interrupt()
+        assert manager._interrupt_task is current
+        assert order == ["old-finished", "async-cancel"]
+    finally:
+        release_cancel.set()
+        previous.cancel()
+        await asyncio.gather(previous, return_exceptions=True)
+        if manager._interrupt_task is not None:
+            await asyncio.gather(manager._interrupt_task, return_exceptions=True)
+        await manager.close()
+        await runner.aclose()
 
 
 @pytest.mark.asyncio

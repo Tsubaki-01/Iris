@@ -61,6 +61,20 @@ checkpoint 只接受当前 payload 形状，也不保存 provider client、task�
 cancellation/finish/recover commands，以及 run/session/lane/interaction/checkpoint/tool/result/event
 reads。
 
+异常结算分为同步事实提交与 owner 的异步资源清理：
+
+- `CreateRun` 即使 deadline 已过也返回 ACTIVE、初始 checkpoint、activation 和 lane；
+  owner 不启动 engine，清理后调用 `FinishRun(DEADLINE_EXCEEDED)`。
+- `reserve_model_step()` 返回 `ModelStepReservationResult(granted, commit)`，其中 `commit` 是
+  `RunCommit`。预算拒绝返回 `granted=False` 和当前事实，不消耗模型步、不推进 revision/event，
+  也不提交 terminal 或释放 lane；runtime 将拒绝交给 owner 结算。
+- `RequestCancellation` 只持久化首次请求；WAITING 的 interaction 和 lane 保持，异步 owner
+  清理后通过 `FinishRun` 关闭交互并完成终态。
+- `RecoverActiveRun` 的 RESUME 与 OUTCOME_UNKNOWN 都必须提供 `new_activation_id`。
+  UNKNOWN 原子放弃旧 fence 并创建 RECOVER activation，checkpoint 标为 `blocked_unknown`；
+  run 保持 ACTIVE，原 claims 与已提交历史不变，清理后才 `FinishRun(OUTCOME_UNKNOWN)`。
+  FINALIZE 不提供新 activation，仍直接完成已知正常结果。
+
 `load_session_header(session_id)` 返回 `SessionHeader(session_id, revision, message_count,
 context_window)`，不读取原文、摘要或发现状态；缺失 session 返回零计数和空窗口。
 `load_run_context(run_id, *, include_tool_discovery)` 返回同一版本的 `SessionContextSnapshot`：

@@ -109,10 +109,18 @@ parent's current projection; its one-time prefix copy and decoding costs remain.
 Run creation records `initial_session_message_count` within its transaction. The first terminal
 settlement records the cumulative session message count in `RunRecord.terminal_session_message_count`,
 including tool closers, and freezes the current summary in `terminal_compaction` (`None` without a
-summary). Later reads preserve this snapshot. Creation-time deadlines, budget exhaustion, waiting cancellation,
-ordinary finish, `OUTCOME_UNKNOWN` recovery, and `FINALIZE` recovery all record it. Runs without a
-checkpoint or closer still record the actual count, including zero. SQLite uses already loaded
+summary). Later reads preserve this snapshot. Ordinary `FinishRun` and normal FINALIZE recovery
+record these terminal fields. Runs without a closer still record the actual count, including zero.
+SQLite uses already loaded
 session metadata instead of loading full history to count messages.
+
+An expired creation still acquires an ACTIVE run, initial checkpoint, activation, and lane.
+Model-step admission returns `ModelStepReservationResult(granted, commit)`; refusal returns current
+facts without changing revisions, usage, or events. Cancellation requests only record intent and
+leave WAITING interactions open. UNKNOWN recovery first acquires a new RECOVER fence through CAS,
+increments the checkpoint sequence, and marks it `BLOCKED_UNKNOWN`, preserving claims, usage, and
+committed history. The asynchronous owner performs cleanup before submitting `FinishRun`. Stores
+hold no transaction across that wait and do not release the lane early.
 
 Stores do not cache complete commands or promise successful resubmission of historical writes.
 Each mutation uses current state, revision/CAS, and activation fences; stale writes normally fail
@@ -245,15 +253,16 @@ remaining events on every read.
 loads the run/interaction and calls `recover()` with the exact activation fence or `resume()` with
 the exact interaction identity.
 
-Cancellation requests, waiting settlement, activation abandon/rebind, outcome-ready finalization,
-and unresolved-claim-to-unknown transitions are aggregate transactions. Runtime has no old-schema
+Cancellation requests, activation abandon/rebind, and outcome-ready finalization each use aggregate
+transactions. After cleanup, `FinishRun` atomically settles WAITING runs and unresolved claims.
+Runtime has no old-schema
 reader, dual write, or compatibility adapter; incompatible files are rejected directly.
 
 One active activation may hold multiple exact durable claims before any result is committed. Every
 claim remains bound to its step, ordinal, call ID, fingerprint, and version. If durable cancellation
 commits first, the store rejects a new claim without appending a claim event. If a claim commits
 first, that call can only commit a proven result or be closed atomically with every other unresolved
-claim as outcome unknown during terminal settlement or recovery; it is never replayed.
+claim as outcome unknown during terminal settlement; it is never replayed.
 
 Preflight failures and `CIRCUIT_OPEN` short-circuit results can commit directly from `PREPARED`
 without a claim event. Both stores use the same classification in `_tool_results.py`; actual tool

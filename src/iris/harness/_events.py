@@ -23,9 +23,16 @@ class _RunEventCollector:
     def __init__(self, callback: Callable[[RunEvent], None] | None = None) -> None:
         self.events: list[RunEvent] = []
         self._keys: set[tuple[str, int]] = set()
+        self._delivery_offset = 0
         self._callback = callback
 
-    def record(self, events: Sequence[RunEvent]) -> None:
+    def take_pending_events(self) -> list[RunEvent]:
+        """把尚未交给异步 observer 的部分移交一次，重试不重送旧批次。"""
+        pending = self.events[self._delivery_offset :]
+        self._delivery_offset = len(self.events)
+        return pending
+
+    def record(self, events: Sequence[RunEvent], *, relay: bool = True) -> None:
         """仅检查本批事件的键，并在首次收集时隔离执行同步回调。"""
         for event in events:
             key = (event.run_id, event.sequence)
@@ -33,7 +40,7 @@ class _RunEventCollector:
                 continue
             self._keys.add(key)
             self.events.append(event)
-            if self._callback is not None:
+            if relay and self._callback is not None:
                 try:
                     self._callback(event)
                 except Exception:

@@ -353,10 +353,19 @@ def test_session_lineage_survives_message_append_and_reopen(tmp_path: Path) -> N
     source_command = _create_command(
         run_id="source-run", session_id="source-session", activation_id="source-activation"
     )
-    store.create_run(
+    created = store.create_run(
         replace(
             source_command,
             options=AgentRunOptions(limits=RunLimits(deadline_at=source_command.now)),
+        )
+    )
+    store.finish_run(
+        FinishRun(
+            run_id=created.run.run_id,
+            expected_run_revision=created.run.revision,
+            activation_id=created.run.current_activation_id,
+            stop_reason=RunStopReason.DEADLINE_EXCEEDED,
+            now=source_command.now,
         )
     )
     store.fork_session(
