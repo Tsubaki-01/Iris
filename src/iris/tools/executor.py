@@ -22,9 +22,9 @@ from pydantic import BaseModel, ValidationError
 
 from ..exceptions import (
     IrisCancellationRequestedError,
-    IrisMCPOutcomeUnknownError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
+    IrisToolOutcomeUnknownError,
     IrisToolValidationError,
 )
 from ..hitl.models import (
@@ -550,7 +550,7 @@ class ToolExecutor:
                     result = await self._run_tool_body(tool, validated_input, context)
                     if isinstance(tool, ToolSearchTool) and not result.is_error:
                         revealed_tools = tuple(result.metadata["context_revealed_tools"])
-                except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
+                except (IrisCancellationRequestedError, IrisToolOutcomeUnknownError):
                     raise
                 except Exception as exc:
                     handled = await self._run_on_error(tool, exc, context)
@@ -564,7 +564,7 @@ class ToolExecutor:
                     }
                 )
                 result = await self._run_after_call(tool, normalized, context)
-        except (IrisCancellationRequestedError, IrisMCPOutcomeUnknownError):
+        except (IrisCancellationRequestedError, IrisToolOutcomeUnknownError):
             raise
         except (IrisToolValidationError, ValidationError) as exc:
             result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))

@@ -11,9 +11,9 @@ from pydantic import BaseModel
 
 from ..exceptions import (
     IrisMCPCallError,
-    IrisMCPOutcomeUnknownError,
     IrisMCPToolError,
     IrisToolExecutionError,
+    IrisToolOutcomeUnknownError,
     IrisToolValidationError,
 )
 from ..message import TextBlock
@@ -54,7 +54,7 @@ class MCPTool(BaseTool):
         """调用已发布的原始 wire 名，保留取消与 unknown 控制流。
 
         Raises:
-            IrisMCPOutcomeUnknownError: SDK 无确定结果且非受信只读，或 Iris 调用期限耗尽。
+            IrisToolOutcomeUnknownError: SDK 无确定结果且非受信只读，或 Iris 调用期限耗尽。
         """
         try:
             result = await self.connection.call_tool(
@@ -65,9 +65,9 @@ class MCPTool(BaseTool):
         except IrisMCPCallError as error:
             if self.descriptor.trusted_read_only:
                 return self._error(context, "MCP_CALL_FAILED", "MCP 调用未取得可用结果")
-            raise IrisMCPOutcomeUnknownError(error.message, **error.context) from error
+            raise IrisToolOutcomeUnknownError(error.message, **error.context) from error
         except TimeoutError as error:
-            raise IrisMCPOutcomeUnknownError("MCP 调用期限耗尽，结果无法确认") from error
+            raise IrisToolOutcomeUnknownError("MCP 调用期限耗尽，结果无法确认") from error
         try:
             return await run_tool_io(lambda: self._project_result(result, context))
         except IrisToolExecutionError as error:

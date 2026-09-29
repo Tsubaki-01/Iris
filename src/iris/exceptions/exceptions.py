@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from ..execution.models import ExecutionStopReceipt
 
 
 class IrisError(Exception):
@@ -235,6 +238,41 @@ class IrisToolValidationError(IrisToolError):
     """工具参数或状态无效时抛出。"""
 
 
+class IrisToolOutcomeUnknownError(IrisToolError):
+    """已 claim 的工具结果不明，必须由 runtime 结算而不能重放。"""
+
+    runtime_error_code = "TOOL_OUTCOME_UNKNOWN"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stop_receipt: ExecutionStopReceipt | None = None,
+        **context: Any,
+    ) -> None:
+        """分开保存执行结果未知的诊断与进程内停止事实。
+
+        Args:
+            message (str): 结果无法确认的说明。
+            stop_receipt (ExecutionStopReceipt | None): 已确认的停止事实，不进入通用 context。
+            **context (Any): 可用于普通错误详情的诊断字段。
+        """
+        super().__init__(message, **context)
+        self.stop_receipt = stop_receipt
+
+
+class IrisExecutionError(IrisToolError):
+    """命令执行环境准备或使用失败。"""
+
+    runtime_error_code = "EXECUTION_ERROR"
+
+
+class IrisExecutionCleanupError(IrisExecutionError):
+    """无法确认命令环境停止或必要收尾完成。"""
+
+    runtime_error_code = "EXECUTION_CLEANUP_FAILED"
+
+
 class IrisMCPError(IrisToolError):
     """MCP 准备、发现或资源关闭失败。"""
 
@@ -258,12 +296,6 @@ class IrisMCPCallError(IrisMCPError):
     """SDK 未提供可确认的调用结果，不推断请求是否已发送。"""
 
     runtime_error_code = "MCP_CALL_FAILED"
-
-
-class IrisMCPOutcomeUnknownError(IrisMCPError):
-    """已 claim 的 MCP 工具结果不明，必须由现有 runtime 结算。"""
-
-    runtime_error_code = "TOOL_OUTCOME_UNKNOWN"
 
 
 # ----- 记忆 (Memory) 领域 -----

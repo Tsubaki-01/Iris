@@ -10,7 +10,7 @@ from mcp import types
 from iris.exceptions import (
     IrisCancellationRequestedError,
     IrisMCPCallError,
-    IrisMCPOutcomeUnknownError,
+    IrisToolOutcomeUnknownError,
 )
 from iris.harness import AgentRunner
 from iris.lifecycle import (
@@ -99,7 +99,7 @@ async def test_unknown_bypasses_both_executor_error_handlers(
     registry = ToolRegistry()
     registry.register(tool)
     executor = ToolExecutor(registry, permission_policy=AllowTools(), middleware=[SwallowErrors()])
-    with pytest.raises(IrisMCPOutcomeUnknownError):
+    with pytest.raises(IrisToolOutcomeUnknownError):
         await executor.execute_one(
             ToolUseBlock(id="call", name=tool.name, input={}),
             ToolExecutionContext(workspace_root=tmp_path),

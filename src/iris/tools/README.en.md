@@ -304,7 +304,9 @@ Preflight errors are clipped without writing files.
 `artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
 Default permissions allow only locally trusted read-only MCP tools.
-`IrisMCPOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.
+`IrisToolOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.
+Ordinary tools and MCP share this unknown exception. Its optional `stop_receipt` separately holds
+process-local stop evidence, outside the generic error context and model-visible result.
 
 ## Current-session context reads
 

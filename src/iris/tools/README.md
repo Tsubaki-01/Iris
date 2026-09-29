@@ -472,7 +472,9 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 `persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
 取得 store。MCP adapter 见 [iris.mcp](../mcp/README.md)，复用现有 executor 与取消桥。
 默认策略仅允许本地受信只读 MCP，其余仍需确认。
-`IrisMCPOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
+`IrisToolOutcomeUnknownError` 透传内外两层异常处理，交由 runtime 使用既有 claim 结算。
+这是普通工具与 MCP 共用的 unknown 异常；可选 `stop_receipt` 单独保存进程内停止事实，
+不进入通用错误 context 或模型可见结果。
 
 会话与调用 ID 的文件名片段统一为 `id_` 加完整 UTF-8 字节的小写十六进制编码；空 ID
 编码为 `id_`。每次落盘再附加随机标识，即使同一 session 重复使用 call ID，也不会覆盖旧产物。

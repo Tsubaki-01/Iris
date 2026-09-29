@@ -105,8 +105,9 @@ Shared assembly passes the context-policy setting through the same `defer_tools`
 manager and catalog, without changing remote schemas or rebuilding adapters on demand.
 
 Default permissions allow MCP tools only when local trust_annotations and readOnlyHint are both
-true. Other tools require confirmation. Uncertain SDK failures become ordinary errors or
-OUTCOME_UNKNOWN according to that policy; Iris interruption with an unsettled claim follows the
+true. Other tools require confirmation. Uncertain SDK failures become ordinary errors or raise the
+shared `IrisToolOutcomeUnknownError` for OUTCOME_UNKNOWN settlement according to that policy;
+Iris interruption with an unsettled claim follows the
 existing unknown path even for trusted reads. MCP tools remain outside parallel windows.
 The existing executor cancels SDK requests and waits for cleanup before settlement; cancellation
 does not prove remote effects stopped. CLI shutdown waits for `manager.close(cancel_run=True)`,
