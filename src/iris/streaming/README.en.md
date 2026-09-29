@@ -156,6 +156,12 @@ The earlier projection boundary already removes raw provider chunks/headers/keys
 artifact paths and bytes, and arbitrary metadata. Gateway filtering consumes that trusted allowlist
 without reparsing payloads.
 
+Successful `edit_file` live `tool.completed` events additionally expose a top-level `file_change`
+containing only the workspace-relative `file_path` and text `patch`. SSE and WebSocket use the same
+projection. Model history keeps the short edit summary; arbitrary tool data is not exposed.
+Durable snapshots retain the field policy above. Hosts can retrieve the full patch from the
+committed ToolCallRecord's `result.data.file_change` without changing the transport envelope.
+
 ## SSE adapter
 
 `SSEAdapter` returns `AsyncIterator[bytes]` and creates no HTTP route:

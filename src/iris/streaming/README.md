@@ -145,6 +145,11 @@ tool result data/stats/metadata 与 pending interaction 的 workspace path；这
 Phase 03 projection 已在更早边界删除 raw provider chunk/header/key/traceback，以及 artifact path、
 bytes 和任意 metadata。Gateway filtering 只消费该 trusted allowlist，不重新解析 payload。
 
+成功 `edit_file` 的 live `tool.completed` 额外提供顶层 `file_change`，仅包含相对 workspace 的
+`file_path` 与文本 `patch`。SSE/WS 使用同一投影；模型历史仍只有编辑短摘要，其他任意工具 data
+不进入事件。durable snapshot 继续遵循上述字段范围；host 可通过已提交 ToolCallRecord 的
+`result.data.file_change` 回查完整 patch，不需要改动传输 envelope。
+
 ## SSE adapter
 
 `SSEAdapter` 返回 `AsyncIterator[bytes]`，不创建 HTTP route：

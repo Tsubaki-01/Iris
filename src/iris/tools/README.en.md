@@ -287,6 +287,22 @@ Standalone SDK `register_memory_tools()` still defaults to an empty selection; s
 `register_file_tools()` registers, in stable order, `read_file`, `list_files`, `grep_search`,
 `write_file`, and `edit_file`, injecting one shared `WorkspaceFileService`.
 
+Write/edit operations share a process-wide lock per resolved path, spanning cancellation and
+freshness checks through replacement and final stat. Different service instances, sessions, roots,
+and children serialize changes to the same file; a stale writer receives `STALE_FILE_STATE` after
+acquiring the lock. Different paths can proceed concurrently. There is no FIFO promise or
+coordination with shell commands, user Python code, external editors, or other processes.
+The actual worker holds the lock, so cancelling its waiter cannot release it early. Business
+cancellation while waiting produces `FILE_OPERATION_CANCELLED` before mutation; an operation
+already in progress returns its actual result instead of reporting a completed write as unstarted.
+
+A successful `edit_file` returns `data.file_change` with `file_path` and `patch`. Paths are relative
+to the effective workspace with POSIX separators. The unified diff uses the actual old/new text,
+normalized LF and no-final-newline markers. Model text stays a short summary; SDK and durable tool
+results retain the patch. `write_file` does not return one. Synchronous
+`WorkspaceFileService.edit_file()` still returns a string; the internal edit observation also
+carries the read record and patch.
+
 ```mermaid
 flowchart LR
     Executor["ToolExecutor"] --> Adapter["FileTool.arun"]

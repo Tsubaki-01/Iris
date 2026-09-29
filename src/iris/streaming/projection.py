@@ -403,6 +403,12 @@ def _safe_tool_result(result: ToolResult) -> dict[str, JsonValue]:
             "size_bytes": result.artifact.size_bytes,
             "preview": result.artifact.preview,
         }
+    if result.tool_name == "edit_file" and not result.is_error and "file_change" in result.data:
+        file_change = result.data["file_change"]
+        payload["file_change"] = {
+            "file_path": file_change["file_path"],
+            "patch": file_change["patch"],
+        }
     return payload
 
 

@@ -324,6 +324,17 @@ INLINE 阻塞仍可能延迟退出。自定义 THREAD callable 取消只结束 a
 `ReadFileRecord` 由 event loop 合并。worker 不修改共享 `ReadFileState`；失败不合并，也不覆盖
 其他文件的记录。同一批次中的读后写校验保持不变；同步 `WorkspaceFileService` 方法仍可直接使用。
 
+write/edit 共用进程级真实路径锁，覆盖取消检查、exists/freshness、读改写、replace 和最终 stat。
+不同 service、session 和 root/child 修改同一文件时会串行执行；后取得锁的旧版本写入返回
+`STALE_FILE_STATE`。不同文件仍可并行，不承诺 FIFO，也不协调 shell、Python 用户代码或外部编辑器。
+锁随实际 worker 持有，取消等待不会提前释放。等锁期间收到业务取消时，取得锁后返回明确未写入的
+`FILE_OPERATION_CANCELLED`；已经开始的有限修改会收回其实际结果，不在写入完成后改报未写入。
+
+`edit_file` 成功结果的 `data.file_change` 包含 `file_path` 与 `patch`。路径相对当前有效 workspace，
+使用 POSIX 分隔符；patch 从同次实际旧文和新文生成 unified diff，统一 LF 并保留无末尾换行标记。
+模型正文仍是短摘要，SDK 与持久化工具结果取得完整 patch；`write_file` 不返回 patch。
+同步 `WorkspaceFileService.edit_file()` 仍返回字符串，内部编辑观测同时携带结果文本、record 与 patch。
+
 最终结果归一化、序列化和 artifact 落盘同样交给 worker。上述有限本地操作即使等待方被重复
 取消，也会收回实际结果或错误，再结束等待；使用现有线程池，不新增常驻 worker 或 pending registry。
 这不改变直接调用 `CallableTool.arun()` 的 THREAD 取消契约，也不让远端请求变成不可取消。

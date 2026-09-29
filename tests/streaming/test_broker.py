@@ -477,3 +477,47 @@ def test_projection_allowlists_tool_and_provider_payloads(tmp_path: Path) -> Non
         "raw model output",
     ):
         assert secret not in serialized
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "failed"),
+    [("edit_file", False), ("edit_file", True), ("write_file", False)],
+)
+def test_projection_exposes_only_successful_edit_patch(tool_name: str, failed: bool) -> None:
+    """编辑成功仅投影路径与 patch，其他 data 不进入 live payload。"""
+    file_change = {
+        "file_path": "src/示例.py",
+        "patch": "--- a/src/示例.py\n+++ b/src/示例.py\n@@ -1 +1 @@\n-旧值\n+新值\n",
+    }
+    result = ToolResult(
+        tool_use_id="edit-1",
+        tool_name=tool_name,
+        content=[TextBlock(text="编辑结果")],
+        is_error=failed,
+        data={"file_change": {**file_change, "extra": "不公开"}, "other": "不公开"},
+        metadata={"trace_id": "不公开"},
+    )
+    event = RuntimeStreamEvent(
+        kind="tool.completed",
+        run_id="run-1",
+        session_id="session-1",
+        activation_id="activation-1",
+        step_index=0,
+        tool_call_id="edit-1",
+        tool_name=tool_name,
+        tool_ordinal=2,
+        tool_result=result,
+    )
+
+    projected = project_live_fact(event)
+
+    expected = {
+        "tool_call_id": "edit-1",
+        "tool_name": tool_name,
+        "tool_ordinal": 2,
+        "content": ["编辑结果"],
+        "is_error": failed,
+        **({"file_change": file_change} if tool_name == "edit_file" and not failed else {}),
+    }
+    assert projected
+    assert all(fact.payload == expected for fact in projected)
