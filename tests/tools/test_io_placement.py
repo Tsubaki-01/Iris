@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from iris.exceptions import IrisToolExecutionError
 from iris.message import ToolUseBlock
 from iris.tools import (
     ReadFileRecord,
@@ -16,6 +17,7 @@ from iris.tools import (
     ToolExecutionContext,
     ToolExecutor,
     ToolRegistry,
+    ToolResult,
     WorkspaceFileService,
     register_file_tools,
 )
@@ -44,6 +46,17 @@ async def test_file_mutation_runs_in_worker_and_merges_only_its_record(
     merges: list[int] = []
     original_write = service.atomic_write
     original_merge = ReadFileState.merge
+    waiting_service = WorkspaceFileService()
+    waiting_context = ToolExecutionContext(
+        workspace_root=tmp_path, read_state=ReadFileState(files=dict(state.files))
+    )
+    waiting_resolved = threading.Event()
+    original_resolve = waiting_service.resolve_path
+
+    def resolve_waiter(path: str, context: ToolExecutionContext, *, write: bool = False) -> Path:
+        resolved = original_resolve(path, context, write=write)
+        waiting_resolved.set()
+        return resolved
 
     def write(path: Path, content: str) -> None:
         writes.append(threading.get_ident())
@@ -59,6 +72,7 @@ async def test_file_mutation_runs_in_worker_and_merges_only_its_record(
 
     monkeypatch.setattr(service, "atomic_write", write)
     monkeypatch.setattr(ReadFileState, "merge", merge)
+    monkeypatch.setattr(waiting_service, "resolve_path", resolve_waiter)
     tool = register_file_tools(file_service=service).get(name)
     params = (
         {"file_path": "notes.txt", "content": "after"}
@@ -66,20 +80,33 @@ async def test_file_mutation_runs_in_worker_and_merges_only_its_record(
         else {"file_path": "notes.txt", "old_string": "before", "new_string": "after"}
     )
     execution = asyncio.create_task(tool.arun(tool.validate_input(params), context))
+    waiting: asyncio.Task[ToolResult] | None = None
     try:
         assert await asyncio.to_thread(entered.wait, 1)
         assert writes == [writes[0]] and writes[0] != loop_thread
         assert not execution.done() and state.files == before
+        waiting_tool = register_file_tools(file_service=waiting_service).get("write_file")
+        waiting = asyncio.create_task(
+            waiting_tool.arun(
+                waiting_tool.validate_input({"file_path": "notes.txt", "content": "second"}),
+                waiting_context,
+            )
+        )
+        assert await asyncio.to_thread(waiting_resolved.wait, 1)
         state.update(other)
         execution.cancel()
         await asyncio.sleep(0)
         execution.cancel()
         await asyncio.sleep(0)
         assert not execution.done()
+        assert not waiting.done()
     finally:
         release.set()
-        [result] = await asyncio.gather(execution, return_exceptions=True)
+        results = await asyncio.gather(
+            execution, *([waiting] if waiting is not None else []), return_exceptions=True
+        )
 
+    result, waiting_result = results
     assert not isinstance(result, BaseException)
     assert not result.is_error
     assert target.read_text(encoding="utf-8") == "after"
@@ -87,6 +114,10 @@ async def test_file_mutation_runs_in_worker_and_merges_only_its_record(
     assert state.get(target).size_bytes == 5
     assert merges == [loop_thread, loop_thread]
     assert len(writes) == 1
+    assert isinstance(waiting_result, IrisToolExecutionError)
+    assert "STALE_FILE_STATE" in waiting_result.message
+    if name == "edit_file":
+        assert "+after\n" in result.data["file_change"]["patch"]
 
 
 @pytest.mark.asyncio

@@ -1087,7 +1087,7 @@ def _resolve(store: LifecycleStore, waiting: RunCommit) -> tuple[ResolveInteract
     return command, store.resolve_interaction(command)
 
 
-def _prepare_tool(store: LifecycleStore) -> RunCommit:
+def _prepare_tool(store: LifecycleStore, *, tool_name: str = "probe") -> RunCommit:
     created = _create(store)
     reserved = store.reserve_model_step(
         ReserveModelStep(
@@ -1097,13 +1097,13 @@ def _prepare_tool(store: LifecycleStore) -> RunCommit:
             now=_T1,
         )
     ).commit
-    assistant = Msg.assistant([ToolUseBlock(id="call-tool", name="probe", input={"value": "A"})])
+    assistant = Msg.assistant([ToolUseBlock(id="call-tool", name=tool_name, input={"value": "A"})])
     prepared = RunToolCallRecord(
         run_id="run-1",
         step_index=0,
         ordinal=1,
         tool_call_id="call-tool",
-        tool_name="probe",
+        tool_name=tool_name,
         arguments={"value": "A"},
         fingerprint=_TOOL_FINGERPRINT,
         phase="prepared",
@@ -1730,7 +1730,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     lifecycle_store: LifecycleStore,
 ) -> None:
     """工具 effect 必须存在 durable claim，result 提交推进 tool/session/checkpoint。"""
-    prepared = _prepare_tool(lifecycle_store)
+    prepared = _prepare_tool(lifecycle_store, tool_name="edit_file")
     prepared = lifecycle_store.record_compaction_usage(
         RecordCompactionUsage(
             run_id="run-1",
@@ -1753,11 +1753,16 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     with pytest.raises(IrisRunConflictError):
         lifecycle_store.claim_tool_call(claim)
     claimed_call = lifecycle_store.list_tool_calls("run-1")[0]
+    file_change = {
+        "file_path": "src/示例.py",
+        "patch": "--- a/src/示例.py\n+++ b/src/示例.py\n@@ -1 +1 @@\n-旧值\n+新值\n",
+    }
     result = ToolResult(
         tool_use_id="call-tool",
-        tool_name="probe",
-        content=[TextBlock(text="done")],
-        metadata={"context_tool_name": "probe"},
+        tool_name="edit_file",
+        content=[TextBlock(text="EDITED: src/示例.py")],
+        data={"file_change": file_change},
+        metadata={"context_tool_name": "edit_file"},
     )
 
     committed = lifecycle_store.commit_tool_result(
@@ -1783,8 +1788,13 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     )
     assert committed.run.usage.tool_calls_committed == 1
     assert committed.run.usage.compaction.total_tokens == 22000
-    assert lifecycle_store.list_tool_calls("run-1")[0].result == result
-    assert lifecycle_store.load_session("session-1").revision == 2
+    stored_result = lifecycle_store.list_tool_calls("run-1")[0].result
+    assert stored_result == result
+    assert stored_result.data == {"file_change": file_change}
+    session = lifecycle_store.load_session("session-1")
+    assert session.revision == 2
+    assert session.messages[-1].tool_results[0].content == "EDITED: src/示例.py"
+    assert "file_change" not in session.messages[-1].model_dump_json()
     _assert_session_projection(lifecycle_store, "run-1")
 
 

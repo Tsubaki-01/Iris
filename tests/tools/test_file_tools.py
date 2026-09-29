@@ -24,6 +24,7 @@ from iris.tools import (
     WorkspacePolicy,
     register_file_tools,
 )
+from iris.tools.builtin.file import EditFileInput
 
 
 class _ScandirEntries:
@@ -503,6 +504,109 @@ async def test_successful_edit_updates_file_and_read_state(tmp_path: Path) -> No
     assert result.is_error is False
     assert path.read_text(encoding="utf-8") == "hello new\n"
     assert context.read_state.files[str(path.resolve())].size_bytes == path.stat().st_size
+    assert result.data == {
+        "file_change": {
+            "file_path": "notes.txt",
+            "patch": "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n-hello old\n+hello new\n",
+        }
+    }
+    assert result.model_content == "EDITED: notes.txt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "old,new", [("旧行\r\n末行", "新行\r\n尾行"), ("旧行\n", "新行"), ("旧行", "新行\n")]
+)
+async def test_edit_patch_uses_full_text_lf_and_missing_newline_markers(
+    tmp_path: Path, old: str, new: str
+) -> None:
+    """审阅 patch 统一 LF，并反映旧文/新文各自的末尾换行状态。"""
+    child = tmp_path / "child"
+    child.mkdir()
+    target = child / "说明.txt"
+    target.write_bytes(old.encode())
+    context = ToolExecutionContext(workspace_root=child, read_state=ReadFileState())
+    executor = _file_executor(write_mode="allow")
+    await executor.execute_one(
+        ToolUseBlock(id="read", name="read_file", input={"file_path": "说明.txt"}), context
+    )
+    result = await executor.execute_one(
+        ToolUseBlock(
+            id="edit",
+            name="edit_file",
+            input={
+                "file_path": str(target),
+                "old_string": old.replace("\r\n", "\n"),
+                "new_string": new,
+            },
+        ),
+        context,
+    )
+    assert not result.is_error
+    change = result.data["file_change"]
+    assert change["file_path"] == "说明.txt"
+    patch = change["patch"]
+    assert patch.startswith("--- a/说明.txt\n+++ b/说明.txt\n")
+    assert "\r" not in patch
+    assert "-旧行" in patch and "+新行" in patch
+    assert patch.count("\\ No newline at end of file\n") == int(not old.endswith("\n")) + int(
+        not new.endswith("\n")
+    )
+    assert target.read_bytes() == new.replace("\n", os.linesep).encode("utf-8")
+    missing_newline = "\\ No newline at end of file\n"
+    if "\r\n" in new:
+        windows_newline = os.linesep == "\r\n"
+        expected_read = "新行\n\n尾行" if windows_newline else "新行\n尾行"
+        expected_hunk = (
+            f"@@ -1,2 +1,{3 if windows_newline else 2} @@\n"
+            f"-旧行\n-末行\n{missing_newline}+新行\n"
+            + ("+\n" if windows_newline else "")
+            + f"+尾行\n{missing_newline}"
+        )
+    else:
+        expected_read = new
+        expected_hunk = (
+            "@@ -1 +1 @@\n-旧行\n"
+            + (missing_newline if not old.endswith("\n") else "")
+            + "+新行\n"
+            + (missing_newline if not new.endswith("\n") else "")
+        )
+    assert target.read_text(encoding="utf-8") == expected_read
+    assert patch == "--- a/说明.txt\n+++ b/说明.txt\n" + expected_hunk
+
+
+def test_sync_edit_keeps_short_string_and_observed_edit_returns_patch(tmp_path: Path) -> None:
+    """同步公开入口仍返回字符串，内部观测包含同次修改的 patch 与 record。"""
+    target = tmp_path / "a.py"
+    target.write_text("old\n", encoding="utf-8")
+    context = ToolExecutionContext(workspace_root=tmp_path, read_state=ReadFileState())
+    context.read_state.update(target)
+    service = WorkspaceFileService()
+    assert (
+        service.edit_file(
+            EditFileInput(file_path="a.py", old_string="old", new_string="new"), context
+        )
+        == "EDITED: a.py"
+    )
+    observed = service.edit_file_observed(
+        EditFileInput(file_path="a.py", old_string="new", new_string="new"), context
+    )
+    assert observed.content == "EDITED: a.py"
+    assert observed.file_path == "a.py" and observed.patch == ""
+    assert observed.record.path == target.resolve()
+
+
+@pytest.mark.asyncio
+async def test_write_file_does_not_add_edit_patch(tmp_path: Path) -> None:
+    """创建文件仍返回原短结果，不顺带扩展 write 的交付协议。"""
+    result = await _file_executor(write_mode="allow").execute_one(
+        ToolUseBlock(
+            id="write", name="write_file", input={"file_path": "new.txt", "content": "new"}
+        ),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert result.model_content == "WROTE: new.txt"
+    assert "file_change" not in result.data
 
 
 @pytest.mark.asyncio

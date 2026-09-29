@@ -17,6 +17,8 @@ import tempfile
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from difflib import unified_diff
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, ClassVar, Generic, Literal, TextIO, TypeVar, cast
@@ -25,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import TextBlock
+from .._file_mutation import file_mutation
 from .._io import run_tool_io
 from .._read_state import ReadFileRecord, ReadFileState
 from ..base import (
@@ -167,6 +170,16 @@ class EditFileInput(BaseModel):
         if not value:
             raise ValueError("old_string 不能为空")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class EditFileObservation:
+    """同一次已完成编辑的短结果、文件观测与文本审阅 patch。"""
+
+    content: str
+    record: ReadFileRecord
+    file_path: str
+    patch: str
 
 
 class WorkspaceFileService:
@@ -647,13 +660,14 @@ class WorkspaceFileService:
     ) -> tuple[str, ReadFileRecord]:
         """完成写入与 stat，返回观测但不修改调用方读取状态。"""
         path = self.resolve_path(params.file_path, context, write=True)
-        if path.exists():
-            self.require_fresh_read(path, context)
-        self.atomic_write(path, params.content)
-        return (
-            f"WROTE: {path.relative_to(context.workspace_root.resolve()).as_posix()}",
-            _written_file_record(path),
-        )
+        with file_mutation(path, cancellation=context.cancellation):
+            if path.exists():
+                self.require_fresh_read(path, context)
+            self.atomic_write(path, params.content)
+            return (
+                f"WROTE: {path.relative_to(context.workspace_root.resolve()).as_posix()}",
+                _written_file_record(path),
+            )
 
     def edit_file(self, params: EditFileInput, context: ToolExecutionContext) -> str:
         """对已读且未变的文件执行唯一字符串替换。
@@ -668,29 +682,47 @@ class WorkspaceFileService:
         Raises:
             IrisToolExecutionError: 当文件不存在、读取状态过期或匹配文本不唯一时。
         """
-        content, record = self.edit_file_observed(params, context)
-        self.ensure_read_state(context).merge(record)
-        return content
+        observed = self.edit_file_observed(params, context)
+        self.ensure_read_state(context).merge(observed.record)
+        return observed.content
 
     def edit_file_observed(
         self, params: EditFileInput, context: ToolExecutionContext
-    ) -> tuple[str, ReadFileRecord]:
-        """完成检查、编辑与 stat，返回观测但不修改调用方读取状态。"""
+    ) -> EditFileObservation:
+        """持锁完成检查、编辑、patch 与 stat，不修改调用方读取状态。"""
         path = self.resolve_path(params.file_path, context, write=True)
-        if not path.exists():
-            raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
-        self.require_fresh_read(path, context)
-        content = path.read_text(encoding="utf-8")
-        count = content.count(params.old_string)
-        if count == 0:
-            raise IrisToolExecutionError("MATCH_NOT_FOUND: 未找到 old_string")
-        if count > 1:
-            raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
-        self.atomic_write(path, content.replace(params.old_string, params.new_string, 1))
-        return (
-            f"EDITED: {path.relative_to(context.workspace_root.resolve()).as_posix()}",
-            _written_file_record(path),
-        )
+        with file_mutation(path, cancellation=context.cancellation):
+            if not path.exists():
+                raise IrisToolExecutionError("FILE_NOT_FOUND: 文件不存在")
+            self.require_fresh_read(path, context)
+            content = path.read_text(encoding="utf-8")
+            count = content.count(params.old_string)
+            if count == 0:
+                raise IrisToolExecutionError("MATCH_NOT_FOUND: 未找到 old_string")
+            if count > 1:
+                raise IrisToolExecutionError("AMBIGUOUS_MATCH: old_string 匹配多处")
+            updated = content.replace(params.old_string, params.new_string, 1)
+            relative_path = path.relative_to(context.workspace_root.resolve()).as_posix()
+            # 按现有文本 writer 的平台换行转换推导落盘文本，不改变写入行为或额外回读。
+            written_text = updated.replace("\n", os.linesep)
+            old_lines, new_lines = (
+                text.replace("\r\n", "\n").replace("\r", "\n").splitlines(keepends=True)
+                for text in (content, written_text)
+            )
+            diff = unified_diff(
+                old_lines, new_lines, fromfile=f"a/{relative_path}", tofile=f"b/{relative_path}"
+            )
+            patch = "".join(
+                line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+                for line in diff
+            )
+            self.atomic_write(path, updated)
+            return EditFileObservation(
+                content=f"EDITED: {relative_path}",
+                record=_written_file_record(path),
+                file_path=relative_path,
+                patch=patch,
+            )
 
     # endregion
 
@@ -934,11 +966,16 @@ class EditFileTool(FileTool[EditFileInput]):
     ) -> ToolResult:
         """调用文件服务执行唯一字符串替换。"""
         worker_context = _file_mutation_context(context)
-        content, record = await run_tool_io(
+        observed = await run_tool_io(
             lambda: self.file_service.edit_file_observed(params, worker_context)
         )
-        self.file_service.ensure_read_state(context).merge(record)
-        return self._text_result(content)
+        self.file_service.ensure_read_state(context).merge(observed.record)
+        return ToolResult(
+            tool_use_id="",
+            tool_name=self.name,
+            content=[TextBlock(text=observed.content)],
+            data={"file_change": {"file_path": observed.file_path, "patch": observed.patch}},
+        )
 
 
 def _file_mutation_context(context: ToolExecutionContext) -> ToolExecutionContext:

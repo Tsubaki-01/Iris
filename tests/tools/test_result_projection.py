@@ -53,3 +53,26 @@ def test_raw_tool_result_message_still_normalizes_metadata() -> None:
         tool_use_id="call-1", metadata={"trace_id": "t", "custom": 7, "extra": {"n": 1}}
     )
     assert message.tool_results[0].metadata == {"trace_id": "t", "extra": {"n": 1, "custom": 7}}
+
+
+def test_edit_patch_stays_in_complete_result_and_out_of_model_message() -> None:
+    """宿主保留完整编辑 patch，模型消息只得到短摘要。"""
+    file_change = {
+        "file_path": "src/示例.py",
+        "patch": "--- a/src/示例.py\n+++ b/src/示例.py\n@@ -1 +1 @@\n-旧值\n+新值\n",
+    }
+    result = ToolResult(
+        tool_use_id="edit-1",
+        tool_name="edit_file",
+        content=[TextBlock(text="EDITED: src/示例.py")],
+        data={"file_change": file_change},
+    )
+
+    restored = ToolResult.model_validate_json(result.model_dump_json())
+    message = result.to_msg()
+
+    assert restored.data == {"file_change": file_change}
+    assert message.tool_results[0].content == "EDITED: src/示例.py"
+    assert message.tool_results[0].metadata == {"tool_name": "edit_file"}
+    assert "file_change" not in message.model_dump_json()
+    assert "patch" not in message.model_dump_json()

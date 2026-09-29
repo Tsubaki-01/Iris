@@ -11,6 +11,9 @@ from typing import cast
 import pytest
 
 from iris.harness import SubmitReceipt
+from iris.message import TextBlock
+from iris.runtime import RuntimeStreamEvent
+from iris.streaming.broker import LiveStreamBroker
 from iris.streaming.gateway import GatewaySubscription, StreamingGateway
 from iris.streaming.models import (
     CommandReceipt,
@@ -21,6 +24,7 @@ from iris.streaming.models import (
     GatewayCommand,
     GatewayStreamItem,
     LiveEnvelope,
+    LiveSubscriptionRequest,
     ReplayGap,
     SnapshotAccepted,
     SnapshotCommand,
@@ -33,6 +37,7 @@ from iris.streaming.models import (
 )
 from iris.streaming.sse import SSEAdapter
 from iris.streaming.websocket import WebSocketAdapter
+from iris.tools import ToolResult
 
 
 class FakeSubscription(AsyncIterator[GatewayStreamItem]):
@@ -171,6 +176,92 @@ async def test_sse_encodes_envelope_and_control_items_without_fake_ids() -> None
     assert b"id:" not in frames[2]
     assert b"event: sync.page\n" in frames[2]
     assert b"id:" not in frames[3]
+    assert subscription.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["sse", "websocket"])
+async def test_transports_preserve_projected_edit_patch(transport: str) -> None:
+    """真实工具结果经 broker 投影后，两种协议交付相同 patch 和 identity。"""
+    file_change = {
+        "file_path": "src/示例.py",
+        "patch": "--- a/src/示例.py\n+++ b/src/示例.py\n@@ -1 +1 @@\n-旧值\n+新值\n",
+    }
+    broker = LiveStreamBroker(replay_capacity_per_scope=8, subscription_capacity=8)
+    live = broker.subscribe(LiveSubscriptionRequest(scope="session", scope_id="session-1"))
+    broker.publish(
+        RuntimeStreamEvent(
+            kind="tool.completed",
+            run_id="run-1",
+            session_id="session-1",
+            activation_id="activation-1",
+            step_index=0,
+            tool_call_id="edit-1",
+            tool_name="edit_file",
+            tool_ordinal=2,
+            tool_result=ToolResult(
+                tool_use_id="edit-1",
+                tool_name="edit_file",
+                content=[TextBlock(text="EDITED: src/示例.py")],
+                data={"file_change": file_change},
+            ),
+        )
+    )
+    envelope = await asyncio.wait_for(anext(live), timeout=0.5)
+    await live.aclose()
+    broker.close()
+    assert isinstance(envelope, LiveEnvelope)
+    subscription = FakeSubscription(envelope)
+
+    if transport == "sse":
+        frames = [frame async for frame in SSEAdapter(heartbeat_interval_s=1).stream(subscription)]
+        data_line = next(
+            line for line in frames[0].decode().splitlines() if line.startswith("data: ")
+        )
+        serialized = json.loads(data_line.removeprefix("data: "))
+    else:
+        gateway = FakeGateway(subscription)
+        sent: list[dict[str, object]] = []
+        delivered = asyncio.Event()
+        commands = deque(
+            [
+                SubscribeCommand(
+                    request_id="subscribe-edit",
+                    scope="session",
+                    scope_id="session-1",
+                ).model_dump_json()
+            ]
+        )
+
+        async def send(value: str) -> None:
+            payload = json.loads(value)
+            sent.append(payload)
+            if payload.get("kind") == "tool.completed":
+                delivered.set()
+
+        async def receive() -> str | None:
+            if commands:
+                return commands.popleft()
+            await delivered.wait()
+            return None
+
+        await asyncio.wait_for(
+            WebSocketAdapter(gateway=cast(StreamingGateway, gateway)).serve(receive, send),
+            timeout=0.5,
+        )
+        serialized = next(item for item in sent if item.get("kind") == "tool.completed")
+
+    assert serialized["payload"] == {
+        "tool_call_id": "edit-1",
+        "tool_name": "edit_file",
+        "tool_ordinal": 2,
+        "content": ["EDITED: src/示例.py"],
+        "is_error": False,
+        "file_change": file_change,
+    }
+    assert serialized["run_id"] == "run-1"
+    assert serialized["session_id"] == "session-1"
+    assert serialized["activation_id"] == "activation-1"
     assert subscription.closed
 
 
