@@ -38,6 +38,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aiodocker"
+version = "0.27.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/19/f07d8532d7489ed8629847d004d0bbd286287286a76828be43aca7e6b106/aiodocker-0.27.0.tar.gz", hash = "sha256:74586f4929aee4563ee7db50996a1a39ac35e06c80701daad31f94aadb6551c7", size = 328202, upload-time = "2026-05-27T07:06:49.731Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/de/54/cd3aa680c9653b8708e164d610948e7a9aa50bba619705ac6169f61b0837/aiodocker-0.27.0-py3-none-any.whl", hash = "sha256:c55647bdcaf546dd4fc9b52794a9510575e126888dff478a9185f580a40dc45e", size = 55037, upload-time = "2026-05-27T07:06:48.316Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1048,6 +1060,11 @@ dependencies = [
     { name = "referencing" },
 ]
 
+[package.optional-dependencies]
+sandbox = [
+    { name = "aiodocker" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
@@ -1063,6 +1080,7 @@ eval = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiodocker", marker = "extra == 'sandbox'", specifier = ">=0.27.0" },
     { name = "httpx2", specifier = ">=2.12.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "json5", specifier = ">=0.15.0" },
@@ -1074,6 +1092,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "referencing", specifier = ">=0.37.0" },
 ]
+provides-extras = ["sandbox"]
 
 [package.metadata.requires-dev]
 dev = [

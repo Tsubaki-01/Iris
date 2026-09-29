@@ -74,6 +74,7 @@ class _Call:
     request: CommandRequest
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    stop_requested: asyncio.Event = field(default_factory=asyncio.Event)
     protocol: _ProcessProtocol | None = None
     stop_operation: _NativeStopOperation | None = None
     termination: asyncio.Task[None] | None = None
@@ -99,6 +100,7 @@ class _NativeStopOperation:
         self.receipt = ExecutionStopReceipt(service._service_id, uuid4().hex)
         for call in self.calls:
             call.stop_operation = self
+            call.stop_requested.set()
         self._stopped = asyncio.create_task(self._stop())
         self._drained = asyncio.create_task(self._drain())
         self._drained.add_done_callback(_observe_completion)
@@ -251,13 +253,19 @@ class NativeCommandService:
                 call.ready.set()
             protocol = call.protocol
             status = CommandStatus.EXITED
+            stop_requested = asyncio.create_task(call.stop_requested.wait())
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(protocol.exited), call.request.timeout_seconds
+                completed, _pending = await asyncio.wait(
+                    (protocol.exited, stop_requested),
+                    timeout=call.request.timeout_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except TimeoutError:
-                status = CommandStatus.TIMED_OUT
-                await self._terminate(call)
+                if not completed:
+                    status = CommandStatus.TIMED_OUT
+                    await self._terminate(call)
+            finally:
+                stop_requested.cancel()
+                await asyncio.gather(stop_requested, return_exceptions=True)
             if call.stop_operation is not None:
                 receipt = await call.stop_operation.wait_stopped()
             if call.interrupted:
