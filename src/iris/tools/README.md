@@ -74,6 +74,41 @@ result = await executor.execute_one(
 assert result.model_content == "你好，Iris"
 ```
 
+## 显式命令执行
+
+在 Agent YAML 的 `tools.builtin` 中声明 `exec.command`，模型工具名为 `exec_command`。
+工具只接受 `command`、`cwd`（默认 `.`）和可选的正数 `timeout_seconds`。执行环境由
+root 的 `execution` 配置确定，模型不能修改模式、镜像或挂载；配置示例见
+[agents](../agents/README.md#executionconfig)。直接构造工具时使用
+`ExecCommandTool(ExecutionBinding(config, service, environment))`，服务准备与关闭归 host。
+
+`cwd` 由 `WorkspacePolicy` 在当前 Agent 的 workspace 内解析一次，再交给后端。
+Native 在宿主用户权限下执行，cwd 不限制命令内部访问其他路径。Docker 的 root/child
+共用 root 的 `/workspace` 挂载；child 的窄 workspace 只决定默认 cwd 和原生文件工具范围。
+child 的 `writes: deny` 不保证 Docker 命令只读；所有命令的挂载读写取 root 配置。
+每条命令使用新 shell，不延续 `cd/export`，不提供交互 stdin 或 TTY。
+
+`DefaultPermissionPolicy(execute_mode="confirm"|"allow"|"deny")` 独立裁决 EXECUTE，默认确认。
+命令仍经过预检、HITL、执行前权限刷新和 effect claim，沿现有非只读屏障串行执行。
+`BaseTool.timeout_owner` 默认 `ToolTimeoutOwner.RUNTIME`；Exec 为 `TOOL`，使用配置期限、
+请求期限与 `ToolExecutionContext.tool_timeout_seconds` 的最小值。run 总期限由外层管理。
+
+| 后端事实 | 工具结果 |
+| --- | --- |
+| exit 0 | 成功，正文包含 stdout/stderr |
+| 普通非零 exit（含 124/137） | `COMMAND_FAILED`，错误正文含真实退出码与诊断 |
+| 单命令期限到达 | `EXECUTION_TIMEOUT`，可按现有错误策略返回模型 |
+| 已确认取消 / 共享停止连带中断 | `EXECUTION_CANCELLED` / `EXECUTION_ENVIRONMENT_INTERRUPTED` |
+| 明确未启动 | `EXECUTION_UNAVAILABLE` |
+| 执行结果无法确认 | 原样抛出 `IrisToolOutcomeUnknownError`，不重放命令 |
+
+输出沿用既有 artifact 处理；`ToolResult.data` 只保留模式、状态、退出码、cwd、耗时和截断
+标记，不重复存放大段输出。停止收据与未完成清理异常保留在 excluded 的
+`context.command_stop_slot`，context 副本共享同一个槽；middleware 替换结果不会清空它。
+已知结果伴随清理失败时，Exec 先返回已知工具事实并记录 `cleanup_error`，供 runtime 提交后
+交给外层结算；没有已知事实的 `IrisExecutionCleanupError` 原样传播。控制异常不会转换为
+普通 middleware 错误。后端与停止范围见 [execution](../execution/README.md)。
+
 ## Web 搜索与网页读取
 
 `WebSearchTool` 调用 Tavily Search 查找来源，`WebFetchTool` 调用 Tavily Extract 读取
@@ -138,7 +173,7 @@ Extract 不传服务端 timeout，使用 basic 默认值。
 - `CallableExecutionMode`: 同步 callable 的本地执行位置，包含默认的 `INLINE` 和显式
   opt-in 的 `THREAD`；它不进入 provider schema。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`context_retention`、`metadata`。
-- `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`，以及不参与序列化的共享 `cancellation` signal。
+- `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`、`tool_timeout_seconds`，以及不参与序列化的共享 `cancellation` signal 与 `command_stop_slot`。
 - `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
@@ -450,9 +485,10 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 - `PermissionEffect`: `ALLOW`、`DENY`、`REQUIRE_HUMAN` 三态权限裁决。
 - `PermissionDecision(effect, reason="", metadata={})`: 权限裁决结果；拒绝或等待人工时必须有 `reason`。
 - `PermissionPolicy.check(tool, params, context)`: 权限策略接口。
-- `DefaultPermissionPolicy(write_mode="confirm"|"allow"|"deny")`: 只读工具允许；写工具按
-  配置等待人工、直接允许或直接拒绝。
-- `WorkspacePolicy`: 路径边界策略，用于文件工具。
+- `DefaultPermissionPolicy(write_mode="confirm"|"allow"|"deny", execute_mode="confirm"|"allow"|"deny")`:
+  只读工具允许；写入与执行分别按配置等待人工、直接允许或拒绝。execute allow 不自动放宽
+  MCP/NETWORK 等其他能力原有策略。
+- `WorkspacePolicy`: 文件工具路径与命令起始目录的边界策略，不约束 shell 内部文件访问。
 - `ReadFileState` / `ReadFileRecord`: 文件读后写入的乐观锁状态。
 
 ### Artifact
@@ -577,12 +613,12 @@ AskQuestionInput, AskQuestionTool, BaseTool, CallableExecutionMode, CallableTool
 CancellationSignal,
 CircuitBreaker, CircuitBreakerState,
 DeferredToolIndex, DocstringInfo, DocstringSchemaExtractor,
-DefaultPermissionPolicy, EditFileInput, FILE_TOOL_CLASSES, FileTool,
+DefaultPermissionPolicy, EditFileInput, ExecCommandInput, ExecCommandTool, FILE_TOOL_CLASSES, FileTool,
 GrepSearchInput, ListFilesInput, PermissionDecision, PermissionEffect,
 PermissionPolicy, PreparedToolCall,
 ReadFileInput, ReadFileRecord, ReadFileState, ToolArtifact,
 ToolArtifactStore, ToolCapability, ToolDefinition, ToolErrorInfo,
-ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolExecutor, ToolMiddleware,
+ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolTimeoutOwner, ToolExecutor, ToolMiddleware,
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool,

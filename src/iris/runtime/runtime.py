@@ -26,6 +26,7 @@ from ..exceptions import (
     IrisRunConflictError,
     IrisToolOutcomeUnknownError,
 )
+from ..execution.models import ExecutionStopReceipt
 from ..hitl import (
     HumanInteractionRequest,
     PermissionPrompt,
@@ -58,6 +59,7 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
+from ..tools.base import ToolTimeoutOwner
 from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentTool
 from ._compaction_summary import (
     consume_summary_response,
@@ -123,9 +125,11 @@ class _ToolCompletion:
 
 
 async def _execute_tool_with_timeout(
-    operation: Awaitable[ToolResult], timeout: float | None
+    operation: Awaitable[ToolResult], timeout: float | None, owner: ToolTimeoutOwner
 ) -> _ToolCompletion:
     """有限 IO 可能延后响应取消，但不能把已过期限的调用误判为正常完成。"""
+    if owner is ToolTimeoutOwner.TOOL:
+        return _ToolCompletion(await operation, False)
     budget = asyncio.timeout(timeout)
     async with budget:
         result = await operation
@@ -382,14 +386,21 @@ class AgentRuntime:
                         outcome=RuntimeActivationOutcome.CANCELLED,
                         cursor=cursor,
                         assistant_message=cursor.assistant_message,
+                        stop_receipt=self._stop_receipt(activation.run_id, prepared.tool_use.id),
+                        stop_call_id=prepared.tool_use.id,
                     )
                 if _deadline_expired(commits):
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
                         cursor=cursor,
                         assistant_message=cursor.assistant_message,
+                        stop_receipt=self._stop_receipt(activation.run_id, prepared.tool_use.id),
+                        stop_call_id=prepared.tool_use.id,
                     )
                 if isinstance(outcome, ChildWaiting):
+                    self.environment.command_stop_slots.pop(
+                        (activation.run_id, prepared.tool_use.id), None
+                    )
                     suspended = commits.rebind_subagent_proxy(
                         call=call, waiting=outcome, cursor=cursor
                     )
@@ -453,14 +464,30 @@ class AgentRuntime:
                         approved_tool_call_id=(
                             prepared.tool_use.id if approved_projection is not None else None
                         ),
+                        tool_timeout_seconds=activation.options.tool_timeout_seconds,
                     )
-                    completion = await _execute_tool_with_timeout(operation, timeout)
+                    completion = await _execute_tool_with_timeout(
+                        operation, timeout, prepared.timeout_owner
+                    )
                     result, tool_timed_out = completion.result, completion.timed_out
                 except IrisToolOutcomeUnknownError as error:
-                    return _unknown_tool_outcome(cursor, prepared, error.message)
+                    return _unknown_tool_outcome(
+                        cursor,
+                        prepared,
+                        error.message,
+                        stop_receipt=error.stop_receipt
+                        or self._stop_receipt(activation.run_id, prepared.tool_use.id),
+                    )
                 except IrisCancellationRequestedError:
                     if guard.claim_for(prepared.tool_use.id) is not None:
-                        return _unknown_tool_outcome(cursor, prepared, "工具 claim 后收到取消")
+                        return _unknown_tool_outcome(
+                            cursor,
+                            prepared,
+                            "工具 claim 后收到取消",
+                            stop_receipt=self._stop_receipt(
+                                activation.run_id, prepared.tool_use.id
+                            ),
+                        )
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.CANCELLED,
                         cursor=cursor,
@@ -468,7 +495,14 @@ class AgentRuntime:
                     )
                 except TimeoutError:
                     if guard.claim_for(prepared.tool_use.id) is not None:
-                        return _unknown_tool_outcome(cursor, prepared, "工具 claim 后执行超时")
+                        return _unknown_tool_outcome(
+                            cursor,
+                            prepared,
+                            "工具 claim 后执行超时",
+                            stop_receipt=self._stop_receipt(
+                                activation.run_id, prepared.tool_use.id
+                            ),
+                        )
                     if _deadline_expired(commits):
                         return RuntimeActivationResult(
                             outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
@@ -508,6 +542,14 @@ class AgentRuntime:
                 stream_sink=stream_sink,
                 subagent_call=subagent_call,
             )
+            stop_slot = self.environment.command_stop_slots.get(
+                (activation.run_id, prepared.tool_use.id)
+            )
+            if stop_slot is not None and stop_slot.cleanup_error is not None:
+                # 已知工具事实先提交；资源失败交由 harness 保留 pending，不能继续模型。
+                raise stop_slot.cleanup_error
+            receipt = None if stop_slot is None else stop_slot.receipt
+            receipt_call_id = prepared.tool_use.id if receipt is not None else None
             if _task_cancellation_pending():
                 raise asyncio.CancelledError
             if _activation_cancelled(commits, cancellation):
@@ -515,12 +557,16 @@ class AgentRuntime:
                     outcome=RuntimeActivationOutcome.CANCELLED,
                     cursor=cursor,
                     assistant_message=batch_assistant,
+                    stop_receipt=receipt,
+                    stop_call_id=receipt_call_id,
                 )
             if _deadline_expired(commits):
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
                     cursor=cursor,
                     assistant_message=batch_assistant,
+                    stop_receipt=receipt,
+                    stop_call_id=receipt_call_id,
                 )
             if tool_timed_out:
                 return RuntimeActivationResult(
@@ -528,6 +574,8 @@ class AgentRuntime:
                     cursor=cursor,
                     assistant_message=batch_assistant,
                     error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
+                    stop_receipt=receipt,
+                    stop_call_id=receipt_call_id,
                 )
             if result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP:
                 return RuntimeActivationResult(
@@ -535,7 +583,15 @@ class AgentRuntime:
                     cursor=cursor,
                     assistant_message=batch_assistant,
                     error=_tool_run_error(result),
+                    stop_receipt=receipt,
+                    stop_call_id=receipt_call_id,
                 )
+            self.environment.command_stop_slots.pop((activation.run_id, prepared.tool_use.id), None)
+
+    def _stop_receipt(self, run_id: str, call_id: str) -> ExecutionStopReceipt | None:
+        """只读取当前调用的进程内停止事实，不从历史结果推断。"""
+        slot = self.environment.command_stop_slots.get((run_id, call_id))
+        return None if slot is None else slot.receipt
 
     def _prepare_tool_plan(
         self,
@@ -662,8 +718,13 @@ class AgentRuntime:
                 metadata={"activation_id": activation.activation_id},
                 cancellation=cancellation,
                 effect_guard=guard,
+                tool_timeout_seconds=activation.options.tool_timeout_seconds,
             )
-            tasks.append(asyncio.create_task(_execute_tool_with_timeout(operation, timeout)))
+            tasks.append(
+                asyncio.create_task(
+                    _execute_tool_with_timeout(operation, timeout, prepared.timeout_owner)
+                )
+            )
 
         pending = set(tasks)
         try:
@@ -818,6 +879,8 @@ class AgentRuntime:
                 assistant_message=cursor.assistant_message,
                 error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
             )
+        for _, prepared in window:
+            self.environment.command_stop_slots.pop((activation.run_id, prepared.tool_use.id), None)
         return committed_cursor
 
     async def _commit_tool_result(
@@ -1019,11 +1082,7 @@ class AgentRuntime:
         )
         context_output = self.environment.context_builder.build(
             context_input,
-            system_addendum=(
-                context_window.memory_overview
-                if self.environment.memory_service is not None
-                else ""
-            ),
+            system_addendum=self._system_addendum(context_window),
         )
         request = self.environment.assembler.build_request(
             agent_config=self.environment.agent_config,
@@ -1038,6 +1097,25 @@ class AgentRuntime:
             selection=tool_selection,
         )
         return request, context_output
+
+    def _system_addendum(self, context_window: SessionContextWindow) -> str:
+        """每次从同源环境事实重建 system 附加段，再追加已采用的记忆概览。"""
+        lines = ["<runtime_environment>", f"host_os: {self.environment.host_os}"]
+        command = self.environment.command_environment
+        if command is not None:
+            lines.extend(
+                [
+                    f"execution_mode: {command.mode.value}",
+                    f"command_os: {command.command_os}",
+                    f"command_shell: {command.command_shell}",
+                    "编写命令时，以 command_os 和 command_shell 为准。",
+                ]
+            )
+        lines.append("</runtime_environment>")
+        environment = "\n".join(lines)
+        if self.environment.memory_service is not None and context_window.memory_overview:
+            return environment + "\n\n" + context_window.memory_overview
+        return environment
 
     def _measure_model_request(
         self, request: LLMRequest, context_snapshot: ContextSnapshot | None
@@ -1995,12 +2073,16 @@ def _unknown_tool_outcome(
     cursor: RuntimeCursor,
     prepared: PreparedToolCall,
     message: str,
+    *,
+    stop_receipt: ExecutionStopReceipt | None = None,
 ) -> RuntimeActivationResult:
     """构造 claim 已存在但缺少 durable result 的 unknown fact。"""
     return RuntimeActivationResult(
         outcome=RuntimeActivationOutcome.OUTCOME_UNKNOWN,
         cursor=cursor,
         assistant_message=cursor.assistant_message,
+        stop_receipt=stop_receipt,
+        stop_call_id=prepared.tool_use.id if stop_receipt is not None else None,
         error=RunErrorInfo(
             code="TOOL_OUTCOME_UNKNOWN",
             message=message,

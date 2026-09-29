@@ -14,6 +14,7 @@ Example:
 # region imports
 from __future__ import annotations
 
+import platform
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -22,6 +23,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..agents import AgentConfig
 from ..context import ContextBuilder, ContextBuildInput, ContextSource
+from ..execution.models import CommandEnvironment, CommandStopSlot
+from ..execution.service import ExecutionBinding
 from ..memory import MemoryService
 from ..message import LLMRequest, ModelStreamEvent
 from ..providers.protocols import CompletionProvider
@@ -112,6 +115,10 @@ class RuntimeEnvironment:
         skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
         execution_scope (RuntimeExecutionScope): 明确的 ROOT/CHILD 装配范围。
+        execution_binding (ExecutionBinding | None): root 拥有、child 借用的命令服务与配置。
+        command_environment (CommandEnvironment | None): 本 Agent 注册命令工具时的环境事实。
+        host_os (str): Iris 进程所在宿主操作系统。
+        command_stop_slots (dict): root/child 共享的当前调用停止事实槽。
         memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
         context_source (ContextSource | None): 宿主每步采集接口，不缓存快照。
     """
@@ -128,23 +135,37 @@ class RuntimeEnvironment:
     skill_registry: SkillRegistry | None = None
     mcp_manager: MCPManager | None = None
     execution_scope: RuntimeExecutionScope = RuntimeExecutionScope.ROOT
+    execution_binding: ExecutionBinding | None = None
+    command_environment: CommandEnvironment | None = None
+    host_os: str = field(default_factory=platform.system)
+    command_stop_slots: dict[tuple[str, str], CommandStopSlot] = field(default_factory=dict)
     memory_capture_port: RuntimeMemoryCapturePort | None = None
     context_source: ContextSource | None = None
 
     def __post_init__(self) -> None:
-        """归一化工具执行的 workspace 根路径。"""
+        """归一化 workspace，并将同一个停止事实映射交给工具桥接。"""
         self.workspace_root = self.workspace_root.resolve()
+        self.tool_bridge.command_stop_slots = self.command_stop_slots
 
     async def aprepare(self) -> MCPCatalogSnapshot | None:
-        """准备并发布当前环境的 MCP 工具，直接委托唯一 manager。"""
+        """准备绑定的命令服务和本环境自有 MCP，返回 MCP 目录快照。"""
+        if self.execution_binding is not None:
+            await self.execution_binding.service.prepare()
         if self.mcp_manager is not None:
             return await self.mcp_manager.prepare()
         return None
 
     async def aclose(self) -> None:
-        """关闭自有 MCP 资源；注入的 provider、memory 和 store 由 host 管理。"""
-        if self.mcp_manager is not None:
-            await self.mcp_manager.aclose()
+        """关闭自有 MCP 和 ROOT 执行资源，CHILD 保留借用的命令服务。"""
+        try:
+            if self.mcp_manager is not None:
+                await self.mcp_manager.aclose()
+        finally:
+            if (
+                self.execution_scope is RuntimeExecutionScope.ROOT
+                and self.execution_binding is not None
+            ):
+                await self.execution_binding.service.aclose()
 
 
 __all__ = [

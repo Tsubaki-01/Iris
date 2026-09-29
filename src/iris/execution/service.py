@@ -1,8 +1,16 @@
 """命令后端与工具、harness 之间的窄协议。"""
 
+from dataclasses import dataclass
 from typing import Protocol
 
-from .models import CommandOutcome, CommandRequest, ExecutionScope, ExecutionStopReceipt
+from .config import ExecutionConfig
+from .models import (
+    CommandEnvironment,
+    CommandOutcome,
+    CommandRequest,
+    ExecutionScope,
+    ExecutionStopReceipt,
+)
 
 
 class StopOperation(Protocol):
@@ -41,4 +49,13 @@ class CommandService(Protocol):
         ...
 
 
-__all__ = ["CommandService", "StopOperation"]
+@dataclass(frozen=True, slots=True)
+class ExecutionBinding:
+    """root 选定的配置、资源服务与环境说明，不在工具内重新装配。"""
+
+    config: ExecutionConfig
+    service: CommandService
+    environment: CommandEnvironment
+
+
+__all__ = ["CommandService", "ExecutionBinding", "StopOperation"]

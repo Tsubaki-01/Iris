@@ -34,6 +34,41 @@ class FixedPolicy:
         )
 
 
+@pytest.mark.parametrize(
+    "execute,effect",
+    [
+        ("allow", PermissionEffect.ALLOW),
+        ("confirm", PermissionEffect.REQUIRE_HUMAN),
+        ("deny", PermissionEffect.DENY),
+    ],
+)
+def test_execute_policy_is_independent_of_file_writes(
+    tmp_path: Path, execute: str, effect: PermissionEffect
+) -> None:
+    command = CallableTool(
+        lambda: "ok", name="command", description="command", capabilities={ToolCapability.EXECUTE}
+    )
+    policy = DefaultPermissionPolicy(execute_mode=execute, write_mode="deny")
+    assert policy.check(command, {}, ToolExecutionContext(workspace_root=tmp_path)).effect is effect
+
+
+@pytest.mark.parametrize("capability", [ToolCapability.MCP, ToolCapability.NETWORK])
+def test_execute_allow_does_not_bypass_other_capability_policies(
+    tmp_path: Path, capability: ToolCapability
+) -> None:
+    tool = CallableTool(
+        lambda: "ok",
+        name="mixed",
+        description="mixed",
+        capabilities={ToolCapability.EXECUTE, capability},
+    )
+    policy = DefaultPermissionPolicy(execute_mode="allow")
+    assert (
+        policy.check(tool, {}, ToolExecutionContext(workspace_root=tmp_path)).effect
+        is PermissionEffect.REQUIRE_HUMAN
+    )
+
+
 def test_default_allow_is_specific_to_concrete_subagent_tool(tmp_path: Path) -> None:
     class Port:
         async def execute(self, invocation: SubagentInvocation) -> SubagentExecutionOutcome:

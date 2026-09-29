@@ -40,6 +40,7 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
+from ..execution.models import ExecutionMode
 from ..hitl import (
     ApprovedToolCall,
     HumanInteraction,
@@ -275,7 +276,10 @@ class AgentRunner:
         self._observer_locks = tuple(asyncio.Lock() for _ in self.observers)
         self.clock = clock or _SystemClock()
         self.interaction_service = interaction_service or HumanInteractionService()
-        self._prepared = runtime.environment.mcp_manager is None
+        binding = runtime.environment.execution_binding
+        self._prepared = runtime.environment.mcp_manager is None and (
+            binding is None or binding.config.mode is ExecutionMode.NATIVE
+        )
         self._closed = False
         self._live_publisher = live_publisher
         if live_publisher is None:
@@ -324,7 +328,7 @@ class AgentRunner:
                         await self._memory_maintenance.aclose()
                     await self.runtime.environment.aclose()
                 except Exception:
-                    logger.exception("MCP 准备失败后的资源关闭失败")
+                    logger.exception("运行资源准备失败后的资源关闭失败")
                 raise
         if self._memory_maintenance is not None:
             await self._memory_maintenance.prepare()

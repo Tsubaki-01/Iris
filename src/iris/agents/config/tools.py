@@ -8,6 +8,7 @@ from typing import Any
 
 from ...config import get_config
 from ...exceptions import IrisConfigError
+from ...execution.service import ExecutionBinding
 from ...memory import (
     MEMORY_TOOL_CLASSES,
     MemoryConfig,
@@ -18,6 +19,7 @@ from ...memory import (
 )
 from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
+from ...tools.builtin.exec import ExecCommandTool
 from ...tools.builtin.file import (
     EditFileTool,
     GrepSearchTool,
@@ -54,6 +56,7 @@ def build_tool_registry(
     *,
     memory_service: MemoryService | None = None,
     memory_config: MemoryConfig | None = None,
+    execution_binding: ExecutionBinding | None = None,
 ) -> ToolRegistry:
     """根据 Agent 工具配置构建工具注册表。
 
@@ -61,6 +64,7 @@ def build_tool_registry(
         config (ToolsConfig): 已校验的工具配置。
         memory_service: 来源工厂已解析的服务，存在时自动绑定双读工具及文件读取范围。
         memory_config: 绑定工具的读取范围和单个写入 namespace。
+        execution_binding: root 已装配的命令服务与环境；仅显式 exec.command 消费。
 
     Returns:
         ToolRegistry: 已注册配置声明工具的注册表。
@@ -74,6 +78,7 @@ def build_tool_registry(
         list(config.builtin),
         memory_service=memory_service,
         memory_config=memory_config or MemoryConfig(),
+        execution_binding=execution_binding,
     )
     for ref in config.python.functions:
         registry.register_function(_import_ref(ref))
@@ -95,6 +100,7 @@ def _register_builtin_tools(
     *,
     memory_service: MemoryService | None,
     memory_config: MemoryConfig,
+    execution_binding: ExecutionBinding | None,
 ) -> None:
     """先绑定有效记忆服务的双读工具，再注册 YAML 声明的其它内置工具。"""
     memory_policy = default_memory_access_policy_factory(memory_config)
@@ -109,7 +115,11 @@ def _register_builtin_tools(
         )
     )
     for name in names:
-        if name in ("memory.search", "memory.fetch"):
+        if name == "exec.command":
+            if execution_binding is None:
+                raise IrisConfigError("exec.command 需要装配层提供 execution_binding", tool=name)
+            registry.register(ExecCommandTool(execution_binding))
+        elif name in ("memory.search", "memory.fetch"):
             raise IrisConfigError(
                 "memory 读取工具由 memory.enabled 自动启用，请移除手工声明", tool=name
             )

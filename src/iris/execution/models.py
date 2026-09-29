@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from ..exceptions import IrisExecutionCleanupError
+
 
 class ExecutionMode(StrEnum):
     """由 root 实例选定的命令运行环境。"""
@@ -19,6 +21,16 @@ class CommandStatus(StrEnum):
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
     ENVIRONMENT_INTERRUPTED = "environment_interrupted"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandEnvironment:
+    """工具说明与 system 提示共同使用的启动期环境事实。"""
+
+    host_os: str
+    mode: ExecutionMode
+    command_os: str
+    command_shell: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +64,7 @@ class CommandStopSlot:
     """当前工具因果链共享的可写槽；投影 context 时保留对象 identity。"""
 
     receipt: ExecutionStopReceipt | None = None
+    cleanup_error: IrisExecutionCleanupError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +83,7 @@ class CommandOutcome:
 
 
 __all__ = [
+    "CommandEnvironment",
     "CommandOutcome",
     "CommandRequest",
     "CommandStatus",

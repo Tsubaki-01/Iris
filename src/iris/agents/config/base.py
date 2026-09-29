@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from ...exceptions import IrisConfigError, IrisValidationError
+from ...execution.config import DockerConfig, ExecutionConfig
 from ...memory.config import MemoryConfig
 from ...providers import ModelRoute, parse_model_route
 from .compaction import CompactionConfig
@@ -167,10 +168,12 @@ class PermissionsConfig(BaseModel):
     Attributes:
         workspace (str): Agent 工作区路径。
         writes (Literal["confirm", "allow", "deny"]): 写入策略。
+        execute (Literal["confirm", "allow", "deny"]): 独立命令执行策略。
     """
 
     workspace: str = "."
     writes: Literal["confirm", "allow", "deny"] = "confirm"
+    execute: Literal["confirm", "allow", "deny"] = "confirm"
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -236,6 +239,7 @@ class AgentConfig(BaseModel):
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
+        execution (ExecutionConfig): root 命令环境配置，不自动注册工具。
         session (SessionConfig): 会话配置。
     """
 
@@ -250,6 +254,7 @@ class AgentConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -334,6 +339,8 @@ __all__ = [
     "AgentContextConfig",
     "AgentConfig",
     "AgentSkillsConfig",
+    "DockerConfig",
+    "ExecutionConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",

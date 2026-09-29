@@ -1,6 +1,6 @@
 # 命令执行
 
-本包提供 Native 与可选本地 Docker 命令环境。当前两种后端都可直接通过服务调用；Agent 命令注册将在后续阶段接入。
+本包提供 Native 与可选本地 Docker 命令环境。两种后端可直接通过服务调用，也可由 Agent 显式注册 `exec_command` 使用；普通工具仍在宿主执行。
 
 ```python
 from iris.execution import ExecutionConfig
@@ -15,7 +15,9 @@ docker = ExecutionConfig.model_validate({"mode": "docker"})
 
 停止分为两个完成点：同步 `stop(scope)` 立即登记并调度操作；工具 body 只等待 `wait_stopped()` 的物理停止证明，外层结算等待 `wait_drained()` 确认旧调用收尾。`ExecutionStopReceipt` 仅标识一次已证实的停止，不包含 Future 或资源句柄，不持久化。消费旧收据不得再次停止之后重启的环境。
 
-`CommandStopSlot` 是当前调用因果链的可写共享状态。context 投影保留槽的 identity，避免工具结果被 middleware 替换后丢失清理证明；它不是模型输入或历史数据。
+`CommandStopSlot` 是当前调用因果链的可写共享状态，保留 receipt 与尚未完成的 cleanup_error。context 投影保留槽的 identity，避免工具结果被 middleware 替换后丢失清理证明；它不是模型输入或历史数据。
+
+`ExecutionBinding` 绑定配置、共享服务与 `CommandEnvironment`。root 装配一次，child 借用同一绑定和调用槽，不单独关闭服务。Agent 配置与权限示例见 [agents](../agents/README.md)，工具参数与结果见 [tools](../tools/README.md)。
 
 ## 直接调用 Native
 

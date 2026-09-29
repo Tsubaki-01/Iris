@@ -98,7 +98,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 ## Public models and APIs
 
 `iris.agents` exports `AgentConfig`, `AgentContextConfig`, `AgentSkillsConfig`, `CompactionConfig`, `ContextPolicyConfig`, `ModelConfig`,
-`PermissionsConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
+`PermissionsConfig`, `ExecutionConfig`, `DockerConfig`, `PythonToolsConfig`, `SessionConfig`, `ToolsConfig`, `load_agent_config()`, and
 `build_tool_registry()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
@@ -107,10 +107,10 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   Streaming is selected by host injection of the runner's `live_publisher`; model configuration
   has no `stream` field.
 - `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`, and
-  `human.ask`. The latter exposes model tool name `ask_question`.
+  `human.ask` and `exec.command`, exposing `ask_question` and `exec_command` respectively.
 - `tools.python.functions` imports a callable `module:function` and registers it. `registrars`
   imports a callable receiving the registry. Inline Python and mixed lists are rejected.
-- `PermissionsConfig` defaults to workspace `.` and writes `confirm`; enforcement belongs to the
+- `PermissionsConfig` defaults to workspace `.`, writes `confirm`, and execute `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
@@ -199,13 +199,15 @@ The switch is fixed when constructing the Agent. Rebuild it and start a new sess
 the setting; hot switching is not supported. Static context memory and existing history remain.
 `include_tools=False` still controls whether a request sends tool schemas.
 
-`build_tool_registry(config, *, memory_service=None, memory_config=None)` registers Search/Fetch
+`build_tool_registry(config, *, memory_service=None, memory_config=None, execution_binding=None)` registers Search/Fetch
 when given a resolved service, then declared builtins and Python extensions. Explicit memory writes
 require a service; manual read declarations are rejected at this assembly boundary. `memory_config`
 binds read and write namespaces, defaulting to `MemoryConfig()`; this helper does not recheck enabled.
 Actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
+An explicit `exec.command` requires an already assembled `ExecutionBinding`, otherwise this helper
+raises `IrisConfigError`. It never creates, prepares, or closes command services.
 
 `AgentConfig.compaction` defaults to `CompactionConfig`, exported from both `iris.agents` and
 `iris.agents.config`:
@@ -285,6 +287,45 @@ runner = AgentRunner.from_config_path("agent.yaml")
 
 This package does not implement loops, automatic model calls, long-term memory, Redis, a vector
 database, or an ORM.
+
+## Command environment
+
+`AgentConfig.execution` defaults to native execution with a 120-second command limit. Selecting a
+mode does not register a tool; declare `exec.command` explicitly. `ExecutionConfig` and
+`DockerConfig` are exported from both Agent configuration entry points.
+
+```yaml
+execution:
+  mode: docker
+  timeout_seconds: 120
+  docker:
+    image: python:3.12-slim
+    network: none
+    cpus: 2
+    memory_mb: 1024
+    pids_limit: 128
+    environment: {}
+permissions:
+  workspace: .
+  writes: confirm
+  execute: confirm
+tools:
+  builtin: [file.read, exec.command]
+```
+
+Docker mode may omit the docker block to use these defaults. It requires the sandbox extra, a
+local Linux engine, and a prepared image; Iris does not pull images or fall back to the host.
+The optional endpoint accepts only a local Unix socket or Windows named pipe, defaulting to
+`unix:///var/run/docker.sock` or `npipe:////./pipe/docker_engine`. Native mode has no Docker
+dependency and rejects a docker block.
+
+The root owns the startup configuration and service. Children may register commands but cannot
+declare an execution override. They share the root mount and environment; their workspace only
+sets default command cwd and native file-tool scope. A Docker child's `writes: deny` does not make
+its commands read-only; the root bind controls writes and effective execute controls authorization.
+Native has no read-only mount, so registering commands in an effectively write-denied scope fails
+at assembly. Native cwd is not an OS access boundary. See [execution](../execution/README.md) and
+[command tools](../tools/README.en.md#explicit-command-execution) for limits and results.
 
 ## Maintenance
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -17,6 +18,10 @@ from ..context import (
     load_context_build_input,
 )
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
+from ..execution.config import DockerConfig, ExecutionConfig
+from ..execution.models import CommandEnvironment, CommandStopSlot, ExecutionMode
+from ..execution.native import NativeCommandService
+from ..execution.service import CommandService, ExecutionBinding
 from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
@@ -47,10 +52,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class RuntimeAssemblyBoundary:
-    """唯一解析后的 effective workspace 与实际权限策略。"""
+    """唯一解析的 workspace/policy 和 root 共享执行依赖。"""
 
     workspace_root: Path
     permission_policy: PermissionPolicy
+    workspace_writable: bool
+    execution_binding: ExecutionBinding
+    command_stop_slots: dict[tuple[str, str], CommandStopSlot]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,32 +77,78 @@ def resolve_runtime_boundary(
     parent_boundary: RuntimeAssemblyBoundary | None = None,
 ) -> RuntimeAssemblyBoundary:
     """解析 ROOT 边界，或将 CHILD 的 workspace/policy 收窄到父边界。"""
+    if parent_boundary is not None and "execution" in config.model_fields_set:
+        raise IrisConfigError("child 不能显式声明 execution，必须继承 root 执行配置")
     workspace = _resolve_relative_to_base(
         config.permissions.workspace, base_dir=_base_dir(config_path)
     ).resolve()
+    writable = config.permissions.writes != "deny"
     if parent_boundary is None:
         policy = (
             permission_policy
             if permission_policy is not None
-            else DefaultPermissionPolicy(write_mode=config.permissions.writes)
+            else DefaultPermissionPolicy(
+                write_mode=config.permissions.writes, execute_mode=config.permissions.execute
+            )
         )
-        return RuntimeAssemblyBoundary(workspace, policy)
-    parent_root = parent_boundary.workspace_root
-    if workspace.is_relative_to(parent_root):
-        effective_root = workspace
-    elif parent_root.is_relative_to(workspace):
-        effective_root = parent_root
+        binding = _create_execution_binding(config.execution, workspace, writable=writable)
+        slots: dict[tuple[str, str], CommandStopSlot] = {}
     else:
-        raise IrisConfigError(
-            "parent 与 child workspace 不相交",
-            parent_workspace=str(parent_root),
-            child_workspace=str(workspace),
-        )
-    return RuntimeAssemblyBoundary(
-        effective_root,
-        MostRestrictivePermissionPolicy(
+        parent_root = parent_boundary.workspace_root
+        if workspace.is_relative_to(parent_root):
+            pass
+        elif parent_root.is_relative_to(workspace):
+            workspace = parent_root
+        else:
+            raise IrisConfigError(
+                "parent 与 child workspace 不相交",
+                parent_workspace=str(parent_root),
+                child_workspace=str(workspace),
+            )
+        writable = writable and parent_boundary.workspace_writable
+        policy = MostRestrictivePermissionPolicy(
             parent_boundary.permission_policy,
-            DefaultPermissionPolicy(write_mode=config.permissions.writes),
+            DefaultPermissionPolicy(
+                write_mode=config.permissions.writes, execute_mode=config.permissions.execute
+            ),
+        )
+        binding = parent_boundary.execution_binding
+        slots = parent_boundary.command_stop_slots
+    if (
+        binding.config.mode is ExecutionMode.NATIVE
+        and not writable
+        and "exec.command" in config.tools.builtin
+    ):
+        raise IrisConfigError("Native 只读 workspace 不能注册 exec.command")
+    return RuntimeAssemblyBoundary(workspace, policy, writable, binding, slots)
+
+
+def _create_execution_binding(
+    config: ExecutionConfig, workspace_root: Path, *, writable: bool
+) -> ExecutionBinding:
+    """构造 root 的轻量执行 owner，不连接 Docker 或启动命令。"""
+    host_os = platform.system()
+    service: CommandService
+    if config.mode is ExecutionMode.NATIVE:
+        service = NativeCommandService(workspace_root)
+        command_os = host_os
+        command_shell = "cmd.exe" if host_os == "Windows" else "/bin/sh"
+    else:
+        from ..execution.docker import DockerCommandService
+
+        service = DockerCommandService(
+            workspace_root, cast(DockerConfig, config.docker), workspace_writable=writable
+        )
+        command_os = "Linux"
+        command_shell = "/bin/sh"
+    return ExecutionBinding(
+        config=config,
+        service=service,
+        environment=CommandEnvironment(
+            host_os=host_os,
+            mode=config.mode,
+            command_os=command_os,
+            command_shell=command_shell,
         ),
     )
 
@@ -152,7 +206,10 @@ def assemble_runtime(
     )
     context_input = _build_context_input(config, base_dir=base_dir)
     tool_registry = build_tool_registry(
-        config.tools, memory_service=memory_service, memory_config=config.memory
+        config.tools,
+        memory_service=memory_service,
+        memory_config=config.memory,
+        execution_binding=boundary.execution_binding,
     )
     if config.context_policy.enabled:
         access = cast(ContextAccessPort, context_access)
@@ -217,6 +274,14 @@ def assemble_runtime(
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
         execution_scope=execution_scope,
+        execution_binding=boundary.execution_binding,
+        command_environment=(
+            boundary.execution_binding.environment
+            if "exec.command" in config.tools.builtin
+            else None
+        ),
+        host_os=boundary.execution_binding.environment.host_os,
+        command_stop_slots=boundary.command_stop_slots,
         context_source=context_source,
     )
     return AgentRuntime(environment)
