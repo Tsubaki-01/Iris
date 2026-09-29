@@ -2,16 +2,20 @@
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from fakes import history_snapshot
 
 from iris.agents import ContextPolicyConfig
+from iris.command import CommandBinding, CommandConfig, CommandEnvironment, CommandMode
+from iris.command.native import NativeCommandService
 from iris.lifecycle import SessionCompaction
 from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.runtime._context_projection import project_context_request
 from iris.runtime._request_measurement import measure_request
 from iris.runtime.compaction import project_history
+from iris.tools import ExecCommandTool, RunPythonTool
 
 
 def _batch(
@@ -143,6 +147,30 @@ def test_unique_old_results_shorten_but_actual_duplicate_representative_stays() 
     assert results[1].content == duplicate
     assert "原文：result:5:0" in results[2].content
     assert "预览：HEADmi" in results[2].content and results[2].content.endswith("IL")
+
+
+@pytest.mark.parametrize("tool_type", [ExecCommandTool, RunPythonTool])
+def test_command_tool_preview_remains_intact_under_history_pressure(
+    tmp_path: Path, tool_type: type[ExecCommandTool] | type[RunPythonTool]
+) -> None:
+    """实际命令工具声明 keep 后，后续历史投影不再丢掉已有诊断尾部。"""
+    tool = tool_type(
+        CommandBinding(
+            CommandConfig(),
+            NativeCommandService(tmp_path),
+            CommandEnvironment("Linux", CommandMode.NATIVE, "Linux", "/bin/sh"),
+        )
+    )
+    body = "status: exited\n" + "bounded output\n" * 100 + "stderr: FINAL_ERROR"
+    raw = [
+        *_batch(body, name=tool.name, retention=tool.definition.context_retention),
+        *_batch(body, name=tool.name, retention=tool.definition.context_retention),
+    ]
+    projected = _project(raw, recent=0, preview=4, trigger=1)
+    assert [block.content for message in projected.messages for block in message.tool_results] == [
+        body,
+        body,
+    ]
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ import pytest
 
 from examples.command.docker import run_example as run_docker
 from examples.command.native import run_example as run_native
+from examples.command.python import run_example as run_python
 from iris.agents import load_agent_config
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples/command"
@@ -44,6 +45,21 @@ async def test_native_example_writes_executes_and_reads_in_unicode_workspace(
     assert report["confirmed_tools"] == ["exec_command"]
     assert report["output"] == {"rows": 3, "total": 12}
     assert '"total": 12' in report["file_tool_read"]
+
+
+@pytest.mark.asyncio
+async def test_python_example_uses_python_only_tool_and_keeps_report(tmp_path: Path) -> None:
+    """仅启用 Python 工具也经过真实 Runner、命令确认和工作区文件交付。"""
+    config = load_agent_config(EXAMPLES / "python.yaml")
+    assert config.tools.builtin == ["exec.python"]
+    assert config.permissions.execute == "confirm"
+    workspace = tmp_path / "Python 中文 workspace"
+    report = await run_python(workspace)
+    assert report["tool_names"] == ["run_python"]
+    assert report["confirmed_tools"] == ["run_python"]
+    assert report["output"] == {"rows": 3, "total": 12}
+    assert (workspace / "report.json").is_file()
+    assert "12" in report["model_result"]
 
 
 @pytest.mark.asyncio

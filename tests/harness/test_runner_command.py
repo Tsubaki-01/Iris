@@ -7,6 +7,7 @@ import pytest
 from iris.command import (
     CommandMode,
     CommandOutcome,
+    CommandOutputStats,
     CommandRequest,
     CommandScope,
     CommandStatus,
@@ -27,6 +28,7 @@ from iris.message import LLMResponse, ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import DefaultPermissionPolicy, ToolCapability, ToolRegistry
 from iris.tools.builtin.exec import ExecCommandTool
+from iris.tools.builtin.python import RunPythonTool
 
 from .fakes import StaticProvider, build_runtime, text_response, tool_response
 from .test_command_settlement import ControlledService, bind_service
@@ -51,7 +53,7 @@ class ResultService(ControlledService):
             exit_code=None,
             stdout="partial",
             stderr="",
-            output_truncated=False,
+            output_stats=CommandOutputStats(7, 0, 7, 0, frozenset()),
             duration_seconds=0.1,
             cwd=".",
             stop_receipt=self.receipt,
@@ -80,18 +82,23 @@ def command_runner(tmp_path: Path, service: ResultService, provider: StaticProvi
     runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
     bind_service(runner, service)
     registry.register(ExecCommandTool(runtime.environment.command_binding))
+    registry.register(RunPythonTool(runtime.environment.command_binding))
     return runner
 
 
-def command_response() -> LLMResponse:
+def command_response(tool_name: str = "exec_command") -> LLMResponse:
     """请求一次命令。"""
-    return tool_response(ToolUseBlock(id="cmd", name="exec_command", input={"command": "x"}))
+    arguments = {"command": "x"} if tool_name == "exec_command" else {"code": "print('x')"}
+    return tool_response(ToolUseBlock(id="cmd", name=tool_name, input=arguments))
 
 
 @pytest.mark.asyncio
-async def test_stop_policy_uses_current_receipt_without_stopping_again(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_name", ["exec_command", "run_python"])
+async def test_stop_policy_uses_current_receipt_without_stopping_again(
+    tmp_path: Path, tool_name: str
+) -> None:
     service = ResultService()
-    runner = command_runner(tmp_path, service, StaticProvider(command_response()))
+    runner = command_runner(tmp_path, service, StaticProvider(command_response(tool_name)))
     result = await runner.start(
         AgentRunRequest(input="x", run_id="stop"),
         options=AgentRunOptions(
@@ -105,11 +112,12 @@ async def test_stop_policy_uses_current_receipt_without_stopping_again(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unstarted", [False, True])
+@pytest.mark.parametrize("tool_name", ["exec_command", "run_python"])
 async def test_known_result_survives_cleanup_failure_and_retry(
-    tmp_path: Path, unstarted: bool
+    tmp_path: Path, unstarted: bool, tool_name: str
 ) -> None:
     service = ResultService(cleanup_failed=True, unstarted=unstarted)
-    provider = StaticProvider(command_response(), text_response("must not run"))
+    provider = StaticProvider(command_response(tool_name), text_response("must not run"))
     runner = command_runner(tmp_path, service, provider)
     with pytest.raises(IrisCommandCleanupError):
         await runner.start(AgentRunRequest(input="x", run_id="known"))
@@ -125,10 +133,13 @@ async def test_known_result_survives_cleanup_failure_and_retry(
 
 
 @pytest.mark.asyncio
-async def test_return_to_model_releases_receipt_before_later_hitl_cancel(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_name", ["exec_command", "run_python"])
+async def test_return_to_model_releases_receipt_before_later_hitl_cancel(
+    tmp_path: Path, tool_name: str
+) -> None:
     service = ResultService()
     provider = StaticProvider(
-        command_response(),
+        command_response(tool_name),
         tool_response(ToolUseBlock(id="write", name="write", input={})),
     )
     runner = command_runner(tmp_path, service, provider)

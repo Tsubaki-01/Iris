@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from iris.command import _container_helper
+from iris.command._python import PYTHON_LOADER_SOURCE
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="助手运行于 Linux 容器，需 POSIX 进程组")
 
@@ -24,6 +25,8 @@ def _run(tmp_path: Path, code: str, timeout: float = 3) -> tuple[dict[str, objec
         [
             sys.executable,
             _container_helper.__file__,
+            PYTHON_LOADER_SOURCE,
+            "shell",
             "exec " + shlex.join([sys.executable, "-u", str(script)]),
             str(timeout),
             str(result_path),
@@ -87,6 +90,8 @@ def test_normal_exit_publishes_result_without_waiting_for_background_pipe(tmp_pa
         [
             sys.executable,
             _container_helper.__file__,
+            PYTHON_LOADER_SOURCE,
+            "shell",
             shlex.join([sys.executable, str(command)]),
             "5",
             str(result_path),

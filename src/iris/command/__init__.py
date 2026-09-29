@@ -5,17 +5,21 @@ from .models import (
     CommandEnvironment,
     CommandMode,
     CommandOutcome,
+    CommandOutputStats,
     CommandRequest,
     CommandScope,
     CommandStatus,
     CommandStopReceipt,
     CommandStopSlot,
+    PythonCode,
+    ShellCommand,
 )
 from .service import CommandBinding, CommandService, StopOperation
 
 __all__ = [
     "CommandEnvironment",
     "CommandOutcome",
+    "CommandOutputStats",
     "CommandRequest",
     "CommandService",
     "CommandStatus",
@@ -27,4 +31,6 @@ __all__ = [
     "CommandScope",
     "CommandStopReceipt",
     "StopOperation",
+    "PythonCode",
+    "ShellCommand",
 ]

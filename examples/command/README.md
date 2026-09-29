@@ -1,7 +1,7 @@
 # 本地命令执行示例
 
-两个示例都由固定响应的 `ScriptedProvider` 驱动，经过真实 `AgentRunner`、权限交互与
-`exec_command`，不需要模型 API key。文件读写仍使用原生文件工具。以下命令从仓库根目录运行。
+示例由固定响应的 `ScriptedProvider` 驱动，经过真实 `AgentRunner`、权限交互与
+`exec_command` 或 `run_python`，不需要模型 API key。文件工具仍在宿主运行。以下命令从仓库根目录运行。
 
 ## Native：CSV → 命令 → JSON
 
@@ -17,6 +17,18 @@ uv run python -X utf8 -m examples.command.native
 
 Native 使用宿主用户权限；workspace/cwd 是文件工具范围与命令起始位置，不是命令的 OS 沙箱。
 基础安装即可运行，不需要 Docker extra，也不连接 Docker。
+
+## Python：直接提交代码并生成报告
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+uv run python -X utf8 -m examples.command.python
+```
+
+[python.yaml](python.yaml) 只注册 `exec.python`。模型侧直接提交代码，由当前 Iris 的 Python
+解释器在独立进程中计算并生成 `report.json`，宿主读取文件；报告包含工具次序、权限确认和
+`{"rows": 3, "total": 12}`。该示例不需要预先写入脚本或处理 shell 引号。
+代码以 `print` 返回文本，跨调用保留文件而不保留变量；使用当前 Python 环境预装的依赖。
 
 ## Docker：同 root 复用与停止后重启
 
@@ -49,7 +61,7 @@ root `aclose()` 删除本次容器，宿主 workspace 内的文件保留。修�
 
 ## 确认与 child 权限
 
-两个 root YAML 都写出了 `execute: confirm`；省略该字段时也是这个默认值。示例宿主只对代码中
+root YAML 都写出了 `execute: confirm`；省略该字段时也是这个默认值。示例宿主只对代码中
 预先声明的固定命令发送 `PermissionInteractionResponse(decision="approve")`，报告里会列出每次确认。
 这不改变普通 Agent 的权限策略。将 YAML 交给真实模型时，需要另行配置 provider 凭据并由宿主
 展示/处理 HITL。

@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 # endregion
 
 logger = logging.getLogger(__name__)
+_COMMAND_TOOL_KEYS = frozenset({"exec.command", "exec.python"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,9 +118,9 @@ def resolve_runtime_boundary(
     if (
         binding.config.mode is CommandMode.NATIVE
         and not writable
-        and "exec.command" in config.tools.builtin
+        and _COMMAND_TOOL_KEYS.intersection(config.tools.builtin)
     ):
-        raise IrisConfigError("Native 只读 workspace 不能注册 exec.command")
+        raise IrisConfigError("Native 只读 workspace 不能注册 exec.command/exec.python")
     return RuntimeAssemblyBoundary(workspace, policy, writable, binding, slots)
 
 
@@ -276,7 +277,9 @@ def assemble_runtime(
         execution_scope=execution_scope,
         command_binding=boundary.command_binding,
         command_environment=(
-            boundary.command_binding.environment if "exec.command" in config.tools.builtin else None
+            boundary.command_binding.environment
+            if _COMMAND_TOOL_KEYS.intersection(config.tools.builtin)
+            else None
         ),
         host_os=boundary.command_binding.environment.host_os,
         command_stop_slots=boundary.command_stop_slots,

@@ -14,6 +14,7 @@ from iris.command import (
     CommandEnvironment,
     CommandMode,
     CommandOutcome,
+    CommandOutputStats,
     CommandRequest,
     CommandScope,
     CommandStatus,
@@ -28,6 +29,7 @@ from iris.tools import DefaultPermissionPolicy, ToolExecutionContext, ToolMiddle
 from iris.tools import ToolResult as Result
 from iris.tools.base import BaseTool, ToolCapability, ToolDefinition, ToolTimeoutOwner
 from iris.tools.builtin.exec import ExecCommandTool
+from iris.tools.builtin.python import RunPythonTool
 
 from .test_execute import _runtime, _text_response, _tool_batch_response, _tool_response
 
@@ -70,17 +72,20 @@ def _outcome(status: CommandStatus, *, receipt: CommandStopReceipt | None = None
         7 if status is CommandStatus.EXITED else None,
         "partial stdout",
         "command diagnostic",
-        False,
+        CommandOutputStats(14, 18, 14, 18, frozenset()),
         0.03,
         ".",
         receipt,
     )
 
 
-def _registry(service: CommandServiceStub) -> ToolRegistry:
+def _registry(
+    service: CommandServiceStub,
+    tool_type: type[ExecCommandTool] | type[RunPythonTool] = ExecCommandTool,
+) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(
-        ExecCommandTool(
+        tool_type(
             CommandBinding(
                 CommandConfig(timeout_seconds=5),
                 service,
@@ -92,18 +97,27 @@ def _registry(service: CommandServiceStub) -> ToolRegistry:
 
 
 @pytest.mark.asyncio
-async def test_tool_owned_timeout_can_finish_cleanup_and_return_to_model(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "tool_type,tool_name,argument",
+    [(ExecCommandTool, "exec_command", "command"), (RunPythonTool, "run_python", "code")],
+)
+async def test_tool_owned_timeout_can_finish_cleanup_and_return_to_model(
+    tmp_path: Path,
+    tool_type: type[ExecCommandTool] | type[RunPythonTool],
+    tool_name: str,
+    argument: str,
+) -> None:
     service = CommandServiceStub(_outcome(CommandStatus.TIMED_OUT), delay=0.03)
     provider = FakeProvider(
         [
-            _tool_response(ToolUseBlock(id="call", name="exec_command", input={"command": "x"})),
+            _tool_response(ToolUseBlock(id="call", name=tool_name, input={argument: "x"})),
             _text_response("continued"),
         ]
     )
     runtime = _runtime(
         provider=provider,
         tmp_path=tmp_path,
-        registry=_registry(service),
+        registry=_registry(service, tool_type),
         permission_policy=DefaultPermissionPolicy(execute_mode="allow"),
     )
     activation = start_activation(options=RuntimeExecutionOptions(tool_timeout_seconds=0.01))

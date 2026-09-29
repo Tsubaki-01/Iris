@@ -24,6 +24,11 @@ does not close injected providers, memory, or stores. Root runners prepare autom
 one fixed catalog and connections across runs. Harness prepares children before admission and closes
 their independent resources at WAITING/completion, rebuilding on recovery.
 
+`exec.command` and `exec.python` borrow the same root command service. A root or child that registers
+only `exec.python` still receives command_environment and its system environment information.
+Native assembly rejects either entry point when effective writes are denied. Python exceptions
+return through the ordinary tool-result/model loop without a separate Python recovery path.
+
 Assembly resolves the provider first, then lets the memory factory handle `memory.enabled`.
 Disabled memory does not attach even an injected service. When enabled, injection takes precedence;
 otherwise the factory builds a SQLite service with the resolved provider, model name, overview, and

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
+import tarfile
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +16,12 @@ import pytest
 
 from iris.command.config import DockerConfig
 from iris.command.docker import DockerCommandService
-from iris.command.models import CommandRequest, CommandScope, CommandStatus
+from iris.command.models import (
+    CommandRequest,
+    CommandScope,
+    CommandStatus,
+    ShellCommand,
+)
 from iris.exceptions import IrisCommandError, IrisToolOutcomeUnknownError
 
 
@@ -64,7 +71,9 @@ class FakeExec:
         self.container = container
         self.cmd = cmd
         self.kwargs = kwargs
-        self.command = cmd[3] if len(cmd) == 6 else None
+        self.command = cmd[5] if len(cmd) == 8 else None
+        if len(cmd) == 8 and cmd[4] == "python":
+            self.command = container.sources[cmd[5]].decode("utf-8")
         self.started = asyncio.Event()
         self.running = False
         self.exit_code = 0
@@ -133,6 +142,25 @@ class FakeContainer:
         self.delete_result_error = False
         self.delete_failures = 0
         self.start_response_error = False
+        self.sources: dict[str, bytes] = {}
+        self.archive_gate: asyncio.Event | None = None
+        self.archive_entered = asyncio.Event()
+        self.archive_error = False
+
+    async def put_archive(self, path: str, data: bytes) -> None:
+        assert path == "/tmp"
+        self.archive_entered.set()
+        if self.archive_gate is not None:
+            await self.archive_gate.wait()
+        if self.archive_error:
+            raise FakeDockerError(500, "upload response lost")
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            member = archive.getmembers()[0]
+            assert member.mode & 0o444
+            assert member.uid == member.gid == 1000
+            source = archive.extractfile(member)
+            assert source is not None
+            self.sources[f"/tmp/{member.name}"] = source.read()
 
     async def start(self) -> None:
         self.starts += 1
@@ -253,7 +281,7 @@ def driver(monkeypatch: pytest.MonkeyPatch) -> FakeClient:
 
 def request(root: Path, command: str, *, call_id: str = "call") -> CommandRequest:
     """构造已经由工具边界解析的请求。"""
-    return CommandRequest(call_id, command, root, 0.5)
+    return CommandRequest(call_id, ShellCommand(command), root, 0.5)
 
 
 async def started(container: FakeContainer, count: int) -> None:
@@ -379,7 +407,11 @@ async def test_output_and_business_timeout_are_bounded(
     else:
         assert outcome.status is CommandStatus.EXITED
         assert outcome.output_truncated
-        assert len(outcome.stdout.encode()) + len(outcome.stderr.encode()) <= 1024 * 1024
+        if command == "large":
+            assert outcome.output_stats.stdout_retained_bytes == 512 * 1024
+            assert outcome.output_stats.stdout_bytes == 2 * 1024 * 1024
+        else:
+            assert outcome.output_stats.truncation_reasons == frozenset({"drain_timeout"})
     assert driver.containers.container.stops == 0
     await service.aclose()
 

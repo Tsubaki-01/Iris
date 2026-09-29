@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +15,7 @@ from uuid import uuid4
 
 from ..exceptions import IrisCommandCleanupError, IrisCommandError, IrisToolOutcomeUnknownError
 from ._output import OutputBuffer
+from ._python import PYTHON_LOADER_SOURCE, write_python_source
 from .models import (
     CommandMode,
     CommandOutcome,
@@ -20,11 +23,14 @@ from .models import (
     CommandScope,
     CommandStatus,
     CommandStopReceipt,
+    PythonCode,
+    ShellCommand,
 )
 
 _DRAIN_SECONDS = 1.0
 _TERM_GRACE_SECONDS = 0.5
 _CONTROL_SECONDS = 10.0
+logger = logging.getLogger(__name__)
 
 
 class _ProcessProtocol(asyncio.SubprocessProtocol):
@@ -51,7 +57,7 @@ class _ProcessProtocol(asyncio.SubprocessProtocol):
         """记录单条管道关闭；读取失败也不能无限等待 EOF。"""
         self._pipes.discard(fd)
         if exc is not None:
-            self.output.mark_truncated()
+            self.output.mark_truncated("stream_error")
         if not self._pipes and not self.pipes_closed.done():
             self.pipes_closed.set_result(None)
 
@@ -62,7 +68,7 @@ class _ProcessProtocol(asyncio.SubprocessProtocol):
     def connection_lost(self, exc: Exception | None) -> None:
         """确认 transport 及其输出资源已经关闭。"""
         if exc is not None:
-            self.output.mark_truncated()
+            self.output.mark_truncated("stream_error")
         self.closed.set_result(None)
 
 
@@ -80,6 +86,7 @@ class _Call:
     termination: asyncio.Task[None] | None = None
     interrupted: bool = False
     released: bool = False
+    source_path: Path | None = None
 
 
 def _observe_completion(task: asyncio.Task[Any]) -> None:
@@ -242,16 +249,27 @@ class NativeCommandService:
         receipt = None
         try:
             try:
-                call.protocol = await self._launch(call.request)
+                if isinstance(call.request.payload, PythonCode):
+                    call.source_path = await asyncio.to_thread(
+                        write_python_source, call.request.payload.code
+                    )
+                if call.stop_operation is None:
+                    call.protocol = await self._launch(call.request, call.source_path)
             except (OSError, NotImplementedError) as error:
                 raise IrisCommandError(
-                    "Native shell 无法启动，请确认宿主支持 asyncio subprocess",
+                    "Native 程序无法准备或启动，请确认宿主支持 asyncio subprocess",
                     started=False,
                     error=str(error),
                 ) from error
             finally:
                 call.ready.set()
             protocol = call.protocol
+            if protocol is None:
+                receipt = await cast(_NativeStopOperation, call.stop_operation).wait_stopped()
+                await self._release_call(call)
+                return self._outcome(
+                    call.request, CommandStatus.CANCELLED, started, receipt=receipt
+                )
             status = CommandStatus.EXITED
             stop_requested = asyncio.create_task(call.stop_requested.wait())
             try:
@@ -284,18 +302,40 @@ class NativeCommandService:
                 "Native 前台或必要收尾状态无法确认", stop_receipt=receipt, **error.context
             ) from error
         finally:
+            await self._remove_source(call)
             call.done.set()
             if call.protocol is None:
                 self._calls.pop((call.scope.run_id, call.request.call_id), None)
                 call.released = True
 
-    async def _launch(self, request: CommandRequest) -> _ProcessProtocol:
+    async def _launch(self, request: CommandRequest, source_path: Path | None) -> _ProcessProtocol:
         loop = asyncio.get_running_loop()
         protocol = _ProcessProtocol()
-        if os.name == "nt":
+        if isinstance(request.payload, PythonCode):
+            options: dict[str, Any] = (
+                {"creationflags": subprocess.CREATE_NO_WINDOW}
+                if os.name == "nt"
+                else {"start_new_session": True}
+            )
+            await loop.subprocess_exec(
+                lambda: protocol,
+                sys.executable,
+                "-X",
+                "utf8",
+                "-u",
+                "-c",
+                PYTHON_LOADER_SOURCE,
+                str(source_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=request.cwd,
+                **options,
+            )
+        elif os.name == "nt":
             await loop.subprocess_shell(
                 lambda: protocol,
-                request.command,
+                request.payload.command,
                 executable=str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -308,7 +348,7 @@ class NativeCommandService:
                 lambda: protocol,
                 "/bin/sh",
                 "-c",
-                request.command,
+                cast(ShellCommand, request.payload).command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -316,6 +356,14 @@ class NativeCommandService:
                 start_new_session=True,
             )
         return protocol
+
+    async def _remove_source(self, call: _Call) -> None:
+        """清理临时源码；文件删除失败不能覆盖已知进程结果。"""
+        if call.source_path is not None:
+            try:
+                await asyncio.to_thread(call.source_path.unlink, missing_ok=True)
+            except OSError:
+                logger.debug("Native 临时 Python 源码删除失败", exc_info=True)
 
     async def _stop_call(self, call: _Call) -> None:
         await call.ready.wait()
@@ -397,7 +445,7 @@ class NativeCommandService:
             try:
                 await asyncio.wait_for(asyncio.shield(protocol.pipes_closed), _DRAIN_SECONDS)
             except TimeoutError:
-                protocol.output.mark_truncated()
+                protocol.output.mark_truncated("drain_timeout")
             protocol.transport.close()
             try:
                 await asyncio.wait_for(asyncio.shield(protocol.closed), _CONTROL_SECONDS)
@@ -423,7 +471,7 @@ class NativeCommandService:
             exit_code=exit_code,
             stdout="" if output is None else output.stdout,
             stderr=stderr if output is None else output.stderr,
-            output_truncated=False if output is None else output.truncated,
+            output_stats=(output or OutputBuffer()).stats,
             duration_seconds=asyncio.get_running_loop().time() - started,
             cwd=request.cwd.relative_to(self._workspace_root).as_posix(),
             stop_receipt=receipt,

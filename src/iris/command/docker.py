@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import tarfile
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -15,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..exceptions import IrisCommandCleanupError, IrisCommandError, IrisToolOutcomeUnknownError
 from ._output import OutputBuffer
+from ._python import PYTHON_LOADER_SOURCE
 from .config import DockerConfig
 from .models import (
     CommandMode,
@@ -23,6 +26,7 @@ from .models import (
     CommandScope,
     CommandStatus,
     CommandStopReceipt,
+    PythonCode,
 )
 
 if TYPE_CHECKING:
@@ -66,6 +70,7 @@ class _Call:
     cancelled: bool = False
     released: bool = False
     result: _CommandResult | None = None
+    source_path: str | None = None
 
 
 def _observe_completion(task: asyncio.Task[Any]) -> None:
@@ -355,6 +360,25 @@ class DockerCommandService:
                 self._running = True
             if call.stop_operation is not None:
                 return None
+            payload = call.request.payload
+            if isinstance(payload, PythonCode):
+                name = f"iris-python-{uuid4().hex}.py"
+                call.source_path = f"/tmp/{name}"
+                source = payload.code.encode("utf-8")
+                archive_bytes = io.BytesIO()
+                with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(source)
+                    entry.mode = 0o444
+                    entry.uid, entry.gid = (int(value) for value in self._user.split(":"))
+                    archive.addfile(entry, io.BytesIO(source))
+                async with asyncio.timeout(_CONTROL_SECONDS):
+                    await self._container.put_archive("/tmp", archive_bytes.getvalue())
+                if call.stop_operation is not None:
+                    return None
+                kind, value = "python", call.source_path
+            else:
+                kind, value = "shell", payload.command
             cwd = "/workspace"
             relative = call.request.cwd.relative_to(self._workspace_root).as_posix()
             if relative != ".":
@@ -365,7 +389,9 @@ class DockerCommandService:
                         "python",
                         "-c",
                         self._helper_source,
-                        call.request.command,
+                        PYTHON_LOADER_SOURCE,
+                        kind,
+                        value,
                         str(call.request.timeout_seconds),
                         result_path,
                     ],
@@ -464,15 +490,19 @@ class DockerCommandService:
             await asyncio.sleep(_POLL_SECONDS)
 
     async def _consume(self, stream: Stream, output: OutputBuffer) -> None:
-        while (message := await stream.read_out()) is not None:
-            output.append(message.stream, message.data)
+        try:
+            while (message := await stream.read_out()) is not None:
+                output.append(message.stream, message.data)
+        except self._errors:
+            output.mark_truncated("stream_error")
+            raise
 
     async def _drain_output(self, call: _Call) -> None:
         if call.reader is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(call.reader), _DRAIN_SECONDS)
             except TimeoutError:
-                call.output.mark_truncated()
+                call.output.mark_truncated("drain_timeout")
                 call.reader.cancel()
                 await asyncio.gather(call.reader, return_exceptions=True)
 
@@ -507,7 +537,7 @@ class DockerCommandService:
     async def _release_call(self, call: _Call) -> None:
         if call.reader is not None:
             if not call.reader.done():
-                call.output.mark_truncated()
+                call.output.mark_truncated("stream_closed")
                 call.reader.cancel()
             await asyncio.gather(call.reader, return_exceptions=True)
         if call.stream is not None:
@@ -576,7 +606,7 @@ class DockerCommandService:
             exit_code=exit_code,
             stdout="" if output is None else output.stdout,
             stderr="" if output is None else output.stderr,
-            output_truncated=False if output is None else output.truncated,
+            output_stats=(output or OutputBuffer()).stats,
             duration_seconds=asyncio.get_running_loop().time() - started,
             cwd=request.cwd.relative_to(self._workspace_root).as_posix(),
             stop_receipt=receipt,
