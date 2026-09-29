@@ -82,7 +82,7 @@ service = DockerCommandService(workspace, DockerConfig(), workspace_writable=Tru
 
 标准库助手在自己的命令组外管理 `/bin/sh -c`；单命令超时只终止该组，其他命令和服务继续。前台结果以独立的 reason/returncode 回传，用户退出 124/137 不会被猜成超时。输出规则与 Native 相同；读取结果后的临时文件删除失败不改写已知退出结果。
 
-本调用自己的环境清理无法确认时，抛出 `IrisExecutionCleanupError`。若前台结果已知，独立 `command_outcome` 属性保留结果；明确尚未发出命令时，context 中保留 `started=False`。调用者不能把清理失败当作普通未启动错误后宣告资源已经停止。该属性是进程内事实，不写入通用错误详情；后续工具/runtime 接入负责先提交已知工具结果，再交给 run owner 等待清理。
+本调用自己的环境清理无法确认时，抛出 `IrisExecutionCleanupError`。若前台结果已知，独立 `command_outcome` 属性保留结果；明确尚未发出命令时，context 中保留 `started=False`。调用者不能把清理失败当作普通未启动错误后宣告资源已经停止。该属性是进程内事实，不写入通用错误详情；工具/runtime 先提交已知工具结果，再交给 run owner 等待清理。Harness 的 pending、deadline 与 child 交接见 [运行结算](../harness/README.md#cancellation-与-recovery)。
 
 `stop(scope)` 停止整个共享容器。同 session 的调用得到 cancelled，其他 session 正在运行的命令得到 environment_interrupted；不会自动重放命令。新调用等本轮物理停止和旧调用收尾后才重启同一容器，文件和用户依赖保留，后台服务不会自动恢复。无法确认停止时保持入口不可用，显式清理可重试。`aclose()` 停止并删除本服务容器、关闭客户端，保留宿主挂载文件；不扫描或回收用户其他容器。
 
@@ -92,4 +92,6 @@ service = DockerCommandService(workspace, DockerConfig(), workspace_writable=Tru
 uv run --extra sandbox pytest tests/execution/test_docker_integration.py --run-docker -p no:cacheprovider --basetemp=tmp/pytest-docker-local
 ```
 
-目前 Docker Desktop Linux engine 的实测覆盖同容器复用、中文 cwd 写回、真实退出码与局部超时、共享中断/重启、离线依赖与后台服务复用、只读挂载、有限输出、close 删除与宿主文件保留。已读取真实 cgroup 限额和 none 网络接口状态；资源负载约束与 bridge 网络组合验收仍在交付阶段完成。非 Desktop 的 Linux Engine 尚未实测。
+Docker Desktop Linux engine 实测覆盖同容器复用、中文 cwd 写回、真实退出码与局部超时、共享中断/重启、离线依赖与后台服务复用、只读挂载、有限输出、close 删除与宿主文件保留。受控本地 TCP 目标验证 none/bridge；真实负载验证 CPU 节流、内存 OOM 与 PID 派生限制。完整 Runner 验证模型/HITL 不受其他 run 容器停止影响、两种期限、child 写入边界和独立 root。
+
+非 Desktop 的 Linux Engine 尚未实测；WSL 的 Native 证据不能替代该平台的 Unix socket、UID:GID 与挂载验收。

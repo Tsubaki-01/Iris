@@ -44,6 +44,20 @@ uv run python -m examples.web.agent --env-file .env.local
 只读 echo；可通过离线 provider 测试实际调用，再使用 `uv run iris chat examples/mcp/agent.yaml`
 体验模型调用。
 
+## 命令执行
+
+[execution/README.md](execution/README.md) 提供无需 API key 的真实工具闭环：Native 用原生文件
+工具写 CSV、exec 转换 JSON、再读回；Docker 展示同 root 跨 session 复用离线依赖和后台服务，
+以及 run 失败停止环境后的文件保留与显式服务重启。
+
+```powershell
+uv run python -X utf8 -m examples.execution.native
+uv run --extra sandbox python -X utf8 -m examples.execution.docker --run-docker
+```
+
+Docker 需预备本机 Linux engine 和镜像；例子不会自动 pull/build。完整 YAML 同时说明
+`execute: confirm` 与 child `writes: deny` 的不同边界。
+
 ## Skill
 
 Chat 示例在 `examples/chat/workspace/.agents/skills/` 内提供 `review-python`，并通过
