@@ -106,9 +106,10 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   provider path uses only LiteLLM Chat Completion and exposes no `api_style` configuration field.
   Streaming is selected by host injection of the runner's `live_publisher`; model configuration
   has no `stream` field.
-- `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`, and
-  `human.ask`, `exec.command`, and `exec.python`, exposing `ask_question`, `exec_command`, and
-  `run_python` respectively.
+- `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`,
+  and optional `file.publish`. The latter exposes `publish_artifact(file_path)`, copies the selected
+  file into local result storage, and needs no command service or Docker. `human.ask`, `exec.command`,
+  and `exec.python` expose `ask_question`, `exec_command`, and `run_python` respectively.
 - `tools.python.functions` imports a callable `module:function` and registers it. `registrars`
   imports a callable receiving the registry. Inline Python and mixed lists are rejected.
 - `PermissionsConfig` defaults to workspace `.`, writes `confirm`, and execute `confirm`; enforcement belongs to the

@@ -282,6 +282,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 - `file.grep`
 - `file.write`
 - `file.edit`
+- `file.publish`
 - `human.ask`
 - `exec.command`
 - `exec.python`
@@ -291,6 +292,9 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 
 `human.ask` 向模型暴露的工具名是 `ask_question`。它只声明人工问题；实际呈现问题、
 收集回答与调用 `AgentRuntime.resume()` 仍由 runtime 和宿主 adapter 完成。
+
+`file.publish` 暴露 `publish_artifact(file_path)`，沿用 registry 的文件服务与 READ 权限，
+将指定文件复制为本地结果产物。它不依赖命令服务或 Docker，也不隐式包含在默认文件工具集合中。
 
 `web.search` 和 `web.fetch` 分别暴露 `web_search`、`web_fetch`，使用 Tavily Search/Extract。
 两者固定 basic，可独立启用，不增加专用 Web 配置块：

@@ -13,6 +13,15 @@ from iris.memory import MemoryConfig, MemoryService, MemoryTool, SQLiteMemorySto
 from iris.tools import ExecCommandTool, RunPythonTool
 
 
+def test_publish_registration_is_explicit_and_shares_file_service() -> None:
+    """发布工具显式启用即可使用，不依赖命令环境且沿同一文件策略。"""
+    ordinary = build_tool_registry(ToolsConfig(builtin=["file.read"]))
+    assert [tool.name for tool in ordinary.view().active_tools] == ["read_file"]
+    registry = build_tool_registry(ToolsConfig(builtin=["file.publish", "file.read"]))
+    assert {tool.name for tool in registry.view().active_tools} == {"publish_artifact", "read_file"}
+    assert registry.get("publish_artifact").file_service is registry.get("read_file").file_service
+
+
 @pytest.mark.parametrize("builtin", ["exec.command", "exec.python"])
 def test_exec_builtin_requires_an_explicit_command_binding(builtin: str) -> None:
     """registry 不自行创建服务，只有显式入口才要求注入 binding。"""

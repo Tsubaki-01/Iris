@@ -303,6 +303,21 @@ results retain the patch. `write_file` does not return one. Synchronous
 `WorkspaceFileService.edit_file()` still returns a string; the internal edit observation also
 carries the read record and patch.
 
+Explicit `file.publish` registration exposes `publish_artifact(file_path)`. SDK callers can register
+`PublishArtifactTool(file_service=...)`; it is not added to `register_file_tools()` defaults.
+The tool uses READ permission and the effective workspace boundary. It needs no prior `read_file`
+and does not update edit/write read-state records.
+
+Finish generating the file before publishing it. Publication copies the selected file in chunks to
+a unique session artifact path, preserving its extension and reporting MIME, actual size, and a short
+preview through `ToolResult.artifact`. Subsequent source edits/deletion or runner closure do not change
+the copy. Failed copies remove their partial destination and return a tool error without retrying.
+The tool performs no directory scan, cloud upload, or binary injection into model messages.
+
+Hosts obtain the local path from the result or its `AgentRunner.list_tool_calls(run_id)` record.
+SSE/WebSocket expose only artifact summaries and call identity; hosts provide their own display or
+download interface. See the [Python report example](../../../examples/command/README.md).
+
 ```mermaid
 flowchart LR
     Executor["ToolExecutor"] --> Adapter["FileTool.arun"]
@@ -370,6 +385,8 @@ Preflight errors are clipped without writing files.
 includes the error prefix, complete retrieval notice, and omission marker.
 `ToolDefinition.preview_chars` controls preview length; `ToolExecutor` no longer accepts
 `artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
+`ToolArtifactStore.persist_file(tool_use_id, source, preview=...)` stores a copy of an already
+resolved source file for explicit publication.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
 Default permissions allow only locally trusted read-only MCP tools.
 `IrisToolOutcomeUnknownError` bypasses both exception conversions for existing runtime settlement.

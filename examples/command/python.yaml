@@ -7,12 +7,15 @@ model:
   timeout: 30
 
 system: |
-  使用 run_python 执行标准库计算，并将需要保留的报告写入工作区。
+  使用文件工具准备 CSV，再用 run_python 执行标准库计算。
+  根据真实错误反馈修正代码，完成后用 publish_artifact 发布报告副本。
   每次调用使用独立 Python 进程，使用 print 返回结果，不依赖上次调用的变量。
 
 tools:
   builtin:
+    - file.write
     - exec.python
+    - file.publish
 
 permissions:
   workspace: workspace

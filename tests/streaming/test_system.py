@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
@@ -703,6 +704,117 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
     await subscription.aclose()
     await manager.close()
     broker.close()
+
+
+@pytest.mark.asyncio
+async def test_publish_artifact_commits_readable_copy_before_streaming_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """显式配置的发布工具在完成事件前提交副本引用，远端只收到摘要。"""
+    source = tmp_path / "report.csv"
+    contents = "name,total\n示例,42\n".encode()
+    source.write_bytes(contents)
+    final_stream = _ControlledRawStream(_text_chunks("报告已发布"), gated_indexes=(0,))
+    backend = _FakeChatBackend(
+        [
+            _ControlledRawStream(
+                _tool_chunks([("publish-1", "publish_artifact", '{"file_path":"report.csv"}')])
+            ),
+            final_stream,
+        ]
+    )
+    monkeypatch.setattr(litellm, "acompletion", backend)
+    provider = _RecordingStreamingProvider()
+    broker = LiveStreamBroker(replay_capacity_per_scope=128, subscription_capacity=128)
+    store = SQLiteStore(tmp_path / "publication.db")
+    runner = AgentRunner.from_config(
+        AgentConfig(
+            name="artifact-publisher",
+            model={"provider": "openai", "name": "fake-model"},
+            system="发布已完成的报告。",
+            permissions={"workspace": str(tmp_path), "writes": "deny"},
+            tools={"builtin": ["file.publish"]},
+        ),
+        provider=provider,
+        store=store,
+        live_publisher=broker,
+    )
+    manager = SessionManager(runner, "session-publish")
+    gateway = StreamingGateway(
+        runner=runner,
+        manager=manager,
+        broker=broker,
+        session_id="session-publish",
+        durable_page_size=3,
+        allow_tool_arguments=True,
+    )
+    subscription = gateway.subscribe(
+        SubscribeCommand(
+            request_id="publish-live",
+            scope="session",
+            scope_id="session-publish",
+        )
+    )
+    task = asyncio.create_task(
+        runner.start(
+            AgentRunRequest(
+                input="发布 report.csv",
+                run_id="run-publish",
+                session_id="session-publish",
+            )
+        )
+    )
+    try:
+        items = await _take_until(subscription, _is_live_kind("tool.completed"))
+        completed = _live_envelopes(items)[-1]
+        assert completed.run_id == "run-publish"
+        assert completed.payload["tool_call_id"] == "publish-1"
+        record = next(
+            call
+            for call in runner.list_tool_calls(completed.run_id)
+            if call.tool_call_id == completed.payload["tool_call_id"]
+        )
+        assert record.phase.value == "committed"
+        assert record.result is not None and not record.result.is_error
+        artifact = record.result.artifact
+        assert artifact is not None
+        artifact_path = artifact.path
+        assert artifact_path.is_absolute() and artifact_path != source
+        assert artifact_path.read_bytes() == contents
+        assert artifact.size_bytes == len(contents)
+        assert artifact.mime_type == mimetypes.guess_type(source.name)[0]
+        assert completed.payload == {
+            "tool_call_id": "publish-1",
+            "tool_name": "publish_artifact",
+            "tool_ordinal": 1,
+            "content": [block.text for block in record.result.content],
+            "is_error": False,
+            "artifact": {
+                "mime_type": artifact.mime_type,
+                "size_bytes": len(contents),
+                "preview": artifact.preview,
+            },
+        }
+        assert str(tmp_path) not in record.result.model_content
+        assert artifact.preview is not None and str(tmp_path) not in artifact.preview
+        assert not task.done()
+        source.unlink()
+        assert artifact_path.read_bytes() == contents
+
+        final_stream.gates[0].set()
+        result = await asyncio.wait_for(task, timeout=1)
+        assert result.run.stop_reason is RunStopReason.COMPLETED
+        assert len(runner.list_tool_calls("run-publish")) == 1
+    finally:
+        final_stream.gates[0].set()
+        await task
+        await subscription.aclose()
+        await manager.close()
+        await runner.aclose()
+        broker.close()
+
+    assert artifact_path.read_bytes() == contents
 
 
 @pytest.mark.asyncio

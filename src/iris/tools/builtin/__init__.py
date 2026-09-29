@@ -1,5 +1,6 @@
 """内置工具集合。"""
 
+from .artifact import PublishArtifactInput, PublishArtifactTool
 from .exec import ExecCommandInput, ExecCommandTool
 from .file import (
     FILE_TOOL_CLASSES,
@@ -26,6 +27,8 @@ __all__ = [
     "FileTool",
     "GrepSearchInput",
     "ListFilesInput",
+    "PublishArtifactInput",
+    "PublishArtifactTool",
     "ReadFileInput",
     "RunPythonInput",
     "RunPythonTool",
