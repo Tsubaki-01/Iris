@@ -451,6 +451,14 @@ runtime = RuntimeFactory.from_config_path(
 Factory 不读取或创建 lifecycle database。`agent.yaml` 的 `session` 配置由 harness composition
 解释；直接调用 Factory 时该字段不会产生持久化副作用。
 
+`goal.enabled` 同样要求完整 `AgentRunner`，独立 Factory 会明确拒绝。ROOT 装配接收
+harness 注入的 `GoalService`，在创建工具 view 前注册 `get_goal` / `report_goal`；两者
+非 deferred、结果保留策略为 `keep`，名称冲突转为 `IrisConfigError`。GoalContextSource
+组合原宿主 source，每主模型步仅采集一次，并保留宿主贡献的 required/priority。
+目标投影作为 required contribution 进入现有请求预算；执行循环仍只消费普通工具和动态快照，
+不负责目标状态转换或跨 Run 续跑。关闭开关时，即使传入 service 也不会挂载 Goal；CHILD
+显式启用则拒绝，默认 child 不继承父目标。详见 [goal](../goal/README.md)。
+
 Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户声明的工具。若
 `skills.enabled: true`，它以该 workspace 做一次项目级发现快照：非空结果会追加
 `available_skills` system slot，并在创建 `ToolRegistryView` / `ToolExecutor` 前注册共享同一

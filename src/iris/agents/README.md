@@ -123,6 +123,7 @@ model: openai/gpt-4o-mini
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
+- `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`、`execute: confirm`。
 - `command`: `CommandConfig`，默认 native 与 120 秒命令期限；不自动注册命令工具。
@@ -223,6 +224,23 @@ runtime 先按 `context_policy` 尝试确定性正文减载；完整输入仍达
 压缩后的完整请求必须不超过 80% 且严格缩小。已开始的压缩失败会结束当前 run，原文与上次
 已提交摘要保留。主调用 usage 与 `RunUsage.compaction` 分开累计；provider 估算边界见
 [providers 说明](../providers/README.md)，执行与恢复见 [runtime](../runtime/README.md)。
+
+### `GoalConfig`
+
+`goal` 默认 `enabled: false`、`max_rounds: 20`。启用时要求
+`context_policy.enabled: true`，轮数必须为正数；加载 YAML 只解析配置，不创建目标。
+
+```yaml
+goal:
+  enabled: true
+  max_rounds: 20
+```
+
+通过 `AgentRunner.from_config*()` 使用此配置。Runner 的同一生命周期存储提供 GoalService，
+装配自动注册非 deferred 的 `get_goal` / `report_goal`，并组合已有 `context_source`。
+关闭时不挂载 Goal 服务、工具或投影；独立 `RuntimeFactory` 与显式启用 Goal 的 child
+在装配时报告配置错误。开关在构建时确定，不支持热切换。目标状态与申报契约见
+[goal 说明](../goal/README.md)。
 
 ### `MemoryConfig`
 

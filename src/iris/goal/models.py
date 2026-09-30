@@ -116,6 +116,15 @@ class GoalAdmission:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class GoalSettlement:
+    """一次结算后的绑定、当前目标与本次是否改变目标的回执。"""
+
+    binding: GoalRunBinding
+    goal: GoalSnapshot | None
+    goal_changed: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class GoalProcessState:
     """宿主提供的只读进程状态；未附着时为空。"""
 
@@ -145,6 +154,7 @@ __all__ = [
     "GoalRunBinding",
     "GoalSnapshot",
     "GoalAdmission",
+    "GoalSettlement",
     "GoalProcessState",
     "GoalView",
 ]

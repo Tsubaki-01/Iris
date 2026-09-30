@@ -540,6 +540,16 @@ runtime = RuntimeFactory.from_config_path(
 The factory never reads or creates a lifecycle database. Harness composition interprets the
 `session` section of `agent.yaml`; the low-level factory has no persistence side effect from it.
 
+`goal.enabled` also requires the complete `AgentRunner`; the standalone factory rejects it.
+ROOT assembly receives a harness-owned `GoalService` and registers `get_goal` / `report_goal`
+before creating the tool view. Both are non-deferred with `keep` result retention; name conflicts
+become `IrisConfigError`. GoalContextSource composes the host source, collecting it once per main
+model step and preserving each contribution's required/priority fields. The required Goal contribution
+uses the existing request budget. The execution loop still consumes ordinary tools and snapshots,
+without owning Goal transitions or cross-run continuation. Disabled Goal drops an injected service;
+explicitly enabling it in CHILD is rejected, and default children do not inherit the parent's Goal.
+See [goal](../goal/README.en.md).
+
 The factory resolves `permissions.workspace` before constructing base context and user-declared
 tools. With `skills.enabled: true`, it takes one project-level discovery snapshot against that
 workspace. A non-empty result adds the `available_skills` system slot and registers `load_skill`

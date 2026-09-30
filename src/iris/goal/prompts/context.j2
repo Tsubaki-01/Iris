@@ -1,0 +1,21 @@
+{% if not bound %}
+当前是用户发起的普通 Run。按本轮用户输入执行，不自动推进 Goal；需要查看目标时可调用 get_goal。
+{% elif goal is none %}
+本轮绑定的原目标已停用。停止推进原目标并完成必要收尾，不采用其他目标。
+{% else %}
+当前目标：goal_id={{ goal.goal_id }} revision={{ goal.revision }}
+状态：{{ goal.status.value }}；已启动自动 Run：{{ goal.rounds_started }}/{{ goal.max_rounds }}。
+目标全文：
+{{ goal.objective }}
+{% if goal.reason %}
+当前原因：{{ goal.reason.code }} — {{ goal.reason.text }}
+{% endif %}
+{% if goal.status.value == 'active' %}
+持续推进完整目标，以实际工具结果和已获得证据判断结果。
+完成时调用 report_goal(decision="complete")；缺少必要条件无法推进时调用 report_goal(decision="blocked")，说明具体原因。
+使用上面的最新 goal_id/revision。report_goal 应单独成一步，不与工作工具同一步调用；后续出现新工作、新用户输入或人工回答时重新申报。
+report_goal(decision="continue") 撤回本轮较早的完成或阻塞申报。申报在本轮正常结束后结算，Run 结束本身不代表目标已完成。
+{% else %}
+目标当前不允许继续推进。停止新增目标工作，完成本轮必要收尾；不要用结果申报覆盖宿主的当前状态。
+{% endif %}
+{% endif %}

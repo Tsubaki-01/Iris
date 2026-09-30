@@ -116,6 +116,23 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
+`AgentConfig.goal` uses `iris.goal.GoalConfig`, with `enabled: false` and `max_rounds: 20`
+by default. Enabling it requires `context_policy.enabled: true`; the round limit must be positive.
+Loading YAML only parses this declaration and does not create a goal.
+
+```yaml
+goal:
+  enabled: true
+  max_rounds: 20
+```
+
+Use `AgentRunner.from_config*()` for this configuration. The runner's lifecycle store supplies
+GoalService; assembly registers the non-deferred `get_goal` / `report_goal` tools and composes
+the existing `context_source`. Disabling Goal omits its service, tools, and projection. Standalone
+`RuntimeFactory` and children explicitly enabling Goal raise configuration errors during assembly.
+The switch is fixed at construction, without hot switching. See [goal](../goal/README.en.md)
+for state and reporting contracts.
+
 `AgentConfig.context_policy` uses `ContextPolicyConfig` with these defaults:
 
 ```yaml

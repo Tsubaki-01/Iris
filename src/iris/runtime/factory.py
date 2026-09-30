@@ -102,6 +102,8 @@ class RuntimeFactory:
         """
         if config.tools.subagent is not None:
             raise IrisConfigError("tools.subagent 需要通过 AgentRunner.from_config* 构造")
+        if config.goal.enabled:
+            raise IrisConfigError("goal.enabled 需要通过 AgentRunner.from_config* 构造")
         return assemble_runtime(
             config,
             config_path=config_path,

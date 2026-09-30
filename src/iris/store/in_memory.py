@@ -27,7 +27,8 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..goal.models import GoalAdmission, GoalRunBinding, GoalSnapshot
+from ..goal.models import GoalAdmission, GoalRunBinding, GoalSettlement, GoalSnapshot
+from ..goal.settlement import GoalRunEvidence, decide_settlement
 from ..goal.store import AdmitGoalRun, ClearGoal, CreateGoal, GoalUpdate
 from ..goal.transitions import (
     admit_goal_snapshot,
@@ -279,6 +280,40 @@ class InMemoryLifecycleStore:
             self._install_created_run(prepared)
             self._goals[goal.goal_id] = updated
             self._goal_runs[binding.run_id] = binding
+            return result
+
+    def settle_goal_run(self, run_id: str, *, now: datetime) -> GoalSettlement:
+        """同锁读取本 Run 终态证据并一次发布目标与绑定的结算。"""
+        with self._lock:
+            binding = self._goal_runs.get(run_id)
+            if binding is None:
+                raise IrisGoalStateError("Run 没有目标绑定", run_id=run_id)
+            session_id = self._goals[binding.goal_id].session_id
+            current_id = self._current_goals.get(session_id)
+            current = None if current_id is None else self._goals[current_id]
+            if binding.settled_at is not None:
+                return deepcopy(GoalSettlement(binding=binding, goal=current, goal_changed=False))
+            run = self._require_run(run_id)
+            if run.phase is not RunPhase.TERMINAL:
+                raise IrisGoalStateError("只能结算终态目标 Run", run_id=run_id)
+            evidence = GoalRunEvidence(
+                result=project_result(run, None),
+                calls=tuple(
+                    self._tool_calls[(run_id, call_id)]
+                    for call_id in self._tool_call_ids_by_run.get(run_id, ())
+                ),
+                messages=tuple(
+                    self._sessions[session_id].snapshot.messages[
+                        run.initial_session_message_count : run.terminal_session_message_count
+                    ]
+                ),
+                events=tuple(self._events[run_id]),
+            )
+            settlement = decide_settlement(binding, current, evidence, now=now)
+            result = deepcopy(settlement)
+            if settlement.goal_changed:
+                self._goals[binding.goal_id] = settlement.goal
+            self._goal_runs[run_id] = settlement.binding
             return result
 
     def _require_goal(self, goal_id: str) -> GoalSnapshot:

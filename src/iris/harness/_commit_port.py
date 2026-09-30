@@ -64,6 +64,7 @@ from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentRouteTabl
 from ._events import _RunEventCollector
 
 if TYPE_CHECKING:
+    from ..goal.service import GoalService
     from .streaming import LiveFact
 
 
@@ -82,6 +83,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         workspace_root: Path,
         subagent_routes: SubagentRouteTable | None = None,
         interaction_service: HumanInteractionService | None = None,
+        goal_service: GoalService | None = None,
     ) -> None:
         if run.phase is not RunPhase.ACTIVE or run.current_activation_id != activation_id:
             raise IrisRunStateError("commit port 必须绑定当前 active activation")
@@ -101,6 +103,9 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         self._workspace_root = workspace_root
         self._subagent_routes = subagent_routes
         self._interaction_service = interaction_service or HumanInteractionService()
+        self._goal_binding = (
+            goal_service.store.get_goal_run(run.run_id) if goal_service is not None else None
+        )
         self._reusable_model_reservation = (
             checkpoint.model_steps_reserved == checkpoint.model_steps_committed + 1
         )
@@ -143,6 +148,20 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
         """输入组与恢复位置在首个模型请求前一次归档。"""
         self._require_writable()
         self._require_cursor(commit.cursor_before)
+        messages = list(commit.message_delta)
+        if self._goal_binding is not None:
+            current_input = messages[-1]
+            messages[-1] = current_input.model_copy(
+                update={
+                    "sender": "context",
+                    "metadata": {
+                        **current_input.metadata,
+                        "context_kind": "goal_continuation",
+                        "goal_id": self._goal_binding.goal_id,
+                        "round_no": self._goal_binding.round_no,
+                    },
+                }
+            )
         checkpoint = self._next_checkpoint(
             cursor=commit.cursor_after,
             usage=self._run.usage,
@@ -155,7 +174,7 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 expected_run_revision=self._run.revision,
                 activation_id=self._activation_id,
                 expected_session_revision=self._session_revision,
-                message_delta=list(commit.message_delta),
+                message_delta=messages,
                 initial_context_window=commit.initial_context_window,
                 checkpoint=checkpoint,
                 now=self._clock(),
