@@ -143,6 +143,27 @@ def test_exhausted_goal_only_resumes_existing_run() -> None:
     assert edited.max_rounds == edited.rounds_started == 2
 
 
+@pytest.mark.parametrize(("rounds_started", "has_resumable_run"), [(1, False), (2, True)])
+def test_active_resume_preserves_report_reason_and_revision(
+    rounds_started: int,
+    has_resumable_run: bool,
+) -> None:
+    """纯 arm/恢复不能清除诊断并让同轮已提交的报告版本失效。"""
+    goal = _goal().model_copy(
+        update={
+            "revision": 4,
+            "rounds_started": rounds_started,
+            "reason": GoalReason(code="report_superseded", text="上轮报告已过时"),
+        }
+    )
+    resumed = apply_goal_update(
+        goal,
+        ResumeGoal(expected=goal.ref, now=_LATER),
+        has_resumable_run=has_resumable_run,
+    )
+    assert resumed is goal
+
+
 def test_admission_consumes_round_and_preserves_input_revision_in_binding() -> None:
     goal = _goal()
     create = CreateRun(

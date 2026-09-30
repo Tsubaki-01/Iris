@@ -22,6 +22,8 @@ from ..context import (
     load_context_build_input,
 )
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
+from ..goal.context import GoalContextSource
+from ..goal.tools import GetGoalTool, ReportGoalTool
 from ..memory.config import build_memory_service_from_config
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
@@ -45,6 +47,7 @@ from .runtime import AgentRuntime
 from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
+    from ..goal.service import GoalService
     from ..memory import MemoryService
 # endregion
 
@@ -167,8 +170,16 @@ def assemble_runtime(
     subagent: SubagentAssembly | None = None,
     context_access: ContextAccessPort | None = None,
     context_source: ContextSource | None = None,
+    goal_service: GoalService | None = None,
 ) -> AgentRuntime:
-    """消费已解析边界装配 inner engine 和可选 memory，不创建 lifecycle store。"""
+    """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
+    if config.goal.enabled:
+        if execution_scope is RuntimeExecutionScope.CHILD:
+            raise IrisConfigError("child 不能启用 goal，Goal 仅由 root AgentRunner 管理")
+        if goal_service is None:
+            raise IrisConfigError("启用 goal 需要 AgentRunner 注入 GoalService")
+    else:
+        goal_service = None
     if not config.context_policy.enabled and context_source is not None:
         raise IrisConfigError("context_policy 禁用时不能注入 context_source")
     if config.context_policy.enabled and context_access is None:
@@ -220,6 +231,12 @@ def assemble_runtime(
             tool_registry.register(ContextSearchTool(access))
         except IrisToolValidationError as exc:
             raise IrisConfigError("context_read/search 与现有工具名称或别名冲突") from exc
+    if goal_service is not None:
+        try:
+            tool_registry.register_many((GetGoalTool(goal_service), ReportGoalTool(goal_service)))
+        except IrisToolValidationError as exc:
+            raise IrisConfigError("get_goal/report_goal 与现有工具名称或别名冲突") from exc
+        context_source = GoalContextSource(goal_service, host_source=context_source)
     context_input, skill_registry = _prepare_skills(
         context_input,
         config=config,
@@ -273,6 +290,7 @@ def assemble_runtime(
         tool_bridge=tool_bridge,
         workspace_root=workspace_root,
         memory_service=memory_service,
+        goal_service=goal_service,
         skill_registry=skill_registry,
         mcp_manager=mcp_manager,
         execution_scope=execution_scope,

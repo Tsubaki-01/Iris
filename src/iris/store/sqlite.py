@@ -25,7 +25,8 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
-from ..goal.models import GoalAdmission, GoalRunBinding, GoalSnapshot
+from ..goal.models import GoalAdmission, GoalRunBinding, GoalSettlement, GoalSnapshot
+from ..goal.settlement import GoalRunEvidence, decide_settlement
 from ..goal.store import AdmitGoalRun, ClearGoal, CreateGoal, GoalUpdate, ResumeGoal
 from ..goal.transitions import (
     admit_goal_snapshot,
@@ -335,6 +336,73 @@ class SQLiteStore:
             return GoalAdmission(commit=commit, goal=updated, binding=binding)
 
         return self._goal_transaction("admit_goal_run", admit, write=True)
+
+    def settle_goal_run(self, run_id: str, *, now: datetime) -> GoalSettlement:
+        """同事务读取终态、工具、事件和本轮有界历史，并结算目标及绑定。"""
+        operation = "settle_goal_run"
+
+        def settle(connection: sqlite3.Connection) -> GoalSettlement:
+            row = connection.execute(
+                "SELECT * FROM goal_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise IrisGoalStateError("Run 没有目标绑定", run_id=run_id)
+            binding = _row_to_goal_run(row)
+            bound_goal, _ = self._require_goal(connection, binding.goal_id)
+            current = self._select_current_goal(connection, bound_goal.session_id)
+            if binding.settled_at is not None:
+                return GoalSettlement(binding=binding, goal=current, goal_changed=False)
+            run = self._require_run(connection, run_id, operation=operation)
+            if run.phase is not RunPhase.TERMINAL:
+                raise IrisGoalStateError("只能结算终态目标 Run", run_id=run_id)
+            start = run.initial_session_message_count
+            end = cast(int, run.terminal_session_message_count)
+            rows = connection.execute(
+                "SELECT ordinal, message_json FROM session_messages "
+                "WHERE session_id = ? AND ordinal > ? AND ordinal <= ? ORDER BY ordinal",
+                (run.session_id, start, end),
+            ).fetchall()
+            messages = decode_session_messages(
+                rows,
+                expected_count=end - start,
+                start_count=start,
+                path=self.path,
+                operation=operation,
+            )
+            evidence = GoalRunEvidence(
+                result=project_result(run, None),
+                messages=tuple(messages),
+                calls=tuple(
+                    _row_to_tool_call(row)
+                    for row in connection.execute(
+                        "SELECT * FROM run_tool_calls WHERE run_id = ? "
+                        "ORDER BY step_index, ordinal",
+                        (run_id,),
+                    )
+                ),
+                events=tuple(
+                    _row_to_event(row)
+                    for row in connection.execute(
+                        "SELECT * FROM run_events WHERE run_id = ? ORDER BY sequence",
+                        (run_id,),
+                    )
+                ),
+            )
+            settlement = decide_settlement(binding, current, evidence, now=now)
+            if settlement.goal_changed:
+                self._persist_goal_update(connection, current, settlement.goal, is_current=True)
+            _execute(
+                connection,
+                "UPDATE goal_runs SET settled_at = ?, applied_report_call_id = ? WHERE run_id = ?",
+                (
+                    settlement.binding.settled_at.isoformat(),
+                    settlement.binding.applied_report_call_id,
+                    run_id,
+                ),
+            )
+            return settlement
+
+        return self._goal_transaction(operation, settle, write=True)
 
     def _goal_transaction(
         self,

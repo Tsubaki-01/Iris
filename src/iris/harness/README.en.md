@@ -31,6 +31,16 @@ MCP construction does not connect. Call `aprepare()` to warm up, or let the exec
 automatically. The complete catalog publishes before creating a run. Required preparation failure
 closes resources without creating a run; construct a new runner after correcting configuration.
 
+Concurrent entry points on one runner share resource preparation. Cancelling one waiter does not
+cancel that preparation; closing the runner settles it before closing owned resources. Each actual
+run still registers its own memory foreground activity.
+
+With `goal.enabled`, the runner assembles GoalService, tools, and dynamic context using the same
+lifecycle store. A Goal run reuses normal start registration, steering, and command lifecycle.
+Its automatic input is marked as context and does not replace the latest ordinary-user anchor.
+`start()` still executes one logical run. See [Goal documentation](../goal/README.md) for models
+and reporting rules.
+
 Resume/recover keep pure durable settlement first, preparing only for execution. They then reload
 state, checkpoints, claims, and time, and continue with the current runner configuration.
 Terminal reads, ordinary waiting expiry, unresolved-CLAIMED unknown recovery, queries, history forks,

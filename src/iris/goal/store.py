@@ -8,7 +8,7 @@ from typing import Protocol
 
 from ..lifecycle.models import AgentRunOptions
 from ..lifecycle.store import CreateRun, LifecycleStore
-from .models import GoalAdmission, GoalReason, GoalRef, GoalRunBinding, GoalSnapshot
+from .models import GoalAdmission, GoalReason, GoalRef, GoalRunBinding, GoalSettlement, GoalSnapshot
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -109,6 +109,10 @@ class GoalStore(LifecycleStore, Protocol):
 
     def admit_goal_run(self, command: AdmitGoalRun) -> GoalAdmission:
         """原子创建普通 Run、绑定并消耗目标轮数。"""
+        ...
+
+    def settle_goal_run(self, run_id: str, *, now: datetime) -> GoalSettlement:
+        """按同一快照中的终态运行证据，幂等结算目标与绑定。"""
         ...
 
 

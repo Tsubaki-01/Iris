@@ -35,6 +35,7 @@ from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
+    from ..goal.service import GoalService
     from ..mcp.manager import MCPManager
     from ..mcp.models import MCPCatalogSnapshot
 
@@ -112,6 +113,7 @@ class RuntimeEnvironment:
         tool_bridge (ToolBridge): 工具可见性、预检与执行边界。
         workspace_root (Path): 工具执行使用的 workspace 根路径。
         memory_service (MemoryService | None): 配置构造或宿主注入的可选 memory 服务。
+        goal_service (GoalService | None): harness 注入的可选目标服务，不参与执行循环控制。
         skill_registry (SkillRegistry | None): 构造时发现的 Skill 目录元数据快照。
         mcp_manager (MCPManager | None): 当前 runtime 独占的 MCP 资源与目录 owner。
         execution_scope (RuntimeExecutionScope): 明确的 ROOT/CHILD 装配范围。
@@ -132,6 +134,7 @@ class RuntimeEnvironment:
     tool_bridge: ToolBridge = field(default_factory=_default_tool_bridge)
     workspace_root: Path = field(default_factory=Path.cwd)
     memory_service: MemoryService | None = None
+    goal_service: GoalService | None = None
     skill_registry: SkillRegistry | None = None
     mcp_manager: MCPManager | None = None
     execution_scope: RuntimeExecutionScope = RuntimeExecutionScope.ROOT

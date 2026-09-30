@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from ..exceptions import IrisGoalStateError
-from ..lifecycle.models import AgentRunOptions
+from ..exceptions import IrisGoalConflictError, IrisGoalStateError
+from ..lifecycle.models import AgentRunOptions, RunPhase, snapshot_run
 from .config import GoalConfig
-from .models import GoalReason, GoalRef, GoalRoundLimit, GoalSnapshot, GoalText
+from .models import (
+    GoalProcessState,
+    GoalReason,
+    GoalRef,
+    GoalReport,
+    GoalRoundLimit,
+    GoalSnapshot,
+    GoalStatus,
+    GoalText,
+    GoalView,
+)
 from .store import (
     ClearGoal,
     CompleteGoal,
@@ -21,17 +32,36 @@ from .store import (
     PauseGoal,
     ResumeGoal,
 )
+from .transitions import require_current_goal
+
+if TYPE_CHECKING:
+    from .models import GoalSettlement
 
 _CREATE_INPUT = TypeAdapter(tuple[GoalText, GoalText, GoalRoundLimit, AgentRunOptions])
 _EDIT_INPUT = TypeAdapter(tuple[GoalText | None, GoalRoundLimit | None, AgentRunOptions | None])
 
 
+def _empty_process_state(session_id: str) -> GoalProcessState:
+    """没有附着控制器时不推断进程内运行意图。"""
+    return GoalProcessState()
+
+
 class GoalService:
     """解析宿主创建/编辑输入并委托 store，不启动、恢复或取消 Run。"""
 
-    def __init__(self, store: GoalStore, *, config: GoalConfig | None = None) -> None:
+    def __init__(
+        self,
+        store: GoalStore,
+        *,
+        config: GoalConfig | None = None,
+        process_state_reader: Callable[[str], GoalProcessState] | None = None,
+        run_options_validator: Callable[[AgentRunOptions], None] | None = None,
+    ) -> None:
+        """注入同一存储与可选宿主只读能力，不依赖宿主实现。"""
         self.store = store
         self.config = GoalConfig() if config is None else config
+        self.process_state_reader = process_state_reader or _empty_process_state
+        self.run_options_validator = run_options_validator
 
     def get_current(self, session_id: str) -> GoalSnapshot | None:
         """读取当前目标，保持只读。"""
@@ -40,6 +70,70 @@ class GoalService:
     def get(self, goal_id: str) -> GoalSnapshot:
         """按 ID 读取目标，包括已取消当前选择的历史目标。"""
         return self.store.get_goal(goal_id)
+
+    def get_view(self, session_id: str) -> GoalView:
+        """组合当前目标、占用 Run、人工交互和待结算事实，保持只读。"""
+        goal = self.store.get_current_goal(session_id)
+        process = self.process_state_reader(session_id)
+        run_id = self.store.load_session_lane(session_id)
+        run = None if run_id is None else self.store.load_run(run_id)
+        settlement_pending = False
+        for binding in self.store.list_unsettled_goal_runs(session_id):
+            pending_run = self.store.load_run(binding.run_id)
+            if pending_run is not None and pending_run.phase is RunPhase.TERMINAL:
+                settlement_pending = True
+                if run is None:
+                    run = pending_run
+        run_binding = None if run is None else self.store.get_goal_run(run.run_id)
+        interaction = (
+            None
+            if run is None or run.pending_interaction_id is None
+            else self.store.load_interaction(run.pending_interaction_id)
+        )
+        return GoalView(
+            goal=goal,
+            armed=(
+                goal is not None
+                and goal.status is GoalStatus.ACTIVE
+                and process.armed_goal_id == goal.goal_id
+            ),
+            run=None if run is None else snapshot_run(run),
+            run_goal_id=None if run_binding is None else run_binding.goal_id,
+            interaction=interaction,
+            settlement_pending=settlement_pending,
+            driver_error=process.error,
+        )
+
+    def report(self, run_id: str, report: GoalReport) -> GoalReport:
+        """核对当前绑定与版本后原样返回申报，不修改目标或绑定。"""
+        binding = self.store.get_goal_run(run_id)
+        if binding is None:
+            raise IrisGoalStateError("本轮未绑定 Goal，不能申报目标结果", run_id=run_id)
+        if binding.goal_id != report.goal_id:
+            raise IrisGoalConflictError("本轮绑定的目标与申报不一致", run_id=run_id)
+        bound_goal = self.store.get_goal(binding.goal_id)
+        current = self.store.get_current_goal(bound_goal.session_id)
+        if current is None:
+            raise IrisGoalConflictError("本轮目标已清除，不能申报", goal_id=report.goal_id)
+        require_current_goal(
+            current,
+            GoalRef.model_construct(goal_id=report.goal_id, revision=report.revision),
+            is_current=True,
+        )
+        return report
+
+    def settle_run(self, run_id: str, *, now: datetime) -> GoalSettlement:
+        """委托存储基于同一事务内的运行事实结算一次绑定。"""
+        return self.store.settle_goal_run(run_id, now=now)
+
+    def reconcile(self, session_id: str) -> tuple[GoalSettlement, ...]:
+        """显式补结算本 session 已终态的绑定，不接管在途 Run。"""
+        results: list[GoalSettlement] = []
+        for binding in self.store.list_unsettled_goal_runs(session_id):
+            run = self.store.load_run(binding.run_id)
+            if run is not None and run.phase is RunPhase.TERMINAL:
+                results.append(self.settle_run(binding.run_id, now=datetime.now(UTC)))
+        return tuple(results)
 
     def create(
         self,
@@ -61,6 +155,8 @@ class GoalService:
             )
         except ValidationError as exc:
             raise IrisGoalStateError("目标创建参数无效", error=str(exc)) from exc
+        if self.run_options_validator is not None:
+            self.run_options_validator(options)
         return self.store.create_goal(
             CreateGoal(
                 goal_id=f"goal_{uuid4().hex}",
@@ -81,6 +177,8 @@ class GoalService:
         run_options: AgentRunOptions | None = None,
     ) -> GoalSnapshot:
         """修改显式提供的目标字段并暂停；不重置已用轮数。"""
+        if objective is None and max_rounds is None and run_options is None:
+            raise IrisGoalStateError("编辑目标至少提供一个修改字段")
         try:
             objective, max_rounds, run_options = _EDIT_INPUT.validate_python(
                 (
@@ -91,6 +189,8 @@ class GoalService:
             )
         except ValidationError as exc:
             raise IrisGoalStateError("目标编辑参数无效", error=str(exc)) from exc
+        if run_options is not None and self.run_options_validator is not None:
+            self.run_options_validator(run_options)
         return cast(
             GoalSnapshot,
             self.store.update_goal(

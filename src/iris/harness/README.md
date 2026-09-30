@@ -29,6 +29,14 @@ reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 配置 MCP 时构造不连接；`aprepare()` 可显式预热，也会由首次执行入口自动调用。完整目录发布
 后才创建 run；required 准备失败会关闭资源且不创建 run，修正后需新建 runner。
 
+同一 runner 的并发入口共享一次资源准备；取消某个等待者不取消共享准备。关闭 runner 会先收口
+已有准备任务，再关闭自有资源。每次实际 Run 的 memory 前台登记仍独立执行。
+
+启用 `goal.enabled` 时，Runner 用同一 lifecycle store 装配 GoalService、目标工具与动态上下文。
+Goal 单轮入口复用普通 start 的执行注册、steering 和命令生命周期；自动输入标记为 context，
+不会替换最近普通用户输入锚点。`start()` 仍只执行一次 logical run。目标模型与申报规则见
+[Goal 说明](../goal/README.md)。
+
 resume/recover 先保留纯 durable 结算，确需执行才准备；准备后重新读取状态、checkpoint、
 claim 与时间，使用当前 runner 的配置继续。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
 恢复、查询、history fork 和取消申请不依赖 MCP 连接。

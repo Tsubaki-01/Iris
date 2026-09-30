@@ -85,6 +85,8 @@ def apply_goal_update(
             status, reason = GoalStatus.PAUSED, command.reason
         elif not has_resumable_run and goal.rounds_started >= goal.max_rounds:
             status, reason = GoalStatus.PAUSED, _ROUND_LIMIT_REASON
+        elif goal.status is GoalStatus.ACTIVE:
+            return goal
         else:
             status, reason = GoalStatus.ACTIVE, None
     if goal.status is status and goal.reason == reason:

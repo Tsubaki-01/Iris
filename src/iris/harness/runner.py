@@ -41,6 +41,10 @@ from ..exceptions import (
     IrisRunRecoveryError,
     IrisRunStateError,
 )
+from ..goal.context import render_continuation
+from ..goal.models import GoalAdmission, GoalProcessState, GoalRef
+from ..goal.service import GoalService
+from ..goal.store import AdmitGoalRun, GoalStore
 from ..hitl import (
     ApprovedToolCall,
     HumanInteraction,
@@ -63,6 +67,7 @@ from ..lifecycle import (
     ResolveInteraction,
     ResumeWaitingRun,
     RunCheckpoint,
+    RunCommit,
     RunControlSnapshot,
     RunErrorInfo,
     RunEvent,
@@ -111,6 +116,7 @@ from ._command_lifecycle import (
 from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAdapter
 from ._context_access import ContextAccess
 from ._events import _RunEventCollector
+from ._goal import validate_goal_options
 from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
@@ -287,6 +293,7 @@ class AgentRunner:
             binding is None or binding.config.mode is CommandMode.NATIVE
         )
         self._closed = False
+        self._prepare_task: asyncio.Task[None] | None = None
         self._resources_closed = False
         self._command_lifecycle = CommandLifecycle(self)
         self._command_target: CommandTarget = RootCommandTarget(self)
@@ -301,6 +308,12 @@ class AgentRunner:
         self._subagent_controller: HarnessSubagentController | None = None
         self._memory_maintenance: MemoryMaintenance | None = None
         environment = runtime.environment
+        self._goal_state_readers: dict[str, Callable[[], GoalProcessState]] = {}
+        self._goal_service = environment.goal_service
+        if self._goal_service is not None:
+            if self._goal_service.store is not store:
+                raise IrisConfigError("GoalService 必须使用 Runner 的同一 store 实例")
+            self._goal_service.process_state_reader = self._read_goal_process_state
         memory_config = environment.agent_config.memory
         if (
             environment.execution_scope is RuntimeExecutionScope.ROOT
@@ -327,18 +340,37 @@ class AgentRunner:
         if self._closed:
             raise IrisRunStateError("runner 已关闭")
         if not self._prepared:
-            try:
-                await self.runtime.environment.aprepare()
-                self._prepared = True
-            except BaseException:
-                self._closed = True
-                try:
-                    await self._close_owned_resources()
-                except Exception:
-                    logger.exception("运行资源准备失败后的资源关闭失败")
-                raise
+            if self._prepare_task is None:
+                self._prepare_task = asyncio.create_task(self._prepare_owned_environment())
+            await asyncio.shield(self._prepare_task)
+        if self._closed:
+            raise IrisRunStateError("runner 已关闭")
         if self._memory_maintenance is not None:
             await self._memory_maintenance.prepare()
+
+    async def _prepare_owned_environment(self) -> None:
+        """Root 拥有共享准备任务；取消等待者不取消准备本身。"""
+        try:
+            await self.runtime.environment.aprepare()
+            self._prepared = True
+        except BaseException:
+            self._closed = True
+            try:
+                await self._close_owned_resources()
+            except Exception:
+                logger.exception("运行资源准备失败后的资源关闭失败")
+            raise
+
+    def _read_goal_process_state(self, session_id: str) -> GoalProcessState:
+        """为模型和宿主读取已附着 manager 的进程态，无 attachment 时不自动执行。"""
+        reader = self._goal_state_readers.get(session_id)
+        return GoalProcessState() if reader is None else reader()
+
+    def _validate_goal_execution_options(self, run: RunRecord) -> None:
+        """Goal 恢复到模型执行前检查当前装配下的最终工具策略。"""
+        service = self._goal_service
+        if service is not None and service.store.get_goal_run(run.run_id) is not None:
+            validate_goal_options(self.runtime.environment.agent_config, run.options)
 
     async def aclose(self) -> None:
         """host 等原 start/resume/recover 完整结束后关闭自有环境资源。
@@ -353,6 +385,8 @@ class AgentRunner:
         ):
             raise IrisRunStateError("runner 仍有 active activation，不能关闭")
         self._closed = True
+        if self._prepare_task is not None:
+            await asyncio.shield(self._prepare_task)
         if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
             await self._command_lifecycle.aclose()
         await self._close_owned_resources()
@@ -424,6 +458,15 @@ class AgentRunner:
             store if store is not None else _build_lifecycle_store(config, config_path=config_path)
         )
         resolved_clock = clock if clock is not None else _SystemClock()
+        goal_service = (
+            GoalService(
+                cast(GoalStore, resolved_store),
+                config=config.goal,
+                run_options_validator=lambda options: validate_goal_options(config, options),
+            )
+            if config.goal.enabled
+            else None
+        )
         boundary = resolve_runtime_boundary(
             config,
             config_path=config_path,
@@ -453,6 +496,7 @@ class AgentRunner:
             subagent=subagent,
             context_access=ContextAccess(resolved_store),
             context_source=context_source,
+            goal_service=goal_service,
         )
         runner = cls(
             runtime=runtime,
@@ -514,18 +558,78 @@ class AgentRunner:
         await self.aprepare()
         command, cursor = self._build_start_facts(request, options=options)
         created = self.store.create_run(command)
+        if created.checkpoint != command.initial_checkpoint:
+            raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
+        return await self._run_created_start(
+            created,
+            cursor=cursor,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
+            activation_started=activation_started,
+        )
+
+    async def _run_created_start(
+        self,
+        created: RunCommit,
+        *,
+        cursor: RuntimeCursor,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """普通与 Goal start 共用 memory 登记、事件和 live activation 注册。"""
         if self._memory_maintenance is not None:
             await self._memory_maintenance.register_run(created.run)
         events = self._event_collector(durable_event_callback)
         events.record(created.events)
-        if created.checkpoint != command.initial_checkpoint:
-            raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
         return await self._run_start_activation(
             created.run,
-            activation_id=command.start_activation_id,
+            activation_id=cast(str, created.run.current_activation_id),
             cursor=cursor,
             events=events,
             steering=steering,
+            activation_started=activation_started,
+        )
+
+    def _admit_goal_start(
+        self, expected: GoalRef, *, run_id: str
+    ) -> tuple[GoalAdmission, RuntimeCursor]:
+        """同步构造并原子准入 Goal Run，manager 在自己的锁内调用。"""
+        service = cast(GoalService, self._goal_service)
+        goal = service.store.get_goal(expected.goal_id)
+        command, cursor = self._build_start_facts(
+            AgentRunRequest(
+                input=render_continuation(goal), session_id=goal.session_id, run_id=run_id
+            ),
+            options=goal.run_options,
+        )
+        admitted = service.store.admit_goal_run(AdmitGoalRun(expected=expected, create_run=command))
+        return admitted, cursor
+
+    @_with_memory_foreground
+    async def _start_goal_managed(
+        self,
+        expected: GoalRef,
+        *,
+        run_id: str,
+        admit: Callable[[], Awaitable[tuple[GoalAdmission, RuntimeCursor] | None]] | None = None,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult | None:
+        """准备后经 manager 的唯一 admission 接入执行一轮；失效意图不创建 Run。"""
+        await self.aprepare()
+        prepared = (
+            self._admit_goal_start(expected, run_id=run_id) if admit is None else await admit()
+        )
+        if prepared is None:
+            return None
+        admitted, cursor = prepared
+        return await self._run_created_start(
+            admitted.commit,
+            cursor=cursor,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
             activation_started=activation_started,
         )
 
@@ -611,6 +715,7 @@ class AgentRunner:
             clock=self._now,
             event_collector=events,
             interaction_service=self.interaction_service,
+            goal_service=self._goal_service,
         )
         activation = RuntimeActivationInput(
             run_id=run.run_id,
@@ -738,6 +843,7 @@ class AgentRunner:
                 run_id=run.run_id,
             )
         cursor = self._validate_resume_checkpoint(run, interaction, checkpoint)
+        self._validate_goal_execution_options(run)
         self.interaction_service.validate_response(
             interaction,
             run=snapshot_run(run),
@@ -812,6 +918,7 @@ class AgentRunner:
             clock=self._now,
             event_collector=active.event_collector,
             interaction_service=self.interaction_service,
+            goal_service=self._goal_service,
         )
         activation = RuntimeActivationInput(
             run_id=run.run_id,
@@ -965,6 +1072,7 @@ class AgentRunner:
             clock=self._now,
             event_collector=event_collector,
             interaction_service=self.interaction_service,
+            goal_service=self._goal_service,
             workspace_root=self.runtime.environment.workspace_root,
             subagent_routes=controller.routes,
         )
@@ -1277,6 +1385,7 @@ class AgentRunner:
                 and recovered_cursor.position != "outcome_ready"
             ):
                 disposition = RecoveryDisposition.RESUME
+                self._validate_goal_execution_options(run)
             else:
                 raise IrisRunRecoveryError(
                     "checkpoint resumability 与 cursor position 不匹配",
@@ -1362,6 +1471,7 @@ class AgentRunner:
             clock=self._now,
             event_collector=active.event_collector,
             interaction_service=self.interaction_service,
+            goal_service=self._goal_service,
         )
         activation = RuntimeActivationInput(
             run_id=run.run_id,

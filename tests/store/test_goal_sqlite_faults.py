@@ -14,6 +14,7 @@ from iris.lifecycle import AgentRunOptions
 from iris.store import SQLiteStore
 from iris.store import sqlite as sqlite_module
 
+from ..goal.test_report_settlement import _admit, _finish, _report, _step
 from .test_lifecycle_store_contract import _NOW, _create_command
 
 
@@ -180,3 +181,34 @@ def test_goal_binding_and_snapshot_survive_reopening(tmp_path: Path) -> None:
     assert reopened.get_goal_run("run-1") == admitted.binding
     assert reopened.list_unsettled_goal_runs("session-1") == (admitted.binding,)
     assert reopened.load_session_revision("session-1") == 0
+
+
+def test_settlement_binding_write_failure_rolls_back_goal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """目标完成写入后若绑定落盘失败，两项事实一起回滚并可重做。"""
+    store = SQLiteStore(tmp_path / "settle-fault.db")
+    current = _admit(store)
+    current = _step(store, current, [("report_goal", {"goal_report": _report(store)}, False)])
+    _finish(store, current)
+    goal = store.get_goal("goal")
+    binding = store.get_goal_run("run-1")
+    execute = sqlite_module._execute
+
+    def fail_binding(
+        connection: sqlite3.Connection,
+        sql: str,
+        params: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor:
+        if "UPDATE goal_runs SET settled_at" in sql:
+            raise sqlite3.OperationalError("injected settlement failure")
+        return execute(connection, sql, params)
+
+    monkeypatch.setattr(sqlite_module, "_execute", fail_binding)
+    with pytest.raises(IrisGoalPersistenceError):
+        store.settle_goal_run("run-1", now=_NOW)
+    assert store.get_goal("goal") == goal
+    assert store.get_goal_run("run-1") == binding
+    monkeypatch.setattr(sqlite_module, "_execute", execute)
+    assert store.settle_goal_run("run-1", now=_NOW).goal.status.value == "completed"
