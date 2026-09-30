@@ -19,10 +19,22 @@ from typing import Any, Protocol, cast
 from uuid import uuid4
 
 from ..exceptions import (
+    IrisGoalConflictError,
+    IrisGoalNotFoundError,
+    IrisGoalStateError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunRecoveryError,
     IrisRunStateError,
+)
+from ..goal.models import GoalAdmission, GoalRunBinding, GoalSnapshot
+from ..goal.store import AdmitGoalRun, ClearGoal, CreateGoal, GoalUpdate
+from ..goal.transitions import (
+    admit_goal_snapshot,
+    apply_goal_update,
+    create_goal_snapshot,
+    require_current_goal,
+    require_goal_creation,
 )
 from ..hitl.models import (
     HumanInteraction,
@@ -124,6 +136,16 @@ class _MemorySession:
     read_state: SessionReadState
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedRun:
+    """已完成构造、可在同一锁内一次发布的初始运行事实。"""
+
+    commit: RunCommit
+    session: _MemorySession
+    activation: ActivationRecord
+    events: list[RunEvent]
+
+
 def _empty_session(session_id: str) -> _MemorySession:
     """构造尚无原文的内部会话。"""
     return _MemorySession(SessionSnapshot(session_id=session_id), SessionReadState())
@@ -154,11 +176,117 @@ class InMemoryLifecycleStore:
         self._events: dict[str, list[RunEvent]] = {}
         self._results: dict[str, RunResult] = {}
         self._subagent_links: dict[tuple[str, str], SubagentRunLink] = {}
+        self._goals: dict[str, GoalSnapshot] = {}
+        self._current_goals: dict[str, str] = {}
+        self._goal_runs: dict[str, GoalRunBinding] = {}
 
     @property
     def source_id(self) -> str:
         """返回此内存实例生命周期内稳定的来源身份。"""
         return self._source_id
+
+    def get_current_goal(self, session_id: str) -> GoalSnapshot | None:
+        """读取当前目标，不推进运行或补结算。"""
+        with self._lock:
+            goal_id = self._current_goals.get(session_id)
+            return None if goal_id is None else deepcopy(self._goals[goal_id])
+
+    def get_goal(self, goal_id: str) -> GoalSnapshot:
+        """读取指定目标，包含已取消当前选择的记录。"""
+        with self._lock:
+            return deepcopy(self._require_goal(goal_id))
+
+    def get_goal_run(self, run_id: str) -> GoalRunBinding | None:
+        """读取一次自动顶层运行的目标绑定。"""
+        with self._lock:
+            return deepcopy(self._goal_runs.get(run_id))
+
+    def list_unsettled_goal_runs(self, session_id: str) -> tuple[GoalRunBinding, ...]:
+        """列出该会话所有尚未结算的绑定，包括已清除目标。"""
+        with self._lock:
+            return deepcopy(
+                tuple(
+                    binding
+                    for binding in self._goal_runs.values()
+                    if binding.settled_at is None
+                    and self._goals[binding.goal_id].session_id == session_id
+                )
+            )
+
+    def create_goal(self, command: CreateGoal) -> GoalSnapshot:
+        """同次发布目标与按需创建的空会话，不占用运行 lane。"""
+        command = deepcopy(command)
+        with self._lock:
+            if command.goal_id in self._goals:
+                raise IrisGoalConflictError("goal_id 已存在", goal_id=command.goal_id)
+            current_id = self._current_goals.get(command.session_id)
+            require_goal_creation(None if current_id is None else self._goals[current_id])
+            goal = create_goal_snapshot(command)
+            session = self._sessions.get(command.session_id)
+            if session is None:
+                session = _empty_session(command.session_id)
+            result = deepcopy(goal)
+            self._goals[goal.goal_id] = goal
+            self._current_goals[goal.session_id] = goal.goal_id
+            self._sessions.setdefault(goal.session_id, session)
+            return result
+
+    def update_goal(self, command: GoalUpdate) -> GoalSnapshot | None:
+        """只修改目标 delta，保持运行与会话历史 revision。"""
+        command = deepcopy(command)
+        with self._lock:
+            if isinstance(command, ClearGoal) and command.expected is None:
+                if command.session_id in self._current_goals:
+                    raise IrisGoalConflictError("当前目标已变化", session_id=command.session_id)
+                return None
+            expected = command.expected
+            goal = self._require_goal(expected.goal_id)
+            require_current_goal(
+                goal, expected, is_current=self._current_goals.get(goal.session_id) == goal.goal_id
+            )
+            if isinstance(command, ClearGoal) and command.session_id != goal.session_id:
+                raise IrisGoalConflictError("clear session 与目标不符", goal_id=goal.goal_id)
+            has_resumable_run = any(
+                binding.goal_id == goal.goal_id
+                and self._runs[binding.run_id].phase is not RunPhase.TERMINAL
+                for binding in self._goal_runs.values()
+            )
+            updated = apply_goal_update(goal, command, has_resumable_run=has_resumable_run)
+            result = deepcopy(updated)
+            self._goals[goal.goal_id] = updated
+            if isinstance(command, ClearGoal):
+                del self._current_goals[goal.session_id]
+            return result
+
+    def admit_goal_run(self, command: AdmitGoalRun) -> GoalAdmission:
+        """原子发布 Run、Goal 绑定与次数；构造失败不留下部分状态。"""
+        command = deepcopy(command)
+        with self._lock:
+            goal = self._require_goal(command.expected.goal_id)
+            require_current_goal(
+                goal,
+                command.expected,
+                is_current=self._current_goals.get(goal.session_id) == goal.goal_id,
+            )
+            if any(
+                binding.goal_id == goal.goal_id and binding.settled_at is None
+                for binding in self._goal_runs.values()
+            ):
+                raise IrisGoalStateError("上一轮目标运行尚未结算", goal_id=goal.goal_id)
+            updated, binding = admit_goal_snapshot(goal, command)
+            prepared = self._prepare_create_run(command.create_run)
+            result = deepcopy(GoalAdmission(commit=prepared.commit, goal=updated, binding=binding))
+            self._install_created_run(prepared)
+            self._goals[goal.goal_id] = updated
+            self._goal_runs[binding.run_id] = binding
+            return result
+
+    def _require_goal(self, goal_id: str) -> GoalSnapshot:
+        """取得 store-owned 目标记录，供锁内 mutation 使用。"""
+        goal = self._goals.get(goal_id)
+        if goal is None:
+            raise IrisGoalNotFoundError("目标不存在", goal_id=goal_id)
+        return goal
 
     def load_subagent_link(
         self, parent_run_id: str, parent_tool_call_id: str
@@ -386,79 +514,87 @@ class InMemoryLifecycleStore:
         """原子创建 run、lane、activation、checkpoint 与起始事件。"""
         command = deepcopy(command)
         with self._lock:
-            run_id = cast(str, command.request.run_id)
-            if run_id in self._runs:
-                raise IrisRunConflictError("run_id 已存在", run_id=run_id)
-            owner = self._lanes.get(command.request.session_id)
-            if owner is not None:
-                raise IrisRunConflictError(
-                    "session lane 已被 non-terminal run 占用",
-                    session_id=command.request.session_id,
-                    owner_run_id=owner,
-                )
-            if command.start_activation_id in self._activations:
-                raise IrisRunConflictError(
-                    "activation_id 已存在", activation_id=command.start_activation_id
-                )
-            session = self._sessions.get(
-                command.request.session_id,
-                _empty_session(command.request.session_id),
-            )
-            if command.initial_checkpoint.session_revision != session.snapshot.revision:
-                raise IrisRunConflictError(
-                    "initial checkpoint session revision 不匹配",
-                    expected=session.snapshot.revision,
-                    actual=command.initial_checkpoint.session_revision,
-                )
+            prepared = self._prepare_create_run(command)
+            result = deepcopy(prepared.commit)
+            self._install_created_run(prepared)
+            return result
 
-            activation = ActivationRecord(
-                activation_id=command.start_activation_id,
-                run_id=run_id,
-                ordinal=1,
-                kind=ActivationKind.START,
-                status=ActivationStatus.ACTIVE,
-                started_at=command.now,
-            )
-            run = RunRecord(
-                run_id=run_id,
+    def _prepare_create_run(self, command: CreateRun) -> _PreparedRun:
+        """在锁内校验并构造全部候选，不发布任何状态。"""
+        run_id = cast(str, command.request.run_id)
+        if run_id in self._runs:
+            raise IrisRunConflictError("run_id 已存在", run_id=run_id)
+        owner = self._lanes.get(command.request.session_id)
+        if owner is not None:
+            raise IrisRunConflictError(
+                "session lane 已被 non-terminal run 占用",
                 session_id=command.request.session_id,
-                agent_id=command.agent_id,
-                request=command.request,
-                initial_session_message_count=len(session.snapshot.messages),
-                options=command.options,
-                phase=RunPhase.ACTIVE,
-                revision=1,
-                current_activation_id=command.start_activation_id,
-                usage=RunUsage(),
-                checkpoint_sequence=1,
-                last_event_sequence=2,
-                created_at=command.now,
-                started_at=command.now,
-                updated_at=command.now,
+                owner_run_id=owner,
             )
-            events = (
-                self._event(run, RunEventKind.RUN_STARTED, command.now, sequence=1),
-                self._event(
-                    run,
-                    RunEventKind.ACTIVATION_STARTED,
-                    command.now,
-                    sequence=2,
-                    activation_id=activation.activation_id,
-                ),
+        if command.start_activation_id in self._activations:
+            raise IrisRunConflictError(
+                "activation_id 已存在", activation_id=command.start_activation_id
             )
-            commit = RunCommit(
-                run=run,
-                session_revision=None,
-                checkpoint=command.initial_checkpoint,
-                events=events,
+        session = self._sessions.get(command.request.session_id)
+        if session is None:
+            session = _empty_session(command.request.session_id)
+        if command.initial_checkpoint.session_revision != session.snapshot.revision:
+            raise IrisRunConflictError(
+                "initial checkpoint session revision 不匹配",
+                expected=session.snapshot.revision,
+                actual=command.initial_checkpoint.session_revision,
             )
-            self._runs[run_id] = deepcopy(run)
-            self._sessions.setdefault(session.snapshot.session_id, session)
-            self._lanes[session.snapshot.session_id] = run_id
-            self._activations[activation.activation_id] = deepcopy(activation)
-            self._checkpoints[run_id] = deepcopy(command.initial_checkpoint)
-            self._events[run_id] = deepcopy(list(events))
-            return deepcopy(commit)
+        activation = ActivationRecord(
+            activation_id=command.start_activation_id,
+            run_id=run_id,
+            ordinal=1,
+            kind=ActivationKind.START,
+            status=ActivationStatus.ACTIVE,
+            started_at=command.now,
+        )
+        run = RunRecord(
+            run_id=run_id,
+            session_id=command.request.session_id,
+            agent_id=command.agent_id,
+            request=command.request,
+            initial_session_message_count=len(session.snapshot.messages),
+            options=command.options,
+            phase=RunPhase.ACTIVE,
+            revision=1,
+            current_activation_id=command.start_activation_id,
+            usage=RunUsage(),
+            checkpoint_sequence=1,
+            last_event_sequence=2,
+            created_at=command.now,
+            started_at=command.now,
+            updated_at=command.now,
+        )
+        events = [
+            self._event(run, RunEventKind.RUN_STARTED, command.now, sequence=1),
+            self._event(
+                run,
+                RunEventKind.ACTIVATION_STARTED,
+                command.now,
+                sequence=2,
+                activation_id=activation.activation_id,
+            ),
+        ]
+        return _PreparedRun(
+            commit=RunCommit(run=run, checkpoint=command.initial_checkpoint, events=tuple(events)),
+            session=session,
+            activation=activation,
+            events=events,
+        )
+
+    def _install_created_run(self, prepared: _PreparedRun) -> None:
+        """仅发布已构造事实；调用者持有同一 admission 锁。"""
+        run = prepared.commit.run
+        self._runs[run.run_id] = run
+        self._sessions.setdefault(run.session_id, prepared.session)
+        self._lanes[run.session_id] = run.run_id
+        self._activations[prepared.activation.activation_id] = prepared.activation
+        self._checkpoints[run.run_id] = cast(RunCheckpoint, prepared.commit.checkpoint)
+        self._events[run.run_id] = prepared.events
 
     def resume_waiting_run(self, command: ResumeWaitingRun) -> RunCommit:
         """从 resolved waiting run 建立新的 active fence。"""

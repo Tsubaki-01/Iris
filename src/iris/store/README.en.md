@@ -30,7 +30,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v10
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v11
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported; choose a new database path for the new store. The
@@ -48,6 +48,15 @@ inherited fork history, and later runs. See the [lifecycle contract](../lifecycl
 for message counts and the returned model.
 
 ## Architecture
+
+Both backends also implement `iris.goal.store.GoalStore`, using `goals` and `goal_runs` in the
+same transaction domain. A session has at most one current goal. Creating a goal before the first
+chat creates an empty session at revision 0; goal controls never change history revisions.
+`admit_goal_run` atomically creates a normal run, its goal binding, and its spent round. Failed
+admission leaves no partial facts; an admitted attempt is not refunded. The in-memory backend
+builds all candidates before publishing, while SQLite reuses run creation on the same connection.
+Clearing a goal retains its records; forks do not copy goal selection or bindings. Reads do not
+start or recover work. See the [Goal package](../goal/README.md) for the domain interface.
 
 `InMemoryLifecycleStore` and `SQLiteStore` are independent, peer protocol implementations. The
 in-memory implementation protects process-local facts with one `RLock` and deep-copy isolates
@@ -88,7 +97,7 @@ history precondition checks only the session revision. Both stores share lifecyc
 helpers: a mutation checks the affected phase, fence, and delta, then applies
 `model_copy(update=...)` to the validated model. Full `model_validate()` is reserved for
 load/recovery boundaries such as SQLite row decoding; a private store serializer projects durable
-values to JSON. Schema v10 keeps revision,
+values to JSON. Schema v11 keeps revision,
 message count, update time, nullable `forked_from_run_id`, the `compaction_json` projection, and the
 fixed `context_window_json` in `sessions`; later appends preserve the source, summary, and window.
 Messages append under contiguous ordinals in
@@ -133,10 +142,10 @@ PENDING writes check run revision and interaction version; a matching RESOLVED a
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v10. Runs and checkpoints no longer store
+when rows are first loaded. The current database is schema v11. Runs and checkpoints no longer store
 an environment fingerprint; older schemas are not migrated or read.
 
-Schema v10 contains:
+Schema v11 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
@@ -166,7 +175,7 @@ session revisions, the activation fence, and checkpoint sequence. It consumes no
 and leaves the step index, usage, and event sequence unchanged. Old commands conflict; SQL failures
 roll back the entire group, so recovery cannot observe partial input or a separately updated window.
 Checkpoint payload version is `3`, including the runtime cursor's required `visible_tool_names`.
-Lifecycle schema is `10`. Older databases or checkpoints are rejected at their respective load
+Lifecycle schema is `11`. Older databases or checkpoints are rejected at their respective load
 boundaries without migration.
 
 `SessionSnapshot.context_window=None` means uninitialized; an explicit `SessionContextWindow()`
@@ -205,7 +214,7 @@ it does not promise exactly-once external model billing across process restarts.
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v10-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v11-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -238,7 +247,7 @@ start beyond the end returns an empty page; the store raises `IrisRunStateError`
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v10.
+schema identity is lifecycle v11.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
 exact tool-call read.
@@ -285,7 +294,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v10, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v11, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
@@ -335,7 +344,7 @@ target session with its source field, copies messages through `INSERT ... SELECT
 initializes its discovery projection from that cutoff prefix, and commits within one
 `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
 empty target or partial messages. This operation requires neither the source's current session
-revision nor a free lane. The current schema v10 policy still provides no migration.
+revision nor a free lane. The current schema v11 policy still provides no migration.
 
 Preview and fork raise `IrisRunNotFoundError` for an absent source. A non-terminal or child source,
 or a nonpositive list limit, raises `IrisRunStateError`. An existing target, including an empty

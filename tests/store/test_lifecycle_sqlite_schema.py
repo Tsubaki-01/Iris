@@ -1,4 +1,4 @@
-"""Lifecycle SQLite v10 schema 与 session history 的持久化契约测试。"""
+"""Lifecycle SQLite v11 schema 与 session history 的持久化契约测试。"""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ from .test_lifecycle_store_contract import (
 )
 
 _TABLES = {
+    "goals",
+    "goal_runs",
     "subagent_run_links",
     "agent_runs",
     "lifecycle_schema",
@@ -34,6 +36,28 @@ _TABLES = {
     "sessions",
 }
 _COLUMNS = {
+    "goals": [
+        "goal_id",
+        "session_id",
+        "revision",
+        "objective",
+        "status",
+        "reason_json",
+        "max_rounds",
+        "rounds_started",
+        "run_options_json",
+        "created_at",
+        "updated_at",
+        "is_current",
+    ],
+    "goal_runs": [
+        "run_id",
+        "goal_id",
+        "round_no",
+        "admission_revision",
+        "settled_at",
+        "applied_report_call_id",
+    ],
     "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
     "lifecycle_schema": ["component", "version", "source_id"],
     "sessions": [
@@ -151,7 +175,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v10_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v11_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -185,14 +209,20 @@ def test_empty_database_creates_exact_v10_schema_and_reopens(tmp_path: Path) -> 
         message_fks = connection.execute("PRAGMA foreign_key_list(session_messages)").fetchall()
         session_fks = connection.execute("PRAGMA foreign_key_list(sessions)").fetchall()
         link_fks = connection.execute("PRAGMA foreign_key_list(subagent_run_links)").fetchall()
+        goal_fks = connection.execute("PRAGMA foreign_key_list(goals)").fetchall()
+        goal_run_fks = connection.execute("PRAGMA foreign_key_list(goal_runs)").fetchall()
         terminal_index = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'terminal_runs_by_session'"
         ).fetchone()
 
     assert tables == _TABLES
-    assert indexes == {"one_open_interaction_per_run", "terminal_runs_by_session"}
+    assert indexes == {
+        "one_open_interaction_per_run",
+        "terminal_runs_by_session",
+        "one_current_goal_per_session",
+    }
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 10)]
+    assert identity == [("agent_lifecycle", 11)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")
@@ -209,11 +239,31 @@ def test_empty_database_creates_exact_v10_schema_and_reopens(tmp_path: Path) -> 
         ("run_tool_calls", "parent_tool_call_id", "tool_call_id"),
         ("agent_runs", "child_run_id", "run_id"),
     }
+    assert {(row[2], row[3], row[4]) for row in goal_fks} == {
+        ("sessions", "session_id", "session_id")
+    }
+    assert {(row[2], row[3], row[4]) for row in goal_run_fks} == {
+        ("agent_runs", "run_id", "run_id"),
+        ("goals", "goal_id", "goal_id"),
+    }
 
 
 @pytest.mark.parametrize(
     "kind",
-    ["legacy", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "extra", "missing", "unknown_version"],
+    [
+        "legacy",
+        "v3",
+        "v4",
+        "v5",
+        "v6",
+        "v7",
+        "v8",
+        "v9",
+        "v10",
+        "extra",
+        "missing",
+        "unknown_version",
+    ],
 )
 def test_incompatible_database_is_rejected_without_changing_bytes(
     tmp_path: Path,
@@ -256,6 +306,10 @@ def test_incompatible_database_is_rejected_without_changing_bytes(
                 connection.execute("ALTER TABLE sessions DROP COLUMN tool_discovery_json")
                 connection.execute("ALTER TABLE sessions DROP COLUMN last_ordinary_user_index")
                 connection.execute("UPDATE lifecycle_schema SET version = 9")
+            elif kind == "v10":
+                connection.execute("DROP TABLE goal_runs")
+                connection.execute("DROP TABLE goals")
+                connection.execute("UPDATE lifecycle_schema SET version = 10")
             else:
                 connection.execute("UPDATE lifecycle_schema SET version = 99")
     before = path.read_bytes()

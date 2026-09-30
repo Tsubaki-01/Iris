@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v10 的同步 SQLite store。"""
+"""精确 lifecycle schema v11 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -14,12 +14,25 @@ from typing import Annotated, Any, Protocol, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from ..exceptions import (
+    IrisGoalConflictError,
+    IrisGoalNotFoundError,
+    IrisGoalPersistenceError,
+    IrisGoalStateError,
     IrisLifecycleSchemaError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
+)
+from ..goal.models import GoalAdmission, GoalRunBinding, GoalSnapshot
+from ..goal.store import AdmitGoalRun, ClearGoal, CreateGoal, GoalUpdate, ResumeGoal
+from ..goal.transitions import (
+    admit_goal_snapshot,
+    apply_goal_update,
+    create_goal_snapshot,
+    require_current_goal,
+    require_goal_creation,
 )
 from ..hitl.models import (
     HumanInteraction,
@@ -192,6 +205,206 @@ class SQLiteStore:
     def source_id(self) -> str:
         """返回数据库创建时保存的来源身份，重开数据库保持不变。"""
         return self._source_id
+
+    def get_current_goal(self, session_id: str) -> GoalSnapshot | None:
+        """读取会话当前目标，不触发结算或执行。"""
+        return self._goal_transaction(
+            "get_current_goal",
+            lambda connection: self._select_current_goal(connection, session_id),
+        )
+
+    def get_goal(self, goal_id: str) -> GoalSnapshot:
+        """按身份读取目标，包含已清除的历史目标。"""
+        return self._goal_transaction(
+            "get_goal", lambda connection: self._require_goal(connection, goal_id)[0]
+        )
+
+    def get_goal_run(self, run_id: str) -> GoalRunBinding | None:
+        """读取自动 Run 的目标绑定，普通 Run 返回空。"""
+
+        def read(connection: sqlite3.Connection) -> GoalRunBinding | None:
+            row = connection.execute(
+                "SELECT * FROM goal_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return None if row is None else _row_to_goal_run(row)
+
+        return self._goal_transaction("get_goal_run", read)
+
+    def list_unsettled_goal_runs(self, session_id: str) -> tuple[GoalRunBinding, ...]:
+        """列出整个会话未结算绑定，保留已清除目标的待结算事实。"""
+        return self._goal_transaction(
+            "list_unsettled_goal_runs",
+            lambda connection: tuple(
+                _row_to_goal_run(row)
+                for row in connection.execute(
+                    "SELECT goal_runs.* FROM goal_runs JOIN goals USING (goal_id) "
+                    "WHERE goals.session_id = ? AND goal_runs.settled_at IS NULL "
+                    "ORDER BY goals.created_at, goals.goal_id, goal_runs.round_no",
+                    (session_id,),
+                )
+            ),
+        )
+
+    def create_goal(self, command: CreateGoal) -> GoalSnapshot:
+        """在同一事务中创建缺失的空 session 和唯一当前目标。"""
+
+        def create(connection: sqlite3.Connection) -> GoalSnapshot:
+            current = self._select_current_goal(connection, command.session_id)
+            require_goal_creation(current)
+            goal = create_goal_snapshot(command)
+            if current is not None:
+                _execute(
+                    connection,
+                    "UPDATE goals SET is_current = 0 WHERE goal_id = ?",
+                    (current.goal_id,),
+                )
+            _execute(
+                connection,
+                "INSERT INTO sessions(session_id, revision, message_count, updated_at) "
+                "VALUES (?, 0, 0, ?) ON CONFLICT(session_id) DO NOTHING",
+                (command.session_id, command.now.isoformat()),
+            )
+            _execute(
+                connection,
+                "INSERT INTO goals(goal_id, session_id, revision, objective, status, reason_json, "
+                "max_rounds, rounds_started, run_options_json, created_at, updated_at, is_current) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                _goal_values(goal),
+            )
+            return goal
+
+        return self._goal_transaction("create_goal", create, write=True)
+
+    def update_goal(self, command: GoalUpdate) -> GoalSnapshot | None:
+        """按 Goal CAS 更新目标，不修改会话历史或 Run。"""
+
+        def update(connection: sqlite3.Connection) -> GoalSnapshot | None:
+            if isinstance(command, ClearGoal):
+                current = self._select_current_goal(connection, command.session_id)
+                if current is None and command.expected is None:
+                    return None
+                if current is None or command.expected is None:
+                    raise IrisGoalConflictError("当前目标已变化", session_id=command.session_id)
+                goal = current
+                is_current = True
+            else:
+                goal, is_current = self._require_goal(connection, command.expected.goal_id)
+            require_current_goal(goal, command.expected, is_current=is_current)
+            resumable = False
+            if isinstance(command, ResumeGoal):
+                resumable = (
+                    connection.execute(
+                        "SELECT 1 FROM goal_runs JOIN agent_runs USING (run_id) "
+                        "WHERE goal_runs.goal_id = ? AND agent_runs.phase != 'terminal' LIMIT 1",
+                        (goal.goal_id,),
+                    ).fetchone()
+                    is not None
+                )
+            updated = apply_goal_update(goal, command, has_resumable_run=resumable)
+            if updated.revision != goal.revision:
+                self._persist_goal_update(
+                    connection, goal, updated, is_current=not isinstance(command, ClearGoal)
+                )
+            return updated
+
+        return self._goal_transaction("update_goal", update, write=True)
+
+    def admit_goal_run(self, command: AdmitGoalRun) -> GoalAdmission:
+        """同事务完成普通 Run 准入、目标绑定和轮数推进。"""
+
+        def admit(connection: sqlite3.Connection) -> GoalAdmission:
+            goal, is_current = self._require_goal(connection, command.expected.goal_id)
+            require_current_goal(goal, command.expected, is_current=is_current)
+            if (
+                connection.execute(
+                    "SELECT 1 FROM goal_runs WHERE goal_id = ? AND settled_at IS NULL LIMIT 1",
+                    (goal.goal_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise IrisGoalStateError("上一轮目标执行尚未结算", goal_id=goal.goal_id)
+            updated, binding = admit_goal_snapshot(goal, command)
+            commit = self._create_run(connection, command.create_run)
+            _execute(
+                connection,
+                "INSERT INTO goal_runs(run_id, goal_id, round_no, admission_revision, "
+                "settled_at, applied_report_call_id) VALUES (?, ?, ?, ?, NULL, NULL)",
+                (binding.run_id, binding.goal_id, binding.round_no, binding.admission_revision),
+            )
+            self._persist_goal_update(connection, goal, updated, is_current=True)
+            return GoalAdmission(commit=commit, goal=updated, binding=binding)
+
+        return self._goal_transaction("admit_goal_run", admit, write=True)
+
+    def _goal_transaction(
+        self,
+        operation: str,
+        handler: Callable[[sqlite3.Connection], _MutationT],
+        *,
+        write: bool = False,
+    ) -> _MutationT:
+        """在 Goal 存储边界归一化 SQL、编码与 durable row 解析错误。"""
+        with self._lock:
+            try:
+                with self._connect() as connection:
+                    _execute(connection, "BEGIN IMMEDIATE" if write else "BEGIN")
+                    result = handler(connection)
+                    connection.commit()
+                    return result
+            except sqlite3.IntegrityError as exc:
+                raise IrisGoalConflictError(
+                    "Goal SQLite constraint 冲突", path=str(self.path), operation=operation
+                ) from exc
+            except (sqlite3.Error, IrisRunPersistenceError, ValueError, TypeError) as exc:
+                raise IrisGoalPersistenceError(
+                    "Goal SQLite 读写或持久化解析失败", path=str(self.path), operation=operation
+                ) from exc
+
+    def _select_current_goal(
+        self, connection: sqlite3.Connection, session_id: str
+    ) -> GoalSnapshot | None:
+        row = connection.execute(
+            "SELECT * FROM goals WHERE session_id = ? AND is_current = 1", (session_id,)
+        ).fetchone()
+        return None if row is None else _row_to_goal(row)
+
+    def _require_goal(
+        self, connection: sqlite3.Connection, goal_id: str
+    ) -> tuple[GoalSnapshot, bool]:
+        row = connection.execute("SELECT * FROM goals WHERE goal_id = ?", (goal_id,)).fetchone()
+        if row is None:
+            raise IrisGoalNotFoundError("目标不存在", goal_id=goal_id)
+        return _row_to_goal(row), row["is_current"] == 1
+
+    def _persist_goal_update(
+        self,
+        connection: sqlite3.Connection,
+        current: GoalSnapshot,
+        updated: GoalSnapshot,
+        *,
+        is_current: bool,
+    ) -> None:
+        cursor = _execute(
+            connection,
+            "UPDATE goals SET revision = ?, objective = ?, status = ?, reason_json = ?, "
+            "max_rounds = ?, rounds_started = ?, run_options_json = ?, updated_at = ?, "
+            "is_current = ? WHERE goal_id = ? AND revision = ? AND is_current = 1",
+            (
+                updated.revision,
+                updated.objective,
+                updated.status.value,
+                _dump_json(updated.reason) if updated.reason is not None else None,
+                updated.max_rounds,
+                updated.rounds_started,
+                _dump_json(updated.run_options),
+                updated.updated_at.isoformat(),
+                int(is_current),
+                current.goal_id,
+                current.revision,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise IrisGoalConflictError("目标已变化", goal_id=current.goal_id)
 
     def load_subagent_link(
         self, parent_run_id: str, parent_tool_call_id: str
@@ -3898,6 +4111,47 @@ def _activation_outcome(stop_reason: RunStopReason) -> ActivationOutcome:
 
 def _stored_activation_outcome(activation: ActivationRecord) -> str | None:
     return activation.outcome.value if activation.outcome is not None else None
+
+
+def _goal_values(goal: GoalSnapshot) -> tuple[object, ...]:
+    """在持久化边界一次编码新目标的所有字段。"""
+    return (
+        goal.goal_id,
+        goal.session_id,
+        goal.revision,
+        goal.objective,
+        goal.status.value,
+        _dump_json(goal.reason) if goal.reason is not None else None,
+        goal.max_rounds,
+        goal.rounds_started,
+        _dump_json(goal.run_options),
+        goal.created_at.isoformat(),
+        goal.updated_at.isoformat(),
+    )
+
+
+def _row_to_goal(row: sqlite3.Row) -> GoalSnapshot:
+    """将数据库目标行完整解析为可信领域快照。"""
+    return GoalSnapshot.model_validate(
+        {
+            "goal_id": row["goal_id"],
+            "session_id": row["session_id"],
+            "revision": row["revision"],
+            "objective": row["objective"],
+            "status": row["status"],
+            "reason": json.loads(row["reason_json"]) if row["reason_json"] is not None else None,
+            "max_rounds": row["max_rounds"],
+            "rounds_started": row["rounds_started"],
+            "run_options": json.loads(row["run_options_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    )
+
+
+def _row_to_goal_run(row: sqlite3.Row) -> GoalRunBinding:
+    """将数据库绑定行完整解析为可信目标执行事实。"""
+    return GoalRunBinding.model_validate(dict(row))
 
 
 def _dump_json(value: object) -> str:
