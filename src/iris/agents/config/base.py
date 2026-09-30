@@ -22,6 +22,7 @@ from ...exceptions import IrisConfigError, IrisValidationError
 from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
 from ...providers import ModelRoute, parse_model_route
+from ...todo.config import TodoConfig
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
 from .mcp import AgentMCPConfig
@@ -239,6 +240,7 @@ class AgentConfig(BaseModel):
         context_policy (ContextPolicyConfig): 当前会话上下文回读策略。
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
+        todo (TodoConfig): 会话 Markdown 待办清单开关。
         tools (ToolsConfig): 工具配置。
         permissions (PermissionsConfig): 权限配置。
         command (CommandConfig): root 命令环境配置，不自动注册工具。
@@ -255,6 +257,7 @@ class AgentConfig(BaseModel):
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
+    todo: TodoConfig = Field(default_factory=TodoConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     command: CommandConfig = Field(default_factory=CommandConfig)
@@ -300,6 +303,13 @@ class AgentConfig(BaseModel):
         """目标的每步动态投影要求启用 context policy。"""
         if self.goal.enabled and not self.context_policy.enabled:
             raise ValueError("goal.enabled 要求 context_policy.enabled=true")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_todo_context(self) -> AgentConfig:
+        """Todo 的当前文件投影要求启用 context policy。"""
+        if self.todo.enabled and not self.context_policy.enabled:
+            raise ValueError("todo.enabled 要求 context_policy.enabled=true")
         return self
 
     def to_model_route(self) -> ModelRoute:

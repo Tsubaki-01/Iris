@@ -8,6 +8,10 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
+`todo.enabled` defaults to false. Enabling it provides per-session Markdown Todo access and
+requires `context_policy.enabled=true`; it does not register file tools or change permissions.
+`TodoConfig` is exported from `iris.todo`. See the [Todo documentation](../todo/README.md).
+
 `AgentConfig.mcp` uses `AgentMCPConfig` and `MCPServerOverride`, both exported from `iris.agents`.
 `mcp.path` resolves relative to the agent YAML. Loading YAML does not connect; shared assembly
 reads declarations, and the runner prepares and publishes tools before execution. See

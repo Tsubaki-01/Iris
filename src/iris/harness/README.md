@@ -85,6 +85,14 @@ timer 和失败清理 pending 不随临时 child runner 关闭；它们通过 ex
 父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
 创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
+## 会话 Todo 读取
+
+启用 `todo.enabled` 后，`await runner.get_todo(session_id)` 返回当前工作区的 Markdown
+清单，包含绝对 `path`、冻结 `items` 和可选格式诊断 `error`。接口使用实际 runtime 的配置
+和工作区，显式 runtime 构造也适用；不创建 session/Run，不占执行 lane，不准备 provider，
+不改变历史版本。人工修改后下次查询即可看到新内容。文件不存在时为空，读取失败与未启用
+使用 `IrisTodoError`。格式及示例见 [Todo](../todo/README.md)。
+
 ## 当前会话上下文回读
 
 `context_policy.enabled` 默认 `true`。`AgentRunner.from_config*()` 使用同一个 lifecycle store

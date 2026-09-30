@@ -41,6 +41,7 @@ from ..exceptions import (
     IrisRunPersistenceError,
     IrisRunRecoveryError,
     IrisRunStateError,
+    IrisTodoError,
 )
 from ..goal.context import render_continuation
 from ..goal.models import GoalAdmission, GoalProcessState, GoalRef
@@ -105,6 +106,8 @@ from ..runtime._assembly import (
 )
 from ..runtime.runtime import _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
+from ..todo import TodoSnapshot
+from ..todo.document import read_todo
 from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ._command_lifecycle import (
@@ -1926,6 +1929,27 @@ class AgentRunner:
         if not normalized:
             raise IrisRunStateError("session_id 不能为空")
         return self.store.load_session(normalized)
+
+    async def get_todo(self, session_id: str) -> TodoSnapshot:
+        """读取当前工作区的会话 Todo 文件，不创建会话或启动执行。
+
+        Args:
+            session_id: 与运行入口一致的会话身份。
+
+        Returns:
+            TodoSnapshot: 当前文件路径、条目或格式诊断。
+
+        Raises:
+            IrisRunStateError: 会话身份为空。
+            IrisTodoError: Todo 未启用或文件读取失败。
+        """
+        normalized = session_id.strip()
+        if not normalized:
+            raise IrisRunStateError("session_id 不能为空")
+        environment = self.runtime.environment
+        if not environment.agent_config.todo.enabled:
+            raise IrisTodoError("Todo 未启用，请设置 todo.enabled: true")
+        return await read_todo(environment.workspace_root, normalized)
 
     def get_result(self, run_id: str) -> RunResult | None:
         """读取 waiting/terminal durable result；active run 返回 ``None``。"""

@@ -10,6 +10,13 @@ ownership from it.
 
 ## Quick start
 
+With `todo.enabled`, `await runner.get_todo(session_id)` reads the current workspace's Markdown
+checklist and returns its absolute `path`, immutable `items`, and an optional format `error`.
+It also works with a directly constructed runtime, does not create a session or run, and does not
+prepare providers, occupy the session lane, or change history revisions. Each query reads current
+file contents; a missing file is empty, while disabled access or I/O failure raises `IrisTodoError`.
+See [Todo](../todo/README.md) for configuration and the Markdown format.
+
 ```python
 from iris.harness import AgentRunRequest, AgentRunner
 
