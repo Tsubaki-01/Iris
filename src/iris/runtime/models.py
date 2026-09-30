@@ -41,6 +41,7 @@ class RuntimeCursor(_FrozenRuntimeModel):
     position: Literal["before_input", "before_model", "tool_batch", "outcome_ready"]
     step_index: int = Field(ge=0)
     visible_tool_names: tuple[str, ...]
+    todo_reminder_step: int | None
     next_tool_index: int = Field(default=0, ge=0)
     tool_calls: tuple[ToolUseBlock, ...] = ()
     tool_results: tuple[ToolResult, ...] = ()

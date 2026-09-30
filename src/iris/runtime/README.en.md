@@ -99,7 +99,7 @@ when the run was created. In `before_input`, the engine prepares the initial win
 then saves the window and input atomically through `commit_run_input()` before entering `before_model`. This
 does not consume a model reservation or increment the step index. BCI is built only during input
 preparation; later steps and recovery after the input commit replay history without appending or
-rendering it again. Checkpoint version 3 requires `visible_tool_names` in the cursor and rejects
+rendering it again. Checkpoint version 4 requires `visible_tool_names` and `todo_reminder_step` in the cursor and rejects
 older checkpoints without inferring their input state or originally visible tool set.
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` independently records each summary
@@ -300,8 +300,15 @@ response uses the new summary, committed window, and the same pending reservatio
 flow; `outcome_ready` only settles. Actual main-provider overflow has no extra compact-and-retry path.
 
 Cursor positions are `before_input`, `before_model`, `tool_batch`, and `outcome_ready`.
-`before_input` prepares and commits the input group before model reservation. A provider response without
-tools is committed as `CheckpointResumability.OUTCOME_READY`. Tool effects require a durable claim
+`before_input` prepares and commits the input group before model reservation. A response without tools
+first handles real steering, then may schedule one Todo check when pending items or a diagnostic
+remain and the run has time and model-step budget. That transition commits only the assistant and
+records the next `before_model` index in the required `todo_reminder_step` cursor field. Otherwise it
+commits as `CheckpointResumability.OUTCOME_READY`. Checkpoint v4 requires the field explicitly;
+new runs initialize it to None. Recovery and tool transitions preserve the target. Only that step
+adds the check to the required Todo contribution. `ModelStepReservation.remaining_model_steps`
+projects accepted Run usage: the number of additional steps available beyond the admitted one.
+Reusing the last prepaid step is valid with zero remaining steps. Tool effects require a durable claim
 before execution and a durable result afterward. If an effect cannot be proven after claim, the
 engine returns `TOOL_OUTCOME_UNKNOWN` and never replays it.
 

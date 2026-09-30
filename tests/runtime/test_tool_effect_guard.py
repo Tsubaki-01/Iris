@@ -277,6 +277,7 @@ def test_commit_port_guard_claims_indexed_uncommitted_suffix(tmp_path: Path) -> 
     second_use = ToolUseBlock(id="call_2", name="echo", input={"value": "later"})
     second = executor.prepare_many([second_use], context).calls[0]
     cursor = RuntimeCursor(
+        todo_reminder_step=None,
         position="tool_batch",
         visible_tool_names=("echo",),
         step_index=2,

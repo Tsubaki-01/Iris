@@ -51,6 +51,8 @@ def test_empty_context_keeps_location_and_editing_instructions(tmp_path: Path) -
     assert "自动验收" in text
     assert "假报完成" in text
     assert "权限" in text
+    assert "另一个模型步骤单独" in text
+    assert "report_goal" in text
 
 
 def test_format_diagnostic_is_not_rendered_as_empty_or_completed(tmp_path: Path) -> None:
@@ -96,3 +98,40 @@ def test_template_failure_is_normalized_once_with_template_path(
     assert error.context["template"] == str(template)
     assert isinstance(error.__cause__, IrisTemplateError)
     assert error.__cause__.context["path"] == str(template)
+
+
+@pytest.mark.parametrize("remind", [False, True])
+@pytest.mark.parametrize("state", ["pending", "empty", "invalid"])
+def test_reminder_only_projects_when_requested(tmp_path: Path, remind: bool, state: str) -> None:
+    """目标步按已安排标记自查，最新文件变空或格式出错也使用同一指令。"""
+    snapshot = TodoSnapshot(
+        tmp_path / "todo.md",
+        (TodoItem("需要检查", TodoStatus.PENDING),) if state == "pending" else (),
+        "Todo 第 2 行格式错误" if state == "invalid" else None,
+    )
+    contribution = render_todo_context(snapshot, remind=remind)
+    assert contribution.required
+    assert ("Todo 结束自查" in contribution.text) == remind
+    if remind:
+        assert "最新" in contribution.text
+        assert "允许结束" in contribution.text
+        assert "假报完成" in contribution.text
+        assert "修复" in contribution.text
+        assert "移除" in contribution.text
+        assert "状态" in contribution.text
+
+
+def test_reminder_template_failure_reports_its_own_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """自查模板缺失不会误报主模板路径，且关闭提醒不读取该模板。"""
+    missing = tmp_path / "todo_reminder.j2"
+    monkeypatch.setattr(todo_context, "_REMINDER_TEMPLATE", missing)
+    snapshot = TodoSnapshot(tmp_path / "todo.md", (), None)
+    assert "Todo 结束自查" not in render_todo_context(snapshot).text
+    with pytest.raises(IrisTodoError) as caught:
+        render_todo_context(snapshot, remind=True)
+    assert caught.value.context["template"] == str(missing)
+    assert caught.value.runtime_code == "TODO_ERROR"
+    assert isinstance(caught.value.__cause__, IrisTemplateError)
+    assert caught.value.__cause__.context["path"] == str(missing)

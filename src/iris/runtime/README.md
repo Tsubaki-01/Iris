@@ -79,7 +79,7 @@ result = await runtime.execute(
 engine 在 `before_input` 准备首次窗口、BCI 和用户输入，通过 `commit_run_input()`
 原子保存窗口与输入后进入 `before_model`，不消耗模型 reservation 或增加 step index。
 BCI 只在输入阶段构建；后续步骤及已提交输入的 resume/recover 使用历史，不重复追加或渲染。
-checkpoint 使用版本 3，cursor 必须提供 `visible_tool_names`；旧版在恢复边界拒绝，不推断
+checkpoint 使用版本 4，cursor 必须提供 `visible_tool_names` 和 `todo_reminder_step`；旧版在恢复边界拒绝，不推断
 旧 cursor 的输入状态或当时可见工具集合。
 
 `RuntimeCommitPort.record_compaction_usage(TokenUsage)` 独立保存每份摘要响应用量；
@@ -250,7 +250,13 @@ cursor 位置只有：
 - `tool_batch`：provider response 已提交，按 `next_tool_index` 推进 exact tool calls；
 - `outcome_ready`：assistant outcome 已提交，只差 lifecycle terminal settlement。
 
-无工具的 provider response 会以 `CheckpointResumability.OUTCOME_READY` 提交。工具 effect 前
+无工具的 provider response 先处理真实 steer，再按当步清单和剩余预算决定是否安排唯一的
+Todo 自查。安排时只提交 assistant，cursor 进入下一步 `before_model` 并记录必需字段
+`todo_reminder_step`；否则以 `CheckpointResumability.OUTCOME_READY` 提交。
+目标步骤将自查指令合入 required Todo 贡献，之后的 cursor 转换保留编号。checkpoint v4
+要求显式提供该字段，新 Run 为 None；旧 payload 不自动补值。
+`ModelStepReservation.remaining_model_steps` 来自已接受的 Run usage，表示当前获准步骤之外
+还能预留几步，复用已预付的最后一步时为 0；它不替代下一步正式 reserve。工具 effect 前
 必须 durable claim，result 后必须 durable commit；claim 后无法证明结果时返回
 `TOOL_OUTCOME_UNKNOWN`，不得重放 effect。
 

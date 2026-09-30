@@ -127,7 +127,7 @@ child 不继承 parent 的 source 或快照。需要持久证据时使用普通�
 registry 不共享已披露集合。Fork 只继承复制前缀内的发现，child 不继承 parent 的披露状态。
 MCP 仍在执行前完整 prepare，按需 schema 不推迟连接或发现。
 
-checkpoint v3 的 `engine_cursor.visible_tool_names` 保存产生当前工具批次的可见名称，
+checkpoint v4 的 `engine_cursor.visible_tool_names` 保存产生当前工具批次的可见名称，
 与 assistant calls 一起提交。WAITING、部分工具完成和恢复均保留该集合，不重跑 source
 或 schema 选材；工具权限仍在执行前刷新。批次完成后清空，下一个主步骤重新选择。
 预算、首项保护及 forced tool 规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
@@ -462,7 +462,12 @@ runtime 的只读并发窗口使用固定内部上限 8；它不增加 public co
 claim 都会使 cancellation、deadline 或程序中断结算为 outcome unknown；现有 terminal
 settlement 会在同一 aggregate transaction 中关闭该 activation 的全部 unresolved claims。
 
-active recovery 会验证 checkpoint v3、session revision、usage counters
+Todo 的自查目标保存在 v4 cursor 的 `todo_reminder_step`，新 Run 显式初始化为 None。
+恢复到目标步骤时重新读取当前文件并复用已有 pending model reservation；目标响应提交后
+继续工具/HITL 不重复自查，outcome_ready 只结算。宿主最终取得实际最后一条 assistant 回复，
+流式输出中此前的候选回复仍可能已经可见。
+
+active recovery 会验证 checkpoint v4、session revision、usage counters
 与 cursor。只要存在 unresolved claims 就不会重放工具；recovery 原子 abandon 旧 activation，
 取得新 RECOVER fence 并保存 BLOCKED_UNKNOWN checkpoint，清理后再关闭 claims 并写 unknown 终态。
 正常 parent/control/
@@ -486,7 +491,7 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
 不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
-重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 11，checkpoint 为 3，
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 11，checkpoint 为 4，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
 新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。

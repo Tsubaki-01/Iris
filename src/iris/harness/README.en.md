@@ -150,7 +150,7 @@ share their revealed sets. Forks inherit only discoveries in the copied prefix, 
 inherit parent disclosure state. MCP still prepares before execution; deferred schemas do not delay
 connections or discovery.
 
-Checkpoint v3 stores the current batch's visible names in `engine_cursor.visible_tool_names`,
+Checkpoint v4 stores the current batch's visible names in `engine_cursor.visible_tool_names`,
 committed with its assistant calls. WAITING, partial progress, and recovery retain that set without
 rerunning source collection or schema selection. Permissions still refresh before execution.
 Completing the batch clears the set for selection at the next main step. See
@@ -537,7 +537,13 @@ order. Claim telemetry event order is not an ordinal contract. Any uncommitted c
 cancellation, deadline, or program interruption settle outcome unknown; the existing terminal
 settlement closes every unresolved claim for that activation in one aggregate transaction.
 
-Active recovery validates checkpoint v3, session revision, usage counters, and cursor.
+Todo's single check target is stored in the v4 cursor's `todo_reminder_step`, initialized to None
+for each new run. Recovery rereads the file at that step and reuses any pending model reservation.
+Once its response is committed, later tools or HITL do not repeat the check; outcome_ready only
+finalizes. The result contains the actual final assistant response, though streaming may already
+have shown the earlier candidate.
+
+Active recovery validates checkpoint v4, session revision, usage counters, and cursor.
 Tools are never replayed while unresolved claims exist. Recovery atomically
 abandons the old activation and acquires a new RECOVER fence with a BLOCKED_UNKNOWN checkpoint.
 Only after cleanup does it close claims as unknown and create the terminal result.
@@ -567,7 +573,7 @@ With an effective runtime memory service, tool loops, later runs, HITL, and reco
 overview without re-querying or reloading updated files. Successful compaction replaces summary and window in the same transaction;
 failure retains the old state. Fork targets start without an adopted window and choose one at their
 first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
-uses schema 11 and checkpoint version 3; old formats are rejected without migration or cleanup.
+uses schema 11 and checkpoint version 4; old formats are rejected without migration or cleanup.
 
 A new runtime without a memory service omits the saved overview from system messages during ordinary
 requests, HITL, and recovery. This does not mutate the saved window or add a session revision change;

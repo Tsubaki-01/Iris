@@ -38,6 +38,7 @@ class ModelStepReservation:
     granted: bool
     step_index: int
     cursor: RuntimeCursor
+    remaining_model_steps: int
     remaining_deadline_seconds: float | None = None
 
 

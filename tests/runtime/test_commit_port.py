@@ -17,6 +17,7 @@ from iris.harness._events import _RunEventCollector
 from iris.lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
+    CheckpointResumability,
     CreateRun,
     RequestCancellation,
     RunCheckpoint,
@@ -53,7 +54,9 @@ def _store_commit_port(
     max_model_steps: int = 20,
 ) -> tuple[InMemoryLifecycleStore, StoreRuntimeCommitPort, RuntimeToolCall]:
     store = InMemoryLifecycleStore()
-    initial = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
+    initial = RuntimeCursor(
+        todo_reminder_step=None, position="before_input", step_index=0, visible_tool_names=()
+    )
     before = initial.model_copy(update={"position": "before_model"})
     created = store.create_run(
         CreateRun(
@@ -90,7 +93,9 @@ def _store_commit_port(
             initial_context_window=SessionContextWindow(),
         )
     )
-    port.reserve_model_step(before)
+    reservation = port.reserve_model_step(before)
+    assert reservation.granted
+    assert reservation.remaining_model_steps == max_model_steps - 1
     tool_use = ToolUseBlock(id="call_1", name="echo", input={"value": "hello"})
     assistant = Msg.assistant([tool_use])
     call = RuntimeToolCall(
@@ -110,6 +115,7 @@ def _store_commit_port(
             assistant_message=assistant,
             prepared_tool_calls=(call,),
             cursor_after=RuntimeCursor(
+                todo_reminder_step=None,
                 position="tool_batch",
                 visible_tool_names=(tool_use.name,),
                 step_index=0,
@@ -263,7 +269,9 @@ def test_store_commit_port_observes_cancellation_from_second_sqlite_store(
 ) -> None:
     path = tmp_path / "cross-process.db"
     owner = SQLiteStore(path)
-    before = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
+    before = RuntimeCursor(
+        todo_reminder_step=None, position="before_input", step_index=0, visible_tool_names=()
+    )
     created = owner.create_run(
         CreateRun(
             request=AgentRunRequest(input="hello", session_id="session_1", run_id="run_1"),
@@ -432,7 +440,9 @@ def test_model_budget_refusal_returns_runtime_fact_without_terminalizing_store()
     store, port, call = _store_commit_port(max_model_steps=1)
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
-    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
+    cursor = RuntimeCursor(
+        todo_reminder_step=None, position="before_model", step_index=1, visible_tool_names=()
+    )
     port.commit_tool_result(
         RuntimeToolResultCommit(
             tool_call=call,
@@ -446,12 +456,69 @@ def test_model_budget_refusal_returns_runtime_fact_without_terminalizing_store()
     events_before = store.list_events(before.run_id)
     reservation = port.reserve_model_step(cursor)
     assert not reservation.granted
+    assert reservation.remaining_model_steps == 0
     assert reservation.cursor == cursor and reservation.step_index == 1
     assert port.run == before == store.load_run(before.run_id)
     assert before.phase is RunPhase.ACTIVE
     assert store.load_session_lane(before.session_id) == before.run_id
     assert store.load_result(before.run_id) is None
     assert store.list_events(before.run_id) == events_before
+
+
+@pytest.mark.parametrize("max_model_steps", [2, 4])
+def test_model_reservation_and_reuse_report_remaining_unreserved_steps(
+    max_model_steps: int,
+) -> None:
+    """普通准入扣一次额度；重建 port 复用已付费步骤，包括最后一步时 remaining=0。"""
+    store, port, call = _store_commit_port(max_model_steps=max_model_steps)
+    claim = port.claim_tool_call(call)
+    result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
+    cursor = RuntimeCursor(
+        position="before_model", step_index=1, visible_tool_names=(), todo_reminder_step=None
+    )
+    port.commit_tool_result(
+        RuntimeToolResultCommit(
+            tool_call=call,
+            claim=claim,
+            result=result,
+            message_delta=(result.to_msg(),),
+            cursor_after=cursor,
+        )
+    )
+    reserved = port.reserve_model_step(cursor)
+    assert reserved.granted and reserved.remaining_model_steps == max_model_steps - 2
+    assert port.run.usage.model_steps_reserved == 2
+    resumed = StoreRuntimeCommitPort(
+        store=store,
+        run=port.run,
+        activation_id="activation_1",
+        cursor=cursor,
+        clock=lambda: NOW,
+        event_collector=_RunEventCollector(),
+        workspace_root=Path("workspace"),
+    )
+    before = resumed.run
+    reused = resumed.reserve_model_step(cursor)
+    assert reused.granted and reused.remaining_model_steps == max_model_steps - 2
+    assert reused.step_index == 1 and reused.cursor == cursor
+    assert resumed.run == before == store.load_run(before.run_id)
+    assistant = Msg.assistant("last admitted reply")
+    resumed.commit_model_step(
+        RuntimeModelStepCommit(
+            cursor_before=cursor,
+            assistant_message=assistant,
+            message_delta=(assistant,),
+            cursor_after=RuntimeCursor(
+                position="outcome_ready",
+                step_index=1,
+                visible_tool_names=(),
+                todo_reminder_step=None,
+                assistant_message=assistant,
+            ),
+            resumability=CheckpointResumability.OUTCOME_READY,
+        )
+    )
+    assert resumed.run.usage.model_steps_reserved == resumed.run.usage.model_steps_committed == 2
 
 
 def test_compaction_usage_refreshes_control_without_events_and_survives_model_commit() -> None:
@@ -473,7 +540,9 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
     assert port.run.usage.compaction.total_tokens == 44_000
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
-    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
+    cursor = RuntimeCursor(
+        todo_reminder_step=None, position="before_model", step_index=1, visible_tool_names=()
+    )
     port.commit_tool_result(
         RuntimeToolResultCommit(
             tool_call=call,
@@ -491,6 +560,7 @@ def test_compaction_usage_refreshes_control_without_events_and_survives_model_co
             assistant_message=assistant,
             message_delta=(assistant,),
             cursor_after=RuntimeCursor(
+                todo_reminder_step=None,
                 position="outcome_ready",
                 step_index=1,
                 assistant_message=assistant,
@@ -511,7 +581,9 @@ def _reserved_compaction_port() -> tuple[InMemoryLifecycleStore, StoreRuntimeCom
     store, port, call = _store_commit_port()
     claim = port.claim_tool_call(call)
     result = ToolResult(tool_use_id=call.tool_call_id, tool_name=call.tool_name, content=[])
-    cursor = RuntimeCursor(position="before_model", step_index=1, visible_tool_names=())
+    cursor = RuntimeCursor(
+        todo_reminder_step=None, position="before_model", step_index=1, visible_tool_names=()
+    )
     port.commit_tool_result(
         RuntimeToolResultCommit(
             tool_call=call,

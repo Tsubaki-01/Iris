@@ -72,7 +72,10 @@ async def test_collect_after_reservation_and_recollect_on_recovery() -> None:
                 update={
                     "kind": "recover",
                     "cursor": RuntimeCursor(
-                        position="before_model", step_index=0, visible_tool_names=()
+                        todo_reminder_step=None,
+                        position="before_model",
+                        step_index=0,
+                        visible_tool_names=(),
                     ),
                 }
             )

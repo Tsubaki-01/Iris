@@ -39,6 +39,7 @@ def test_commit_facts_do_not_rescan_validated_tool_batch(kind: str) -> None:
     calls = tuple(ToolUseBlock(id=f"call-{index}", name="echo") for index in range(8))
     assistant = Msg.assistant(list(calls))
     cursor = RuntimeCursor(
+        todo_reminder_step=None,
         position="tool_batch",
         step_index=0,
         tool_calls=calls,
@@ -57,8 +58,12 @@ def test_commit_facts_do_not_rescan_validated_tool_batch(kind: str) -> None:
         arguments={},
         fingerprint="0" * 64,
     )
-    before_model = RuntimeCursor(position="before_model", step_index=0, visible_tool_names=())
-    before_input = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
+    before_model = RuntimeCursor(
+        todo_reminder_step=None, position="before_model", step_index=0, visible_tool_names=()
+    )
+    before_input = RuntimeCursor(
+        todo_reminder_step=None, position="before_input", step_index=0, visible_tool_names=()
+    )
     scans = 0
     validator_code = RuntimeCursor._validate_position.__code__
 
@@ -77,7 +82,9 @@ def test_commit_facts_do_not_rescan_validated_tool_batch(kind: str) -> None:
                 cursor_after=before_model,
             )
         elif kind == "reservation":
-            ModelStepReservation(granted=True, step_index=0, cursor=before_model)
+            ModelStepReservation(
+                granted=True, step_index=0, cursor=before_model, remaining_model_steps=0
+            )
         elif kind == "model":
             RuntimeModelStepCommit(
                 cursor_before=before_model, assistant_message=assistant, cursor_after=cursor
@@ -100,6 +107,7 @@ def test_cursor_raw_recovery_still_rejects_duplicate_call_identity() -> None:
                 "position": "tool_batch",
                 "visible_tool_names": ("echo",),
                 "step_index": 0,
+                "todo_reminder_step": None,
                 "assistant_message": {"role": "assistant", "content": "tools"},
                 "tool_calls": [{"id": "same", "name": "echo"}, {"id": "same", "name": "echo"}],
             }
@@ -116,7 +124,9 @@ def test_all_activation_kinds_carry_original_input_and_history_start(kind: str) 
         kind=kind,
         run_input="原始请求",
         initial_session_message_count=4,
-        cursor=RuntimeCursor(position="before_input", step_index=0, visible_tool_names=()),
+        cursor=RuntimeCursor(
+            todo_reminder_step=None, position="before_input", step_index=0, visible_tool_names=()
+        ),
         options=RuntimeExecutionOptions(),
     )
     assert activation.run_input == "原始请求"

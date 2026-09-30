@@ -290,7 +290,12 @@ async def test_summary_retry_uses_one_frozen_todo_read_and_excludes_it_from_summ
     ).model_copy(
         update={
             "kind": "recover",
-            "cursor": RuntimeCursor(position="before_model", step_index=0, visible_tool_names=()),
+            "cursor": RuntimeCursor(
+                todo_reminder_step=None,
+                position="before_model",
+                step_index=0,
+                visible_tool_names=(),
+            ),
         }
     )
     port = FakeRuntimeCommitPort(activation, messages=raw, max_model_steps=1)

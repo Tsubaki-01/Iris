@@ -228,6 +228,7 @@ class FakeRuntimeCommitPort:
             granted=granted,
             step_index=cursor.step_index,
             cursor=cursor,
+            remaining_model_steps=self.max_model_steps - self._reserved if granted else 0,
             remaining_deadline_seconds=self.deadline,
         )
 
@@ -428,6 +429,7 @@ class FakeRuntimeCommitPort:
                 and after.tool_calls == calls
                 and not after.tool_results
                 and after.assistant_message == assistant
+                and after.todo_reminder_step == before.todo_reminder_step
                 and self._prepared_match_calls(commit.prepared_tool_calls, calls)
             )
         else:
@@ -438,6 +440,7 @@ class FakeRuntimeCommitPort:
                 and not after.tool_calls
                 and not after.tool_results
                 and after.assistant_message == assistant
+                and after.todo_reminder_step == before.todo_reminder_step
                 and not commit.prepared_tool_calls
                 and commit.resumability is CheckpointResumability.OUTCOME_READY
             )
@@ -450,10 +453,25 @@ class FakeRuntimeCommitPort:
                 and not after.tool_calls
                 and not after.tool_results
                 and after.assistant_message is None
+                and after.todo_reminder_step == before.todo_reminder_step
                 and not commit.prepared_tool_calls
                 and commit.resumability is CheckpointResumability.SAFE
             )
-            valid = outcome_ready or steered
+            reminded = (
+                commit.message_delta == (assistant,)
+                and after.position == "before_model"
+                and after.step_index == before.step_index + 1
+                and before.todo_reminder_step is None
+                and after.todo_reminder_step == after.step_index
+                and not after.visible_tool_names
+                and not after.tool_calls
+                and not after.tool_results
+                and after.next_tool_index == 0
+                and after.assistant_message is None
+                and not commit.prepared_tool_calls
+                and commit.resumability is CheckpointResumability.SAFE
+            )
+            valid = outcome_ready or steered or reminded
         if not valid:
             raise IrisRunConflictError("fake port model commit cursor/message/prepared 转换无效")
 
@@ -471,6 +489,7 @@ class FakeRuntimeCommitPort:
                 and cursor.next_tool_index == 0
                 and cursor.tool_calls == calls
                 and cursor.assistant_message == assistant
+                and cursor.todo_reminder_step == before.todo_reminder_step
                 and self._prepared_match_calls(suspension.prepared_tool_calls, calls)
             )
         else:
@@ -592,6 +611,7 @@ class FakeRuntimeCommitPort:
                 and after.step_index == before.step_index + 1
                 and not after.tool_calls
                 and not after.tool_results
+                and after.todo_reminder_step == before.todo_reminder_step
             )
         else:
             valid = (
@@ -601,6 +621,7 @@ class FakeRuntimeCommitPort:
                 and after.tool_calls == before.tool_calls
                 and after.tool_results == expected_results
                 and after.assistant_message == before.assistant_message
+                and after.todo_reminder_step == before.todo_reminder_step
             )
         if not valid:
             raise IrisRunConflictError("fake port tool result 必须精确推进一个 cursor 调用")
@@ -628,7 +649,9 @@ def start_activation(
         kind="start",
         run_input=input,
         initial_session_message_count=initial_session_message_count,
-        cursor=RuntimeCursor(position="before_input", step_index=0, visible_tool_names=()),
+        cursor=RuntimeCursor(
+            todo_reminder_step=None, position="before_input", step_index=0, visible_tool_names=()
+        ),
         options=options or RuntimeExecutionOptions(),
     )
 

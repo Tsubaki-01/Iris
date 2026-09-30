@@ -179,7 +179,8 @@ from `before_input` to `before_model` within one lock or SQLite transaction. It 
 session revisions, the activation fence, and checkpoint sequence. It consumes no model reservation
 and leaves the step index, usage, and event sequence unchanged. Old commands conflict; SQL failures
 roll back the entire group, so recovery cannot observe partial input or a separately updated window.
-Checkpoint payload version is `3`, including the runtime cursor's required `visible_tool_names`.
+Checkpoint payload version is `4`, including the runtime cursor's required `visible_tool_names`
+and `todo_reminder_step`. Todo file content is not stored, and there is no Todo table.
 Lifecycle schema is `11`. Older databases or checkpoints are rejected at their respective load
 boundaries without migration.
 

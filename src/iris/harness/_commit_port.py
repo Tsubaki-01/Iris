@@ -192,6 +192,9 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
                 granted=True,
                 step_index=cursor.step_index,
                 cursor=cursor,
+                remaining_model_steps=(
+                    self._run.options.limits.max_model_steps - self._run.usage.model_steps_reserved
+                ),
                 remaining_deadline_seconds=self.remaining_deadline_seconds(),
             )
         reservation = self._store.reserve_model_step(
@@ -209,6 +212,11 @@ class StoreRuntimeCommitPort(RuntimeCommitPort):
             granted=reservation.granted,
             step_index=cursor.step_index,
             cursor=cursor,
+            remaining_model_steps=(
+                self._run.options.limits.max_model_steps - self._run.usage.model_steps_reserved
+                if reservation.granted
+                else 0
+            ),
             remaining_deadline_seconds=self.remaining_deadline_seconds(),
         )
 

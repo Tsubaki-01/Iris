@@ -45,9 +45,13 @@ owner, concrete stores implement the contract, and `AgentRuntime` consumes only 
 - Run, checkpoint, session revision, and usage counters cross-validate.
 - Mutation events append atomically with aggregate facts and use monotonic sequence numbers.
 
-## Checkpoint v3
+## Checkpoint v4
 
-`RunCheckpoint.checkpoint_version` is fixed at `3`; loading rejects earlier versions without
+The runtime cursor explicitly carries `todo_reminder_step: int | None`, the single Todo check's
+target step. Markdown content is not checkpointed. The store treats the cursor as opaque data;
+runtime parses it at recovery.
+
+`RunCheckpoint.checkpoint_version` is fixed at `4`; loading rejects earlier versions without
 migration. New runs start at `before_input` and move to `before_model` after archiving the input
 group, so recovery explicitly distinguishes whether the input has already been saved.
 Runtime cursors require `visible_tool_names`: `tool_batch` preserves the visible names that produced
@@ -159,7 +163,7 @@ must pass `None` to retain the adopted text. The input group, window, session re
 commit together. Initialization advances the revision once even with no messages; changing both
 messages and the window also advances it only once. Later runs, HITL, and recovery
 reuse that window. Only a successful `CommitCompaction.context_window` replaces it; cancellation,
-failure, and CAS conflicts preserve the previous value. Checkpoint v3 binds the window through the
+failure, and CAS conflicts preserve the previous value. Checkpoint v4 binds the window through the
 session revision without duplicating its text. `RuntimeExecutionOptions` no longer accepts memory
 queries, result snapshots, or character budgets; runtime composition owns reading and selection.
 

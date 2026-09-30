@@ -680,7 +680,9 @@ class AgentRunner:
         run_id = request.run_id or f"run_{uuid.uuid4().hex}"
         resolved_request = request.model_copy(update={"run_id": run_id})
         activation_id = f"act_{uuid.uuid4().hex}"
-        cursor = RuntimeCursor(position="before_input", step_index=0, visible_tool_names=())
+        cursor = RuntimeCursor(
+            position="before_input", step_index=0, visible_tool_names=(), todo_reminder_step=None
+        )
         session_revision = self.store.load_session_revision(resolved_request.session_id)
         checkpoint = RunCheckpoint(
             run_id=run_id,

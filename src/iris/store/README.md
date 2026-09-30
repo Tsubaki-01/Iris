@@ -149,7 +149,8 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 从 `before_input` 推进到 `before_model`。它沿用 run revision、session revision、activation fence
 和 checkpoint sequence；不消耗模型 reservation，不改变步骤索引、usage 或 event sequence。
 旧 command 重交会冲突；SQL 失败整体回滚，恢复不会看到部分输入或单独更新的窗口。
-Checkpoint payload 使用版本 `3`，包含 runtime cursor 必需的 `visible_tool_names`；lifecycle
+Checkpoint payload 使用版本 `4`，包含 runtime cursor 必需的 `visible_tool_names` 和
+`todo_reminder_step`；不保存 Todo 文件内容，不新增 Todo 表。lifecycle
 schema 为 `11`。旧库或旧 checkpoint 在对应读取边界拒绝，不执行迁移。
 
 `SessionSnapshot.context_window=None` 表示未初始化；显式 `SessionContextWindow()` 表示已初始化且

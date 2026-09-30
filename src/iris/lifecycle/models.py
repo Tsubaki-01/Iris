@@ -637,7 +637,7 @@ class ActivationRecord(_FrozenModel):
 class RunCheckpoint(_FrozenModel):
     """Logical run 当前可恢复位置。"""
 
-    checkpoint_version: Literal[3] = 3
+    checkpoint_version: Literal[4] = 4
     run_id: str
     sequence: int = Field(ge=1)
     activation_id: str

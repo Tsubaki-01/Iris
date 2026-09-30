@@ -943,6 +943,63 @@ async def test_subagent_repeated_waiting_rebinds_proxy_without_advancing_parent_
 
 
 @pytest.mark.asyncio
+async def test_reminder_target_survives_subagent_proxy_wait_and_completion(tmp_path: Path) -> None:
+    """父自查步委派 child 并等待问题，proxy 完成后不丢失父提醒目标。"""
+    config_path = _write_configs(tmp_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + "todo:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    parent = StaticProvider(
+        text_response("父候选回复"),
+        tool_response(
+            ToolUseBlock(id="delegate", name="subagent", input={"prompt": "确认阻塞事项"})
+        ),
+        text_response("父清单仍在等待，结束本轮"),
+    )
+    child = StaticProvider(
+        tool_response(ToolUseBlock(id="ask", name="ask_question", input={"question": "等待吗？"})),
+        text_response("子任务已确认"),
+    )
+    runner = AgentRunner.from_config_path(
+        config_path, provider=parent, child_provider_factory=ChildProviders(child)
+    )
+    try:
+        path = (await runner.get_todo("parent-session")).path
+        path.parent.mkdir(parents=True)
+        path.write_text("- [ ] 等待外部反馈\n", encoding="utf-8")
+        waiting = await runner.start(
+            AgentRunRequest(input="确认任务状态", session_id="parent-session", run_id="parent"),
+            options=AgentRunOptions(limits=RunLimits(max_model_steps=5)),
+        )
+        assert waiting.run.phase is RunPhase.WAITING
+        proxy = waiting.pending_interaction
+        assert proxy is not None and proxy.request.subagent_origin is not None
+        checkpoint = runner.store.load_checkpoint("parent")
+        assert checkpoint.engine_cursor["todo_reminder_step"] == 1
+        assert checkpoint.engine_cursor["step_index"] == 1
+        assert "Todo 结束自查" in "\n".join(message.text for message in parent.requests[1].messages)
+        completed = await runner.resume(
+            "parent",
+            interaction_id=proxy.interaction_id,
+            response=QuestionInteractionResponse(answer="等待反馈"),
+        )
+        assert completed.run.stop_reason is RunStopReason.COMPLETED
+        assert completed.assistant_message.text == "父清单仍在等待，结束本轮"
+        assert completed.run.usage.model_steps_committed == 3
+        assert len(parent.requests) == 3 and len(child.requests) == 2
+        assert "Todo 结束自查" not in "\n".join(
+            message.text for message in parent.requests[2].messages
+        )
+        assert runner.store.load_checkpoint("parent").engine_cursor["todo_reminder_step"] == 1
+        assert (
+            runner.store.load_tool_call("parent", "delegate").result.model_content == "子任务已确认"
+        )
+    finally:
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("nondefault,drift", [(False, False), (True, False), (True, True)])
 async def test_recover_resolved_proxy_uses_stored_response_and_same_child(
     tmp_path: Path,
@@ -1568,6 +1625,7 @@ def _prepare_parent(
     after = RuntimeCursor(
         position="tool_batch",
         step_index=0,
+        todo_reminder_step=cursor.todo_reminder_step,
         tool_calls=(tool_use,),
         assistant_message=assistant,
         visible_tool_names=("subagent",),

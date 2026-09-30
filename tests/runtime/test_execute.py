@@ -345,6 +345,7 @@ async def test_execute_no_tool_steer_commits_input_before_next_model_step(
         Role.USER,
     ]
     assert commits.model_commits[0].cursor_after == RuntimeCursor(
+        todo_reminder_step=None,
         position="before_model",
         visible_tool_names=(),
         step_index=1,
@@ -1641,6 +1642,7 @@ async def test_execute_restores_read_state_before_resumed_tool(tmp_path: Path) -
         ]
     )
     cursor = RuntimeCursor(
+        todo_reminder_step=None,
         position="tool_batch",
         visible_tool_names=("edit_file",),
         step_index=0,

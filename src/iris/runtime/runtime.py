@@ -52,7 +52,7 @@ from ..message import (
     Msg,
     ToolUseBlock,
 )
-from ..todo import TodoSnapshot
+from ..todo import TodoSnapshot, TodoStatus
 from ..todo.context import render_todo_context
 from ..todo.document import read_todo
 from ..tools import (
@@ -1235,7 +1235,10 @@ class AgentRuntime:
                         context_snapshot = ContextSnapshot(
                             contributions=(
                                 *context_snapshot.contributions,
-                                render_todo_context(todo_snapshot),
+                                render_todo_context(
+                                    todo_snapshot,
+                                    remind=cursor.step_index == cursor.todo_reminder_step,
+                                ),
                             )
                         )
             except IrisCancellationRequestedError:
@@ -1436,6 +1439,7 @@ class AgentRuntime:
                 cursor_after = RuntimeCursor(
                     position="before_model",
                     visible_tool_names=(),
+                    todo_reminder_step=cursor.todo_reminder_step,
                     step_index=cursor.step_index + 1,
                     read_state=read_state,
                 )
@@ -1468,13 +1472,33 @@ class AgentRuntime:
                 )
                 return _ModelStepAdvance(cursor=committed)
 
-            cursor_after = RuntimeCursor(
-                position="outcome_ready",
-                visible_tool_names=(),
-                step_index=cursor.step_index,
-                assistant_message=assistant,
-                read_state=read_state,
+            remind = (
+                todo_snapshot is not None
+                and cursor.todo_reminder_step is None
+                and (
+                    todo_snapshot.error is not None
+                    or any(item.status is not TodoStatus.COMPLETED for item in todo_snapshot.items)
+                )
+                and reservation.remaining_model_steps > 0
+                and not _deadline_expired(commits)
             )
+            if remind:
+                cursor_after = RuntimeCursor(
+                    position="before_model",
+                    visible_tool_names=(),
+                    step_index=cursor.step_index + 1,
+                    todo_reminder_step=cursor.step_index + 1,
+                    read_state=read_state,
+                )
+            else:
+                cursor_after = RuntimeCursor(
+                    position="outcome_ready",
+                    visible_tool_names=(),
+                    step_index=cursor.step_index,
+                    todo_reminder_step=cursor.todo_reminder_step,
+                    assistant_message=assistant,
+                    read_state=read_state,
+                )
             committed = commits.commit_model_step(
                 RuntimeModelStepCommit(
                     cursor_before=cursor,
@@ -1484,11 +1508,17 @@ class AgentRuntime:
                     output_tokens=response.output_tokens,
                     total_tokens=response.total_tokens,
                     cursor_after=cursor_after,
-                    resumability=CheckpointResumability.OUTCOME_READY,
+                    resumability=(
+                        CheckpointResumability.SAFE
+                        if remind
+                        else CheckpointResumability.OUTCOME_READY
+                    ),
                 )
             )
             if committed != cursor_after:
                 raise IrisRunConflictError("model-step commit 返回了意外 cursor")
+            if remind:
+                return _ModelStepAdvance(cursor=committed)
             return RuntimeActivationResult(
                 outcome=RuntimeActivationOutcome.COMPLETED,
                 cursor=committed,
@@ -1517,6 +1547,7 @@ class AgentRuntime:
         cursor_after = RuntimeCursor(
             position="tool_batch",
             visible_tool_names=visible_tool_names,
+            todo_reminder_step=cursor.todo_reminder_step,
             step_index=cursor.step_index,
             tool_calls=tuple(assistant.tool_calls),
             assistant_message=assistant,
@@ -1860,6 +1891,7 @@ def _project_tool_result_cursor(
         return RuntimeCursor(
             position="before_model",
             step_index=cursor.step_index + 1,
+            todo_reminder_step=cursor.todo_reminder_step,
             read_state=read_state,
             visible_tool_names=(),
         )
