@@ -18,10 +18,28 @@ be used when creating an automatic Goal.
 
 - Ordinary input starts a Run when idle or steers the current Run at an existing execution boundary.
 - `/follow-up <message>` queues the next Run after the current one finishes.
+- `/todo` reads the current session's checklist and displays its actual file path.
 - Human responses use `y/yes/n/no` for permission, with empty input meaning reject; questions accept
   an answer or an option number.
 - `/help` lists commands. `/exit`, `/quit`, and EOF exit. Ctrl-C cancels current execution and exits
   with code 130.
+
+## Viewing a Todo checklist
+
+Set `todo.enabled: true` in the Agent configuration and keep `context_policy.enabled: true`, then
+rebuild the Agent. `/todo` displays the completed/total count, absolute file path, and every item:
+`[ ]` for pending, `[-]` for in progress, and `[x]` for completed.
+
+A missing or empty checklist displays `暂无待办` (no tasks); an invalid file displays its path and
+diagnostic instead of a completion count. After a manual edit, run `/todo` again to read the latest
+content. Viewing does not create a file or remove completed items. Configure ordinary file tools
+explicitly if the model needs to maintain the file; see [Todo](../todo/README.md).
+
+Viewing also works during ordinary or Goal execution and while a question or permission response
+is pending. `/todo` never becomes chat, steering input, or an interaction answer; the next actual
+answer still resumes the original interaction. The command accepts no arguments: `/todo extra`
+shows `用法：/todo` (usage). Disabled Todo and file read failures display an error while chat continues.
+The CLI does not enable Todo automatically or poll for file changes.
 
 ## Automatic Goals
 
@@ -88,3 +106,7 @@ failures display actual errors rather than fabricated completion.
 `tests/cli/test_chat_goal.py` uses the real host, manager, runtime, and store with a controlled provider
 to cover two-round completion, command dispatch, text preservation, disabled Goal, and explicit recovery
 hints. These tests do not evaluate a real model's task quality.
+
+`tests/cli/test_chat_todo.py` exercises the real `run_chat_loop` for all three task states, manual
+edits, query failures, argument usage, and read-only behavior during ordinary/Goal execution and
+question/permission WAITING states.

@@ -17,6 +17,14 @@ prepare providers, occupy the session lane, or change history revisions. Each qu
 file contents; a missing file is empty, while disabled access or I/O failure raises `IrisTodoError`.
 See [Todo](../todo/README.md) for configuration and the Markdown format.
 
+Ordinary and automatic Goal runs in the same session reuse its file; each run gets its own single
+check opportunity. Children use their own configuration and session, including after recovery;
+they neither inherit nor merge the parent's list. `SessionHistory(store).fork(source_run_id)`
+creates a new session and therefore a new Todo path, read if present and empty otherwise, without
+copying a list from history. Direct `RuntimeFactory` construction still requires the existing
+`context_access` for context_policy and gains no Todo-specific factory parameter. CLI `/todo`
+queries this SDK on demand without consuming a pending human answer.
+
 ```python
 from iris.harness import AgentRunRequest, AgentRunner
 

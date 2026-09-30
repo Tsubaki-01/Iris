@@ -17,8 +17,24 @@ iris chat agent.yaml --session-id work --max-steps 8
 
 - 普通输入：空闲时创建 Run，执行中按现有安全边界 steer 当前 Run。
 - `/follow-up <消息>`：排入下一轮，等待当前 Run 收尾。
+- `/todo`：只读查看当前会话待办及实际文件路径。
 - 人工交互：permission 输入 `y/yes/n/no`，空输入为拒绝；question 输入答案或选项编号。
 - `/help` 显示命令；`/exit`、`/quit`、EOF 退出；Ctrl-C 取消当前执行并退出，退出码为 130。
+
+## 查看 Todo 工作清单
+
+在现有 Agent 配置中设置 `todo.enabled: true`，并保持 `context_policy.enabled: true`，
+重建 Agent 后即可使用 `/todo`。该命令显示已完成数/总数、文件绝对路径，以及
+`[ ]`（待处理）、`[-]`（进行中）、`[x]`（已完成）的全部条目。
+
+清单缺失或为空时显示“暂无待办”；格式错误时显示路径和诊断，不当作完成。
+人工修改文件后再次执行 `/todo` 即读取最新内容。命令不创建文件，不自动清除完成项；
+模型维护文件所需的普通文件工具仍须显式配置，详见 [Todo](../todo/README.md)。
+
+普通或 Goal Run 执行中、等待 question/permission 回答时都可查看；`/todo` 不成为
+聊天输入、steer 或人工答案，不改变待回答交互，下一条实际回答仍恢复原交互。
+命令不接受参数，`/todo extra` 显示“用法：/todo”。未启用或文件读取失败只显示错误，
+聊天继续；不会自动启用能力，也不轮询文件变化。
 
 ## 自动 Goal
 
@@ -78,3 +94,6 @@ SQLite schema 按新契约使用，不提供旧 schema migration；child/fork �
 
 `tests/cli/test_chat_goal.py` 使用真实 host、manager、runtime 与存储以及可控 provider，覆盖
 两轮完成、命令派发、正文保留、关闭开关和显式恢复提示；它不是一次真实模型质量评估。
+
+`tests/cli/test_chat_todo.py` 通过真实 `run_chat_loop` 验证清单三态、人工编辑刷新、
+查询错误与参数提示，以及普通/Goal 执行和 question/permission WAITING 时的只读行为。

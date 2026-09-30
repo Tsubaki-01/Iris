@@ -93,6 +93,13 @@ timer 和失败清理 pending 不随临时 child runner 关闭；它们通过 ex
 不改变历史版本。人工修改后下次查询即可看到新内容。文件不存在时为空，读取失败与未启用
 使用 `IrisTodoError`。格式及示例见 [Todo](../todo/README.md)。
 
+同 session 的普通 Run 和 Goal 自动 Run 复用当前文件，每个 Run 分别拥有一次自查机会。
+子代理按自己的配置独立启用，用其原 child session 定位清单；恢复不换文件身份，也不继承
+或合并父清单。`SessionHistory(store).fork(source_run_id)` 返回新 session，其新 Todo 路径
+不存在时为空，已存在则读取实际内容，不复制原历史中的清单。
+直接使用 `RuntimeFactory` 仍需提供 context_policy 原有的 `context_access`，Todo 不新增
+factory 参数或服务。终端通过 `/todo` 按需调用同一 SDK 查询，等待 HITL 时也不消费人工回答。
+
 ## 当前会话上下文回读
 
 `context_policy.enabled` 默认 `true`。`AgentRunner.from_config*()` 使用同一个 lifecycle store

@@ -49,6 +49,7 @@ from ..message import (
     ModelResponseStarted,
 )
 from ..runtime import RuntimeStreamEvent
+from ..todo import TodoStatus
 
 # endregion
 
@@ -263,6 +264,7 @@ def run_chat_loop(
                 write_output("可用命令：")
                 write_output("/follow-up <消息>  排入下一轮")
                 write_output("/goal <目标>  创建自动推进目标；/goal 查看目标命令用法")
+                write_output("/todo  查看当前会话待办及文件路径")
                 write_output("/help  显示帮助")
                 write_output("/exit  退出 chat")
                 write_output("/quit  退出 chat")
@@ -271,6 +273,12 @@ def run_chat_loop(
                 user_input.startswith("/goal") and user_input[5:6].isspace()
             ):
                 host.goal_command(user_input[5:].lstrip())
+                continue
+            if user_input == "/todo":
+                host.todo_command()
+                continue
+            if user_input.startswith("/todo") and user_input[5:6].isspace():
+                write_output("用法：/todo")
                 continue
             if user_input == "/follow-up":
                 write_output("用法：/follow-up <消息>")
@@ -452,6 +460,10 @@ class _ChatSessionHost:
         """把 Goal 命令交给 manager 所属 event loop，不等待整个目标完成。"""
         self._call(self._goal_command(text))
 
+    def todo_command(self) -> None:
+        """在现有后台 event loop 只读查询当前会话清单。"""
+        self._call(self._todo_command())
+
     def close(self, *, reason: str | None = None) -> None:
         """停止 admission 并等待当前 run 结算后结束后台线程。"""
         if not self._thread.is_alive():
@@ -600,6 +612,28 @@ class _ChatSessionHost:
                     and self._pending_interaction.run_id == event.run_id
                 ):
                     self._pending_interaction = None
+
+    async def _todo_command(self) -> None:
+        """展示当前文件或诊断，查询失败保留聊天与原人工交互。"""
+        try:
+            snapshot = await self._runner.get_todo(self._options.session_id)
+        except IrisError as exc:
+            self._error_func(_format_iris_error(exc))
+            return
+        if snapshot.error is not None:
+            lines = [f"文件: {snapshot.path}", f"Todo 格式错误: {snapshot.error}"]
+        elif not snapshot.items:
+            lines = ["暂无待办", f"文件: {snapshot.path}"]
+        else:
+            completed = sum(item.status is TodoStatus.COMPLETED for item in snapshot.items)
+            markers = {
+                TodoStatus.PENDING: " ",
+                TodoStatus.IN_PROGRESS: "-",
+                TodoStatus.COMPLETED: "x",
+            }
+            lines = [f"Todo: {completed}/{len(snapshot.items)} 已完成", f"文件: {snapshot.path}"]
+            lines.extend(f"[{markers[item.status]}] {item.content}" for item in snapshot.items)
+        self._output_func("\n".join(lines))
 
     async def _goal_command(self, text: str) -> None:
         """在后台解析并执行 GoalSession 操作；误用不会变成普通输入。"""
