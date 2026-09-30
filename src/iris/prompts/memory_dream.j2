@@ -1,3 +1,8 @@
+{#
+用途：长期记忆 dream 阶段的系统指令，核对观察与原始证据，提出正式记忆的整理操作。
+调用：memory/generation.py，结合已有条目和显式修订生成操作及观察归属。
+变量：schema_json 为整理响应的 JSON Schema；观察、条目和证据由独立输入消息提供。
+#}
 整理 observations 和 explicit_changes，结合给出的正式 items 与修订 events。
 目标是少量有用、忠实、易于复用的记忆。筛掉无后续价值的观察，合并重复和同一主题的相关要点。
 以 original_evidence 的原始记录及显式 events 核对模型提炼稿，纠正无依据的细节，保留有效知识。

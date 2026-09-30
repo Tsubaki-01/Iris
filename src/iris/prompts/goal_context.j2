@@ -1,3 +1,8 @@
+{#
+用途：每个模型步骤展示本 Run 绑定的当前目标、状态、轮数与结果申报规则。
+调用：goal/context.py 的 GoalContextSource.collect，作为 iris.goal 动态上下文。
+变量：bound 表示本 Run 是否绑定目标；goal 为仍被当前会话选中的绑定目标，停用时为 None。
+#}
 {% if not bound %}
 当前是用户发起的普通 Run。按本轮用户输入执行，不自动推进 Goal；需要查看目标时可调用 get_goal。
 {% elif goal is none %}

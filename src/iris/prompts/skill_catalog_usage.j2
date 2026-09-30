@@ -1,1 +1,6 @@
+{#
+用途：可用技能目录的使用指引，要求模型先调用 load_skill 读取选定技能的完整说明。
+调用：skill/catalog.py 的 SkillCatalog，与技能名称和描述一同构造目录上下文。
+变量：无；技能条目由 Python 代码另行装配。
+#}
 call load_skill with the skill name before following it; the returned Markdown is skill instructions, not user data

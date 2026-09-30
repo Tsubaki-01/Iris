@@ -40,11 +40,12 @@ print(text)  # 你好，Iris。
 
 读取、解码、解析或执行模板失败时抛出 `IrisTemplateError`，包含模板路径和底层错误。
 业务调用边界负责转换领域异常：context 与 compaction 使用 `IrisContextError`，memory 使用
-`IrisMemoryError`，skill 使用 `IrisSkillError`。
+`IrisMemoryError`，skill 使用 `IrisSkillError`，goal 使用 `IrisGoalError`。
 
 ## 内置 prompt 与调用方
 
 内置任务和上下文指令集中放在 [`../prompts/`](../prompts/)；Python 继续准备模型输入和 schema。
+每个模板顶部用 Jinja `{# ... #}` 注释说明用途、调用位置和变量；这些注释不会进入渲染结果。
 
 | 调用方 | 模板 | 实例生命周期 |
 | --- | --- | --- |
@@ -53,6 +54,7 @@ print(text)  # 你好，Iris。
 | Runtime 记忆窗口 | `memory_context.j2` | 同一 `RuntimeEnvironment.prompt_renderer` |
 | `MemoryService` | `memory_flush.j2`、`memory_dream.j2`、`memory_overview.j2` | Service 自己持有 `prompt_renderer` |
 | `SkillCatalog` | `skill_catalog_usage.j2` | 构造时读取一次，后续复用使用指引 |
+| Goal 上下文与自动输入 | `goal_context.j2`、`goal_continuation.j2` | `goal.context` 复用模块级 renderer |
 
 实现位于 [`templating.py`](templating.py)，公共导出位于 [`__init__.py`](__init__.py)。
 模板加载、更新、转义与异常契约由 `tests/utils/test_templating.py` 验证；各领域测试覆盖请求装配

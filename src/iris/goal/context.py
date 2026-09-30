@@ -9,7 +9,7 @@ from ..utils.templating import TemplateRenderer
 from .models import GoalSnapshot
 from .service import GoalService
 
-_PROMPTS = Path(__file__).parent / "prompts"
+_PROMPTS = Path(__file__).resolve().parents[1] / "prompts"
 _RENDERER = TemplateRenderer()
 
 
@@ -23,7 +23,7 @@ def _render(name: str, variables: dict[str, Any]) -> str:
 
 def render_continuation(goal: GoalSnapshot) -> str:
     """生成交给 Runner 的自动输入，具体来源标记由提交端完成。"""
-    return _render("continuation.j2", {"goal": goal})
+    return _render("goal_continuation.j2", {"goal": goal})
 
 
 class GoalContextSource:
@@ -44,7 +44,7 @@ class GoalContextSource:
         binding = self.service.store.get_goal_run(scope.run_id)
         goal = self.service.get_current(scope.session_id)
         text = _render(
-            "context.j2",
+            "goal_context.j2",
             {
                 "goal": goal
                 if binding is not None and goal is not None and binding.goal_id == goal.goal_id

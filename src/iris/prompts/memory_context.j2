@@ -1,3 +1,9 @@
+{#
+用途：把已发布的记忆概览和检索指引渲染为主模型的上下文，选择完整概览或仅知识范围。
+调用：runtime/memory_context.py，在会话窗口采用概览时构造候选内容。
+变量：mode 为 full/navigation；documents 为概览文档，namespaces 用于无文档时的提示；
+has_memory_search、has_memory_fetch 表示本次可用的记忆读取工具。
+#}
 # Memory overview
 {%- if mode == "navigation" %}
 {{ "\n\n" }}本窗口仅载入知识范围，未载入核心事实。
