@@ -1,129 +1,151 @@
-# Goal：跨 Run 的目标状态
+# Goal：跨 Run 持续推进目标
 
-`iris.goal` 保存期望完成的目标、状态、自动执行轮数和 Run 绑定。目标与一次
-logical Run 分开：一个 Run 结束不会自行把目标标记为完成。
+`iris.goal` 管理目标是否完成、是否允许继续，以及自动执行轮数。一个 Run 内本就可以多次
+调用模型和工具；正常结束但目标尚未完成时，SessionManager 才安排下一轮，不要求固定分阶段。
 
-提供状态服务、原子存储契约、模型工具、动态上下文、终态结算与会话控制 SDK。
-GoalDriver 提供续跑策略，实际准入与执行交给 harness，本包不持有异步执行循环。
+## 从配置到执行
 
-## 使用状态服务
+在已配置模型和所需工具的 `agent.yaml` 中启用：
 
-`GoalService` 使用同一个 lifecycle backend，支持 `InMemoryLifecycleStore` 与
-`SQLiteStore`。集成执行系统时，必须传入 Runner 正在使用的 exact store。
-
-```python
-from iris.goal import GoalReason, GoalService
-from iris.store import InMemoryLifecycleStore
-
-store = InMemoryLifecycleStore()
-goals = GoalService(store)
-goal = goals.create("session-1", "修复问题并通过相关测试", max_rounds=3)
-paused = goals.pause(goal.ref, reason=GoalReason(code="user", text="等待我确认"))
-resumed = goals.resume(paused.ref)
-assert resumed.rounds_started == 0
-assert store.load_session_revision("session-1") == 0
+```yaml
+context_policy:
+  enabled: true
+goal:
+  enabled: true
+  max_rounds: 20
 ```
 
-创建可以早于首条聊天；它只按需建立空 session，不写历史或占用 lane。
-`GoalConfig` 默认 `enabled=False`、`max_rounds=20`，开关由执行装配统一使用；
-直接构造领域服务只操作状态。
+默认 `goal.enabled=false`，此时 `manager.goal` 为 None，服务、工具和目标上下文都不挂载。
+配置加载不会创建目标。完整自动推进使用 `AgentRunner → SessionManager → manager.goal`；
+直接 `runner.start()` 始终只执行调用方的一次普通 Run。
 
-## 会话控制 SDK
+下面示例展示创建、只读查询、暂停、恢复和消费结果；将目标和测试路径换成自己的项目内容。
+需要人工回答的应用还应接入后面的 HITL 响应流程。
 
-`GoalSession(service, port)` 是异步控制入口。`GoalControlPort` 由宿主绑定一个 session，
-在其唯一 admission owner 中处理操作；SDK 不持有 runner、manager、任务或锁。
+```python
+import asyncio
 
-| 方法 | 作用 |
+from iris.harness import AgentRunner, GoalChanged, SessionManager
+
+
+async def main() -> None:
+    runner = AgentRunner.from_config_path("agent.yaml")
+    manager = SessionManager(runner, "fix-calculation")
+    try:
+        goal = manager.goal
+        assert goal is not None  # 配置已经显式启用 Goal。
+        created = await goal.create(
+            "修复计算函数的空输入处理，并让 tests/test_calculation.py 通过",
+            max_rounds=3,
+        )
+        print(created.disposition)
+        print(await goal.get())
+        await goal.pause(reason="先确认测试范围")
+        await goal.resume()
+
+        async for event in manager.events():
+            if isinstance(event, GoalChanged) and event.view.goal is not None:
+                current = event.view.goal
+                print(current.status, current.rounds_started, current.reason)
+                if current.status in {"completed", "blocked", "paused"}:
+                    break
+    finally:
+        await manager.close(cancel_run=True)
+        await runner.aclose()
+
+
+asyncio.run(main())
+```
+
+`create()` 返回时目标已保存并允许调度，不保证模型已经开始。默认 mixed 模式应持续消费
+`manager.events()`，否则 tracker 满时暂停新轮准入；broker-only 模式通过 publisher 观察，
+不需要本地 consumer。用户输入及已排队 follow-up 优先于自动续跑。
+
+## 控制与状态
+
+所有 `manager.goal` 方法都是 async；除 get 外返回 `GoalControlResult(view, disposition)`。
+
+| 方法 | 语义 |
 | --- | --- |
-| `create(objective, *, max_rounds=None, run_options=None)` | 保存目标并明确允许推进；不等待模型执行完。 |
-| `get()` | 返回只读 GoalView，不补结算或启动执行。 |
-| `edit(*, objective=None, max_rounds=None, run_options=None)` | 至少修改一项，编辑后暂停；None 表示未修改。 |
-| `pause(*, reason)` / `complete(*, reason)` | 记录非空用户原因并停止后续推进，不取消已准入 Run。 |
-| `resume(*, expected_activation_id=None)` | 先处理原执行的附着或精确恢复，再决定后续推进。 |
-| `clear()` | 取消当前选择，保留历史和绑定。 |
+| `create(objective, *, max_rounds=None, run_options=None)` | 创建当前目标并允许推进；缺省使用配置轮数和 AgentRunOptions。 |
+| `get()` | 只读 GoalView，不补结算、arm 或启动。 |
+| `edit(*, objective=None, max_rounds=None, run_options=None)` | 至少修改一项；保留已用次数并暂停。None 表示未修改。 |
+| `pause(*, reason)` | 暂停后续推进，当前 Run 可以收尾。 |
+| `resume(*, expected_activation_id=None)` | 先处理原 Run 的附着或恢复，再决定是否继续。 |
+| `complete(*, reason)` | 用户明确完成目标；不取消已准入 Run。 |
+| `clear()` | 清除当前选择并停止后续推进，保留目标与绑定历史。 |
 
-除 get 外均返回 `GoalControlResult(view, disposition)`。disposition 区分已允许调度
-`scheduled`、已创建 Run `admitted`、复用在途调用 `running`、等待人工输入 `waiting`、
-缺少接管 fence `needs_recovery`、lane 属于其他执行 `occupied`、仅停止操作或额度用尽
-`stopped`。只有宿主实际到达相应阶段才返回该值。
+持久状态为 active、paused、blocked、completed；armed 是当前 manager 的进程内推进意图。
+每个 session 至多一个当前目标，未完成目标不能被 create 隐式覆盖。已完成目标不能编辑或
+恢复为新任务，应创建新 Goal。
 
-SDK 调用 `GoalService.parse_create/parse_edit` 完成一次原始输入解析，之后把冻结的
-`GoalCreateInput/GoalEditInput` 交给 port。宿主取得当前引用后调用
-`create_validated/edit_validated`；这两条路径不重复解析或检查模型工具配置。
-同步 `GoalService.create/edit` 也复用相同 parser。用户原因以 code=user 的 GoalReason
-传递，恢复 fence 在 SDK 入口解析；状态、版本和额度条件由 store 的操作边界检查。
+| disposition | 实际达到的阶段 |
+| --- | --- |
+| scheduled | 已允许后续调度，可能仍在等待用户工作或 tracker 容量。 |
+| admitted | Run 已创建。 |
+| running | 复用已有 live invocation。 |
+| waiting | 原 Run 等待人工回答。 |
+| needs_recovery | 原 ACTIVE Run 无 live invocation，需要明确 activation fence。 |
+| occupied | lane 被普通 Run 或其他 Goal 的执行占用。 |
+| stopped | 仅暂停、完成、清除，或额度用尽。 |
 
-## 状态与版本
+`GoalView.run` 表示当前 session lane，`run_goal_id` 区分普通 Run 和目标执行。
+无 lane 时 run=None；旧终态仍可能 settlement_pending。driver_error 表示未能可靠落盘的
+运行控制错误，不能据此推断目标已暂停或完成。
 
-- 状态为 `active`、`paused`、`blocked`、`completed`。每个 session 只选择一个当前目标。
-- `edit()` 修改正文、总轮数或 Run 选项后转为 paused，保留已经消耗的轮数。
-- `pause()` 与 `complete()` 只修改目标状态，不取消或结束已存在的 Run。
-- `resume()` 不重置额度。额度耗尽且没有目标在途 Run 时保持或转为 paused；
-  已 active 的纯恢复不推进版本。
-- `clear()` 取消当前选择，保留记录和所有 Run 绑定。未完成目标不能被 create 隐式覆盖；
-  completed 后可以创建新目标。
+**暂停与立即停止不同。** `await manager.interrupt()` 先停止 Goal 续跑，再按既有契约取消
+当前 Run；仅暂停空闲 Goal 时返回 None。`CancelAccepted.run` 同样允许 None。
+关闭时先 `manager.close(cancel_run=True)`，再 `runner.aclose()`，让原执行和命令清理收尾。
 
-修改使用 `GoalRef(goal_id, revision)` 做 CAS。实际修改只推进一次 Goal revision，
-不会改动 session history revision。重复 pause/complete 且原因相同返回原快照；
-已完成目标不能通过编辑或恢复再次运行。
+## 轮数、恢复与人工交互
 
-## 存储与职责
+max_rounds 是自动 Run 总次数，包含 kickoff，不是模型调用次数或 token 上限。轮数在原子
+admission 成功时消耗：即使尚未请求 provider 或绝对期限已到，也不退款；准入前失败不计数。
+普通用户 Run 不计入 Goal 轮数。resume 不重置次数；增额使用 edit 后再 resume，不能降到
+已用次数以下。最后允许的一轮仍可成功完成。
 
-`GoalStore` 在本包扩展 `LifecycleStore`。创建、修改和准入接收冻结 typed command；
-`GoalService` 是创建、编辑原始字段的解析入口，存储与纯转换直接消费可信输入。
+`run_options.limits.max_model_steps` 仍是每 Run 限制，`deadline_at` 始终是绝对时刻，
+后续 Run 不会获得重新计时的期限。Goal 执行要求 include_tools=True，按运行选项覆盖模型
+配置后，最终 tool_choice 只能为 None/auto。
 
-`admit_goal_run(AdmitGoalRun(...))` 原子写入既有 `CreateRun` 的结果、目标绑定和已用轮数。
-首轮从 1 开始；失败不留下部分记录，成功后即使模型尚未调用也不退还轮数。
-目标必须 current、active、版本匹配、有额度且先前绑定已结算。普通用户 Run
-不受目标额度或未结算绑定限制。
+新 manager 总是 disarmed，不会自动启动持久 active 目标。先调用 `goal.resume()`：
 
-持久模型和只读 `GoalView` 位于 `models.py`，控制 command/协议位于 `store.py`，
-共享状态规则位于 `transitions.py`。具体数据库实现在 `iris.store`，本包不导入
-harness、runtime 或具体 backend。只读 API 不触发状态推进或结算。
+- 原 WAITING Run 仍等待回答时，返回原 interaction。通过
+  `manager.resume(interaction_id=..., response=QuestionInteractionResponse(...))` 或
+  `PermissionInteractionResponse(...)` 回答它；保持原 run_id 和 round，不另开一轮。
+- ACTIVE 无 live invocation 时返回 needs_recovery。读取 view.run.current_activation_id，
+  再显式调用 `goal.resume(expected_activation_id=该值)`。不可把存在 run_id 当成仍在执行。
+- 命令排空失败保留原 Run 和 pending 收尾；显式恢复重试原收尾。异常终态会暂停，
+  不会在同次恢复中自动替换为新尝试。
 
-## 模型工具与动态上下文
+## 完成意味着什么
 
-开启 Goal 时装配 `get_goal` 与 `report_goal`，两者默认可见且历史正文保留。
-`get_goal()` 返回统一 `GoalView`：当前目标、armed、当前 Run、人工交互、待结算
-状态及 driver 错误。未附着控制器时 armed=false；读取不会恢复执行或补结算。
-view.run 只表示当前 session lane，run_goal_id 说明它绑定哪个目标；普通 Run 占用
-lane 时不伪装成 Goal 执行。无 lane 时 run=None，即使旧终态绑定仍 settlement_pending。
+模型通过 get_goal 获取最新目标和版本，通过 report_goal 申报 complete、blocked 或 continue。
+工具成功只记录本轮申报；正常 Run 结束后，存储才基于已提交事实结算。工作工具与申报同一步、
+申报后的新工作、已交付用户输入或人工回答会使原完成判断失效，需要重新申报。continue 撤回
+早期申报。用户暂停、完成、清除或替换目标的决定不会被旧 Run 覆盖。
+申报不会结束或切换 Run。本轮工作结束后，模型用不含工具调用的普通文本结束回复，随后由
+SessionManager 决定是否启动下一轮；提示要求遵守目标规定的阶段和轮次范围，但不强制模型切轮。
 
-`report_goal(goal_id, revision, decision, reason)` 接受 complete、blocked、continue。
-它从真实工具执行上下文取得 Run 绑定，拒绝普通 Run、替换目标或过期版本的报告。
-成功时只把 `GoalReport` 写入普通 `ToolResult.data["goal_report"]`，不直接修改目标。
+**completed 表示主模型或用户声明目标完成，不是独立验收认证。** 模型依据的工具结果和
+验收文本决定判断质量；框架保证状态及报告时序一致，不提供额外 judge。
 
-`GoalContextSource(service, host_source=...)` 每个模型 step 调用宿主 source 一次，
-保留所有原条目的 required/priority，再追加 required 的 `iris.goal`。该 key 冲突
-是配置错误。Goal Run 看到同一目标的最新完整正文、状态、版本与轮数；暂停或完成
-要求收尾，已 clear/替换的旧 Run 不会看到新目标正文。普通 Run 只有普通输入说明。
+## 存储、范围与错误
 
-`render_continuation()` 生成简短自动输入；完整目标只从当前动态快照读取。
-模板位于 `prompts/`，通过共享 `TemplateRenderer` 渲染；Goal 入口统一包装模板错误。
+Goal 与 Run 使用同一个 InMemoryLifecycleStore 或 SQLiteStore。创建可以早于首次聊天，
+不写聊天历史、不占 lane；Goal 控制不会改变 session history revision。
+SQLite 当前 lifecycle schema 为 11，不兼容旧库且不迁移；使用新数据库路径，旧文件不重置。
+这个 schema 约束在 Goal 关闭时也适用。
 
-## 结算与宿主接线
+默认 child 不继承 Goal，显式为 child 开启会报配置错误；history fork 不复制当前目标和绑定。
+目标全文从存储投影为 required 动态上下文，不依赖长期记忆或聊天压缩摘要；旧目标 Run
+不会收到替换目标的正文。Goal 共用现有 memory handoff，等待用户/HITL/容量不长期占用前台。
 
-`GoalService.settle_run(run_id, now=...)` 委托同一个 store 原子结算绑定；
-`reconcile(session_id)` 显式补结算已 terminal 的未结算绑定，跳过 ACTIVE/WAITING。
-正常结束时只采用最新有效申报：同一步工作工具、后续工作、新提交用户输入或
-人工回答使旧的完成申报失效，需要模型重新申报。continue 撤回先前申报。
-异常结束暂停目标；最后允许的一轮仍先判有效完成，再判轮数耗尽。
-用户已 pause/complete/clear 或替换目标时，结算不能覆盖这些决定。
+配置不支持、目标身份/版本冲突、额度耗尽、原 Run 待恢复、命令清理失败与存储故障均通过
+领域异常或实际 view/result 表达。get 不暗中修复，存储失败不伪报成功。
 
-宿主为服务注入只读 `process_state_reader`，以及可选的 `run_options_validator`。
-后者只在创建和显式修改 Run 选项时调用；实际执行装配检查 tools 已开启、有效
-tool_choice 为 None/auto。领域包不持有宿主任务、不自行启动模型或执行循环。
-
-## 续跑候选与通知
-
-`GoalDriver` 新建时 disarmed，只保存 armed_goal_id 和至多一个
-`GoalContinuationIntent(source_run_id, goal_id, run_id)`。`can_continue()` 判断目标当前
-是否 active、匹配 armed 身份且有剩余额度；用户优先、lane 与 tracker 容量归 manager。
-同一来源终态重复到达时 `offer()` 复用候选；它不创建 Run、不扣轮数，也不操作 memory。
-
-`consume()` 或 `invalidate()` 移除并返回候选身份，`disarm()` 同时停止推进。
-宿主据此释放现有 handoff 预留；durable admission 后由启动操作继续持有 run_id，
-直到 activation_started 或启动收尾。实际调用的前台计数仍归 Runner，memory 无需感知 Goal。
-
-`GoalChanged(session_id, view)` 是冻结的会话级最新快照通知，不伪造 RunEvent。
-通知不承担逐操作重放或调度触发；丢失通知后仍可通过 get 读取真实状态。
+公开 SDK 类型包括 GoalSession、GoalView、GoalControlResult、GoalChanged；后二者是冻结
+快照/回执。GoalChanged 可以合并，重连后用 get 读取当前状态，不能据其逐条重放操作。
+底层 GoalService/GoalStore 支持领域操作和自定义 backend；driver、调度 intent 和 admission
+helper 留在对应内部模块，不作为顶层稳定 SDK。模型在 [models.py](models.py)，原子存储协议
+在 [store.py](store.py)，宿主控制边界在 [session.py](session.py)。

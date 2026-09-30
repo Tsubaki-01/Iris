@@ -1,5 +1,7 @@
 """Iris complete-run lifecycle harness 公共入口。"""
 
+from ..goal.models import GoalChanged, GoalControlResult, GoalView
+from ..goal.session import GoalSession
 from ..lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -28,6 +30,10 @@ from .session_manager import (
 from .streaming import CommandCleanupFailed, LiveFact, LivePublisher, SessionSubmissionEvent
 
 __all__ = [
+    "GoalChanged",
+    "GoalControlResult",
+    "GoalSession",
+    "GoalView",
     "AgentRunOptions",
     "AgentRunRequest",
     "AgentRunner",

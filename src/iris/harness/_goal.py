@@ -236,27 +236,33 @@ class _GoalControl:
                 self.fail(exc)
             raise
         async with self.manager._lock:
-            may_arm = self._resume_arming is task and not self.manager._closed
-            if self._resume_arming is task:
-                self._resume_arming = None
-            abnormal = self.reconcile_locked()
-            goal = self.service.get_current(self.manager._session_id)
-            if (
-                not may_arm
-                or abnormal
-                or goal is None
-                or goal.goal_id != goal_id
-                or goal.status is not GoalStatus.ACTIVE
-            ):
+            if not self._finish_resume_arming(task, goal_id):
                 return self._result("stopped")
-            self.driver.arm(goal.goal_id)
-            self.error = None
             await self.manager._reconcile_locked()
             self.schedule_locked()
             view = self.service.get_view(self.manager._session_id)
             if view.run is not None:
                 return self._result("waiting" if view.run.phase is RunPhase.WAITING else "running")
             return self._result("scheduled")
+
+    def _finish_resume_arming(self, task: asyncio.Task[RunResult], goal_id: str) -> bool:
+        """接手后只完成仍有效的 resume 意图；结算和故障可使该意图失效。"""
+        abnormal = self.reconcile_locked()
+        may_arm = self._resume_arming is task and not self.manager._closed
+        if self._resume_arming is task:
+            self._resume_arming = None
+        goal = self.service.get_current(self.manager._session_id)
+        if (
+            not may_arm
+            or abnormal
+            or goal is None
+            or goal.goal_id != goal_id
+            or goal.status is not GoalStatus.ACTIVE
+        ):
+            return False
+        self.driver.arm(goal_id)
+        self.error = None
+        return True
 
     def reserve_successor(self, source_run_id: str) -> None:
         """旧调用退出前同步暂存候选，不读写存储或启动任务。"""
@@ -408,6 +414,13 @@ class _GoalControl:
                 )
             )
             await manager._wait_for_admission(cast(asyncio.Task[RunResult], execution), started)
+            async with manager._lock:
+                if self._resume_arming is execution and self._finish_resume_arming(
+                    cast(asyncio.Task[RunResult], execution), intent.goal_id
+                ):
+                    await manager._reconcile_locked()
+                    self.schedule_locked()
+                    self.publish()
         except asyncio.CancelledError:
             raise
         except IrisGoalConflictError:

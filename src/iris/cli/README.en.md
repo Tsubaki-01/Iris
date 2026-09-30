@@ -1,0 +1,90 @@
+[中文](README.md)
+
+# `iris.cli`
+
+`iris chat` is a terminal host for `AgentRunner` and one `SessionManager`. The main thread reads
+input while a background event loop executes the Agent, consumes events, and handles human responses.
+The CLI does not own authoritative run, Goal, or history state.
+
+## Starting and ordinary input
+
+```bash
+iris chat agent.yaml --session-id work --max-steps 8
+```
+
+Models and tools follow [Agent configuration](../agents/README.en.md). `--env-file` selects a dotenv
+file. `--max-steps` bounds model steps within each Run; `--no-tools` disables model tools and cannot
+be used when creating an automatic Goal.
+
+- Ordinary input starts a Run when idle or steers the current Run at an existing execution boundary.
+- `/follow-up <message>` queues the next Run after the current one finishes.
+- Human responses use `y/yes/n/no` for permission, with empty input meaning reject; questions accept
+  an answer or an option number.
+- `/help` lists commands. `/exit`, `/quit`, and EOF exit. Ctrl-C cancels current execution and exits
+  with code 130.
+
+## Automatic Goals
+
+Add the following to an existing Agent configuration:
+
+```yaml
+context_policy:
+  enabled: true
+goal:
+  enabled: true
+  max_rounds: 20
+session:
+  backend: sqlite
+```
+
+Then provide an explicit objective and acceptance condition:
+
+```text
+/goal Fix empty-input handling in the calculation function and pass its specified tests
+```
+
+A Goal may span several Runs. Each Run already supports multiple model and tool calls; work is not
+split into fixed stages. The CLI waits only for the control receipt, so input stays available.
+User input and queued follow-ups take precedence over automatic continuation.
+
+| Command | Behavior |
+| --- | --- |
+| `/goal` | Show usage. |
+| `/goal <objective>` | Create and arm a Goal using the CLI's current model-step and tool options. |
+| `/goal status` | Read objective, status, armed state, rounds, reason, occupied Run, interaction, and error. |
+| `/goal edit <objective>` | Replace the objective and pause, retaining the Goal ID and spent rounds. |
+| `/goal edit --max-rounds 30` | Change the total allowance and pause, retaining text and spent rounds. |
+| `/goal pause` | Stop subsequent rounds while the current Run may finish. |
+| `/goal resume` | Explicitly resume, reusing existing execution or the original human interaction. |
+| `/goal complete` | Declare completion as the user, allowing the current Run to finish. |
+| `/goal clear` | Deselect the current Goal while preserving historical Goals and Run bindings. |
+
+Escape an objective beginning with a reserved word using `/goal -- status analysis requirements`.
+To edit text beginning with an option prefix, use `/goal edit -- --max-rounds is text`.
+Internal spaces and quotation marks remain intact. Invalid arguments show usage and never become
+ordinary chat or steering input. Disabled Goal only produces a configuration hint; the CLI does not
+edit YAML.
+
+Rounds are spent at Run admission and are not refunded; resume does not reset them. The final allowed
+round can still complete a Goal. After exhaustion, raise the total with `edit --max-rounds` and then
+`resume`. Completion comes from a user declaration or a committed model report, not independent
+acceptance testing. Use Ctrl-C to stop current execution immediately.
+
+A new manager does not automatically resume old Goals. WAITING continues the original question.
+For an existing ACTIVE Run without a live invocation, `resume` displays its run/activation ID and
+points to the explicit SDK call `await manager.goal.resume(expected_activation_id="...")`.
+The CLI has no general lifecycle recovery command. SQLite uses the new schema contract without old
+schema migration; children and forks do not inherit Goals. See [goal](../goal/README.md) for
+control receipts, absolute deadlines, and recovery rules.
+
+## Implementation and verification
+
+`_ChatSessionHost` in `chat.py` dispatches all Goal controls on the manager's event loop. GoalChanged
+shares the mixed stream with Run events and displays the latest Goal snapshot after relevant terminal
+events. Live text output uses the same GoalView formatting without a second duplicate Goal output
+path. Notifications can coalesce; use `status` to read current facts. Command cleanup and Goal storage
+failures display actual errors rather than fabricated completion.
+
+`tests/cli/test_chat_goal.py` uses the real host, manager, runtime, and store with a controlled provider
+to cover two-round completion, command dispatch, text preservation, disabled Goal, and explicit recovery
+hints. These tests do not evaluate a real model's task quality.

@@ -1,16 +1,11 @@
 """跨 Run 目标的领域模型、状态服务与原子存储契约。"""
 
 from .config import GoalConfig
-from .driver import GoalDriver
 from .models import (
-    GoalAdmission,
     GoalChanged,
-    GoalContinuationIntent,
     GoalControlDisposition,
     GoalControlResult,
-    GoalCreateInput,
     GoalDecision,
-    GoalEditInput,
     GoalProcessState,
     GoalReason,
     GoalRef,
@@ -22,28 +17,13 @@ from .models import (
     GoalView,
 )
 from .service import GoalService
-from .session import GoalControlPort, GoalSession
-from .store import (
-    AdmitGoalRun,
-    ClearGoal,
-    CompleteGoal,
-    CreateGoal,
-    EditGoal,
-    GoalStore,
-    GoalUpdate,
-    PauseGoal,
-    ResumeGoal,
-)
+from .session import GoalSession
+from .store import GoalStore
 
 __all__ = [
-    "GoalDriver",
     "GoalChanged",
-    "GoalContinuationIntent",
     "GoalControlDisposition",
     "GoalControlResult",
-    "GoalCreateInput",
-    "GoalEditInput",
-    "GoalControlPort",
     "GoalSession",
     "GoalService",
     "GoalConfig",
@@ -55,16 +35,7 @@ __all__ = [
     "GoalRunBinding",
     "GoalSettlement",
     "GoalSnapshot",
-    "GoalAdmission",
     "GoalProcessState",
     "GoalView",
-    "CreateGoal",
-    "EditGoal",
-    "PauseGoal",
-    "ResumeGoal",
-    "CompleteGoal",
-    "ClearGoal",
-    "GoalUpdate",
-    "AdmitGoalRun",
     "GoalStore",
 ]

@@ -48,6 +48,8 @@ def _interaction(prompt: PermissionPrompt | QuestionPrompt) -> HumanInteraction:
 class SequenceRunner:
     """仅供不启动 run 的终端命令测试使用。"""
 
+    _goal_service: None = None
+
     def __init__(self) -> None:
         self.start_calls: list[object] = []
 
@@ -67,6 +69,8 @@ class SequenceRunner:
 
 class ErrorRunner:
     """在 manager create admission 前抛出领域错误。"""
+
+    _goal_service: None = None
 
     async def aclose(self) -> None:
         """该替身没有自有资源。"""

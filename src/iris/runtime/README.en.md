@@ -548,7 +548,10 @@ model step and preserving each contribution's required/priority fields. The requ
 uses the existing request budget. The execution loop still consumes ordinary tools and snapshots,
 without owning Goal transitions or cross-run continuation. Disabled Goal drops an injected service;
 explicitly enabling it in CHILD is rejected, and default children do not inherit the parent's Goal.
-See [goal](../goal/README.en.md).
+See [goal](../goal/README.md). Each step reads the same goal's latest full objective and revision;
+an old Goal run never receives a replacement objective. Required text that cannot fit follows the
+existing context-budget error path rather than being truncated. report_goal only emits a claim in
+an ordinary ToolResult; terminal settlement determines state. Main-model completion is not independent verification.
 
 The factory resolves `permissions.workspace` before constructing base context and user-declared
 tools. With `skills.enabled: true`, it takes one project-level discovery snapshot against that

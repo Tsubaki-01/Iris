@@ -55,6 +55,9 @@ envelope 不虚构 run/activation identity 或 durable sequence。快照按 sess
 重放每次操作；重连后通过 `manager.goal.get()` 读取当前状态，不新增远程 Goal commands。
 Mixed 模式保存一个最新 Goal 快照槽，并保留尚未交付的各 Run terminal 水位；因此即使结算与
 下一轮准入连续发生，也先显示对应终态再显示合并后的目标结果。broker-only 不依赖本地消费者。
+本地消费者可从 `iris.harness` 或 `iris.goal` 导入同一个 `GoalChanged` 类型。
+completed 表示主模型或用户申报完成，展示时不得表述为独立认证；SDK 使用见
+[Goal 说明](../goal/README.md)。
 
 `LiveStreamBroker` 必须在同一个 event loop/thread 中使用。`replay_capacity_per_scope` 限制每个
 run/session ring；`max_replay_scopes`（默认 256）限制全局 ring 数，publish 或 subscribe 会更新

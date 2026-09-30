@@ -26,6 +26,7 @@ print(session.revision, session.messages)
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，应为新 store 选择新的数据库路径；
 constructor 不重置或修改原文件。
+schema 11 的严格格式要求也适用于 Goal 关闭时；没有旧库读取或自动 migration 路径。
 
 两种实现公开只读 `source_id`。SQLite 在 `lifecycle_schema.source_id` 保存创建时生成的 UUID，
 重开同一数据库保持相同身份；InMemory 每个实例生成自己的 UUID。`load_run_message_slice()`
@@ -43,6 +44,9 @@ Goal 使用同一 backend 的 `goals`、`goal_runs`，一个 session 至多一�
 准入失败不留下半写记录，已准入的尝试不退还次数。内存实现先构造全部候选再发布，SQLite
 复用同 connection 的 Run 创建。目标清除保留旧事实；fork 不复制当前目标或绑定。
 读取不会自动启动或恢复目标，领域接口见 [Goal](../goal/README.md)。
+`settle_goal_run` 在同一事务内读取 Run 结果、报告及其时序证据，并一起更新目标与绑定；
+不增加独立报告表。终态先提交而目标尚未结算时，读视图只显示 settlement_pending，显式
+reconcile 补结算。重复结算不再修改目标；last-round 的有效完成先于额度耗尽判定。
 
 Sub Agent 新增且只新增三条 mutation：`admit_child_run()` 同事务创建普通 child run 与
 `subagent_run_links` 三字段 link；重入 exact parent key 返回原 child。`rebind_subagent_proxy()`
