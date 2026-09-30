@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -14,6 +14,9 @@ from ..lifecycle.store import RunCommit
 
 GoalText = Annotated[str, Field(pattern=r"\S")]
 GoalRoundLimit = Annotated[int, Field(gt=0)]
+GoalControlDisposition = Literal[
+    "scheduled", "admitted", "running", "waiting", "needs_recovery", "occupied", "stopped"
+]
 
 
 class GoalStatus(StrEnum):
@@ -107,6 +110,33 @@ class GoalSnapshot(_GoalModel):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class GoalCreateInput:
+    """已解析的目标创建字段，不包含由宿主绑定的 session。"""
+
+    objective: str
+    max_rounds: int
+    run_options: AgentRunOptions
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GoalEditInput:
+    """已解析且至少包含一个修改项的目标编辑输入。"""
+
+    objective: str | None = None
+    max_rounds: int | None = None
+    run_options: AgentRunOptions | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GoalContinuationIntent:
+    """至多一个可撤销的后继候选，不等于 Run 准入。"""
+
+    source_run_id: str | None
+    goal_id: str
+    run_id: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class GoalAdmission:
     """原子准入的完整回执，不创建第二份 lifecycle 事实。"""
 
@@ -145,7 +175,29 @@ class GoalView:
     driver_error: RunErrorInfo | None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GoalControlResult:
+    """宿主控制实际达到的阶段及其最新只读视图。"""
+
+    view: GoalView
+    disposition: GoalControlDisposition
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GoalChanged:
+    """会话级最新目标投影通知，不承担执行或逐操作重放。"""
+
+    session_id: str
+    view: GoalView
+
+
 __all__ = [
+    "GoalControlDisposition",
+    "GoalCreateInput",
+    "GoalEditInput",
+    "GoalContinuationIntent",
+    "GoalControlResult",
+    "GoalChanged",
     "GoalStatus",
     "GoalDecision",
     "GoalRef",

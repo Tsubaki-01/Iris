@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
 from ..exceptions import IrisCommandCleanupError, IrisRunNotFoundError, IrisRunStateError
+from ..goal.models import GoalChanged
+from ..goal.session import GoalSession
 from ..hitl import HumanInteractionResponse
 from ..lifecycle import (
     AgentRunOptions,
@@ -40,6 +42,7 @@ from ..lifecycle import (
 )
 from ..message import Msg
 from ..runtime import SteeringInput
+from ._goal import _GoalControl
 from .runner import AgentRunner
 
 if TYPE_CHECKING:
@@ -158,7 +161,7 @@ class ResumeReceipt(BaseModel):
 
 
 # 单消费者 stream 原样混合 durable run event 与 transient submission event，不合并 sequence。
-type SessionEvent = RunEvent | SubmissionEvent
+type SessionEvent = RunEvent | SubmissionEvent | GoalChanged
 
 
 class _EventPageReader(Protocol):
@@ -279,6 +282,7 @@ class _DurableRunTracker:
     observed_highest_sequence: int
     delivered_highest_sequence: int
     settled: bool = False
+    terminal_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +312,8 @@ class _SessionEventBuffer:
         self._reserved_submission_ids: set[str] = set()
         self._run_trackers: OrderedDict[str, _DurableRunTracker] = OrderedDict()
         self._replayed_events: deque[RunEvent] = deque()
+        self._goal_event: GoalChanged | None = None
+        self._goal_barriers: dict[str, int] = {}
         self._wakeup = asyncio.Event()
         self._closed = False
 
@@ -360,6 +366,17 @@ class _SessionEventBuffer:
         self._submission_events.append(_BufferedSubmissionEvent(event, barriers))
         self._wakeup.set()
 
+    def add_goal_changed(self, event: GoalChanged) -> None:
+        """合并最新目标快照，保留所有尚未交付的终态水位。"""
+        self._goal_event = event
+        self._goal_barriers.update(
+            (run_id, tracker.terminal_sequence)
+            for run_id, tracker in self._run_trackers.items()
+            if tracker.terminal_sequence is not None
+            and tracker.delivered_highest_sequence < tracker.terminal_sequence
+        )
+        self._wakeup.set()
+
     def try_register_run(self, run_id: str, *, after_sequence: int) -> bool:
         """容量允许时登记不回放旧事件的 durable baseline。"""
         if len(self._run_trackers) >= self._max_tracked_durable_runs:
@@ -375,6 +392,7 @@ class _SessionEventBuffer:
         self._replayed_events = deque(
             event for event in self._replayed_events if event.run_id != run_id
         )
+        self._goal_barriers.pop(run_id, None)
         if self._run_trackers.pop(run_id, None) is not None:
             self._on_tracker_released()
         self._wakeup.set()
@@ -392,6 +410,7 @@ class _SessionEventBuffer:
         )
         if event.kind is RunEventKind.RUN_TERMINAL:
             tracker.settled = True
+            tracker.terminal_sequence = event.sequence
         self._cleanup_run_if_caught_up(event.run_id, tracker)
         self._wakeup.set()
 
@@ -410,7 +429,12 @@ class _SessionEventBuffer:
             event = self._take_ready_event()
             if event is not None:
                 return event
-            if self._closed and not self._submission_events and not self._has_undelivered_event():
+            if (
+                self._closed
+                and not self._submission_events
+                and self._goal_event is None
+                and not self._has_undelivered_event()
+            ):
                 return None
             self._wakeup.clear()
             await self._wakeup.wait()
@@ -429,6 +453,9 @@ class _SessionEventBuffer:
         buffered = self._submission_events[0] if self._submission_events else None
         if buffered is not None and self._barriers_satisfied(buffered.durable_barriers):
             return self._submission_events.popleft().event
+        if self._goal_event is not None and not self._goal_barriers:
+            event, self._goal_event = self._goal_event, None
+            return event
         if self._replayed_events:
             return self._pop_replayed_event()
 
@@ -458,6 +485,9 @@ class _SessionEventBuffer:
         event = self._replayed_events.popleft()
         tracker = self._run_trackers[event.run_id]
         tracker.delivered_highest_sequence = event.sequence
+        barrier = self._goal_barriers.get(event.run_id)
+        if barrier is not None and event.sequence >= barrier:
+            self._goal_barriers.pop(event.run_id)
         self._cleanup_run_if_caught_up(event.run_id, tracker)
         return event
 
@@ -484,6 +514,7 @@ class _SessionEventBuffer:
         if tracker.delivered_highest_sequence < tracker.observed_highest_sequence:
             return
         if self._run_trackers.pop(run_id, None) is tracker:
+            self._goal_barriers.pop(run_id, None)
             self._on_tracker_released()
 
 
@@ -718,6 +749,12 @@ class SessionManager:
             if observation_mode == "mixed"
             else None
         )
+        self._goal_control = (
+            _GoalControl(self, runner._goal_service) if runner._goal_service is not None else None
+        )
+        self.goal: GoalSession | None = (
+            self._goal_control.api if self._goal_control is not None else None
+        )
 
     # endregion
 
@@ -765,6 +802,8 @@ class SessionManager:
             if self._current_run_id is None:
                 if mode is not None:
                     raise IrisRunStateError("idle submit 的 mode 必须为 None")
+                if self._goal_control is not None:
+                    self._goal_control.cancel_candidate()
                 submission_id = self._new_submission_id()
                 run_id = self._new_run_id()
                 if self._event_buffer is not None and not self._event_buffer.try_register_run(
@@ -917,7 +956,7 @@ class SessionManager:
             await self._wait_for_admission(task, started)
         return ResumeReceipt(run_id=run_id, interaction_id=interaction_id.strip()), task
 
-    async def interrupt(self, *, reason: str | None = None) -> RunSnapshot:
+    async def interrupt(self, *, reason: str | None = None) -> RunSnapshot | None:
         """请求取消 facade 当前 exact run，并保留 follow-up 到真实 terminal。
 
         active run 的 cancellation request 不是 terminal，因此只清空该 run 的 steer input，
@@ -927,17 +966,35 @@ class SessionManager:
             reason (str | None): 取消原因，None 表示使用 runner 默认文案。
 
         Returns:
-            RunSnapshot: 请求提交后的 run snapshot。
+            RunSnapshot | None: Run 取消回执；只有 Goal 意图被停止时为 None。
 
         Raises:
             IrisRunStateError: 当 facade 已关闭或没有 current run 时。
         """
         async with self._lock:
             self._require_open()
+            goal_error: Exception | None = None
+            goal_stopped = False
+            if self._goal_control is not None:
+                try:
+                    goal_stopped = self._goal_control.interrupt_locked(reason)
+                except Exception as exc:
+                    goal_error = exc
+                    self._goal_control.fail(exc)
             await self._reconcile_locked()
+            if self._current_run_id is None:
+                if goal_error is not None:
+                    raise goal_error
+                if goal_stopped:
+                    return None
             run_id = self._require_current_run()
             before = self._runner.get_run(run_id)
-            snapshot = self._runner.request_cancel(run_id, reason=reason)
+            try:
+                snapshot = self._runner.request_cancel(run_id, reason=reason)
+            except Exception as exc:
+                if goal_error is not None:
+                    raise exc from goal_error
+                raise
             # request_cancel 是同步 durable 写入，其 events 不经过 managed
             # callback，需要在此补 relay。
             for event in self._runner.list_events(run_id, before.last_event_sequence):
@@ -966,6 +1023,9 @@ class SessionManager:
                     self._interrupt_task = task
                     self._attach_settlement_callback(task, run_id, submission=None)
                 # 连续 interrupt 共享已有 cleanup owner，不能取消正在执行的 settlement。
+            if goal_error is not None:
+                goal_error.add_note(f"已对 Run {run_id} 提交取消请求")
+                raise goal_error
             return snapshot
 
     async def _cancel_after_delivery(
@@ -1015,6 +1075,8 @@ class SessionManager:
                 return
             if not self._closed:
                 self._closed = True
+                if self._goal_control is not None:
+                    self._goal_control.close_locked()
                 run_id = self._current_run_id
                 # claim 与 acknowledge/fail 之间不允许 await。
                 assert not self._claimed_steer, "claim 到 callback 之间不得出现 await"
@@ -1052,6 +1114,8 @@ class SessionManager:
 
     async def _finish_close(self, *, reason: str | None) -> None:
         """关闭失败保留原 run 与任务引用；重试只补尚未完成的收尾。"""
+        if self._goal_control is not None:
+            await self._goal_control.wait_closed()
         run_id = self._close_run_id
         if run_id is not None:
             before = self._runner.get_run(run_id)
@@ -1136,6 +1200,8 @@ class SessionManager:
         def schedule(completed: asyncio.Task[RunResult]) -> None:
             self._managed_tasks.discard(completed)
             asyncio.create_task(self._settle_managed_task(completed, run_id, submission=submission))
+            if self._goal_control is not None:
+                self._schedule_tracker_reconcile()
 
         self._managed_tasks.add(task)
         task.add_done_callback(schedule)
@@ -1215,6 +1281,8 @@ class SessionManager:
                             self._complete_follow_up_failure_locked(admission)
                     return
                 # run 已 durable 存在即视为 follow-up 投递成功，run 自身成败与之无关。
+                if self._goal_control is not None and not self._closed:
+                    self._goal_control.execution_finished(run_id, task_error)
                 if submission is not None:
                     admission = self._follow_up_admissions.get(submission.submission_id)
                     if admission is not None:
@@ -1226,7 +1294,9 @@ class SessionManager:
                         self._event_buffer.mark_run_settled(run_id)
                     await self._handle_terminal_locked(run_id)
                 # waiting 保留 current owner；active task error 也不自动 recover/drain。
-        except Exception:
+        except Exception as exc:
+            if self._goal_control is not None:
+                self._goal_control.fail(exc)
             logger.exception(
                 "SessionManager managed task settlement 失败",
                 extra={"session_id": self._session_id, "run_id": run_id},
@@ -1238,6 +1308,8 @@ class SessionManager:
         必须在持有 ``_lock`` 时调用。循环是必要的：结算一个 terminal run 会立即启动下一条
         follow-up，而它也可能已经是 terminal。
         """
+        if self._goal_control is not None and not self._closed:
+            self._goal_control.reconcile_locked()
         while self._current_run_id is not None:
             run_id = self._current_run_id
             try:
@@ -1265,6 +1337,8 @@ class SessionManager:
         """结算 terminal run：清空其 steer 并启动下一条 follow-up。"""
         if self._current_run_id != run_id:
             return
+        if self._goal_control is not None and not self._closed:
+            self._goal_control.reconcile_locked()
         if self._event_buffer is not None:
             self._event_buffer.mark_run_settled(run_id)
         self._fail_items(self._pending.drain_steers_for_run(run_id), reason="target_terminal")
@@ -1273,6 +1347,8 @@ class SessionManager:
         self._interrupt_task = None
         if not self._closed:
             await self._start_next_follow_up_locked()
+            if self._goal_control is not None:
+                self._goal_control.schedule_locked()
 
     async def _start_next_follow_up_locked(self) -> None:
         """取出并启动至多一条 follow-up，等待其 create admission 有结论。
@@ -1401,7 +1477,11 @@ class SessionManager:
                 await self._reconcile_locked()
                 if self._current_run_id is None:
                     await self._start_next_follow_up_locked()
-        except Exception:
+                if self._goal_control is not None:
+                    self._goal_control.schedule_locked()
+        except Exception as exc:
+            if self._goal_control is not None:
+                self._goal_control.fail(exc)
             logger.exception(
                 "SessionManager tracker 释放后的 reconcile 失败",
                 extra={"session_id": self._session_id},
@@ -1435,6 +1515,8 @@ class SessionManager:
             successor = self._pending.peek_follow_up()
             if successor is not None:
                 self._reserve_memory_handoff(successor.run_id)
+            elif self._goal_control is not None and event.payload.get("stop_reason") == "completed":
+                self._goal_control.reserve_successor(event.run_id)
         if self._event_buffer is not None:
             self._event_buffer.observe_run_event(event)
 
@@ -1495,6 +1577,17 @@ class SessionManager:
                 },
                 exc_info=True,
             )
+
+    def _publish_goal_changed(self, event: GoalChanged) -> None:
+        """向选定的 mixed/live 出口发布最新 Goal 视图。"""
+        if self._event_buffer is not None:
+            self._event_buffer.add_goal_changed(event)
+        publisher = self._submission_publisher
+        if publisher is not None:
+            try:
+                publisher.publish(event)
+            except Exception:
+                logger.warning("live publisher 处理 GoalChanged 失败", exc_info=True)
 
     # endregion
 

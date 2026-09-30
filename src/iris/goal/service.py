@@ -13,6 +13,8 @@ from ..exceptions import IrisGoalConflictError, IrisGoalStateError
 from ..lifecycle.models import AgentRunOptions, RunPhase, snapshot_run
 from .config import GoalConfig
 from .models import (
+    GoalCreateInput,
+    GoalEditInput,
     GoalProcessState,
     GoalReason,
     GoalRef,
@@ -37,7 +39,8 @@ from .transitions import require_current_goal
 if TYPE_CHECKING:
     from .models import GoalSettlement
 
-_CREATE_INPUT = TypeAdapter(tuple[GoalText, GoalText, GoalRoundLimit, AgentRunOptions])
+_SESSION_ID_INPUT = TypeAdapter(GoalText)
+_CREATE_INPUT = TypeAdapter(tuple[GoalText, GoalRoundLimit, AgentRunOptions])
 _EDIT_INPUT = TypeAdapter(tuple[GoalText | None, GoalRoundLimit | None, AgentRunOptions | None])
 
 
@@ -82,8 +85,6 @@ class GoalService:
             pending_run = self.store.load_run(binding.run_id)
             if pending_run is not None and pending_run.phase is RunPhase.TERMINAL:
                 settlement_pending = True
-                if run is None:
-                    run = pending_run
         run_binding = None if run is None else self.store.get_goal_run(run.run_id)
         interaction = (
             None
@@ -145,9 +146,25 @@ class GoalService:
     ) -> GoalSnapshot:
         """创建目标并按需建立空 session，不占执行 lane。"""
         try:
-            session_id, objective, rounds, options = _CREATE_INPUT.validate_python(
+            session_id = _SESSION_ID_INPUT.validate_python(session_id)
+        except ValidationError as exc:
+            raise IrisGoalStateError("目标 session ID 无效", error=str(exc)) from exc
+        return self.create_validated(
+            session_id,
+            self.parse_create(objective, max_rounds=max_rounds, run_options=run_options),
+        )
+
+    def parse_create(
+        self,
+        objective: str,
+        *,
+        max_rounds: int | None = None,
+        run_options: AgentRunOptions | None = None,
+    ) -> GoalCreateInput:
+        """一次解析创建字段，供同步服务和异步会话 SDK 共用。"""
+        try:
+            objective, rounds, options = _CREATE_INPUT.validate_python(
                 (
-                    session_id,
                     objective,
                     self.config.max_rounds if max_rounds is None else max_rounds,
                     AgentRunOptions() if run_options is None else run_options,
@@ -157,13 +174,17 @@ class GoalService:
             raise IrisGoalStateError("目标创建参数无效", error=str(exc)) from exc
         if self.run_options_validator is not None:
             self.run_options_validator(options)
+        return GoalCreateInput(objective=objective, max_rounds=rounds, run_options=options)
+
+    def create_validated(self, session_id: str, input_data: GoalCreateInput) -> GoalSnapshot:
+        """保存已解析的输入；宿主在 admission lock 内调用，不重新解析。"""
         return self.store.create_goal(
             CreateGoal(
                 goal_id=f"goal_{uuid4().hex}",
                 session_id=session_id,
-                objective=objective,
-                max_rounds=rounds,
-                run_options=options,
+                objective=input_data.objective,
+                max_rounds=input_data.max_rounds,
+                run_options=input_data.run_options,
                 now=datetime.now(UTC),
             )
         )
@@ -177,6 +198,19 @@ class GoalService:
         run_options: AgentRunOptions | None = None,
     ) -> GoalSnapshot:
         """修改显式提供的目标字段并暂停；不重置已用轮数。"""
+        return self.edit_validated(
+            expected,
+            self.parse_edit(objective=objective, max_rounds=max_rounds, run_options=run_options),
+        )
+
+    def parse_edit(
+        self,
+        *,
+        objective: str | None = None,
+        max_rounds: int | None = None,
+        run_options: AgentRunOptions | None = None,
+    ) -> GoalEditInput:
+        """一次解析非空编辑，内部字段与模型配置约束不在写入路径重验。"""
         if objective is None and max_rounds is None and run_options is None:
             raise IrisGoalStateError("编辑目标至少提供一个修改字段")
         try:
@@ -191,14 +225,18 @@ class GoalService:
             raise IrisGoalStateError("目标编辑参数无效", error=str(exc)) from exc
         if run_options is not None and self.run_options_validator is not None:
             self.run_options_validator(run_options)
+        return GoalEditInput(objective=objective, max_rounds=max_rounds, run_options=run_options)
+
+    def edit_validated(self, expected: GoalRef, input_data: GoalEditInput) -> GoalSnapshot:
+        """在锁内取得当前引用后应用可信编辑，仅由 store 检查状态和 CAS。"""
         return cast(
             GoalSnapshot,
             self.store.update_goal(
                 EditGoal(
                     expected=expected,
-                    objective=objective,
-                    max_rounds=max_rounds,
-                    run_options=run_options,
+                    objective=input_data.objective,
+                    max_rounds=input_data.max_rounds,
+                    run_options=input_data.run_options,
                     now=datetime.now(UTC),
                 )
             ),

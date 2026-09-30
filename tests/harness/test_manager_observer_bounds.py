@@ -44,6 +44,8 @@ async def _wait_until(predicate: Callable[[], bool]) -> None:
 
 
 class _ReplayRunner:
+    _goal_service = None
+
     def __init__(self, events: list[RunEvent]) -> None:
         self.events = events
         self.on_first_list: Callable[[], None] | None = None

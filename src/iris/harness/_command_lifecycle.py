@@ -114,19 +114,19 @@ class CommandLifecycle:
             raise
 
     def report_failure(self, run_id: str, error: IrisCommandCleanupError) -> None:
-        """child 与后台任务经 root 唯一 publisher 反馈小型诊断。"""
+        """child 与后台清理经 root 通知 attachment，并按原路径发布诊断。"""
         from .streaming import CommandCleanupFailed
 
         run = self.root.store.load_run(run_id)
-        if run is not None and self.root._live_publisher is not None:
-            self.root._publish_live_fact(
-                CommandCleanupFailed(
-                    run_id=run_id,
-                    session_id=run.session_id,
-                    error=RunErrorInfo(code=error.runtime_code, message=str(error), source="tool"),
-                )
+        if run is not None:
+            fact = CommandCleanupFailed(
+                run_id=run_id,
+                session_id=run.session_id,
+                error=RunErrorInfo(code=error.runtime_code, message=str(error), source="tool"),
             )
-        else:
+            self.root._notify_session_fact(fact)
+            self.root._publish_live_fact(fact)
+        if run is None or self.root._live_publisher is None:
             logger.error("命令环境清理失败 run=%s: %s", run_id, error)
 
     def register_deadline(self, run: RunRecord, target: CommandTarget) -> None:

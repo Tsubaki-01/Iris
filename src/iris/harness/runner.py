@@ -34,6 +34,7 @@ from ..exceptions import (
     IrisCancellationRequestedError,
     IrisCommandCleanupError,
     IrisConfigError,
+    IrisGoalStateError,
     IrisRunConflictError,
     IrisRunNotFoundError,
     IrisRunObservationTimeoutError,
@@ -122,7 +123,7 @@ from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
 if TYPE_CHECKING:
-    from .streaming import LiveFact, LivePublisher
+    from .streaming import CommandCleanupFailed, LiveFact, LivePublisher
 
 # endregion
 
@@ -309,6 +310,9 @@ class AgentRunner:
         self._memory_maintenance: MemoryMaintenance | None = None
         environment = runtime.environment
         self._goal_state_readers: dict[str, Callable[[], GoalProcessState]] = {}
+        self._session_fact_callbacks: dict[
+            str, Callable[[RunEvent | CommandCleanupFailed], None]
+        ] = {}
         self._goal_service = environment.goal_service
         if self._goal_service is not None:
             if self._goal_service.store is not store:
@@ -360,6 +364,35 @@ class AgentRunner:
             except Exception:
                 logger.exception("运行资源准备失败后的资源关闭失败")
             raise
+
+    def _register_session_fact_callback(
+        self, session_id: str, callback: Callable[[RunEvent | CommandCleanupFailed], None]
+    ) -> None:
+        """Root 为同一 session 只接受一个仍附着的 Goal 控制 owner。"""
+        callbacks = self._command_lifecycle.root._session_fact_callbacks
+        if session_id in callbacks:
+            raise IrisGoalStateError("session 已有 Goal 控制 attachment", session_id=session_id)
+        callbacks[session_id] = callback
+
+    def _unregister_session_fact_callback(
+        self, session_id: str, callback: Callable[[RunEvent | CommandCleanupFailed], None]
+    ) -> None:
+        """只移除 exact owner，旧 attachment 的关闭不影响后继。"""
+        callbacks = self._command_lifecycle.root._session_fact_callbacks
+        if callbacks.get(session_id) is callback:
+            del callbacks[session_id]
+
+    def _notify_session_fact(self, fact: RunEvent | CommandCleanupFailed) -> None:
+        """同步通知只登记已提交事实，实际 reconciliation 由 manager 安排。"""
+        callback = self._command_lifecycle.root._session_fact_callbacks.get(fact.session_id)
+        if callback is not None:
+            try:
+                callback(fact)
+            except Exception:
+                logger.exception(
+                    "session fact callback 处理失败",
+                    extra={"run_id": fact.run_id, "session_id": fact.session_id},
+                )
 
     def _read_goal_process_state(self, session_id: str) -> GoalProcessState:
         """为模型和宿主读取已附着 manager 的进程态，无 attachment 时不自动执行。"""
@@ -958,7 +991,12 @@ class AgentRunner:
             if current.cancellation_requested_at is None:
                 raise
             settled = await self._settle_waiting_if_due(
-                current, proxy, now=self._now(), event_collector=event_collector
+                current,
+                proxy,
+                now=self._now(),
+                event_collector=event_collector,
+                steering=steering,
+                activation_started=activation_started,
             )
             return cast(RunResult, settled)
         current = cast(RunRecord, self.store.load_run(parent_run.run_id))
@@ -966,7 +1004,12 @@ class AgentRunner:
             await self._deliver_events(event_collector.take_pending_events())
             return self._require_result(current.run_id)
         settled = await self._settle_waiting_if_due(
-            current, proxy, now=self._now(), event_collector=event_collector
+            current,
+            proxy,
+            now=self._now(),
+            event_collector=event_collector,
+            steering=steering,
+            activation_started=activation_started,
         )
         if settled is not None:
             return settled
@@ -1270,10 +1313,28 @@ class AgentRunner:
                     reason=reason,
                 )
 
-    @_with_memory_foreground
     async def recover(self, run_id: str, *, expected_activation_id: str | None = None) -> RunResult:
         """按精确 activation fence 恢复；先完成本进程已有的清理结算。"""
-        return await self._recover(run_id, expected_activation_id=expected_activation_id)
+        return await self._recover_managed(run_id, expected_activation_id=expected_activation_id)
+
+    @_with_memory_foreground
+    async def _recover_managed(
+        self,
+        run_id: str,
+        *,
+        expected_activation_id: str | None = None,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
+    ) -> RunResult:
+        """恢复完整调用复用前台入口，并把 managed hooks 传递到实际接手处。"""
+        return await self._recover(
+            run_id,
+            expected_activation_id=expected_activation_id,
+            steering=steering,
+            durable_event_callback=durable_event_callback,
+            activation_started=activation_started,
+        )
 
     async def _recover(
         self,
@@ -1281,6 +1342,9 @@ class AgentRunner:
         *,
         expected_activation_id: str | None = None,
         stop_receipt: CommandStopReceipt | None = None,
+        steering: RuntimeSteeringPort | None = None,
+        durable_event_callback: Callable[[RunEvent], None] | None = None,
+        activation_started: asyncio.Event | None = None,
     ) -> RunResult:
         """根据精确 activation fence 与 durable facts 显式恢复 run。
 
@@ -1325,13 +1389,24 @@ class AgentRunner:
                     "waiting run 缺少 durable interaction", run_id=run.run_id
                 )
             settled = await self._settle_waiting_if_due(
-                run, interaction, now=self._now(), stop_receipt=stop_receipt
+                run,
+                interaction,
+                now=self._now(),
+                stop_receipt=stop_receipt,
+                steering=steering,
+                durable_event_callback=durable_event_callback,
+                activation_started=activation_started,
             )
             if settled is not None:
                 return settled
             if needs_prepare and self._prepared:
                 return await self._recover(
-                    run_id, expected_activation_id=expected_activation_id, stop_receipt=stop_receipt
+                    run_id,
+                    expected_activation_id=expected_activation_id,
+                    stop_receipt=stop_receipt,
+                    steering=steering,
+                    durable_event_callback=durable_event_callback,
+                    activation_started=activation_started,
                 )
             if (
                 interaction.status is InteractionStatus.RESOLVED
@@ -1341,6 +1416,9 @@ class AgentRunner:
                     run.run_id,
                     interaction_id=interaction.interaction_id,
                     response=cast(HumanInteractionResponse, interaction.response),
+                    steering=steering,
+                    durable_event_callback=durable_event_callback,
+                    activation_started=activation_started,
                 )
             raise IrisRunStateError(
                 "waiting run 必须通过 resume 继续",
@@ -1372,7 +1450,12 @@ class AgentRunner:
             if needs_prepare:
                 # 保留调用方 fence，重新读取 phase、checkpoint 与可能新出现的 claim。
                 return await self._recover(
-                    run_id, expected_activation_id=expected_activation_id, stop_receipt=stop_receipt
+                    run_id,
+                    expected_activation_id=expected_activation_id,
+                    stop_receipt=stop_receipt,
+                    steering=steering,
+                    durable_event_callback=durable_event_callback,
+                    activation_started=activation_started,
                 )
             recovered_cursor = self._validate_recovery_checkpoint(run, checkpoint)
             if (
@@ -1407,7 +1490,7 @@ class AgentRunner:
                 now=self._now(),
             )
         )
-        recovered_events = self._event_collector()
+        recovered_events = self._event_collector(durable_event_callback)
         recovered_events.record(recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
             self._command_lifecycle.terminal(run.run_id)
@@ -1452,12 +1535,12 @@ class AgentRunner:
             raise IrisRunConflictError("recover rebound checkpoint cursor 已变化")
 
         # --- 5. 绑定新 activation 并继续推进 ---
-        # recover 不是 managed 入口，因此不注入 steering / event callback / admission signal。
         active = ActiveActivation(
             run_id=run.run_id,
             activation_id=new_activation_id,
             signal=_MutableCancellationSignal(),
             event_collector=recovered_events,
+            steering=steering,
         )
         port = StoreRuntimeCommitPort(
             workspace_root=self.runtime.environment.workspace_root,
@@ -1487,6 +1570,8 @@ class AgentRunner:
             options=run.options.runtime,
         )
         self._register(active, recovered.run.current_activation_id)
+        if activation_started is not None:
+            activation_started.set()
         return await self._run_activation(active, activation=activation, port=port)
 
     # endregion
@@ -1755,7 +1840,14 @@ class AgentRunner:
                 deadline is not None and self._now() >= deadline
             ):
                 return await self._settle_waiting_if_due(
-                    current, interaction, now=self._now(), stop_receipt=stop_receipt
+                    current,
+                    interaction,
+                    now=self._now(),
+                    stop_receipt=stop_receipt,
+                    steering=steering,
+                    durable_event_callback=durable_event_callback,
+                    activation_started=activation_started,
+                    event_collector=event_collector,
                 )
             return await self._complete_subagent_proxy(
                 parent_run=current,
@@ -2332,11 +2424,13 @@ class AgentRunner:
 
     def _publish_live_fact(self, fact: LiveFact) -> None:
         """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
+        from ..goal.models import GoalChanged
         from .streaming import CommandCleanupFailed
 
         publisher = self._live_publisher
         if publisher is None:
             return
+        run_id: str | None
         if isinstance(fact, RunEvent):
             fact_kind = fact.kind.value
             run_id = fact.run_id
@@ -2350,6 +2444,11 @@ class AgentRunner:
         elif isinstance(fact, CommandCleanupFailed):
             fact_kind = "command.cleanup.failed"
             run_id = fact.run_id
+            session_id = fact.session_id
+            activation_id = None
+        elif isinstance(fact, GoalChanged):
+            fact_kind = "goal.changed"
+            run_id = None
             session_id = fact.session_id
             activation_id = None
         else:
@@ -2375,16 +2474,15 @@ class AgentRunner:
     def _compose_durable_event_callback(
         self,
         callback: Callable[[RunEvent], None] | None,
-    ) -> Callable[[RunEvent], None] | None:
-        """组合既有 callback 与 publisher，供 commit port relay 新事件。"""
-        if callback is None and self._live_publisher is None:
-            return None
+    ) -> Callable[[RunEvent], None]:
+        """动态查询 root attachment，使旧 pending collector 也能通知新宿主。"""
 
         def relay(event: RunEvent) -> None:
             try:
                 if callback is not None:
                     callback(event)
             finally:
+                self._notify_session_fact(event)
                 self._publish_live_fact(event)
 
         return relay

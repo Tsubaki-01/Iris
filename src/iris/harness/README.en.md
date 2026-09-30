@@ -41,6 +41,25 @@ Its automatic input is marked as context and does not replace the latest ordinar
 `start()` still executes one logical run. See [Goal documentation](../goal/README.md) for models
 and reporting rules.
 
+When enabled, `SessionManager(runner, session_id).goal` provides async create/get/edit/pause/resume/
+complete/clear. Creation explicitly arms continuation; automatic work stays outside the user FIFO
+and follows accepted user work. Pause stops later rounds. `interrupt()` also pauses the goal while
+cancelling the current run; it returns None when it only stops an idle goal. Disabled managers expose
+`goal=None`.
+
+A new manager does not automatically continue a persisted active goal. Explicit `goal.resume()` can
+attach the original WAITING run, restore its deadline timer, and accept its pending interaction.
+An ACTIVE run without a live invocation requires `expected_activation_id`. Recovery consumes no
+new round. Background deadlines and command cleanup errors notify Goal state without requiring a
+live publisher. Pending command cleanup retains its lane until explicit settlement retry.
+
+`GoalChanged` carries the latest state. Mixed streams deliver the related terminal before the goal
+result; broker-only mode publishes session-scoped `goal.changed`. Reads neither reconcile nor start
+work. Full mixed trackers defer admission until consumption releases capacity. Goal and user follow-ups
+share memory handoff; reservations cover only transition to the next foreground run. Waiting for user
+input, HITL, or capacity permits normal idle maintenance. Manager close unregisters its attachment,
+while Runner keeps ownership of resource shutdown.
+
 Resume/recover keep pure durable settlement first, preparing only for execution. They then reload
 state, checkpoints, claims, and time, and continue with the current runner configuration.
 Terminal reads, ordinary waiting expiry, unresolved-CLAIMED unknown recovery, queries, history forks,
