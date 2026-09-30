@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 
 from ..exceptions import IrisLifecycleSchemaError
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 
 _IDENTITY_STATEMENT = """
 CREATE TABLE lifecycle_schema (
@@ -197,6 +197,39 @@ SCHEMA_STATEMENTS = (
         PRIMARY KEY (parent_run_id, parent_tool_call_id),
         FOREIGN KEY (parent_run_id, parent_tool_call_id)
             REFERENCES run_tool_calls(run_id, tool_call_id)
+    )
+    """,
+    """
+    CREATE TABLE goals (
+        goal_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(session_id),
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        objective TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'blocked', 'completed')),
+        reason_json TEXT,
+        max_rounds INTEGER NOT NULL CHECK (max_rounds >= 1),
+        rounds_started INTEGER NOT NULL CHECK (rounds_started >= 0),
+        run_options_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+        CHECK (rounds_started <= max_rounds)
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX one_current_goal_per_session
+    ON goals(session_id)
+    WHERE is_current = 1
+    """,
+    """
+    CREATE TABLE goal_runs (
+        run_id TEXT PRIMARY KEY REFERENCES agent_runs(run_id),
+        goal_id TEXT NOT NULL REFERENCES goals(goal_id),
+        round_no INTEGER NOT NULL CHECK (round_no >= 1),
+        admission_revision INTEGER NOT NULL CHECK (admission_revision >= 0),
+        settled_at TEXT,
+        applied_report_call_id TEXT,
+        UNIQUE (goal_id, round_no)
     )
     """,
 )

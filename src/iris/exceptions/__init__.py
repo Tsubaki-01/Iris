@@ -55,8 +55,20 @@ from .exceptions import (
     IrisToolValidationError,
     IrisValidationError,
 )
+from .goal import (
+    IrisGoalConflictError,
+    IrisGoalError,
+    IrisGoalNotFoundError,
+    IrisGoalPersistenceError,
+    IrisGoalStateError,
+)
 
 __all__ = [
+    "IrisGoalError",
+    "IrisGoalStateError",
+    "IrisGoalConflictError",
+    "IrisGoalNotFoundError",
+    "IrisGoalPersistenceError",
     "IrisError",
     "IrisCancellationRequestedError",
     "IrisConfigError",

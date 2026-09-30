@@ -8,7 +8,9 @@ logical-run aggregate 契约，统一管理 session revision、run、activation�
 call、interaction 和 event。
 
 本包只负责具体存储；领域模型和 command/read 协议定义在 `iris.lifecycle`。它不调用
-provider、不执行工具，也不承担 `iris.memory` 的长期记忆。运行要求 Python 3.12+。
+provider、不执行工具，也不承担 `iris.memory` 的长期记忆。两个 backend 同时实现
+`iris.goal.store.GoalStore`，目标领域模型和 command 位于独立的 `iris.goal` 包。
+运行要求 Python 3.12+。
 
 ## 快速入门
 
@@ -20,7 +22,7 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v10 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v11 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，应为新 store 选择新的数据库路径；
 constructor 不重置或修改原文件。
@@ -34,6 +36,13 @@ InMemory 在同一锁内仅复制本页至多 `limit` 条消息。`end_message_c
 消息计数与返回模型详见 [lifecycle 契约](../lifecycle/README.md#store-contract)。
 
 ## 实现架构
+
+Goal 使用同一 backend 的 `goals`、`goal_runs`，一个 session 至多一个当前目标。
+`create_goal` 可以在首次聊天前建立 revision=0 的空 session；目标控制只推进 Goal revision，
+不修改会话历史。`admit_goal_run` 在一次事务内创建普通 Run、保存绑定并增加已用轮数；
+准入失败不留下半写记录，已准入的尝试不退还次数。内存实现先构造全部候选再发布，SQLite
+复用同 connection 的 Run 创建。目标清除保留旧事实；fork 不复制当前目标或绑定。
+读取不会自动启动或恢复目标，领域接口见 [Goal](../goal/README.md)。
 
 Sub Agent 新增且只新增三条 mutation：`admit_child_run()` 同事务创建普通 child run 与
 `subagent_run_links` 三字段 link；重入 exact parent key 返回原 child。`rebind_subagent_proxy()`
@@ -73,7 +82,7 @@ rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
 load/recovery 边界；durable JSON 投影使用 store 私有 serializer。
-schema v10 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
+schema v11 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
 及 `compaction_json` 摘要投影、`context_window_json` 固定窗口；后续追加保留直接来源、摘要和窗口。
 消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
@@ -106,10 +115,10 @@ revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态�
 写入检查 run revision 与 interaction version；RESOLVED 的同回答直接返回当前事实。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
-时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v10，
+时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v11，
 run 与 checkpoint 不再保存环境总指纹；不迁移或读取旧 schema。
 
-schema v10 包含：
+schema v11 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
@@ -137,7 +146,7 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 和 checkpoint sequence；不消耗模型 reservation，不改变步骤索引、usage 或 event sequence。
 旧 command 重交会冲突；SQL 失败整体回滚，恢复不会看到部分输入或单独更新的窗口。
 Checkpoint payload 使用版本 `3`，包含 runtime cursor 必需的 `visible_tool_names`；lifecycle
-schema 为 `10`。旧库或旧 checkpoint 在对应读取边界拒绝，不执行迁移。
+schema 为 `11`。旧库或旧 checkpoint 在对应读取边界拒绝，不执行迁移。
 
 `SessionSnapshot.context_window=None` 表示未初始化；显式 `SessionContextWindow()` 表示已初始化且
 没有 memory 文本。首输入的 `initial_context_window` 必须传实际采用窗口，后续输入必须为 `None`。
@@ -169,7 +178,7 @@ token 额度由 runtime 负责。事件只含覆盖条数和前后输入估算�
 `iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：只接受 schema v10 的持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v11 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -195,7 +204,7 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-额外索引或连接池，schema identity 为 lifecycle v10。
+额外索引或连接池，schema identity 为 lifecycle v11。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
 
@@ -235,7 +244,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v10、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v11、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
@@ -275,7 +284,7 @@ SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_
 `_session_history.py` 共享来源检查与结果投影。内存实现持同一 `RLock` 复制前缀并一次写入目标。
 SQLite 在 `BEGIN IMMEDIATE` 事务内检查来源、创建带来源字段的 session、通过 `INSERT ... SELECT`
 复制消息，再完整读回目标、从该截止前缀初始化发现投影并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
-source 当前 session revision 或空闲 lane。当前 schema v10 的无迁移规则保持不变。
+source 当前 session revision 或空闲 lane。当前 schema v11 的无迁移规则保持不变。
 
 来源不存在时，预览和 fork 抛 `IrisRunNotFoundError`；来源非 terminal 或为 child，以及
 非正数 list limit，使用 `IrisRunStateError`。目标已存在（包括空 session）抛
