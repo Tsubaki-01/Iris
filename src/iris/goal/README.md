@@ -149,3 +149,7 @@ SQLite 当前 lifecycle schema 为 11，不兼容旧库且不迁移；使用新�
 底层 GoalService/GoalStore 支持领域操作和自定义 backend；driver、调度 intent 和 admission
 helper 留在对应内部模块，不作为顶层稳定 SDK。模型在 [models.py](models.py)，原子存储协议
 在 [store.py](store.py)，宿主控制边界在 [session.py](session.py)。
+
+提示模板统一放在 [../prompts/](../prompts/)：[goal_context.j2](../prompts/goal_context.j2)
+生成每步的当前目标上下文，[goal_continuation.j2](../prompts/goal_continuation.j2) 生成自动新轮
+输入。[context.py](context.py) 仍负责目标投影、变量准备与渲染调用。

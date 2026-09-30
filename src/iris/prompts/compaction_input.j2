@@ -1,3 +1,8 @@
+{#
+用途：把上一份摘要与本批已保存历史包装成压缩模型的输入消息，标清两者边界。
+调用：runtime/_compaction_summary.py，与摘要系统指令配套使用。
+变量：previous_summary_or_none 为旧摘要或无摘要标记；serialized_history 为本批序列化历史。
+#}
 You will process the following two input parts.
 
 === BEGIN PREVIOUS SUMMARY ===

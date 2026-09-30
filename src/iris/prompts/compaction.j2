@@ -1,3 +1,8 @@
+{#
+用途：会话历史压缩的系统指令，约束模型生成可供后续执行接续的七节摘要。
+调用：runtime 压缩流程，作为 CompactionConfig.prompt 的默认模板。
+变量：无；上一份摘要和本批历史由 compaction_input.j2 单独组成输入消息。
+#}
 You create a concise, self-contained handoff summary so work can continue without rereading the summarized messages.
 
 Input:
