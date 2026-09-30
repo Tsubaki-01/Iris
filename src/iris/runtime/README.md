@@ -89,6 +89,11 @@ checkpoint 使用版本 3，cursor 必须提供 `visible_tool_names`；旧版在
 
 ### 宿主动态上下文与选材
 
+启用 `todo.enabled` 后，同一采集段还会读取当前会话 Markdown，并合并 required 的
+`iris.todo` 贡献；无需注入 source。一步只读一次，压缩和摘要重试复用这份快照，下一步才
+刷新文件。格式诊断交给模型修复，读取或模板失败保留 `TODO_ERROR`。外部 source 不得占用
+保留 key `iris.todo`。完整格式和普通文件工具规则见 [Todo 说明](../todo/README.md)。
+
 `RuntimeFactory.from_config()` 与 `from_config_path()` 接收可选 `context_source=`，协议与示例见
 [`iris.context`](../context/README.md#宿主动态快照)。source 存在时，每次 `before_model` 在
 model-step reservation 获准并检查取消和 deadline 后采集一次；未获准的步骤不采集。scope
@@ -100,7 +105,7 @@ model-step reservation 获准并检查取消和 deadline 后采集一次；未�
 协作式取消与 task cancellation 沿既有控制路径结算。`context_policy.enabled=false` 时注入
 source 会在装配时报 `IrisConfigError`。
 
-完整快照渲染为 history 后的一条 `runtime_snapshot` user 消息。未注入 source 不加消息；
+完整快照渲染为 history 后的一条 `runtime_snapshot` user 消息。未注入 source 且 Todo 关闭时不加消息；
 空快照明确表示当前无已提供状态。它不改写稳定 system、原始任务、已归档 BCI 或 durable
 history，也不进入摘要原料。需要后续精确回读的内容应先由宿主通过工具结果或文件保存。
 

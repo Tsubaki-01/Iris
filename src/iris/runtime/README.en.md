@@ -74,6 +74,12 @@ AgentRunner -> AgentRuntime.execute -> RuntimeCommitPort
 
 ## Low-level contract
 
+With `todo.enabled`, the admitted model step reads the session Markdown and adds a required
+`iris.todo` contribution, even without a host source. Compaction and summary retries reuse that
+snapshot; the next model step refreshes it. Malformed Markdown is model-visible diagnostic data;
+read or template failures retain `TODO_ERROR`. Host sources must not use the reserved `iris.todo`
+key. See the [Todo documentation](../todo/README.md) for file and editing rules.
+
 ```python
 result = await runtime.execute(
     activation,
@@ -117,8 +123,9 @@ source exceptions, including a source-raised `TimeoutError`, end the activation 
 without reusing old values. Cooperative cancellation and task cancellation keep the existing control
 paths. Supplying a source with `context_policy.enabled=false` raises `IrisConfigError` during assembly.
 
-The complete snapshot becomes one `runtime_snapshot` user message after history. No source adds no
-message; an empty snapshot explicitly means no current entries. It changes neither the stable system
+The complete snapshot becomes one `runtime_snapshot` user message after history. Without a source
+and with Todo disabled, no message is added; an empty snapshot explicitly means no current entries.
+It changes neither the stable system
 message, original task, archived BCI, nor durable history, and is not summary material. Hosts preserve
 content needed for later exact recall through tool results or files.
 

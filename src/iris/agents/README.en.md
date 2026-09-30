@@ -8,7 +8,8 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
-`todo.enabled` defaults to false. Enabling it provides per-session Markdown Todo access and
+`todo.enabled` defaults to false. Enabling it provides SDK access to per-session Markdown Todo
+lists and a fresh snapshot for each model step. It
 requires `context_policy.enabled=true`; it does not register file tools or change permissions.
 `TodoConfig` is exported from `iris.todo`. See the [Todo documentation](../todo/README.md).
 

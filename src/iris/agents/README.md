@@ -124,7 +124,7 @@ model: openai/gpt-4o-mini
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
-- `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单读取；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
+- `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单的 SDK 读取与每步动态投影；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`、`execute: confirm`。
 - `command`: `CommandConfig`，默认 native 与 120 秒命令期限；不自动注册命令工具。

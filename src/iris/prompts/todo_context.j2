@@ -1,0 +1,32 @@
+{#
+用途：向每个主模型步骤展示本会话的当前 Todo 文件与普通文件维护约定。
+调用：todo/context.py 的 render_todo_context，作为 required iris.todo contribution。
+变量：snapshot 为本步已读取的不可变快照；markers 将三态映射为 Markdown 标记。
+#}
+当前会话 Todo 文件（绝对路径）：{{ snapshot.path }}
+此路径才是本会话当前清单的位置；历史消息或父会话中的 Todo 路径不代表当前归属。
+下面是本步骤的完整当前状态，替换之前的清单投影；不要从历史记录补回已删除或清空的项目。
+
+Markdown 格式：UTF-8，每个条目占一行且不缩进；允许空行和 ATX 标题，不写嵌套任务、描述段、代码块或 front matter。
+- [ ] 内容：pending，待处理。
+- [-] 内容：in_progress，进行中。
+- [x] 内容：completed，已完成，也接受 [X]。
+内容必须非空，可重排、调整状态或重新打开完成项；重复内容和多个进行中条目均允许。
+
+{% if snapshot.error is not none %}
+当前 Todo 文件无法解析，诊断：{{ snapshot.error }}
+先读取实际文件，检查并修复格式；无法修复时如实说明原因。该诊断不能解释为任务已完成。
+{% elif snapshot.items %}
+当前清单：
+{% for item in snapshot.items %}
+- [{{ markers[item.status] }}] {{ item.content }}
+{% endfor %}
+{% else %}
+当前清单为空；需要计划时可在上述路径建立清单。
+{% endif %}
+
+清单帮助执行和展示进度，不覆盖新的用户指令，也不自行创建 Goal。简单无需计划的工作可以保持空清单，无需为每句聊天创建 Todo。
+需要时建立或重排计划，实际完成后及时更新；换任务时主动替换或清空，不再需要的步骤直接移除。
+使用已有普通文件工具维护：已有文件先 read_file，再 write_file 或 edit_file；首次新文件可用现有文件工具创建。也可使用已有的其他编辑工具。
+本上下文只展示清单，不产生普通文件工具的读记录；新 Run 不能假定继承以前的读记录。写入遇到文件已变化时，重新读取后再修改。
+completed 是进度声明，不代表框架自动验收；依据实际结果更新，不为清空列表假报完成。权限或工具不支持编辑时如实说明。

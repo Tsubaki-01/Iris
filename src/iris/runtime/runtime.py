@@ -25,6 +25,7 @@ from ..exceptions import (
     IrisProviderStreamInterruptedError,
     IrisRateLimitExceededError,
     IrisRunConflictError,
+    IrisTodoError,
     IrisToolOutcomeUnknownError,
 )
 from ..hitl import (
@@ -51,6 +52,9 @@ from ..message import (
     Msg,
     ToolUseBlock,
 )
+from ..todo import TodoSnapshot
+from ..todo.context import render_todo_context
+from ..todo.document import read_todo
 from ..tools import (
     CancellationSignal,
     PreparedToolCall,
@@ -1204,20 +1208,36 @@ class AgentRuntime:
             )
 
         context_snapshot = None
+        todo_snapshot: TodoSnapshot | None = None
         source = self.environment.context_source
-        if source is not None:
+        todo_enabled = self.environment.agent_config.todo.enabled
+        if source is not None or todo_enabled:
             budget = asyncio.timeout(remaining)
             try:
                 async with budget:
-                    context_snapshot = await source.collect(
-                        ContextBuildScope(
-                            session_id=activation.session_id,
-                            run_id=activation.run_id,
-                            step_index=cursor.step_index,
-                            workspace_root=self.environment.workspace_root,
-                            run_input=activation.run_input,
+                    context_snapshot = ContextSnapshot()
+                    if source is not None:
+                        context_snapshot = await source.collect(
+                            ContextBuildScope(
+                                session_id=activation.session_id,
+                                run_id=activation.run_id,
+                                step_index=cursor.step_index,
+                                workspace_root=self.environment.workspace_root,
+                                run_input=activation.run_input,
+                            )
                         )
-                    )
+                    if todo_enabled:
+                        if any(item.key == "iris.todo" for item in context_snapshot.contributions):
+                            raise IrisContextError("context_source 占用了保留 key iris.todo")
+                        todo_snapshot = await read_todo(
+                            self.environment.workspace_root, activation.session_id
+                        )
+                        context_snapshot = ContextSnapshot(
+                            contributions=(
+                                *context_snapshot.contributions,
+                                render_todo_context(todo_snapshot),
+                            )
+                        )
             except IrisCancellationRequestedError:
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
@@ -1227,6 +1247,8 @@ class AgentRuntime:
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
                     )
+                if isinstance(exc, IrisTodoError):
+                    return _failed_activation(cursor, exc)
                 return _failed_activation(
                     cursor, IrisContextError(f"context_source 采集失败：{exc}")
                 )
