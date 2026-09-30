@@ -288,11 +288,11 @@ class ResumeAccepted(_FrozenWireModel):
 
 
 class CancelAccepted(_FrozenWireModel):
-    """Cancel command snapshot receipt。"""
+    """Cancel 回执；仅暂停 Goal 意图、没有当前 Run 时 run 为 None。"""
 
     event: Literal["command.cancel.accepted"] = "command.cancel.accepted"
     request_id: _NonEmptyString
-    run: RunSnapshot
+    run: RunSnapshot | None
 
 
 class SyncAccepted(_FrozenWireModel):

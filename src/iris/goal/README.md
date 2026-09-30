@@ -3,8 +3,8 @@
 `iris.goal` 保存期望完成的目标、状态、自动执行轮数和 Run 绑定。目标与一次
 logical Run 分开：一个 Run 结束不会自行把目标标记为完成。
 
-提供状态服务、原子存储契约、模型工具、动态上下文与终态结算。执行装配在开启
-Goal 时注册能力；本阶段不包含跨 Run 的自动续跑调度。
+提供状态服务、原子存储契约、模型工具、动态上下文、终态结算与会话控制 SDK。
+GoalDriver 提供续跑策略，实际准入与执行交给 harness，本包不持有异步执行循环。
 
 ## 使用状态服务
 
@@ -27,6 +27,31 @@ assert store.load_session_revision("session-1") == 0
 创建可以早于首条聊天；它只按需建立空 session，不写历史或占用 lane。
 `GoalConfig` 默认 `enabled=False`、`max_rounds=20`，开关由执行装配统一使用；
 直接构造领域服务只操作状态。
+
+## 会话控制 SDK
+
+`GoalSession(service, port)` 是异步控制入口。`GoalControlPort` 由宿主绑定一个 session，
+在其唯一 admission owner 中处理操作；SDK 不持有 runner、manager、任务或锁。
+
+| 方法 | 作用 |
+| --- | --- |
+| `create(objective, *, max_rounds=None, run_options=None)` | 保存目标并明确允许推进；不等待模型执行完。 |
+| `get()` | 返回只读 GoalView，不补结算或启动执行。 |
+| `edit(*, objective=None, max_rounds=None, run_options=None)` | 至少修改一项，编辑后暂停；None 表示未修改。 |
+| `pause(*, reason)` / `complete(*, reason)` | 记录非空用户原因并停止后续推进，不取消已准入 Run。 |
+| `resume(*, expected_activation_id=None)` | 先处理原执行的附着或精确恢复，再决定后续推进。 |
+| `clear()` | 取消当前选择，保留历史和绑定。 |
+
+除 get 外均返回 `GoalControlResult(view, disposition)`。disposition 区分已允许调度
+`scheduled`、已创建 Run `admitted`、复用在途调用 `running`、等待人工输入 `waiting`、
+缺少接管 fence `needs_recovery`、lane 属于其他执行 `occupied`、仅停止操作或额度用尽
+`stopped`。只有宿主实际到达相应阶段才返回该值。
+
+SDK 调用 `GoalService.parse_create/parse_edit` 完成一次原始输入解析，之后把冻结的
+`GoalCreateInput/GoalEditInput` 交给 port。宿主取得当前引用后调用
+`create_validated/edit_validated`；这两条路径不重复解析或检查模型工具配置。
+同步 `GoalService.create/edit` 也复用相同 parser。用户原因以 code=user 的 GoalReason
+传递，恢复 fence 在 SDK 入口解析；状态、版本和额度条件由 store 的操作边界检查。
 
 ## 状态与版本
 
@@ -61,6 +86,8 @@ harness、runtime 或具体 backend。只读 API 不触发状态推进或结算�
 开启 Goal 时装配 `get_goal` 与 `report_goal`，两者默认可见且历史正文保留。
 `get_goal()` 返回统一 `GoalView`：当前目标、armed、当前 Run、人工交互、待结算
 状态及 driver 错误。未附着控制器时 armed=false；读取不会恢复执行或补结算。
+view.run 只表示当前 session lane，run_goal_id 说明它绑定哪个目标；普通 Run 占用
+lane 时不伪装成 Goal 执行。无 lane 时 run=None，即使旧终态绑定仍 settlement_pending。
 
 `report_goal(goal_id, revision, decision, reason)` 接受 complete、blocked、continue。
 它从真实工具执行上下文取得 Run 绑定，拒绝普通 Run、替换目标或过期版本的报告。
@@ -86,3 +113,17 @@ harness、runtime 或具体 backend。只读 API 不触发状态推进或结算�
 宿主为服务注入只读 `process_state_reader`，以及可选的 `run_options_validator`。
 后者只在创建和显式修改 Run 选项时调用；实际执行装配检查 tools 已开启、有效
 tool_choice 为 None/auto。领域包不持有宿主任务、不自行启动模型或执行循环。
+
+## 续跑候选与通知
+
+`GoalDriver` 新建时 disarmed，只保存 armed_goal_id 和至多一个
+`GoalContinuationIntent(source_run_id, goal_id, run_id)`。`can_continue()` 判断目标当前
+是否 active、匹配 armed 身份且有剩余额度；用户优先、lane 与 tracker 容量归 manager。
+同一来源终态重复到达时 `offer()` 复用候选；它不创建 Run、不扣轮数，也不操作 memory。
+
+`consume()` 或 `invalidate()` 移除并返回候选身份，`disarm()` 同时停止推进。
+宿主据此释放现有 handoff 预留；durable admission 后由启动操作继续持有 run_id，
+直到 activation_started 或启动收尾。实际调用的前台计数仍归 Runner，memory 无需感知 Goal。
+
+`GoalChanged(session_id, view)` 是冻结的会话级最新快照通知，不伪造 RunEvent。
+通知不承担逐操作重放或调度触发；丢失通知后仍可通过 get 读取真实状态。

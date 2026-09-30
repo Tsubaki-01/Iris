@@ -109,8 +109,8 @@ def test_get_view_shows_terminal_unsettled_run_without_reconciling() -> None:
     _finish(store, admission.commit, RunStopReason.COMPLETED)
     view = service.get_view("session-1")
     assert view.settlement_pending is True
-    assert view.run.run_id == "run-1"
-    assert view.run_goal_id == goal.goal_id
+    assert view.run is None
+    assert view.run_goal_id is None
     assert store.get_goal_run("run-1").settled_at is None
     assert store.get_goal(goal.goal_id) == admission.goal
     settlements = service.reconcile("session-1")

@@ -13,8 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, assert_never, cast
 
-from pydantic import JsonValue
+from pydantic import JsonValue, TypeAdapter
 
+from ..goal.models import GoalChanged, GoalView
 from ..harness.streaming import CommandCleanupFailed, LiveFact, SessionSubmissionEvent
 from ..lifecycle import RunEvent
 from ..message import (
@@ -33,6 +34,8 @@ from ..runtime import RuntimeStreamEvent
 from ..tools import ToolResult
 
 # endregion
+
+_GOAL_VIEW_ADAPTER = TypeAdapter(GoalView)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +68,21 @@ def project_live_fact(fact: LiveFact) -> tuple[_ProjectedLiveFact, ...]:
         return _run_and_session(projected)
     if isinstance(fact, SessionSubmissionEvent):
         return (_project_submission_event(fact),)
+    if isinstance(fact, GoalChanged):
+        return (
+            _ProjectedLiveFact(
+                scope="session",
+                scope_id=fact.session_id,
+                kind="goal.changed",
+                run_id=None,
+                session_id=fact.session_id,
+                activation_id=None,
+                durable_sequence=None,
+                payload={"view": _GOAL_VIEW_ADAPTER.dump_python(fact.view, mode="json")},
+                critical=False,
+                coalescing_key=("goal", fact.session_id),
+            ),
+        )
     if isinstance(fact, RuntimeStreamEvent):
         projected = _project_runtime_event(fact)
         return _run_and_session(projected)

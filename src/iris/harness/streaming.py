@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from .session_manager import SubmissionEvent
@@ -42,7 +43,9 @@ class CommandCleanupFailed:
     error: RunErrorInfo
 
 
-type LiveFact = RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | CommandCleanupFailed
+type LiveFact = (
+    RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | CommandCleanupFailed | GoalChanged
+)
 
 
 class LivePublisher(Protocol):

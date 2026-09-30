@@ -49,6 +49,13 @@ gateway = StreamingGateway(
 因无人消费 mixed stream 而占用下一轮 admission 容量。需要本地 mixed stream 的 host 可使用默认
 `observation_mode="mixed"`，并持续消费 `manager.events()`。
 
+启用 Goal 时，同一个 session publisher 还接收 `GoalChanged`，投影为仅 session scope 的
+`goal.changed`，`payload.view` 是当时的 GoalView。没有 Run 的创建、暂停或清除也能通知；
+envelope 不虚构 run/activation identity 或 durable sequence。快照按 session 合并，不能用它
+重放每次操作；重连后通过 `manager.goal.get()` 读取当前状态，不新增远程 Goal commands。
+Mixed 模式保存一个最新 Goal 快照槽，并保留尚未交付的各 Run terminal 水位；因此即使结算与
+下一轮准入连续发生，也先显示对应终态再显示合并后的目标结果。broker-only 不依赖本地消费者。
+
 `LiveStreamBroker` 必须在同一个 event loop/thread 中使用。`replay_capacity_per_scope` 限制每个
 run/session ring；`max_replay_scopes`（默认 256）限制全局 ring 数，publish 或 subscribe 会更新
 scope 的 LRU 顺序。淘汰 ring 不关闭活跃订阅，其 published sequence 会保留到订阅关闭且无 ring；
@@ -121,7 +128,8 @@ caller 已知且属于 bound session 的 run，不发现其他 run，也不自�
 - `SubmitCommand` → `SessionManager.submit()`；
 - `ResumeCommand` → `SessionManager.admit_resume()`，返回 `ResumeAccepted.receipt`
   中的 `run_id` 和 `interaction_id`，不会等待恢复后的模型或工具执行结束；
-- `CancelCommand` → `SessionManager.interrupt()`；
+- `CancelCommand` → `SessionManager.interrupt()`；`CancelAccepted.run` 可以为 `None`，
+  表示本次只暂停了 Goal 意图，没有当前 Run 可取消；
 - `SyncCommand` → 只读有限事件页，返回 `SyncAccepted.sync`；
 - `SnapshotCommand` → 按需完整状态，返回 `SnapshotAccepted.snapshot`。
 

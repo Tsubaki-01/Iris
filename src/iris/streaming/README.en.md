@@ -51,6 +51,15 @@ Completed runs do not consume subsequent admission capacity because a mixed stre
 Hosts that need a local mixed stream can keep the default `observation_mode="mixed"` and continuously
 consume `manager.events()`.
 
+With Goal enabled, the same session publisher also receives `GoalChanged`, projected as a
+session-only `goal.changed` whose `payload.view` contains the current GoalView. Creation, pause,
+and clear can notify without a Run; the envelope invents no run/activation identity or durable
+sequence. Snapshots coalesce by session and do not replay every control operation. After reconnecting,
+read current state through `manager.goal.get()`; no remote Goal commands are added. Mixed mode
+keeps one latest Goal snapshot and the terminal watermarks of runs not yet delivered. Even when
+settlement immediately leads to another admission, relevant terminal events precede the coalesced
+Goal result. Broker-only observation needs no local consumer.
+
 `LiveStreamBroker` must be used on one event loop/thread. `replay_capacity_per_scope` bounds each
 run/session ring. `max_replay_scopes` (default 256) bounds the global ring count; publishing or
 subscribing updates the scope's LRU position. Evicting a ring does not close active subscriptions:
@@ -130,7 +139,8 @@ discovers other runs nor automatically recovers them.
 - `SubmitCommand` → `SessionManager.submit()`.
 - `ResumeCommand` → `SessionManager.admit_resume()`, returning `run_id` and `interaction_id` in
   `ResumeAccepted.receipt` without waiting for the resumed model or tool execution to finish.
-- `CancelCommand` → `SessionManager.interrupt()`.
+- `CancelCommand` → `SessionManager.interrupt()`. `CancelAccepted.run` may be `None`, meaning
+  only a Goal intent was paused and no current Run needed cancellation.
 - `SyncCommand` → bounded event pages in `SyncAccepted.sync`.
 - `SnapshotCommand` → on-demand full state in `SnapshotAccepted.snapshot`.
 

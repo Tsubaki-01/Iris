@@ -37,6 +37,21 @@ Goal 单轮入口复用普通 start 的执行注册、steering 和命令生命�
 不会替换最近普通用户输入锚点。`start()` 仍只执行一次 logical run。目标模型与申报规则见
 [Goal 说明](../goal/README.md)。
 
+启用后，`SessionManager(runner, session_id).goal` 提供异步 create/get/edit/pause/resume/
+complete/clear。创建显式允许续跑；后继不进入用户 FIFO，已接纳的用户工作先执行。暂停只停止
+后续轮次，`interrupt()` 同时暂停目标并按原契约取消当前 Run；仅停止空闲 Goal 时返回 None。
+关闭功能时 `manager.goal` 为 None。
+
+新 manager 默认不续跑持久 active 目标。显式 `goal.resume()` 可以附着原 WAITING Run、恢复
+其 deadline timer 并回答原交互；无人推进的 ACTIVE Run 要提供 `expected_activation_id`。
+恢复不增加轮数。后台 deadline 和命令清理错误同样触发 Goal 状态通知，不依赖 live publisher。
+命令清理尚未完成时仍占原 lane，须显式重试原收尾。
+
+`GoalChanged` 是最新状态快照：mixed 流先交付相应 terminal，再交付目标结果；broker-only
+发布 session-scope `goal.changed`。读取状态不会补结算或启动工作。mixed tracker 满时停止准入，
+消费释放后再推进。Goal 与用户 follow-up 共用现有 memory handoff；临时预留只覆盖交接，
+等待用户/HITL/容量不阻止原闲置整理。manager 关闭注销控制附着，不接管 Runner 的资源关闭。
+
 resume/recover 先保留纯 durable 结算，确需执行才准备；准备后重新读取状态、checkpoint、
 claim 与时间，使用当前 runner 的配置继续。terminal 读取、普通 waiting 到期、未结算 CLAIMED 的 unknown
 恢复、查询、history fork 和取消申请不依赖 MCP 连接。
