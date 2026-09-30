@@ -47,11 +47,21 @@ and follows accepted user work. Pause stops later rounds. `interrupt()` also pau
 cancelling the current run; it returns None when it only stops an idle goal. Disabled managers expose
 `goal=None`.
 
+See the [Goal SDK example](../goal/README.md#从配置到执行) for configuration and the full
+Runner → Manager → create/get/pause/resume sequence. GoalSession, GoalView, GoalControlResult,
+and GoalChanged are also exported from iris.harness. Control dispositions distinguish scheduled,
+admitted, running, waiting, needs_recovery, occupied, and stopped; scheduled does not promise
+execution has started. Admission consumes a nonrefundable round, resume does not reset it, and
+Run deadline_at remains absolute. Completion is reported by the main model or user, not independently certified.
+
 A new manager does not automatically continue a persisted active goal. Explicit `goal.resume()` can
 attach the original WAITING run, restore its deadline timer, and accept its pending interaction.
 An ACTIVE run without a live invocation requires `expected_activation_id`. Recovery consumes no
 new round. Background deadlines and command cleanup errors notify Goal state without requiring a
 live publisher. Pending command cleanup retains its lane until explicit settlement retry.
+Answer the original typed WAITING interaction through manager.resume(interaction_id=..., response=...);
+this preserves the run and round. Default children and history forks do not inherit goals; children
+explicitly enabling Goal are rejected.
 
 `GoalChanged` carries the latest state. Mixed streams deliver the related terminal before the goal
 result; broker-only mode publishes session-scoped `goal.changed`. Reads neither reconcile nor start
@@ -402,7 +412,8 @@ registration; there is no check-then-register path.
 HITL responses use `manager.resume(interaction_id=..., response=...)` to wait for the complete result,
 or `admit_resume(...)` to return `ResumeReceipt(run_id, interaction_id)` after activation admission.
 Both share one admission owner; the manager/runner retains background execution ownership and the
-response never enters the ordinary-input queue. `interrupt()` requests cancellation of the exact current run. An active
+response never enters the ordinary-input queue. `interrupt()` pauses Goal continuation, then requests
+cancellation of the exact current run. It returns None when only an idle Goal was paused. An active
 cancellation request is not terminal, so follow-ups still wait for actual settlement. For WAITING runs
 and ACTIVE runs left without a live continuation after cleanup failure, the manager owns one async
 cancel task. A later interrupt retries pending cleanup; a new run never inherits the old cancel owner.
@@ -549,7 +560,7 @@ With an effective runtime memory service, tool loops, later runs, HITL, and reco
 overview without re-querying or reloading updated files. Successful compaction replaces summary and window in the same transaction;
 failure retains the old state. Fork targets start without an adopted window and choose one at their
 first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
-uses schema 9 and checkpoint version 3; old formats are rejected without migration or cleanup.
+uses schema 11 and checkpoint version 3; old formats are rejected without migration or cleanup.
 
 A new runtime without a memory service omits the saved overview from system messages during ordinary
 requests, HITL, and recovery. This does not mutate the saved window or add a session revision change;

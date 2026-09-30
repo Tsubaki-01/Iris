@@ -121,6 +121,8 @@ by default. Enabling it requires `context_policy.enabled: true`; the round limit
 Loading YAML only parses this declaration and does not create a goal.
 
 ```yaml
+context_policy:
+  enabled: true
 goal:
   enabled: true
   max_rounds: 20
@@ -130,8 +132,10 @@ Use `AgentRunner.from_config*()` for this configuration. The runner's lifecycle 
 GoalService; assembly registers the non-deferred `get_goal` / `report_goal` tools and composes
 the existing `context_source`. Disabling Goal omits its service, tools, and projection. Standalone
 `RuntimeFactory` and children explicitly enabling Goal raise configuration errors during assembly.
-The switch is fixed at construction, without hot switching. See [goal](../goal/README.en.md)
-for state and reporting contracts.
+The switch is fixed at construction, without hot switching. See the
+[complete Goal SDK example](../goal/README.md#从配置到执行). Automatic continuation requires
+SessionManager. max_rounds is a creation default; admission consumes a round and resume never
+resets it. Run options must enable tools, with effective tool_choice None/auto after runtime overrides.
 
 `AgentConfig.context_policy` uses `ContextPolicyConfig` with these defaults:
 

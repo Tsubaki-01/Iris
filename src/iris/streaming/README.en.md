@@ -59,6 +59,9 @@ read current state through `manager.goal.get()`; no remote Goal commands are add
 keeps one latest Goal snapshot and the terminal watermarks of runs not yet delivered. Even when
 settlement immediately leads to another admission, relevant terminal events precede the coalesced
 Goal result. Broker-only observation needs no local consumer.
+Local consumers can import the same GoalChanged type from iris.harness or iris.goal. completed
+means completion reported by the main model or user, not independent certification. See the
+[Goal SDK](../goal/README.md) for use.
 
 `LiveStreamBroker` must be used on one event loop/thread. `replay_capacity_per_scope` bounds each
 run/session ring. `max_replay_scopes` (default 256) bounds the global ring count; publishing or

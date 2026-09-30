@@ -26,9 +26,7 @@ def _run_events(run_id: str, count: int = 2) -> list[RunEvent]:
             session_id="session",
             sequence=index,
             kind=(
-                RunEventKind.RUN_TERMINAL
-                if index == count
-                else RunEventKind.MODEL_STEP_COMMITTED
+                RunEventKind.RUN_TERMINAL if index == count else RunEventKind.MODEL_STEP_COMMITTED
             ),
             occurred_at=datetime.now(UTC),
         )
@@ -38,6 +36,7 @@ def _run_events(run_id: str, count: int = 2) -> list[RunEvent]:
 
 def _buffer(rows: list[RunEvent], *, capacity: int = 2) -> _SessionEventBuffer:
     """保留真实 buffer 的有界回读，仅替换持久事件来源。"""
+
     def read(run_id: str, after_sequence: int = 0, *, limit: int | None = None) -> list[RunEvent]:
         selected = [row for row in rows if row.run_id == run_id and row.sequence > after_sequence]
         return selected if limit is None else selected[:limit]

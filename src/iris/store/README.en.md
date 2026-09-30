@@ -35,6 +35,7 @@ database. A new database gets its parent directory and complete schema. An old s
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported; choose a new database path for the new store. The
 constructor never resets or changes that file.
+Schema 11 is required even with Goal disabled; there is no legacy reader or automatic migration.
 
 Both implementations expose a read-only `source_id`. SQLite saves a generated UUID in
 `lifecycle_schema.source_id` at creation and preserves it across reopenings; each InMemory instance
@@ -57,6 +58,10 @@ admission leaves no partial facts; an admitted attempt is not refunded. The in-m
 builds all candidates before publishing, while SQLite reuses run creation on the same connection.
 Clearing a goal retains its records; forks do not copy goal selection or bindings. Reads do not
 start or recover work. See the [Goal package](../goal/README.md) for the domain interface.
+settle_goal_run reads the Run outcome, report, and ordering evidence in one transaction, updating
+the goal and binding together without a separate report table. Reads expose settlement_pending
+when the run is terminal but its goal is unsettled; explicit reconciliation repairs that window.
+Repeated settlement does not mutate the goal, and a valid final-round completion precedes the round limit.
 
 `InMemoryLifecycleStore` and `SQLiteStore` are independent, peer protocol implementations. The
 in-memory implementation protects process-local facts with one `RLock` and deep-copy isolates

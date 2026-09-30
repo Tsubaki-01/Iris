@@ -49,10 +49,13 @@ class _TwoRoundProvider(StaticProvider):
             assert goal is not None
             return tool_response(
                 ToolUseBlock(
-                    id="complete", name="report_goal",
+                    id="complete",
+                    name="report_goal",
                     input={
-                        "goal_id": goal.goal_id, "revision": goal.revision,
-                        "decision": "complete", "reason": "两轮工作完成",
+                        "goal_id": goal.goal_id,
+                        "revision": goal.revision,
+                        "decision": "complete",
+                        "reason": "两轮工作完成",
                     },
                 )
             )
@@ -78,10 +81,13 @@ async def test_clear_then_create_keeps_old_run_bound_to_old_goal(tmp_path: Path)
                 await release.wait()
                 return tool_response(
                     ToolUseBlock(
-                        id="old-report", name="report_goal",
+                        id="old-report",
+                        name="report_goal",
                         input={
-                            "goal_id": old.goal_id, "revision": old.revision,
-                            "decision": "complete", "reason": "旧工作完成",
+                            "goal_id": old.goal_id,
+                            "revision": old.revision,
+                            "decision": "complete",
+                            "reason": "旧工作完成",
                         },
                     )
                 )
@@ -269,7 +275,10 @@ async def test_broker_only_goal_runs_without_event_consumer(
     runner = AgentRunner.from_config(goal_config(tmp_path), provider=provider, store=store)
     publisher = FailingPublisher() if publish_fails else RecordingPublisher()
     manager = SessionManager(
-        runner, "s", observation_mode="broker_only", submission_publisher=publisher,
+        runner,
+        "s",
+        observation_mode="broker_only",
+        submission_publisher=publisher,
         max_tracked_durable_runs=1,
     )
     try:
@@ -299,12 +308,14 @@ async def test_mixed_tracker_capacity_waits_then_continues_after_terminal_delive
     try:
         await manager.goal.create("两轮后完成", max_rounds=2)
         await _until(
-            lambda: len(provider.requests) == 1
-            and manager._current_run_id is None
-            and not store.list_unsettled_goal_runs("s")
-            and not manager._managed_tasks
-            and not manager._goal_control._operations
-            and manager._tracker_reconcile_task is None
+            lambda: (
+                len(provider.requests) == 1
+                and manager._current_run_id is None
+                and not store.list_unsettled_goal_runs("s")
+                and not manager._managed_tasks
+                and not manager._goal_control._operations
+                and manager._tracker_reconcile_task is None
+            )
         )
         view = await manager.goal.get()
         assert view.goal.rounds_started == 1 and view.armed

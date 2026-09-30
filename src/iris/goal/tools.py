@@ -89,9 +89,9 @@ class ReportGoalTool(_GoalTool):
 
     _name = "report_goal"
     _description = (
-        "申报本轮目标结果：complete 已完成、blocked 无法继续、continue 继续或撤回旧申报。"
+        "申报本轮目标结果：complete 已完成、blocked 无法继续、continue 目标未完成或撤回旧申报。"
         "使用最新 goal_id/revision 并说明证据；单独调用，不与工作工具同一步。"
-        "后续有新工作或新输入时须重新申报。申报不立即完成目标，正常结束后才结算。"
+        "后续有新工作或新输入时须重新申报。申报不结束或切换 Run，正常结束后才结算。"
     )
     _input_type = GoalReport
 
@@ -119,7 +119,11 @@ class ReportGoalTool(_GoalTool):
             tool_use_id=context.call_id,
             tool_name=self.name,
             content=[
-                TextBlock(text="已记录本轮申报，正常结束后结算；新工作或新输入后请重新申报。")
+                TextBlock(
+                    text="已记录本轮申报，正常结束后结算。申报不会结束或切换 Run；"
+                    "若本轮工作已结束，下一响应只用普通文本结束回复，由宿主决定是否启动下一轮。"
+                    "新工作或新输入后请重新申报。"
+                )
             ],
             data={"goal_report": report.model_dump(mode="json")},
         )

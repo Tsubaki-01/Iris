@@ -16,16 +16,18 @@ import threading
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ..config import init_config, is_config_initialized
 from ..exceptions import HITLCheckpointInvalidError, IrisError
+from ..goal.models import GoalChanged, GoalControlResult, GoalView
 from ..harness import (
     AgentRunner,
     AgentRunOptions,
     RunEventKind,
     RunLimits,
     RunResult,
+    RunSnapshot,
     RunStopReason,
     RuntimeExecutionOptions,
     SessionManager,
@@ -49,6 +51,79 @@ from ..message import (
 from ..runtime import RuntimeStreamEvent
 
 # endregion
+
+_GOAL_USAGE = (
+    "用法：/goal <目标> | status | edit <目标> | edit --max-rounds <正整数> | "
+    "pause | resume | complete | clear\n"
+    "正文以保留词开头时使用 /goal -- <目标>；编辑选项前缀正文使用 /goal edit -- <目标>。"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _GoalCommand:
+    """CLI 已解析的 Goal 操作，正文保持用户原有内部空格与引号。"""
+
+    operation: Literal["create", "status", "edit", "pause", "resume", "complete", "clear"]
+    objective: str | None = None
+    max_rounds: int | None = None
+
+
+def _parse_goal_command(text: str) -> _GoalCommand | None:
+    """只拆命令和选项前缀；空输入或非法参数返回用法分支。"""
+    parts = text.split(maxsplit=1)
+    if not parts:
+        return None
+    head = parts[0]
+    body = parts[1] if len(parts) == 2 else ""
+    match head:
+        case "--":
+            return _GoalCommand("create", objective=body) if body else None
+        case "status" | "pause" | "resume" | "complete" | "clear":
+            return _GoalCommand(head) if not body else None
+        case "edit":
+            edit_parts = body.split(maxsplit=1)
+            if not edit_parts:
+                return None
+            option = edit_parts[0]
+            value = edit_parts[1] if len(edit_parts) == 2 else ""
+            if option == "--":
+                return _GoalCommand("edit", objective=value) if value else None
+            if option == "--max-rounds":
+                if value.isdecimal() and int(value) > 0:
+                    return _GoalCommand("edit", max_rounds=int(value))
+                return None
+            return None if option.startswith("--") else _GoalCommand("edit", objective=body)
+        case _:
+            return None if head.startswith("--") else _GoalCommand("create", objective=text)
+
+
+def _format_goal_view(view: GoalView) -> str:
+    """统一 status、mixed 和 live 的目标状态文本。"""
+    goal = view.goal
+    if goal is None:
+        lines = ["Goal: absent（当前没有目标）"]
+    else:
+        lines = [
+            f"Goal: {goal.status.value} | 自动推进: {'开启' if view.armed else '关闭'} | "
+            f"轮数: {goal.rounds_started}/{goal.max_rounds}",
+            f"目标: {goal.objective}",
+        ]
+        if goal.reason is not None:
+            lines.append(f"原因 [{goal.reason.code}]: {goal.reason.text}")
+    if view.run is not None:
+        lines.append(
+            f"Run: {view.run.run_id} | 状态: {view.run.phase.value} | "
+            f"Activation: {view.run.current_activation_id or '无'} | "
+            f"所属 Goal: {view.run_goal_id or '普通用户执行'}"
+        )
+    if view.interaction is not None:
+        lines.append(f"等待交互: {view.interaction.interaction_id}；请回答原问题。")
+    if view.settlement_pending:
+        lines.append("目标待结算：Run 已结束，目标状态尚未结算。")
+    if view.driver_error is not None:
+        error = view.driver_error
+        lines.append(f"Goal 错误 {error.source}:{error.code}: {error.message}")
+    return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -187,9 +262,15 @@ def run_chat_loop(
             if user_input == "/help":
                 write_output("可用命令：")
                 write_output("/follow-up <消息>  排入下一轮")
+                write_output("/goal <目标>  创建自动推进目标；/goal 查看目标命令用法")
                 write_output("/help  显示帮助")
                 write_output("/exit  退出 chat")
                 write_output("/quit  退出 chat")
+                continue
+            if user_input == "/goal" or (
+                user_input.startswith("/goal") and user_input[5:6].isspace()
+            ):
+                host.goal_command(user_input[5:].lstrip())
                 continue
             if user_input == "/follow-up":
                 write_output("用法：/follow-up <消息>")
@@ -229,6 +310,9 @@ class _ChatLiveOutput:
 
     def publish(self, fact: LiveFact) -> None:
         """显示摘要短状态与模型文本；durable 与 submission 由 manager 处理。"""
+        if isinstance(fact, GoalChanged):
+            self._write(_format_goal_view(fact.view) + "\n")
+            return
         if isinstance(fact, CommandCleanupFailed):
             self._finish_text(fact.run_id)
             self._write(f"执行环境清理失败 [{fact.run_id}]: {fact.error.message}\n")
@@ -364,6 +448,10 @@ class _ChatSessionHost:
         """同步提交一行普通输入或 follow-up 命令。"""
         self._call(self._submit(input, mode=mode))
 
+    def goal_command(self, text: str) -> None:
+        """把 Goal 命令交给 manager 所属 event loop，不等待整个目标完成。"""
+        self._call(self._goal_command(text))
+
     def close(self, *, reason: str | None = None) -> None:
         """停止 admission 并等待当前 run 结算后结束后台线程。"""
         if not self._thread.is_alive():
@@ -473,6 +561,12 @@ class _ChatSessionHost:
         async for event in self._require_manager().events():
             if isinstance(event, SubmissionEvent):
                 continue
+            if isinstance(event, GoalChanged):
+                if self._live_output is None:
+                    self._output_func(_format_goal_view(event.view))
+                else:
+                    self._live_output.publish(event)
+                continue
             if event.kind is RunEventKind.INTERACTION_SUSPENDED:
                 result = self._runner.get_result(event.run_id)
                 # 输入控制读取当前事实；历史 suspended 提示可能已被取消或恢复取代。
@@ -482,11 +576,7 @@ class _ChatSessionHost:
                     or result.pending_interaction.interaction_id != event.correlation_id
                 ):
                     continue
-                self._pending_interaction = result.pending_interaction
-                _write_interaction_prompt(
-                    result.pending_interaction,
-                    output_func=self._output_func,
-                )
+                self._show_interaction(result.pending_interaction)
                 continue
             if event.kind is RunEventKind.RUN_TERMINAL:
                 result = self._runner.get_result(event.run_id)
@@ -511,12 +601,77 @@ class _ChatSessionHost:
                 ):
                     self._pending_interaction = None
 
+    async def _goal_command(self, text: str) -> None:
+        """在后台解析并执行 GoalSession 操作；误用不会变成普通输入。"""
+        command = _parse_goal_command(text)
+        if command is None:
+            self._output_func(_GOAL_USAGE)
+            return
+        goal = self._require_manager().goal
+        if goal is None:
+            self._output_func("Goal 未启用：请在 agent.yaml 设置 goal.enabled: true 后重建 Agent。")
+            return
+        try:
+            if command.operation == "status":
+                self._output_func(_format_goal_view(await goal.get()))
+                return
+            result: GoalControlResult
+            if command.operation == "create":
+                result = await goal.create(
+                    cast(str, command.objective), run_options=self._run_options()
+                )
+            elif command.operation == "edit":
+                result = await goal.edit(objective=command.objective, max_rounds=command.max_rounds)
+            elif command.operation == "pause":
+                result = await goal.pause(reason="用户通过 /goal pause 暂停")
+            elif command.operation == "resume":
+                result = await goal.resume()
+            elif command.operation == "complete":
+                result = await goal.complete(reason="用户通过 /goal complete 声明完成")
+            else:
+                result = await goal.clear()
+        except IrisError as exc:
+            self._error_func(_format_iris_error(exc))
+            return
+        if result.disposition == "needs_recovery":
+            self._output_func(_format_goal_view(result.view))
+            run = cast(RunSnapshot, result.view.run)
+            self._output_func(
+                "需要显式 SDK 恢复：await manager.goal.resume("
+                f"expected_activation_id={run.current_activation_id!r})；Run: {run.run_id}。"
+            )
+        else:
+            self._output_func(
+                {
+                    "scheduled": "Goal 已保存，等待调度。",
+                    "admitted": "Goal 本轮已准入。",
+                    "running": "Goal 继续使用当前执行。",
+                    "waiting": "Goal 等待原有交互回答。",
+                    "occupied": "当前会话被其他执行占用，Goal 未接手。",
+                    "stopped": "Goal 自动推进已停止。",
+                }[result.disposition]
+            )
+        if command.operation in {"pause", "edit", "complete", "clear"}:
+            self._output_func("当前执行可以继续收尾；立即停止请使用 Ctrl-C。")
+        if result.disposition == "waiting":
+            self._show_interaction(cast(HumanInteraction, result.view.interaction))
+
     # endregion
 
     # ==========================================
     #                Helpers
     # ==========================================
     # region
+    def _show_interaction(self, interaction: HumanInteraction) -> None:
+        """接回原问题；恢复回执与 suspended 事件同时到达时只提示一次。"""
+        if (
+            self._pending_interaction is not None
+            and self._pending_interaction.interaction_id == interaction.interaction_id
+        ):
+            return
+        self._pending_interaction = interaction
+        _write_interaction_prompt(interaction, output_func=self._output_func)
+
     def _call[T](self, coroutine: Coroutine[Any, Any, T]) -> T:
         """在 manager event loop 中执行 coroutine，并同步返回结果。"""
         future = asyncio.run_coroutine_threadsafe(coroutine, self._require_loop())

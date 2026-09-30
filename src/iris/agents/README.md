@@ -231,6 +231,8 @@ runtime 先按 `context_policy` 尝试确定性正文减载；完整输入仍达
 `context_policy.enabled: true`，轮数必须为正数；加载 YAML 只解析配置，不创建目标。
 
 ```yaml
+context_policy:
+  enabled: true
 goal:
   enabled: true
   max_rounds: 20
@@ -240,7 +242,9 @@ goal:
 装配自动注册非 deferred 的 `get_goal` / `report_goal`，并组合已有 `context_source`。
 关闭时不挂载 Goal 服务、工具或投影；独立 `RuntimeFactory` 与显式启用 Goal 的 child
 在装配时报告配置错误。开关在构建时确定，不支持热切换。目标状态与申报契约见
-[goal 说明](../goal/README.md)。
+[Goal SDK 完整示例](../goal/README.md#从配置到执行)。完整自动推进需要 SessionManager；
+`max_rounds` 是创建默认值，准入成功才消耗轮数，resume 不重置。每 Run 的运行选项要求
+include_tools=True，运行覆盖后的有效 tool_choice 为 None/auto。
 
 ### `MemoryConfig`
 

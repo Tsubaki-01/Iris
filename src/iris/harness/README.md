@@ -42,10 +42,18 @@ complete/clear。创建显式允许续跑；后继不进入用户 FIFO，已接�
 后续轮次，`interrupt()` 同时暂停目标并按原契约取消当前 Run；仅停止空闲 Goal 时返回 None。
 关闭功能时 `manager.goal` 为 None。
 
+完整配置与 `Runner → Manager → create/get/pause/resume` 示例见
+[Goal SDK](../goal/README.md#从配置到执行)。`GoalSession`、`GoalView`、`GoalControlResult`、
+`GoalChanged` 可直接从 iris.harness 导入。控制回执分别表示 scheduled/admitted/running/
+waiting/needs_recovery/occupied/stopped，scheduled 不代表已经执行。轮数在准入消耗且不退款，
+resume 不重置；Run deadline_at 仍是绝对时刻。完成来自主模型或用户申报，不是独立认证。
+
 新 manager 默认不续跑持久 active 目标。显式 `goal.resume()` 可以附着原 WAITING Run、恢复
 其 deadline timer 并回答原交互；无人推进的 ACTIVE Run 要提供 `expected_activation_id`。
 恢复不增加轮数。后台 deadline 和命令清理错误同样触发 Goal 状态通知，不依赖 live publisher。
 命令清理尚未完成时仍占原 lane，须显式重试原收尾。
+WAITING 的恢复沿用 `manager.resume(interaction_id=..., response=...)` 回答原 typed 交互，
+不会创建新 Run。默认 child 和 history fork 不继承目标，child 显式启用 Goal 会被拒绝。
 
 `GoalChanged` 是最新状态快照：mixed 流先交付相应 terminal，再交付目标结果；broker-only
 发布 session-scope `goal.changed`。读取状态不会补结算或启动工作。mixed tracker 满时停止准入，
@@ -349,7 +357,8 @@ admission mutation 完成，不使用 check-then-register 双阶段路径。
 HITL response 通过 `manager.resume(interaction_id=..., response=...)` 等待完整结果，或通过
 `admit_resume(...)` 在 activation 已接纳后返回 `ResumeReceipt(run_id, interaction_id)`。
 两者共享同一 admission owner；后台执行仍由 manager/runner 持有，不进入普通输入队列。
-`interrupt()` 只请求取消 exact current run；active cancellation request 不是 terminal，follow-up
+`interrupt()` 先暂停 Goal 续跑，再请求取消 exact current run；无 Run 但暂停了 Goal 时返回 None。
+active cancellation request 不是 terminal，follow-up
 仍等待真实 settlement。WAITING 或清理失败后已无活动 continuation 的 ACTIVE run，由 manager
 持有唯一异步 cancel task；再次 interrupt 可重试 pending 清理。新 run 不继承旧 run 的 cancel owner。
 `close()` 拒绝后续操作、以 `session_closed` 结算全部 pending input 并结束
@@ -469,7 +478,7 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
 不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
-重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 9，checkpoint 为 3，
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 11，checkpoint 为 3，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
 新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。

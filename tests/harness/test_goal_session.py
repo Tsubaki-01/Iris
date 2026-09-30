@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from iris.exceptions import IrisGoalStateError
+from iris.exceptions import IrisGoalPersistenceError, IrisGoalStateError
 from iris.goal.models import GoalChanged, GoalView
 from iris.harness import AgentRunner, SessionManager
 from iris.lifecycle import RunPhase
@@ -237,6 +237,76 @@ async def test_goal_run_accepts_real_steer_and_invalidates_early_report(tmp_path
         assert len(store._runs) == 1 and view.goal.rounds_started == 1
         assert any(message.text == "补充验收要求" for message in store.load_session("s").messages)
         assert store.get_goal_run(receipt.run_id).applied_report_call_id is None
+    finally:
+        release.set()
+        await manager.close(cancel_run=True)
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_goal_settlement_failure_disarms_without_blocking_user_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = StaticProvider(text_response("第一轮"), text_response("用户仍可使用"))
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner.from_config(goal_config(tmp_path), provider=provider, store=store)
+    manager = SessionManager(runner, "s")
+
+    def fail_settlement(run_id: str, *, now: object) -> None:
+        raise IrisGoalPersistenceError("暂时无法写入目标结算")
+
+    try:
+        with monkeypatch.context() as failing:
+            failing.setattr(store, "settle_goal_run", fail_settlement)
+            await manager.goal.create("保存故障应停自动轮")
+            async with asyncio.timeout(5):
+                async for event in manager.events():
+                    if isinstance(event, GoalChanged) and event.view.driver_error is not None:
+                        assert not event.view.armed
+                        assert event.view.settlement_pending
+                        break
+            receipt = await manager.submit("目标存储失败后继续聊天")
+            task = manager._current_task
+            if task is not None:
+                await task
+            assert store.load_run(receipt.run_id).phase is RunPhase.TERMINAL
+            assert store.get_goal_run(receipt.run_id) is None
+            assert store.get_current_goal("s").rounds_started == 1
+        assert len(provider.requests) == 2
+        assert not (await manager.goal.get()).armed
+    finally:
+        await manager.close(cancel_run=True)
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_during_start_registration_arms_after_actual_takeover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = StaticProvider(text_response(), text_response())
+    runner = AgentRunner.from_config(goal_config(tmp_path), provider=provider)
+    manager = SessionManager(runner, "s")
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = runner._run_start_activation
+
+    async def delayed_registration(*args: object, **kwargs: object) -> object:
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_start_activation", delayed_registration)
+    try:
+        await manager.goal.create("注册后继续推进", max_rounds=2)
+        async with asyncio.timeout(5):
+            await entered.wait()
+        await manager.goal.pause(reason="暂时暂停")
+        resumed = await manager.goal.resume()
+        assert resumed.disposition == "scheduled" and not resumed.view.armed
+        release.set()
+        view = await goal_state(manager.events(), "paused")
+        assert view.goal.reason.code == "round_limit" and view.goal.rounds_started == 2
     finally:
         release.set()
         await manager.close(cancel_run=True)

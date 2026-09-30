@@ -37,7 +37,9 @@ def test_goal_projection_is_session_only_and_keeps_actual_view() -> None:
     event = _changed("完成目标")
     (projected,) = project_live_fact(event)
     assert (projected.scope, projected.scope_id, projected.kind) == (
-        "session", "session", "goal.changed"
+        "session",
+        "session",
+        "goal.changed",
     )
     assert projected.run_id is None
     assert projected.activation_id is None
@@ -58,8 +60,11 @@ async def test_goal_coalescing_moves_latest_after_terminal_and_is_session_scoped
     broker.publish(_changed("开始"))
     broker.publish(
         RunEvent(
-            run_id="run", session_id="session", sequence=3,
-            kind=RunEventKind.RUN_TERMINAL, occurred_at=datetime.now(UTC),
+            run_id="run",
+            session_id="session",
+            sequence=3,
+            kind=RunEventKind.RUN_TERMINAL,
+            occurred_at=datetime.now(UTC),
         )
     )
     for index in range(10):
@@ -82,6 +87,7 @@ async def test_goal_coalescing_moves_latest_after_terminal_and_is_session_scoped
 @pytest.mark.asyncio
 async def test_runner_goal_fact_dispatch_is_best_effort(tmp_path: Path) -> None:
     """失败 publisher 不会因 Goal 缺少 event/run_id 字段泄露分派异常。"""
+
     class Publisher:
         """记录已到达发布边界的事实后抛出宿主异常。"""
 

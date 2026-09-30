@@ -458,6 +458,9 @@ harness 注入的 `GoalService`，在创建工具 view 前注册 `get_goal` / `r
 目标投影作为 required contribution 进入现有请求预算；执行循环仍只消费普通工具和动态快照，
 不负责目标状态转换或跨 Run 续跑。关闭开关时，即使传入 service 也不会挂载 Goal；CHILD
 显式启用则拒绝，默认 child 不继承父目标。详见 [goal](../goal/README.md)。
+同一目标每步读取最新完整正文和版本，旧目标 Run 不接收替换目标的正文；无法容纳 required
+文本时使用既有上下文预算错误，不截短目标。report_goal 只产生普通 ToolResult 中的申报，
+终态结算才决定目标状态；主模型声明完成不等于独立验收。
 
 Factory 会先解析 `permissions.workspace`，再构建基础 context 和用户声明的工具。若
 `skills.enabled: true`，它以该 workspace 做一次项目级发现快照：非空结果会追加
