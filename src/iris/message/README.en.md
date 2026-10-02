@@ -84,6 +84,9 @@ is needed. Import images through [`AgentRunner.import_image()`](../harness/READM
 and pass ordered content to `Msg.user([TextBlock(...), image])`. Messages retain complete blocks
 without reading the image files; the selected provider adapter owns request encoding.
 
+`image_reference_text()` renders the image name and both files' paths, MIME types, and dimensions
+for later retrieval. It performs no file I/O and leaves message/result reference indices to callers.
+
 ### `Conversation`
 
 `Conversation` provides `add()`, `add_many()`, `last`, `turn_count`, `system_prompt`,

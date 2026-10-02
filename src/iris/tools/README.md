@@ -74,6 +74,20 @@ result = await executor.execute_one(
 assert result.model_content == "你好，Iris"
 ```
 
+## 工具图片导入
+
+普通工具可调用 `import_tool_image(source: Path | bytes, context, *, name=None) -> ImageBlock`，
+把返回块放进 `ToolResult.content`，与 `TextBlock` 按需要混排。实现位于
+[`images.py`](images.py)，从 `ToolExecutionContext` 取得 workspace/session，将相对路径按
+workspace 解析，并复用 `utils.images.save_image()` 保存到 `.iris/image-cache/<session 编码>/`。
+这个 helper 同步执行图片读取和处理，异步工具应在自身已有的 I/O 工作调用中使用它。
+
+普通文件和 bytes 每次导入生成新快照，来源后续改变不会影响结果。已经位于 workspace 的
+image-cache 中的文件仍经过解码与尺寸/体积处理：合规则 original/model 直接引用该文件，
+需要变换时保留原文件，只在当前 session 目录新增模型版。缓存归属不跳过图片处理。
+图片完整保存后才返回块；读取、解码、处理或保存失败抛 `IrisImageError`，沿既有工具失败流程返回。
+工具层只生产图片引用，不选择 API 协议、编码 base64 或调用辅助视觉模型。
+
 ## 显式命令执行
 
 在 Agent YAML 的 `tools.builtin` 中声明 `exec.command`，模型工具名为 `exec_command`。
@@ -344,8 +358,9 @@ write/edit 共用进程级真实路径锁，覆盖取消检查、exists/freshnes
 
 `WorkspaceFileService.read_text_observed()` 为 Skill 加载提供同一次打开的完整文本与
 文件观测，复用文件读取的 workspace 和普通文件边界。它不更新共享读取状态；调用方在 await
-成功后合并。常规 `read_file_observed(..., max_chars=...)` 只读取预算内的分页范围，额外观察一个
-字符判断是否还有内容；跳过前置行和列时也按块读取，不把超长行整体载入内存。
+成功后合并。`read_file_observed(..., max_chars=...)` 先读取短文件头区分图片和文本；文本只读取
+预算内的分页范围，额外观察一个字符判断是否还有内容。跳过前置行和列时也按块读取，
+不把超长行整体载入内存。图片返回 `ImageBlock` 和空读取观测；`read_text_observed()` 仍只读文本。
 
 `ToolExecutor` 只提供分类、permission refresh 和单调用执行原语；lifecycle active path 由 runtime 在它之上
 使用固定内部上限 8 的窗口。只有连续 read-only + concurrency-safe 调用可以进入窗口；STOP、
@@ -390,11 +405,16 @@ executor = ToolExecutor(
 
 | 工具名 | 输入模型 | 能力 | 行为 |
 | --- | --- | --- | --- |
-| `read_file` | `ReadFileInput` | `READ` | 返回保留换行的文本片段及继续位置；可选 `L0001 |` 行号，并记录 `ReadFileState` |
+| `read_file` | `ReadFileInput` | `READ` | 文本返回保留换行的片段及继续位置，可选行号并记录 `ReadFileState`；图片返回引用文字与 `ImageBlock` |
 | `list_files` | `ListFilesInput` | `READ` | 按 `os.scandir` 发现顺序流式列出 workspace 内普通文件；不保证全局词典序，达到 `max_results` 后立即停止 |
 | `grep_search` | `GrepSearchInput` | `READ` | 流式逐行执行 Python 正则搜索，下降前跳过 `.iris`，达到全局 `max_results` 后立即停止 |
 | `write_file` | `WriteFileInput` | `WRITE` | 写入新文件；覆盖已有文件前要求已读且未变化 |
 | `edit_file` | `EditFileInput` | `WRITE` | 对已读且未变化的文件执行唯一字符串替换 |
+
+`file.read`/`read_file` 同时读取文字和静态 PNG/JPEG/WebP；按短文件头识别，不依赖扩展名。
+图片沿共享文件服务解析路径，再按[工具图片导入](#工具图片导入)处理并返回引用文字与图片块。
+`offset`、`column`、`limit`、`with_line_numbers` 只对文本生效；图片忽略这些参数并返回整张模型版，
+不生成文本分页游标，也不登记文本编辑所需的 `ReadFileState`。没有额外的图片工具或配置别名。
 
 ### 显式发布文件产物
 
@@ -451,7 +471,7 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 - `WriteFileInput(file_path, content)`。
 - `EditFileInput(file_path, old_string, new_string)`: `old_string` 不能为空，且必须唯一匹配。
 
-`read_file` 的最终正文包含文本、可选行号和以下继续提示，全部计入该工具的
+`read_file` 读取文本时，最终正文包含文本、可选行号和以下继续提示，全部计入该工具的
 `max_result_chars`。长行可分成多个片段，正常分页不再生成新的 artifact。提示中的坐标按
 源文本计数，行号前缀不占用 column；换行被消费后，行偏移加一且 column 归零。
 
@@ -461,9 +481,10 @@ artifact 或熔断生命周期，应修改 `ToolExecutor` 对应扩展点，而�
 
 `has_more=true` 时将 next_offset/next_column 分别作为下次调用的 offset/column，沿用原文件
 路径；false 表示文件末尾，不需要再尝试读一页。limit=0 不消费正文，只报告当前位置的剩余
-状态。正文保留文本流解码后的换行（含页尾换行）；这是当前唯一返回合同。无需统计总行数。
+状态。文本正文保留解码后的换行（含页尾换行），无需统计总行数。
 column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和提示报
-`READ_BUDGET_TOO_SMALL`。直接调用文件服务的 read_file/read_file_observed 须显式传 max_chars。
+`READ_BUDGET_TOO_SMALL`。直接调用文件服务的 read_file/read_file_observed 须显式传 max_chars；
+前者返回 `str | ImageBlock`，后者还返回文本的 `ReadFileRecord`，图片的该记录为 `None`。
 
 `WorkspacePolicy.resolve_path()` 会拒绝 workspace 外路径，包括父目录逃逸和解析后逃逸的符号链接。`WorkspaceFileService` 用 `ReadFileState` 记录文件的 `mtime_ns` 和 `size_bytes`，写入或编辑已有文件前会检查 `FILE_NOT_READ` 和 `STALE_FILE_STATE`。
 
@@ -536,6 +557,10 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 after middleware 后的完整 `model_content`。普通文本只写一份 `.txt`，`text_path == path`；已有
 MCP JSON 等 artifact 时保留原 `path`，另写 `.model.txt` 并通过 `text_path` 引用，不能用原生
 payload 代替 middleware 最终输出。未截短结果不额外保存文本。
+
+混合结果截断时保留所有图片及其顺序，图片不占文字字符额度。有图片的 `text_path` 首部
+保存每张图的名称、MIME、original/model 路径与尺寸，空行之后是完整模型文字；没有图片时
+沿用纯文本布局。引用列表不随预览裁剪，供 `context_read` 定位原图和模型版。
 
 最终预算计入错误前缀和完整取回提示，错误的预览与路径写入 `error.message`。若阈值连提示和
 错误前缀都放不下，返回 `ARTIFACT_ERROR`，不输出残缺引用或放宽字符预算。

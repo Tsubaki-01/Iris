@@ -26,7 +26,7 @@ from typing import Any, ClassVar, Generic, Literal, TextIO, TypeVar, cast
 from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
-from ...message import TextBlock
+from ...message import ImageBlock, TextBlock, image_reference_text
 from .._file_mutation import file_mutation
 from .._io import run_tool_io
 from .._read_state import ReadFileRecord, ReadFileState
@@ -37,6 +37,7 @@ from ..base import (
     ToolExecutionContext,
     ToolResult,
 )
+from ..images import import_tool_image
 from ..permissions import WorkspacePolicy
 from ..registry import ToolRegistry
 from ..schema import schema_from_pydantic_model
@@ -93,10 +94,10 @@ def _matches_rglob_pattern(
 
 
 class ReadFileInput(BaseModel):
-    """读取文件工具的输入模型。
+    """读取文字或图片文件的输入模型；分页及行号仅用于文本。
 
     Attributes:
-        file_path (str): 相对 workspace 根目录的文本文件路径。
+        file_path (str): workspace 内的文本或静态 PNG/JPEG/WebP 图片路径。
         offset (int | None): 起始行偏移量，从 0 开始。默认为 None。
         column (int): 起始行内的 Unicode 字符偏移，从 0 开始，用于续读超长行。
         limit (int | None): 最多读取的行数，最大 1000。默认为 None。
@@ -405,26 +406,34 @@ class WorkspaceFileService:
         context: ToolExecutionContext,
         *,
         max_chars: int,
-    ) -> tuple[str, ReadFileRecord]:
-        """读取文件片段并返回与已打开文件绑定的不可变观测。
+    ) -> tuple[str | ImageBlock, ReadFileRecord | None]:
+        """识别图片或读取文本页；仅文本返回同一已打开文件的不可变观测。
 
         Args:
-            params (ReadFileInput): 读取路径、分页和行号参数。
+            params (ReadFileInput): 读取路径，分页和行号参数仅用于文本。
             context (ToolExecutionContext): 只提供 workspace 等不可变执行事实的 worker context。
             max_chars: 包含行号和续读提示的结果字符预算。
 
         Returns:
-            tuple[str, ReadFileRecord]: 文本页和续读提示，以及同一已打开文件的 mtime/size 观测。
+            tuple[str | ImageBlock, ReadFileRecord | None]: 文本页与 mtime/size 观测，
+                或已准备的图片块与 None。图片忽略分页和行号参数。
 
         Raises:
             IrisToolExecutionError: 文件不存在、不是普通文件，或列偏移/页预算无法读取。
             IrisToolValidationError: 路径越出 workspace。
+            IrisImageError: 图片读取、解码、处理或保存失败。
             OSError: 打开、读取或观测文件失败。
             UnicodeDecodeError: 文件不是有效 UTF-8 文本。
         """
         offset = params.offset or 0
         limit = params.limit if params.limit is not None else 1000
         with self._open_text(params.file_path, context) as (path, handle):
+            header = handle.buffer.read(12)
+            handle.seek(0)
+            if header.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff")) or (
+                header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+            ):
+                return import_tool_image(path, context, name=path.name), None
             source_revision = self._memory_source(path, handle)
             content = read_text_page(
                 handle,
@@ -513,8 +522,8 @@ class WorkspaceFileService:
 
     def read_file(
         self, params: ReadFileInput, context: ToolExecutionContext, *, max_chars: int
-    ) -> str:
-        """读取文件片段并更新读取状态。
+    ) -> str | ImageBlock:
+        """读取文本页或准备图片；只有文本更新编辑用读取状态。
 
         Args:
             params (ReadFileInput): 读取路径和分页参数。
@@ -522,13 +531,14 @@ class WorkspaceFileService:
             max_chars: 包含继续位置的结果字符预算。
 
         Returns:
-            str: 保留换行的文本片段及继续位置；可选 `L0001 |` 行号前缀。
+            str | ImageBlock: 保留换行/续读位置的文本页，或完整图片引用块。
 
         Raises:
             IrisToolExecutionError: 当路径不存在或不是普通文件时。
         """
         content, record = self.read_file_observed(params, context, max_chars=max_chars)
-        self.ensure_read_state(context).merge(record)
+        if record is not None:
+            self.ensure_read_state(context).merge(record)
         return content
 
     def list_files(self, params: ListFilesInput, context: ToolExecutionContext) -> str:
@@ -860,13 +870,15 @@ class FileTool(BaseTool, Generic[InputT]):  # noqa: UP046
 
 
 class ReadFileTool(FileTool[ReadFileInput]):
-    """读取 workspace 文本文件的工具。"""
+    """读取 workspace 文本或静态图片，保持同一个文件工具入口。"""
 
     name: ClassVar[str] = "read_file"
     description: ClassVar[str] = (
-        "读取 workspace 内文本文件，offset 为零基行偏移，column 为行内字符偏移。"
+        "读取 workspace 内文本或静态 PNG/JPEG/WebP 图片，按文件内容识别。"
+        "文本的 offset 为零基行偏移，column 为行内字符偏移。"
         "返回实际 next_offset、next_column 和 has_more；继续时将 next 值作为 offset、column。"
-        "需要定位或编辑时可请求行号。"
+        "需要定位或编辑时可请求行号。图片忽略 offset、column、limit 和 with_line_numbers，"
+        "返回整张图片的模型版及文件引用。"
     )
     input_type: type[ReadFileInput] = ReadFileInput
     capabilities: ClassVar[set[ToolCapability]] = {ToolCapability.READ}
@@ -877,15 +889,21 @@ class ReadFileTool(FileTool[ReadFileInput]):
         params: ReadFileInput,
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """调用文件服务读取文本片段。"""
+        """在一次本地工作调用中读取文本或准备图片，再合并文本读取观测。"""
         worker_context = context.model_copy(update={"read_state": None})
-        content, record = await asyncio.to_thread(
-            self.file_service.read_file_observed,
-            params,
-            worker_context,
-            max_chars=self.definition.max_result_chars,
+        content, record = await run_tool_io(
+            lambda: self.file_service.read_file_observed(
+                params, worker_context, max_chars=self.definition.max_result_chars
+            )
         )
-        self.file_service.ensure_read_state(context).merge(record)
+        if record is not None:
+            self.file_service.ensure_read_state(context).merge(record)
+        if isinstance(content, ImageBlock):
+            return ToolResult(
+                tool_use_id=context.call_id,
+                tool_name=self.name,
+                content=[TextBlock(text=image_reference_text(content)), content],
+            )
         return self._text_result(content)
 
 

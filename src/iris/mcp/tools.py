@@ -1,7 +1,8 @@
-"""MCP 工具的输入边界、SDK 调用和文本结果投影。"""
+"""MCP 工具的输入边界、SDK 调用和有序文本/图片结果投影。"""
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, cast
 
@@ -10,16 +11,18 @@ from mcp import types
 from pydantic import BaseModel
 
 from ..exceptions import (
+    IrisImageError,
     IrisMCPCallError,
     IrisMCPToolError,
     IrisToolExecutionError,
     IrisToolOutcomeUnknownError,
     IrisToolValidationError,
 )
-from ..message import TextBlock
+from ..message import DataBlock, TextBlock
 from ..tools._io import run_tool_io
 from ..tools.artifacts import artifact_store_for
 from ..tools.base import BaseTool, ToolErrorInfo, ToolExecutionContext, ToolResult
+from ..tools.images import import_tool_image
 from .connection import MCPConnection
 from .models import MCPToolDescriptor
 
@@ -70,6 +73,8 @@ class MCPTool(BaseTool):
             raise IrisToolOutcomeUnknownError("MCP 调用期限耗尽，结果无法确认") from error
         try:
             return await run_tool_io(lambda: self._project_result(result, context))
+        except IrisImageError as error:
+            return self._error(context, "IMAGE_ERROR", error.message)
         except IrisToolExecutionError as error:
             return self._error(context, "ARTIFACT_ERROR", error.message)
 
@@ -85,19 +90,30 @@ class MCPTool(BaseTool):
     def _project_result(
         self, result: types.CallToolResult, context: ToolExecutionContext
     ) -> ToolResult:
-        """富内容只作文本预览，完整 SDK JSON 交给现有 artifact store。"""
-        parts: list[str] = []
+        """保留有序文字与本地图片，完整 SDK JSON 交给现有 artifact store。"""
+        parts: list[DataBlock] = []
         preserve = bool(result.model_extra) or result.meta is not None
         for block in result.content:
             if isinstance(block, types.TextContent):
-                parts.append(block.text)
+                parts.append(TextBlock(text=block.text))
                 preserve |= (
                     bool(block.model_extra)
                     or block.meta is not None
                     or block.annotations is not None
                 )
+            elif isinstance(block, types.ImageContent):
+                try:
+                    data = base64.b64decode(block.data, validate=True)
+                except ValueError as error:
+                    raise IrisImageError("MCP 图片不是合法 base64") from error
+                parts.append(import_tool_image(data, context))
+                preserve = True
             elif isinstance(block, types.ResourceLink):
-                parts.append(f"Resource: {block.name} {block.uri} ({block.mime_type or 'unknown'})")
+                parts.append(
+                    TextBlock(
+                        text=f"Resource: {block.name} {block.uri} ({block.mime_type or 'unknown'})"
+                    )
+                )
                 preserve = True
             elif isinstance(block, types.EmbeddedResource):
                 resource = block.resource
@@ -105,24 +121,26 @@ class MCPTool(BaseTool):
                     resource.text if isinstance(resource, types.TextResourceContents) else "binary"
                 )
                 parts.append(
-                    f"Resource: {resource.uri} ({resource.mime_type or 'unknown'})\n{text}"
+                    TextBlock(
+                        text=f"Resource: {resource.uri} ({resource.mime_type or 'unknown'})\n{text}"
+                    )
                 )
                 preserve = True
             else:
-                parts.append(f"{block.type}: {block.mime_type}，完整内容见结果文件")
+                parts.append(TextBlock(text=f"{block.type}: {block.mime_type}，完整内容见结果文件"))
                 preserve = True
         if result.structured_content is not None or "structured_content" in result.model_fields_set:
-            parts.append(json.dumps(result.structured_content, ensure_ascii=False))
+            parts.append(TextBlock(text=json.dumps(result.structured_content, ensure_ascii=False)))
             preserve = True
-        text = "\n".join(parts)
+        text = "\n".join(part.text for part in parts if isinstance(part, TextBlock))
         if result.is_error and not text:
             text = "MCP 工具返回业务错误"
-        projected = (
-            self._error(context, "MCP_TOOL_ERROR", text)
-            if result.is_error
-            else ToolResult(
-                tool_use_id=context.call_id, tool_name=self.name, content=[TextBlock(text=text)]
-            )
+        projected = ToolResult(
+            tool_use_id=context.call_id,
+            tool_name=self.name,
+            content=parts,
+            is_error=result.is_error,
+            error=ToolErrorInfo(code="MCP_TOOL_ERROR", message=text) if result.is_error else None,
         )
         store = artifact_store_for(context, preview_chars=self.definition.preview_chars)
         if preserve or len(projected.model_content) > self.definition.max_result_chars:
@@ -131,11 +149,13 @@ class MCPTool(BaseTool):
                 result.model_dump(mode="json", by_alias=True),
                 preview=text[: self.definition.preview_chars],
             )
-            message = f"{text}\n\n[完整 MCP 结果：{artifact.path}]"
+            note = f"[完整 MCP 结果：{artifact.path}]"
             projected.artifact = artifact
-            projected.content = [TextBlock(text=message)]
+            projected.content.append(TextBlock(text=f"\n{note}" if text else note))
             if projected.error is not None:
-                projected.error = projected.error.model_copy(update={"message": message})
+                projected.error = projected.error.model_copy(
+                    update={"message": f"{text}\n\n{note}"}
+                )
         return projected
 
 

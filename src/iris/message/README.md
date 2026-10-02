@@ -52,6 +52,7 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 - `ToolResultBlock`: 工具结果的调用 ID、名称、`list[DataBlock]` 正文、错误标记和元数据。
 - `ContentBlock`: 数据块与工具调用/结果块的联合类型。
 - `image_block_from_saved()`: 将图片保存器返回的可信文件信息投影为 `ImageBlock`。
+- `image_reference_text()`: 将图片名称、两份文件的路径/MIME/尺寸渲染为回读引用，不读取像素。
 - `Msg`: 一条统一消息。
 - `Conversation`: 有序消息集合。
 - `LLMRequest`: 一次 provider-neutral 模型请求。

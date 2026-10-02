@@ -22,6 +22,21 @@ def test_publish_registration_is_explicit_and_shares_file_service() -> None:
     assert registry.get("publish_artifact").file_service is registry.get("read_file").file_service
 
 
+def test_file_read_keeps_its_shared_service_and_schema_for_image_input() -> None:
+    """读图复用已有 file.read 声明、共享服务和参数，不增加配置入口。"""
+    registry = build_tool_registry(ToolsConfig(builtin=["file.read", "file.list"]))
+    assert {tool.name for tool in registry.view().active_tools} == {"read_file", "list_files"}
+    reader = registry.get("read_file")
+    assert reader.file_service is registry.get("list_files").file_service
+    assert set(reader.input_schema["properties"]) == {
+        "file_path",
+        "offset",
+        "column",
+        "limit",
+        "with_line_numbers",
+    }
+
+
 @pytest.mark.parametrize("builtin", ["exec.command", "exec.python"])
 def test_exec_builtin_requires_an_explicit_command_binding(builtin: str) -> None:
     """registry 不自行创建服务，只有显式入口才要求注入 binding。"""

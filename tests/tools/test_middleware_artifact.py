@@ -9,7 +9,7 @@ import httpx2 as httpx
 import pytest
 from pydantic import BaseModel
 
-from iris.message import TextBlock, ToolUseBlock
+from iris.message import ImageBlock, ImageFileRef, TextBlock, ToolUseBlock, image_reference_text
 from iris.tools import (
     BaseTool,
     PermissionDecision,
@@ -24,7 +24,127 @@ from iris.tools import (
     ToolRegistry,
     ToolResult,
 )
-from iris.tools.artifacts import ToolArtifactStore
+from iris.tools.artifacts import ToolArtifactStore, truncate_tool_result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_mode", ["success", "unstructured", "structured"])
+async def test_middleware_expanded_images_survive_artifact_and_error_projection(
+    tmp_path: Path, error_mode: str
+) -> None:
+    """最终外置只短化文字，图片引用留在可读正文首部，原生结果保持独立。"""
+    first = ImageBlock(
+        original=ImageFileRef(
+            path=tmp_path / "first-original.png", mime_type="image/png", width=3000, height=1500
+        ),
+        model=ImageFileRef(
+            path=tmp_path / "first-model.jpg", mime_type="image/jpeg", width=2000, height=1000
+        ),
+        name="图一",
+    )
+    ref = ImageFileRef(path=tmp_path / "second.png", mime_type="image/png", width=100, height=100)
+    second = ImageBlock(original=ref, model=ref, name="图二")
+    raw_store = ToolArtifactStore(tmp_path / "native")
+    raw = raw_store.persist_json("plot", {"original": "payload"}, preview="原生结果")
+    original_bytes = raw.path.read_bytes()
+    full_text = "middleware完整输出" * 2000
+    hooks = 0
+
+    def produce() -> ToolResult:
+        """返回尚未超限的有序图片与文字。"""
+        return ToolResult(
+            tool_use_id="",
+            tool_name="produce",
+            artifact=raw,
+            content=[first, TextBlock(text="before"), second, TextBlock(text="after")],
+            is_error=error_mode != "success",
+            error=ToolErrorInfo(code="FAILED", message="initial")
+            if error_mode == "structured"
+            else None,
+        )
+
+    class ExpandImages(ToolMiddleware):
+        """接收完整结果，再扩展最终文字。"""
+
+        async def after_call(
+            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
+        ) -> ToolResult:
+            """图片始终透传，结构化错误文字以 error.message 为准。"""
+            nonlocal hooks
+            hooks += 1
+            assert [block.type for block in result.content] == ["image", "text", "image", "text"]
+            assert result.artifact is not None and result.artifact.text_path is None
+            return result.model_copy(
+                update={
+                    "content": [first, TextBlock(text=full_text), second, TextBlock(text="tail")],
+                    "error": result.error.model_copy(update={"message": full_text})
+                    if result.error is not None
+                    else None,
+                }
+            )
+
+    registry = ToolRegistry()
+    tool = registry.register_function(produce)
+    tool.definition.max_result_chars = 1600
+    tool.definition.preview_chars = 32
+    result = await ToolExecutor(registry, middleware=[ExpandImages()]).execute_one(
+        ToolUseBlock(id="image-result", name="produce", input={}),
+        ToolExecutionContext(workspace_root=tmp_path, session_id="images"),
+    )
+
+    assert hooks == 1
+    assert result.tool_use_id == "image-result" and result.is_error == (error_mode != "success")
+    assert [block.type for block in result.content] == ["image", "text", "image"]
+    assert [block for block in result.content if isinstance(block, ImageBlock)] == [first, second]
+    assert len(result.model_content) <= 1600
+    assert result.model_content.count("Error[FAILED]:") == (1 if error_mode == "structured" else 0)
+    assert result.artifact is not None and result.artifact.text_path is not None
+    assert result.artifact.path == raw.path and result.artifact.mime_type == "application/json"
+    assert raw.path.read_bytes() == original_bytes
+    assert result.artifact.text_path != raw.path
+    saved = result.artifact.text_path.read_text(encoding="utf-8")
+    full_model_text = (
+        f"Error[FAILED]: {full_text}" if error_mode == "structured" else f"{full_text}\ntail"
+    )
+    assert saved == (
+        f"{image_reference_text(first)}\n{image_reference_text(second)}\n\n{full_model_text}"
+    )
+    assert len(list((tmp_path / ".iris" / "tool-results").rglob("*.model.txt"))) == 1
+    message = result.to_msg().tool_results[0]
+    assert [block for block in message.content if isinstance(block, ImageBlock)] == [first, second]
+    assert message.text == result.model_content
+
+
+def test_error_with_only_images_retains_images_when_text_is_truncated(tmp_path: Path) -> None:
+    """错误文字可能只在 error 对象中，截短后仍有文字与原图。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref)
+    result = truncate_tool_result(
+        ToolResult(
+            tool_use_id="plot",
+            tool_name="plot",
+            content=[image],
+            is_error=True,
+            error=ToolErrorInfo(code="FAILED", message="failure" * 1000),
+        ),
+        max_chars=80,
+        preview_chars=80,
+        suffix="[truncated]",
+    )
+    assert result.model_blocks[-1] is image
+    assert result.model_content.count("Error[FAILED]:") == 1
+    assert result.model_content.endswith("[truncated]")
+    assert len(result.model_content) == 80
+
+
+def test_image_only_result_does_not_consume_text_budget(tmp_path: Path) -> None:
+    """图片信息不会作为工具文字额度进入截短或外置流程。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=2000, height=2000)
+    result = ToolResult(
+        tool_use_id="plot", tool_name="plot", content=[ImageBlock(original=ref, model=ref)]
+    )
+    assert ToolArtifactStore(tmp_path).persist_if_large(result, max_chars=0) is result
+    assert result.artifact is None
 
 
 @pytest.mark.asyncio

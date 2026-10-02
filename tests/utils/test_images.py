@@ -56,6 +56,43 @@ def test_small_images_keep_original_encoding_without_upscale(image_format: str, 
     assert prepared.model.mime_type == mime
 
 
+def test_saved_source_reuse_still_prepares_image_once_without_new_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已保存的合规图片仍经过解码，但不创建重复文件或目标目录。"""
+    source = tmp_path / "cached.png"
+    source.write_bytes(_image_bytes())
+    prepare = images.prepare_image
+    prepared_data: list[bytes] = []
+
+    def prepare_once(data: bytes) -> images.PreparedImage:
+        prepared_data.append(data)
+        return prepare(data)
+
+    monkeypatch.setattr(images, "prepare_image", prepare_once)
+    target = tmp_path / "next-session"
+    saved = save_image(source, cache_dir=target, reuse_source=True)
+    assert saved.original is saved.model
+    assert saved.model.path == source
+    assert len(prepared_data) == 1 and prepared_data[0] == source.read_bytes()
+    assert not target.exists()
+
+
+def test_saved_source_reuse_keeps_original_and_writes_only_transformed_model(
+    tmp_path: Path,
+) -> None:
+    """原缓存图需缩放时只生成模型版，原始路径和字节保持不变。"""
+    source = tmp_path / "cached-large.png"
+    data = _image_bytes(size=(2400, 1200))
+    source.write_bytes(data)
+    target = tmp_path / "next-session"
+    saved = save_image(source, cache_dir=target, reuse_source=True)
+    assert saved.original.path == source and source.read_bytes() == data
+    assert saved.model.path.parent == target
+    assert list(target.iterdir()) == [saved.model.path]
+    assert (saved.model.width, saved.model.height) == (2000, 1000)
+
+
 def test_large_png_is_scaled_proportionally_and_keeps_original_bytes() -> None:
     data = _image_bytes(size=(2400, 1200))
     prepared = prepare_image(data)

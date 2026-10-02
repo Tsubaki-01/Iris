@@ -115,12 +115,13 @@ def _encode(image: Image.Image, image_format: str, *, quality: int | None = None
     return ImageData(output.getvalue(), _MIME_TYPES[image_format], *image.size)
 
 
-def save_image(source: Path | bytes, *, cache_dir: Path) -> SavedImage:
+def save_image(source: Path | bytes, *, cache_dir: Path, reuse_source: bool = False) -> SavedImage:
     """保存一次导入快照，两个文件完整关闭后才交付引用。
 
     Args:
         source: 已由调用方解析的文件路径，或原始图片 bytes。
         cache_dir: 调用方确定的目标目录；本函数不知道 session。
+        reuse_source: 调用方确认路径属于已有缓存时复用原文件；仍解码并处理其内容。
 
     Returns:
         绝对路径形式的原图和模型版文件信息。
@@ -138,22 +139,33 @@ def save_image(source: Path | bytes, *, cache_dir: Path) -> SavedImage:
             data = source
         prepared = prepare_image(data)
         directory = cache_dir.resolve()
-        directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise IrisImageError("读取图片或创建副本目录失败") from exc
+        raise IrisImageError("读取图片失败") from exc
 
     asset_id = uuid4().hex
-    original = _file_info(directory, asset_id, "original", prepared.original)
+    reused_path = source.resolve() if reuse_source and isinstance(source, Path) else None
+    original = (
+        SavedImageFile(
+            reused_path,
+            prepared.original.mime_type,
+            prepared.original.width,
+            prepared.original.height,
+        )
+        if reused_path is not None
+        else _file_info(directory, asset_id, "original", prepared.original)
+    )
     model = (
         original
         if prepared.model is prepared.original
         else _file_info(directory, asset_id, "model", prepared.model)
     )
-    pending = [(original.path, prepared.original.data)]
+    pending = [] if reused_path is not None else [(original.path, prepared.original.data)]
     if model is not original:
         pending.append((model.path, prepared.model.data))
     created: list[Path] = []
     try:
+        if pending:
+            directory.mkdir(parents=True, exist_ok=True)
         for path, content in pending:
             with path.open("xb") as output:
                 created.append(path)

@@ -32,6 +32,7 @@ from .message import (
     ToolResultBlock,
     ToolUseBlock,
     image_block_from_saved,
+    image_reference_text,
 )
 from .streaming import (
     ModelBlockCompleted,
@@ -88,4 +89,5 @@ __all__ = [
     "ToolSpec",
     "ToolUseBlock",
     "image_block_from_saved",
+    "image_reference_text",
 ]

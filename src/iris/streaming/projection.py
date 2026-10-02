@@ -29,6 +29,7 @@ from ..message import (
     ModelResponseStarted,
     ModelStreamEvent,
     ModelUsageUpdated,
+    TextBlock,
 )
 from ..runtime import RuntimeStreamEvent
 from ..tools import ToolResult
@@ -406,7 +407,14 @@ def _tool_identity_payload(event: RuntimeStreamEvent) -> dict[str, JsonValue]:
 def _safe_tool_result(result: ToolResult) -> dict[str, JsonValue]:
     """只投影可远端暴露的 ToolResult allowlist。"""
     payload: dict[str, JsonValue] = {
-        "content": [block.text for block in result.content],
+        "content": [
+            block.text
+            if isinstance(block, TextBlock)
+            else f"[image: {block.name}]"
+            if block.name
+            else "[image]"
+            for block in result.content
+        ],
         "is_error": result.is_error,
     }
     if result.error is not None:

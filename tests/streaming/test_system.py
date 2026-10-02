@@ -23,7 +23,14 @@ from iris.lifecycle import (
     RunPhase,
     RunStopReason,
 )
-from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, TextBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    LLMResponse,
+    ModelStreamEvent,
+    TextBlock,
+)
 from iris.providers import ProviderClient
 from iris.providers.responses import ResponsesAdapter
 from iris.store import InMemoryLifecycleStore, SQLiteStore
@@ -63,6 +70,61 @@ from iris.tools import (
 )
 from tests.harness.fakes import text_response
 from tests.runtime.fakes import build_runtime
+
+
+@pytest.mark.parametrize("name", [None, "诊断图"])
+def test_image_tool_completed_uses_text_projection(tmp_path: Path, name: str | None) -> None:
+    """图片结果提供简短事件文字；CLI 消费相同事实时不读取图片 text。"""
+    from iris.cli.chat import _ChatLiveOutput
+    from iris.runtime import RuntimeStreamEvent
+    from iris.streaming.projection import project_live_fact
+    from iris.tools import ToolErrorInfo
+
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref, name=name)
+    result = ToolResult(
+        tool_use_id="plot-call",
+        tool_name="plot",
+        content=[TextBlock(text="诊断失败"), image, TextBlock(text="请检查输入")],
+        is_error=True,
+        error=ToolErrorInfo(code="FAILED", message="诊断失败"),
+        artifact=ToolArtifact(
+            path=tmp_path / "raw.json", mime_type="application/json", size_bytes=2
+        ),
+    )
+    fact = RuntimeStreamEvent(
+        kind="tool.completed",
+        run_id="run-images",
+        session_id="session-images",
+        activation_id="act-images",
+        step_index=0,
+        tool_call_id="plot-call",
+        tool_name="plot",
+        tool_ordinal=1,
+        tool_result=result,
+    )
+    projected = project_live_fact(fact)
+    expected_image = f"[image: {name}]" if name else "[image]"
+    assert len(projected) == 2
+    for item in projected:
+        assert item.payload["content"] == ["诊断失败", expected_image, "请检查输入"]
+        assert item.payload["error"] == {
+            "code": "FAILED",
+            "message": "诊断失败",
+            "retryable": False,
+        }
+        assert item.payload["artifact"] == {
+            "mime_type": "application/json",
+            "size_bytes": 2,
+            "preview": "",
+        }
+        assert str(tmp_path) not in json.dumps(item.payload, ensure_ascii=False)
+        assert "base64" not in json.dumps(item.payload)
+    output: list[str] = []
+    live = _ChatLiveOutput(output.append)
+    live.publish(fact)
+    live.close()
+    assert output == []
 
 
 class _ControlledRawStream(AsyncIterator[dict[str, Any]]):

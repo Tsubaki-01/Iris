@@ -169,6 +169,11 @@ The earlier projection boundary already removes raw provider chunks/headers/keys
 artifact paths and bytes, and arbitrary metadata. Gateway filtering consumes that trusted allowlist
 without reparsing payloads.
 
+`tool.completed.payload.content` remains a list of strings: text blocks keep their text, while
+image blocks become `[image: name]` or `[image]`. The event adds no image paths, encoded bytes,
+or download endpoint; complete references remain in typed tool results and message history.
+The text CLI continues consuming the same live facts without taking responsibility for image display.
+
 Successful `edit_file` live `tool.completed` events additionally expose a top-level `file_change`
 containing only the workspace-relative `file_path` and text `patch`. SSE and WebSocket use the same
 projection. Model history keeps the short edit summary; arbitrary tool data is not exposed.
