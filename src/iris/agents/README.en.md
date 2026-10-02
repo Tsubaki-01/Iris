@@ -124,6 +124,60 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
 
+### Hooks and tool middleware
+
+`AgentConfig.hooks` defaults to an empty sequence. `middleware.tools` also defaults to empty;
+only ordinary tool middleware is supported.
+
+```yaml
+hooks:
+  - name: check-command
+    event: tool.before
+    tools: [exec_command]
+    timeout_seconds: 10
+    handler:
+      type: command
+      command: python scripts/check.py
+  - name: feedback
+    event: tool.after
+    handler:
+      type: python
+      factory: my_extensions:create_feedback
+      options:
+        text: Explain the verification result.
+middleware:
+  tools:
+    - factory: my_extensions:create_logging
+      options: {}
+```
+
+The four events are `run.started`, `run.finished`, `tool.before`, and `tool.after`. The optional
+`tools` filter is a nonempty list, applies only to tool events, and matches the actual call name.
+For example, builtin key `exec.command` loads `exec_command`; filters do not resolve aliases.
+Names identify handlers without deduplication. Each handler has its own positive, finite
+`timeout_seconds`, defaulting to 10.
+
+Python handlers declare only `type: python`, `factory`, and optional `options`; command handlers
+declare only `type: command` and `command`. A Python reference is an importable `module:attribute`.
+The sole construction protocol is synchronous `factory(**options)`, returning an async callable
+for hooks or a `ToolMiddleware` instance for middleware. The factory interprets its own options.
+Command scripts run in the existing Native/Docker environment and workspace, receive event JSON
+over UTF-8 stdin, and return one event-specific JSON object on stdout.
+
+Loading YAML validates declarations without importing extensions. Assembly constructs each factory
+once before resource preparation; import, construction, or returned-object errors raise
+`IrisConfigError`. Handlers are never called for validation. A callable that returns a non-awaitable
+fails when actually invoked. Instances are shared by sessions using the same Agent assembly;
+keep temporary call state local.
+
+Both `AgentRunner.from_config*()` and `RuntimeFactory.from_config*()` accept `hooks=` and
+`tool_middlewares=`, appended after YAML entries without replacement or deduplication. Children
+use their own YAML and do not inherit parent SDK additions. See the [Hooks guide](../hooks/README.md)
+for factories, SDK examples, script protocol, and lifecycle limits, and the
+[tool guide](../tools/README.en.md) for the wrapping contract.
+`HookConfig`, `PythonHookHandlerConfig`, `CommandHookHandlerConfig`, `HookHandlerConfig`,
+`ToolMiddlewareConfig`, and `MiddlewareConfig` are exported from `iris.agents`.
+
 `AgentConfig.goal` uses `iris.goal.GoalConfig`, with `enabled: false` and `max_rounds: 20`
 by default. Enabling it requires `context_policy.enabled: true`; the round limit must be positive.
 Loading YAML only parses this declaration and does not create a goal.

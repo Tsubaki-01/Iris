@@ -203,7 +203,7 @@ Extract 不传服务端 timeout，使用 basic 默认值。
 
 `hook_feedback` 默认为空元组；有反馈时在工具原正文或 `Error[code]: message` 后按顺序追加
 `[Hook feedback]` 段落。反馈仍在同一个 `ToolResultBlock` 内，不改变消息角色，也不覆盖原
-`content`、`data` 或结构化错误。当前已提供结果投影能力，Agent YAML 的 Hooks 接线另行提供。
+`content`、`data` 或结构化错误。图片块与反馈一并保留；Agent YAML 接线见下方工具 Hooks。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
 
@@ -609,6 +609,9 @@ Executor 在包装链及符合资格的 `tool.after` 返回后执行一次 artif
 `async wrap_tool_call(call: ToolCall, call_next: ToolNext) -> ToolResult`。
 通过 `ToolExecutor(..., middleware=[...])` 注入；第一个注册项最外层，A、B 的执行顺序是
 A 前 → B 前 → body → B 后 → A 后。
+完整 Agent 可使用 YAML `middleware.tools` 的工厂声明，或在
+`AgentRunner.from_config/from_config_path`、`RuntimeFactory.from_config/from_config_path` 中传入
+`tool_middlewares=[...]`。YAML 实例排在 SDK 实例之前，child 使用自己的配置，不继承父 SDK 项。
 
 `ToolCall` 是冻结调用视图，提供 `tool_use_id`、`tool_name`、`arguments`、`agent_id`、
 `session_id`、可空的 `run_id`/`activation_id` 和 `workspace_root`，不暴露可写 context 或
@@ -645,8 +648,14 @@ executor = ToolExecutor(registry, middleware=[LabelResult()])
 
 通过 `ToolExecutor(..., hook_dispatcher=dispatcher, command_binding=binding)` 注入同一 Agent 的
 内部 Hook 依赖。纯 Python 处理器不需要命令 binding；命令脚本与命令停止收据的收口使用既有
-binding。`RuntimeEnvironment` 会把本 Agent 的这两项依赖接到其工具执行器；当前尚未开放
-Hooks YAML 或公共 SDK 装配参数。事件与命令协议见 [iris.hooks](../hooks/README.md)。
+binding。`RuntimeEnvironment` 会把本 Agent 的这两项依赖接到其工具执行器。完整 Agent
+通过 YAML `hooks` 或上述四个 SDK 入口的 `hooks=[HookRegistration(...)]` 组装，YAML 在前、
+SDK 追加在后；同一次装配只创建一份派发器和实例列表。事件与命令协议见
+[iris.hooks](../hooks/README.md)。
+
+独立 `ToolExecutor` 可使用 Python 工具处理器，run/activation 身份可为空；无 harness 的调用
+不提供配置式脚本的 Run 作用域，也不吞掉无人消费的延迟控制。Middleware 只包装工具调用，
+不提供 Run/model 包装、重试或参数变换；Hook 不替换工具结果，也不发出 Run 续跑指令。
 
 执行顺序是权限刷新、熔断检查、取消检查与 durable effect claim，随后 `tool.before`，再进入
 Middleware/body，最后对真正执行且结果已知的 body 派发 `tool.after`。before 拒绝与普通失败

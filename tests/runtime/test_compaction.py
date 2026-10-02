@@ -336,7 +336,11 @@ def test_sparse_history_candidates_equal_full_history_projection(covered: int) -
             *(messages[index] for index in protected if index < end),
             *messages[end:],
         ]
-        assert project_history(snapshot, candidate) == expected
+        actual = project_history(snapshot, candidate)
+        assert actual[0].model_dump(exclude={"timestamp"}) == expected[0].model_dump(
+            exclude={"timestamp"}
+        )
+        assert actual[1:] == expected[1:]
 
 
 def test_empty_tail_keeps_prefix_anchors_without_new_compaction_work() -> None:

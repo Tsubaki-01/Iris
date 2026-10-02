@@ -14,6 +14,14 @@ from .base import (
 )
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
+from .hooks import (
+    CommandHookHandlerConfig,
+    HookConfig,
+    HookHandlerConfig,
+    MiddlewareConfig,
+    PythonHookHandlerConfig,
+    ToolMiddlewareConfig,
+)
 from .mcp import AgentMCPConfig, MCPServerOverride
 from .tools import build_tool_registry
 
@@ -25,12 +33,18 @@ __all__ = [
     "CompactionConfig",
     "ContextPolicyConfig",
     "CommandConfig",
+    "CommandHookHandlerConfig",
+    "HookConfig",
+    "HookHandlerConfig",
+    "MiddlewareConfig",
     "ModelConfig",
     "MCPServerOverride",
     "PermissionsConfig",
     "PythonToolsConfig",
+    "PythonHookHandlerConfig",
     "SessionConfig",
     "ToolsConfig",
+    "ToolMiddlewareConfig",
     "build_tool_registry",
     "load_agent_config",
 ]

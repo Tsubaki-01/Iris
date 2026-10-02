@@ -11,8 +11,19 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 `AgentRuntime.execute()`。
 
 `RuntimeEnvironment.hook_dispatcher` 保存当前 Agent 的可选进程内派发依赖，不保存到 checkpoint。
-环境构造时把同一 dispatcher 和 command binding 交给工具执行器；内部 `assemble_runtime`
-可以注入它，公开 Factory/Runner 配置入口与 Run 事件接线尚未开放。
+环境构造时把同一 dispatcher 和 command binding 交给工具执行器。`RuntimeFactory.from_config()`
+与 `from_config_path()` 均接收 `hooks: Sequence[HookRegistration] = ()` 和
+`tool_middlewares: Sequence[ToolMiddleware] = ()`，同 Runner 入口共用唯一内部装配。
+YAML 的 `hooks` / `middleware.tools` 在前，SDK 项追加在后；每项工厂每次装配只构造一次，
+随后跨本 Agent 的 session/Run 复用实例。child 只装配自己的配置，不继承父 SDK 项。
+
+扩展工厂使用 `factory(**options)` 同步构造 async handler 或 `ToolMiddleware`，在 provider、
+memory、MCP 资源构造前执行；导入和构造失败为 `IrisConfigError`。命令服务此时只是惰性 binding，
+真正的 MCP/命令 prepare 与失败清理仍归现有环境 owner。没有任何 Hook 时不创建 dispatcher。
+YAML、Python SDK 和命令 JSON 协议示例见 [Hooks](../hooks/README.md)。
+
+Factory 可保存 `run.started` / `run.finished` 处理器供 `AgentRunner(runtime=..., store=...)`
+使用；直接 `AgentRuntime.execute()` 只派发工具事件，不产生 logical-run 事件。
 
 普通工具在权限刷新与 durable claim 后执行 `tool.before`，实际 body 已知后才执行符合资格的
 `tool.after`。反馈通过原 `ToolResult`、历史消息和 cursor 提交；恢复已有结果不会重发处理器。
@@ -20,6 +31,8 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 批末 steer，并向下一获准模型步骤反馈原因。其他错误、取消、期限和资源清理规则保持不变。
 after 控制使用调用级槽，串行与并发都先提交允许提交的已知前缀；未知附加动作由工具层收口，
 已收口时不把确定的 body 改为 unknown。父侧 subagent 专用路径继续绕过工具 Hooks。
+同一事件的处理器串行执行，不代表不同工具调用全局串行。工具 Middleware 的单次
+`wrap_tool_call(call, call_next)` 契约见 [工具扩展](../tools/README.md)。
 
 runtime 始终使用同一逻辑请求、工具定义与流式事件契约；provider 构造时默认选择 Responses，
 也可显式选择 Chat Completions。工具定义、强制选择和请求计量的协议投影由 adapter 负责。
@@ -539,7 +552,8 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 动态采集与选材见 `tests/runtime/test_context_source.py`、`tests/runtime/test_context_selection.py`
 及 `tests/harness/test_context_source_integration.py`，覆盖步骤与恢复、预算顺序和真实 runner 接线。
 工具 Hooks 接线见 `tests/runtime/test_tool_hooks.py`，覆盖身份与 claim、STOP/steer、反馈提交、
-后置控制和并发脚本清理；P1 通用后置控制仍由 `test_tool_post_control.py` 验证。
+后置控制和并发脚本清理；通用后置控制由 `test_tool_post_control.py` 验证。
+`test_extensions_assembly.py` 验证四个公开入口、YAML/SDK 顺序、实例复用和准备失败清理。
 按需工具定义见 `tests/runtime/test_deferred_selection.py` 与
 `tests/harness/test_deferred_tool_context.py`，覆盖发现排序、强制工具、session 隔离和批次恢复。
 

@@ -11,6 +11,7 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,7 +24,9 @@ from ._assembly import RuntimeExecutionScope, assemble_runtime, resolve_runtime_
 from .runtime import AgentRuntime
 
 if TYPE_CHECKING:
+    from ..hooks import HookRegistration
     from ..memory import MemoryService
+    from ..tools import ToolMiddleware
 
 
 class RuntimeFactory:
@@ -47,6 +50,8 @@ class RuntimeFactory:
         memory_service: MemoryService | None = None,
         context_access: ContextAccessPort | None = None,
         context_source: ContextSource | None = None,
+        hooks: Sequence[HookRegistration] = (),
+        tool_middlewares: Sequence[ToolMiddleware] = (),
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从 `agent.yaml` 路径构造 runtime。
@@ -57,6 +62,8 @@ class RuntimeFactory:
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             context_source (ContextSource | None): 可选的每步运行态采集接口。
+            hooks (Sequence[HookRegistration]): 追加在 YAML 项之后的当前 Agent 处理器。
+            tool_middlewares (Sequence[ToolMiddleware]): 追加在 YAML 项之后的工具包装实例。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -71,6 +78,8 @@ class RuntimeFactory:
             memory_service=memory_service,
             context_access=context_access,
             context_source=context_source,
+            hooks=hooks,
+            tool_middlewares=tool_middlewares,
             api_key=api_key,
         )
 
@@ -84,6 +93,8 @@ class RuntimeFactory:
         memory_service: MemoryService | None = None,
         context_access: ContextAccessPort | None = None,
         context_source: ContextSource | None = None,
+        hooks: Sequence[HookRegistration] = (),
+        tool_middlewares: Sequence[ToolMiddleware] = (),
         api_key: str | None = None,
     ) -> AgentRuntime:
         """从已校验的 `AgentConfig` 构造 runtime。
@@ -95,6 +106,8 @@ class RuntimeFactory:
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             context_source (ContextSource | None): 可选的每步运行态采集接口。
+            hooks (Sequence[HookRegistration]): 追加在 YAML 项之后的当前 Agent 处理器。
+            tool_middlewares (Sequence[ToolMiddleware]): 追加在 YAML 项之后的工具包装实例。
             api_key (str | None): 创建真实 provider client 时使用的 API key。
 
         Returns:
@@ -111,6 +124,8 @@ class RuntimeFactory:
             memory_service=memory_service,
             context_access=context_access,
             context_source=context_source,
+            hooks=hooks,
+            tool_middlewares=tool_middlewares,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
             boundary=resolve_runtime_boundary(config, config_path=config_path),

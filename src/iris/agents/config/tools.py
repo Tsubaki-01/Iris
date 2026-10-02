@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from importlib import import_module
-from typing import Any
 
 from ...command.service import CommandBinding
 from ...config import get_config
@@ -30,6 +28,7 @@ from ...tools.builtin.file import (
 )
 from ...tools.builtin.python import RunPythonTool
 from ...tools.builtin.web import WebFetchTool, WebSearchTool
+from ._imports import import_ref
 from .base import ToolsConfig
 
 _FileToolFactory = Callable[[WorkspaceFileService], BaseTool]
@@ -89,9 +88,9 @@ def build_tool_registry(
         command_binding=command_binding,
     )
     for ref in config.python.functions:
-        registry.register_function(_import_ref(ref))
+        registry.register_function(import_ref(ref))
     for ref in config.python.registrars:
-        registrar = _import_ref(ref)
+        registrar = import_ref(ref)
         try:
             registrar(registry)
         except TypeError as exc:
@@ -155,34 +154,6 @@ def _register_builtin_tools(
             if human_factory is None:
                 raise IrisConfigError("未知内置工具", tool=name)
             registry.register(human_factory())
-
-
-def _import_ref(ref: str) -> Callable[..., Any]:
-    """导入 `module:function` Python 引用。
-
-    Args:
-        ref (str): Python 引用字符串。
-
-    Returns:
-        Callable[..., Any]: 导入后的可调用对象。
-
-    Raises:
-        IrisConfigError: 引用格式、模块、属性或可调用性不合法时抛出。
-    """
-    module_name, separator, function_name = ref.partition(":")
-    if not separator or not module_name or not function_name:
-        raise IrisConfigError("Python 引用必须使用 module:function 格式", ref=ref)
-    try:
-        module = import_module(module_name)
-    except ModuleNotFoundError as exc:
-        raise IrisConfigError("Python 引用模块不存在", ref=ref) from exc
-    try:
-        target = getattr(module, function_name)
-    except AttributeError as exc:
-        raise IrisConfigError("Python 引用函数不存在", ref=ref) from exc
-    if not callable(target):
-        raise IrisConfigError("Python 引用目标不可调用", ref=ref)
-    return target
 
 
 __all__ = ["build_tool_registry"]

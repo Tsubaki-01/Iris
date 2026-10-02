@@ -7,15 +7,18 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iris.command import CommandBinding, CommandConfig, CommandEnvironment, CommandMode
 from iris.command.docker import DockerCommandService
-from iris.hooks import ToolAfterEvent
+from iris.hooks import ToolAfterEvent, event_to_dict
 from iris.hooks._dispatch_types import CommandHookRegistration
 from iris.hooks.command import CommandHookAdapter
 from iris.hooks.dispatcher import HookDispatcher
+from iris.message import TextBlock, image_block_from_saved
 from iris.sandbox import DockerConfig
 from iris.tools import ToolResult
+from iris.utils.images import save_image
 
 
 @pytest.fixture(autouse=True)
@@ -68,10 +71,25 @@ def _event(workspace: Path) -> ToolAfterEvent:
 
 @pytest.mark.asyncio
 async def test_real_docker_hook_json_and_independent_timeout(tmp_path: Path) -> None:
-    """完整事件经过上传文件及 helper stdin，工作目录写回并产生模型反馈。"""
+    """图片事件保留宿主路径，脚本按 workspace 映射读取两份图片并返回反馈。"""
+    source = tmp_path / "原图.png"
+    with Image.new("RGB", (8, 5), "red") as image:
+        image.save(source)
+    imported = image_block_from_saved(
+        save_image(source, cache_dir=tmp_path / "cache"), name="原图.png"
+    )
+    event = _event(tmp_path)
+    event.result.content = [TextBlock(text="中文"), imported]
     (tmp_path / "check.py").write_text(
         "import json, pathlib, sys, time\n"
         "event = json.loads(sys.stdin.buffer.read())\n"
+        "path_type = (pathlib.PureWindowsPath\n"
+        "    if pathlib.PureWindowsPath(event['workspace']).drive else pathlib.PurePosixPath)\n"
+        "for kind in ('original', 'model'):\n"
+        "    host_path = path_type(event['result']['content'][1][kind]['path'])\n"
+        "    relative = host_path.relative_to(path_type(event['workspace']))\n"
+        "    data = pathlib.Path('/workspace', *relative.parts).read_bytes()\n"
+        "    pathlib.Path('received-' + kind + '.png').write_bytes(data)\n"
         "pathlib.Path('received.json').write_text(json.dumps(event), encoding='utf-8')\n"
         "time.sleep(0.04)\n"
         "print('diagnostic only', file=sys.stderr)\n"
@@ -81,11 +99,13 @@ async def test_real_docker_hook_json_and_independent_timeout(tmp_path: Path) -> 
     service = DockerCommandService(tmp_path, DockerConfig(), workspace_writable=True)
     try:
         await service.prepare()
-        outcome = await _dispatcher(service, tmp_path, ("check",)).dispatch(_event(tmp_path))
+        outcome = await _dispatcher(service, tmp_path, ("check",)).dispatch(event)
         assert outcome.control is None
         assert outcome.feedback == ("已检查：中文",)
         received = json.loads((tmp_path / "received.json").read_text(encoding="utf-8"))
-        assert received["event"] == "tool.after" and received["call_id"] == "tool-call"
+        assert received == event_to_dict(event)
+        assert (tmp_path / "received-original.png").read_bytes() == source.read_bytes()
+        assert (tmp_path / "received-model.png").read_bytes() == imported.model.path.read_bytes()
     finally:
         await service.aclose()
 

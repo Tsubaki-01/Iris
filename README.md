@@ -47,8 +47,8 @@ run 或 runner 结束保留缓存，fork 继续依赖源 session 图片目录；
 
 ## 本地命令与可选 Docker 沙箱
 
-普通文件、Python 扩展和 MCP 工具在宿主执行。只有显式声明的 `exec.command` 使用所选
-命令环境，模型看到的工具名为 `exec_command`。Native 是默认模式，无需 Docker：
+普通文件、Python 扩展和 MCP 工具在宿主执行。显式声明的命令工具和配置式命令 Hook 使用所选
+命令环境；`exec.command` 对应的模型调用名为 `exec_command`。Native 是默认模式，无需 Docker：
 
 ```yaml
 name: local-command-agent
@@ -118,6 +118,29 @@ Iris 实现的是工具权限、命令生命周期和 run 结算协调；OS 隔�
 不需要模型 API key 的可重复示例见 [`examples/command`](examples/command/README.md)，
 命令执行契约见 [`iris.command`](src/iris/command/README.md)，镜像与容器配置见
 [`iris.sandbox`](src/iris/sandbox/README.md)。
+
+## Hooks 与工具 Middleware
+
+Hooks 在明确的事件时点执行附加逻辑，可使用 Python 处理器或一次性 JSON 命令脚本：
+
+| 事件 | 时点与能力 |
+| --- | --- |
+| `run.started` | 新 Run 的初始受控任务内、首个模型步骤前；附加动作 |
+| `run.finished` | 新终态提交后；Python 覆盖各停止原因，命令脚本仅在 `COMPLETED` 后运行 |
+| `tool.before` | 权限和 claim 后；允许拒绝本次工具调用 |
+| `tool.after` | 实际工具 body 结果已知后；允许追加模型反馈 |
+
+工具 Middleware 使用 `wrap_tool_call(call, call_next)` 包裹单次工具调用，可短路或返回新结果；
+`call_next()` 最多执行一次。它不提供 Run/model 包装、重试或参数改写。Hook 不修改工具参数、
+不替换结果，也不决定 Run 续跑。父侧 subagent 委派不进入工具扩展链，child 独立配置自己的扩展。
+
+YAML 通过 `hooks` 和 `middleware.tools` 声明；Runner 与 RuntimeFactory 的配置构造入口
+支持 `hooks`、`tool_middlewares`，SDK 项追加在 YAML 项之后。直接运行低层 Runtime 只派发
+工具事件；Run 事件由 harness 拥有。结束处理可能延长 SDK 返回时间，但不改写已提交结果；
+同 session 的后续输入由 SessionManager 等待完成。Hook 尽力执行，不为旧结果补发或重放。
+
+配置、脚本协议和限制见 [Hooks](src/iris/hooks/README.md)，包装接口见
+[工具系统](src/iris/tools/README.md#middleware)。
 
 ## Context Engineering
 

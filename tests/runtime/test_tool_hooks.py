@@ -326,7 +326,7 @@ async def test_internal_assembly_injects_one_dispatcher_into_executor(tmp_path: 
         seen.append(cast(ToolBeforeEvent, event).tool_name)
         return ToolBeforeResult(deny_reason="skip command")
 
-    dispatcher = HookDispatcher([HookRegistration(event="tool.before", name="deny", handler=deny)])
+    registration = HookRegistration(event="tool.before", name="deny", handler=deny)
     config = AgentConfig(
         name="hook-assembly",
         model={"provider": "openai", "name": "fake"},
@@ -352,7 +352,7 @@ async def test_internal_assembly_injects_one_dispatcher_into_executor(tmp_path: 
         api_key=None,
         execution_scope=RuntimeExecutionScope.ROOT,
         boundary=resolve_runtime_boundary(config),
-        hook_dispatcher=dispatcher,
+        hooks=[registration],
     )
     activation = start_activation()
     commits = FakeRuntimeCommitPort(activation)

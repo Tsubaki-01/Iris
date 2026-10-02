@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iris.agents import CompactionConfig
 from iris.harness import AgentRunner
@@ -14,7 +15,16 @@ from iris.harness._context_access import ContextAccess
 from iris.hooks import HookEvent, HookHandler, HookRegistration, ToolAfterEvent, ToolAfterResult
 from iris.hooks.dispatcher import HookDispatcher
 from iris.lifecycle import AgentRunRequest, LifecycleStore, RunStopReason
-from iris.message import LLMRequest, LLMResponse, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    LLMResponse,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    image_reference_text,
+)
 from iris.runtime import AgentRuntime
 from iris.store import SQLiteStore
 from iris.tools import ToolErrorInfo, ToolRegistry, ToolResult
@@ -29,8 +39,22 @@ _SESSION = "feedback-session"
 _CALL = "feedback-call"
 
 
+@pytest.fixture
+def tool_image(tmp_path: Path) -> ImageBlock:
+    """提供路径和尺寸不同的真实原图与模型副本。"""
+    original_path = tmp_path / "original.png"
+    model_path = tmp_path / "model.png"
+    Image.new("RGB", (32, 24), "red").save(original_path)
+    Image.new("RGB", (16, 12), "red").save(model_path)
+    return ImageBlock(
+        original=ImageFileRef(path=original_path, mime_type="image/png", width=32, height=24),
+        model=ImageFileRef(path=model_path, mime_type="image/png", width=16, height=12),
+        name="feedback-image",
+    )
+
+
 def _with_feedback(
-    runtime: AgentRuntime, feedback: tuple[str, ...], effects: list[str]
+    runtime: AgentRuntime, feedback: tuple[str, ...], effects: list[str], image: ImageBlock
 ) -> AgentRuntime:
     """通过环境构造期真实接线，将两段反馈各自交给独立 after 处理器。"""
 
@@ -42,6 +66,9 @@ def _with_feedback(
             assert isinstance(event, ToolAfterEvent)
             assert event.call_id == _CALL
             assert event.result.hook_feedback == ()
+            assert [part for part in event.result.content if isinstance(part, ImageBlock)] == [
+                image
+            ]
             effects.append(f"after:{index}")
             return ToolAfterResult(feedback=text)
 
@@ -96,14 +123,18 @@ def _result_block(store: LifecycleStore) -> tuple[int, int, ToolResultBlock]:
 @pytest.mark.parametrize("failed", [False, True])
 @pytest.mark.parametrize("large", [False, True])
 async def test_feedback_survives_runner_commit_and_context_reads(
-    tmp_path: Path, lifecycle_store: LifecycleStore, failed: bool, large: bool
+    tmp_path: Path,
+    lifecycle_store: LifecycleStore,
+    failed: bool,
+    large: bool,
+    tool_image: ImageBlock,
 ) -> None:
-    """成功/错误及超额正文都经过真实提交，结果、历史和全文回读保持一致。"""
+    """图文成功/错误及超额正文都经过真实提交，图片与反馈持久化后仍可回读。"""
     feedback = (_FEEDBACK[0] + ("资料" * 700 if large else ""), _FEEDBACK[1])
     raw = ToolResult(
         tool_use_id="",
         tool_name="feedback_source",
-        content=[TextBlock(text="原始工具正文")],
+        content=[TextBlock(text="原始工具正文"), tool_image],
         is_error=failed,
         error=ToolErrorInfo(code="SOURCE_FAILED", message="原始工具错误") if failed else None,
         hook_feedback=feedback,
@@ -125,7 +156,10 @@ async def test_feedback_survives_runner_commit_and_context_reads(
     )
     runner = AgentRunner(
         runtime=_with_feedback(
-            build_runtime(tmp_path, registry=registry, provider=provider), feedback, effects
+            build_runtime(tmp_path, registry=registry, provider=provider),
+            feedback,
+            effects,
+            tool_image,
         ),
         store=lifecycle_store,
     )
@@ -142,6 +176,7 @@ async def test_feedback_survives_runner_commit_and_context_reads(
     record = store.load_tool_call("feedback-run", _CALL)
     assert record is not None and record.result is not None
     saved = record.result
+    assert [part for part in saved.content if isinstance(part, ImageBlock)] == [tool_image]
     assert saved.is_error is failed
     assert saved.hook_feedback == (() if large else feedback)
     assert saved.model_content.count("Error[SOURCE_FAILED]") == int(failed)
@@ -156,6 +191,7 @@ async def test_feedback_survives_runner_commit_and_context_reads(
         if item.tool_use_id == _CALL
     ]
     assert len(delivered) == 1
+    assert [part for part in delivered[0].content if isinstance(part, ImageBlock)] == [tool_image]
     assert delivered[0].is_error is failed
     assert delivered[0].name == block.name
     if large:
@@ -167,32 +203,44 @@ async def test_feedback_survives_runner_commit_and_context_reads(
 
     if large:
         assert saved.artifact is not None and saved.artifact.text_path is not None
-        assert saved.artifact.text_path.read_text(encoding="utf-8") == raw.model_content
+        expected_full = f"{image_reference_text(tool_image)}\n\n{raw.model_content}"
+        assert saved.artifact.text_path.read_text(encoding="utf-8") == expected_full
         assert len(saved.model_content) <= 1000
     else:
         assert saved.artifact is None
         assert saved.model_content == raw.model_content
+        expected_full = "\n".join(
+            [
+                "Error[SOURCE_FAILED]: 原始工具错误" if failed else "原始工具正文",
+                image_reference_text(tool_image),
+                *(f"[Hook feedback]\n{text}" for text in feedback),
+            ]
+        )
     access = ContextAccess(store)
     full_text = _read_full(access, f"result:{message_index}:{block_index}", tmp_path)
-    assert full_text == raw.model_content
+    assert full_text == expected_full
     assert full_text.count("[Hook feedback]") == 2
     assert all(full_text.count(item) == 1 for item in feedback)
     message_text = _read_full(access, f"message:{message_index}", tmp_path)
-    assert message_text.endswith(saved.model_content)
+    assert image_reference_text(tool_image) in message_text
+    if large:
+        assert saved.model_content in message_text
+    else:
+        assert message_text.endswith(expected_full)
     assert effects == ["before", "executed", "after:0", "after:1"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failed", [False, True])
 async def test_compaction_receives_feedback_and_preserves_original_reads(
-    tmp_path: Path, lifecycle_store: LifecycleStore, failed: bool
+    tmp_path: Path, lifecycle_store: LifecycleStore, failed: bool, tool_image: ImageBlock
 ) -> None:
-    """反馈进入真实摘要输入；压缩仅改变模型视图，原结果与原文仍可回读。"""
+    """摘要接收图片引用及反馈，原始图片块和正文在压缩后仍可回读。"""
     body = "原始资料" * 230
     raw = ToolResult(
         tool_use_id="",
         tool_name="feedback_source",
-        content=[TextBlock(text=body)],
+        content=[TextBlock(text=body), tool_image],
         is_error=failed,
         error=ToolErrorInfo(code="SOURCE_FAILED", message=body) if failed else None,
         hook_feedback=_FEEDBACK,
@@ -211,7 +259,10 @@ async def test_compaction_receives_feedback_and_preserves_original_reads(
         text_response("压缩后完成"),
     )
     runtime = _with_feedback(
-        build_runtime(tmp_path, registry=registry, provider=provider), _FEEDBACK, effects
+        build_runtime(tmp_path, registry=registry, provider=provider),
+        _FEEDBACK,
+        effects,
+        tool_image,
     )
     runtime.environment.agent_config = runtime.environment.agent_config.model_copy(
         update={"compaction": CompactionConfig(input_budget_tokens=1000)}
@@ -235,7 +286,8 @@ async def test_compaction_receives_feedback_and_preserves_original_reads(
     summary_input = "\n".join(
         message.text for request in provider.summary_requests for message in request.messages
     )
-    assert raw.model_content in summary_input
+    assert body in summary_input
+    assert image_reference_text(tool_image) in summary_input
     assert f"ref=result:{message_index}:{block_index}" in summary_input
     assert all(summary_input.count(item) == 1 for item in _FEEDBACK)
     assert any(message.text.startswith("<summary>") for message in provider.requests[-1].messages)
@@ -248,27 +300,38 @@ async def test_compaction_receives_feedback_and_preserves_original_reads(
     record = store.load_tool_call("compacted-feedback", _CALL)
     assert record is not None and record.result is not None
     assert record.result.hook_feedback == _FEEDBACK
+    assert [part for part in record.result.content if isinstance(part, ImageBlock)] == [tool_image]
+    assert block.content == record.result.model_blocks
     assert block.text == record.result.model_content == raw.model_content
-    access = ContextAccess(store)
-    assert (
-        _read_full(access, f"result:{message_index}:{block_index}", tmp_path) == raw.model_content
+    expected_full = "\n".join(
+        [
+            f"Error[SOURCE_FAILED]: {body}" if failed else body,
+            image_reference_text(tool_image),
+            *(f"[Hook feedback]\n{text}" for text in _FEEDBACK),
+        ]
     )
-    assert _read_full(access, f"message:{message_index}", tmp_path).endswith(raw.model_content)
+    access = ContextAccess(store)
+    assert _read_full(access, f"result:{message_index}:{block_index}", tmp_path) == expected_full
+    assert _read_full(access, f"message:{message_index}", tmp_path).endswith(expected_full)
     assert effects == ["before", "executed", "after:0", "after:1"]
 
 
 @pytest.mark.asyncio
 async def test_recovery_reuses_committed_feedback_without_replaying_tool_or_hooks(
-    tmp_path: Path, lifecycle_store: LifecycleStore
+    tmp_path: Path, lifecycle_store: LifecycleStore, tool_image: ImageBlock
 ) -> None:
     """提交工具结果后的 SDK 中断以原 activation 恢复，不重放已完成 before/body/after。"""
     effects: list[str] = []
     entered = asyncio.Event()
 
-    def feedback_source() -> str:
+    def feedback_source() -> ToolResult:
         """提供可精确计数的真实业务副作用。"""
         effects.append("executed")
-        return "已提交的原始正文"
+        return ToolResult(
+            tool_use_id="",
+            tool_name="feedback_source",
+            content=[TextBlock(text="已提交的原始正文"), tool_image],
+        )
 
     class PauseAfterCommit(StaticProvider):
         """第二步模型入口只在工具结果已提交后到达。"""
@@ -288,7 +351,10 @@ async def test_recovery_reuses_committed_feedback_without_replaying_tool_or_hook
     )
     runner = AgentRunner(
         runtime=_with_feedback(
-            build_runtime(tmp_path, registry=registry, provider=provider), _FEEDBACK, effects
+            build_runtime(tmp_path, registry=registry, provider=provider),
+            _FEEDBACK,
+            effects,
+            tool_image,
         ),
         store=lifecycle_store,
     )
@@ -312,7 +378,9 @@ async def test_recovery_reuses_committed_feedback_without_replaying_tool_or_hook
     before = store.load_tool_call("recover-feedback", _CALL)
     assert before is not None and before.result is not None
     assert before.result.hook_feedback == _FEEDBACK
+    assert [part for part in before.result.content if isinstance(part, ImageBlock)] == [tool_image]
     message_index, block_index, block = _result_block(store)
+    assert block.content == before.result.model_blocks
     assert block.text == before.result.model_content
 
     resumed_provider = StaticProvider(text_response("恢复后完成"))
@@ -321,6 +389,7 @@ async def test_recovery_reuses_committed_feedback_without_replaying_tool_or_hook
             build_runtime(tmp_path, registry=registry, provider=resumed_provider),
             _FEEDBACK,
             effects,
+            tool_image,
         ),
         store=store,
     )
@@ -341,7 +410,16 @@ async def test_recovery_reuses_committed_feedback_without_replaying_tool_or_hook
         if item.tool_use_id == _CALL
     ]
     assert len(delivered) == 1 and delivered[0].text == before.result.model_content
+    assert delivered[0].content == block.content
+    assert delivered[0].text.count("[Hook feedback]") == 2
+    expected_full = "\n".join(
+        [
+            "已提交的原始正文",
+            image_reference_text(tool_image),
+            *(f"[Hook feedback]\n{text}" for text in _FEEDBACK),
+        ]
+    )
     access = ContextAccess(_reopen(store))
-    assert _read_full(access, f"result:{message_index}:{block_index}", tmp_path) == block.text
-    assert _read_full(access, f"message:{message_index}", tmp_path).endswith(block.text)
+    assert _read_full(access, f"result:{message_index}:{block_index}", tmp_path) == expected_full
+    assert _read_full(access, f"message:{message_index}", tmp_path).endswith(expected_full)
     assert effects == expected_effects
