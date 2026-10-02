@@ -149,9 +149,11 @@ class RuntimeEnvironment:
     hook_dispatcher: HookDispatcher | None = None
 
     def __post_init__(self) -> None:
-        """归一化 workspace，并将同一个停止事实映射交给工具桥接。"""
+        """归一化 workspace，交接当前 Agent 的 Hooks 与共享命令依赖。"""
         self.workspace_root = self.workspace_root.resolve()
         self.tool_bridge.command_stop_slots = self.command_stop_slots
+        self.tool_bridge.tool_executor.hook_dispatcher = self.hook_dispatcher
+        self.tool_bridge.tool_executor.command_binding = self.command_binding
 
     async def aprepare(self) -> MCPCatalogSnapshot | None:
         """准备绑定的命令服务和本环境自有 MCP，返回 MCP 目录快照。"""

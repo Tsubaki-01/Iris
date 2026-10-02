@@ -20,7 +20,8 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
-from ..command.models import CommandStopSlot
+from ..command.models import CommandStatus, CommandStopSlot
+from ..command.service import CommandBinding
 from ..exceptions import (
     IrisCancellationRequestedError,
     IrisToolExecutionError,
@@ -34,8 +35,11 @@ from ..hitl.models import (
     ToolCallSnapshot,
     make_call_fingerprint,
 )
+from ..hooks.dispatcher import HookDispatcher
+from ..hooks.models import ToolAfterEvent, ToolBeforeEvent
 from ..message import ToolUseBlock
 from ._execution_control import ToolExecutionControlSlot
+from ._hooks import consume_tool_hook_control, drain_hook_commands
 from ._io import run_tool_io
 from ._middleware_chain import CONTROL_ERRORS, drain_operation, run_middleware_chain
 from ._read_state import ReadFileState
@@ -136,6 +140,8 @@ class ToolExecutor:
         permission_policy: PermissionPolicy | None = None,
         middleware: Sequence[ToolMiddleware] | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        hook_dispatcher: HookDispatcher | None = None,
+        command_binding: CommandBinding | None = None,
     ) -> None:
         """初始化执行器。
 
@@ -146,11 +152,15 @@ class ToolExecutor:
             permission_policy (PermissionPolicy | None): 安全及交互式授权拦截规则处理器。
             middleware (Sequence[ToolMiddleware] | None): 工具调用生命周期钩子。
             circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
+            hook_dispatcher (HookDispatcher | None): 本 Agent 共享的工具 Hook 派发器。
+            command_binding (CommandBinding | None): Hook 停止事实收口使用的命令依赖。
         """
         self.registry = registry
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
         self.middleware = list(middleware or [])
         self.circuit_breaker = circuit_breaker
+        self.hook_dispatcher = hook_dispatcher
+        self.command_binding = command_binding
 
     # endregion
 
@@ -559,6 +569,7 @@ class ToolExecutor:
             context.cancellation.raise_if_requested()
         facts = _ToolExecutionFacts()
         control = ToolExecutionControlSlot()
+        hook_feedback: tuple[str, ...] = ()
 
         def remember_result(result: ToolResult) -> None:
             """只有真实 body 已知，包装器的下游结果才可用于延迟控制提交。"""
@@ -584,7 +595,7 @@ class ToolExecutor:
             self._record_breaker_result(tool.name, result)
             return result
 
-        async def operation() -> ToolResult:
+        async def middleware_operation() -> ToolResult:
             """空链直接执行 body，否则组合一次调用的包装层。"""
             if not self.middleware:
                 return await leaf()
@@ -609,6 +620,75 @@ class ToolExecutor:
                 ),
             )
 
+        async def operation() -> ToolResult:
+            """同一调用 owner 中依次执行 before、包装链与有资格的 after。"""
+            nonlocal hook_feedback
+            dispatcher = self.hook_dispatcher
+            event_fields = {
+                "agent_id": context.agent_id,
+                "session_id": context.session_id,
+                "run_id": context.metadata.get("run_id"),
+                "activation_id": context.metadata.get("activation_id"),
+                "workspace": str(context.workspace_root),
+                "call_id": tool_use.id,
+                "tool_name": tool_use.name,
+                "arguments": prepared.arguments,
+            }
+            if dispatcher is not None:
+                before = await dispatcher.dispatch(
+                    ToolBeforeEvent(**event_fields), cancellation=context.cancellation
+                )
+                if before.control is not None:
+                    await consume_tool_hook_control(
+                        before.control, context, self.command_binding, body_known=False
+                    )
+                if before.rejection is not None:
+                    return self._error_result(
+                        tool_use, before.rejection.code, before.rejection.reason
+                    )
+            try:
+                result = await middleware_operation()
+            except CONTROL_ERRORS:
+                raise
+            except Exception as error:
+                result = self._execution_error_result(tool_use, tool, error)
+            # 该字段只属于本轮真实 Hook；缓存或包装器返回值不能制造反馈。
+            result = result.model_copy(update={"hook_feedback": ()})
+            remember_result(result)
+            slot = context.command_stop_slot
+            if (
+                dispatcher is not None
+                and facts.body_result is not None
+                and control.control is None
+                and slot.cleanup_error is None
+                and slot.status
+                not in {CommandStatus.CANCELLED, CommandStatus.ENVIRONMENT_INTERRUPTED}
+                and not (context.cancellation is not None and context.cancellation.requested)
+                and (slot.receipt is None or slot.status is CommandStatus.TIMED_OUT)
+            ):
+                # 普通 body timeout 可触发 after，但其命令必须先排空。
+                if slot.receipt is not None:
+                    await drain_hook_commands(context, self.command_binding)
+                snapshot = result.model_copy(
+                    update={"tool_use_id": tool_use.id, "tool_name": tool_use.name}
+                )
+                after = await dispatcher.dispatch(
+                    ToolAfterEvent(
+                        **event_fields,
+                        result=snapshot,
+                        body_status="error" if facts.body_result.is_error else "success",
+                    ),
+                    cancellation=context.cancellation,
+                )
+                hook_feedback = after.feedback
+                result = result.model_copy(update={"hook_feedback": hook_feedback})
+                remember_result(result)
+                if after.control is not None:
+                    await consume_tool_hook_control(
+                        after.control, context, self.command_binding, body_known=True
+                    )
+            return result
+
         try:
             result = await self._run_call_operation(operation, context, control)
         except CONTROL_ERRORS as error:
@@ -629,7 +709,7 @@ class ToolExecutor:
         result = await self._finalize_result(
             tool_use=tool_use,
             tool=tool,
-            result=result,
+            result=result.model_copy(update={"hook_feedback": hook_feedback}),
             context=context,
             revealed_tools=facts.revealed_tools,
         )

@@ -11,7 +11,15 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 `AgentRuntime.execute()`。
 
 `RuntimeEnvironment.hook_dispatcher` 保存当前 Agent 的可选进程内派发依赖，不保存到 checkpoint。
-当前阶段提供 Hooks 核心与结果反馈投影，工具及 Run 的触发接线和 YAML 入口尚未开放。
+环境构造时把同一 dispatcher 和 command binding 交给工具执行器；内部 `assemble_runtime`
+可以注入它，公开 Factory/Runner 配置入口与 Run 事件接线尚未开放。
+
+普通工具在权限刷新与 durable claim 后执行 `tool.before`，实际 body 已知后才执行符合资格的
+`tool.after`。反馈通过原 `ToolResult`、历史消息和 cursor 提交；恢复已有结果不会重发处理器。
+`HOOK_REJECTED` / `HOOK_ERROR` 保持工具错误，但不触发 `ToolErrorPolicy.STOP`，因此仍可接收
+批末 steer，并向下一获准模型步骤反馈原因。其他错误、取消、期限和资源清理规则保持不变。
+after 控制使用调用级槽，串行与并发都先提交允许提交的已知前缀；未知附加动作由工具层收口，
+已收口时不把确定的 body 改为 unknown。父侧 subagent 专用路径继续绕过工具 Hooks。
 
 runtime 始终使用同一逻辑请求、工具定义与流式事件契约；provider 构造时默认选择 Responses，
 也可显式选择 Chat Completions。工具定义、强制选择和请求计量的协议投影由 adapter 负责。
@@ -530,6 +538,8 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 `tests/harness/test_context_pruning.py`，分别检查纯请求投影以及实际调用、原文保存和回读。
 动态采集与选材见 `tests/runtime/test_context_source.py`、`tests/runtime/test_context_selection.py`
 及 `tests/harness/test_context_source_integration.py`，覆盖步骤与恢复、预算顺序和真实 runner 接线。
+工具 Hooks 接线见 `tests/runtime/test_tool_hooks.py`，覆盖身份与 claim、STOP/steer、反馈提交、
+后置控制和并发脚本清理；P1 通用后置控制仍由 `test_tool_post_control.py` 验证。
 按需工具定义见 `tests/runtime/test_deferred_selection.py` 与
 `tests/harness/test_deferred_tool_context.py`，覆盖发现排序、强制工具、session 隔离和批次恢复。
 

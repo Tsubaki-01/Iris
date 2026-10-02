@@ -48,6 +48,7 @@ from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
     from ..goal.service import GoalService
+    from ..hooks.dispatcher import HookDispatcher
     from ..memory import MemoryService
 # endregion
 
@@ -171,6 +172,7 @@ def assemble_runtime(
     context_access: ContextAccessPort | None = None,
     context_source: ContextSource | None = None,
     goal_service: GoalService | None = None,
+    hook_dispatcher: HookDispatcher | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
     if config.goal.enabled:
@@ -304,6 +306,7 @@ def assemble_runtime(
         host_os=boundary.command_binding.environment.host_os,
         command_stop_slots=boundary.command_stop_slots,
         context_source=context_source,
+        hook_dispatcher=hook_dispatcher,
     )
     return AgentRuntime(environment)
 

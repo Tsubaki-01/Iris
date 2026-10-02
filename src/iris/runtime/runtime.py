@@ -574,7 +574,7 @@ class AgentRuntime:
             )
             if control_outcome is not None:
                 return control_outcome
-            if result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP:
+            if _stops_on_tool_error(result, activation.options.tool_error_policy):
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.FAILED,
                     cursor=cursor,
@@ -928,9 +928,7 @@ class AgentRuntime:
             steering is not None
             and subagent_call is None
             and next_index == len(cursor.tool_calls)
-            and not (
-                result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP
-            )
+            and not _stops_on_tool_error(result, activation.options.tool_error_policy)
             and not _activation_cancelled(commits, cancellation)
             and not _deadline_expired(commits)
             and not _task_cancellation_pending()
@@ -2224,6 +2222,15 @@ def _tool_run_error(result: ToolResult) -> RunErrorInfo:
         message=result.error.message,
         source="tool",
         details=result.error.details,
+    )
+
+
+def _stops_on_tool_error(result: ToolResult, policy: ToolErrorPolicy) -> bool:
+    """Hook 拒绝仍反馈模型；串行停止和批末 steer 共用同一策略。"""
+    return (
+        result.is_error
+        and policy is ToolErrorPolicy.STOP
+        and (result.error is None or result.error.code not in {"HOOK_REJECTED", "HOOK_ERROR"})
     )
 
 
