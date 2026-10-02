@@ -108,6 +108,34 @@ timer 和失败清理 pending 不随临时 child runner 关闭；它们通过 ex
 父子连接独立，父子权限仍取更严格的组合。live cancel 借用当前 runner 并等待原任务，资源由
 创建它的作用域关闭；关闭异常记日志并保留原结果。非 live 取消先写 durable request，再按需准备。
 
+## Run Hooks
+
+环境中的同一 `HookDispatcher` 同时供工具执行器与 harness 使用。`run.started` 在资源准备、
+Run 准入和 active task 注册后、首模型调用前运行；普通、Goal 和 child 开始共用这个位置。
+准备失败或 Goal 未获准时不派发，WAITING、resume 和 recover 不重发 started。
+开始处理器处于原取消与绝对期限管理内；真实命令 unknown、清理失败和 SDK task 取消保留各自
+原有语义，不制造工具 claim 或伪造 engine checkpoint。
+
+`run.finished` 只由本次新终态提交触发，包括 outcome-ready recovery 的直接终结。
+Python 处理器适用所有终态，命令处理器只适用 COMPLETED；普通失败只记录，原 durable result
+不变。原命令结算完成、pending 移除后才运行 finished；它使用自身期限，不再受已结束 Run 的
+deadline 限制，也不等待慢 observer。历史结果读取不补发；它不是资源释放或必达保证。
+
+存在适用的 finished 处理器时，root 在终态可见前登记完成任务。同 session 的直接 SDK 新 Run
+会暂时报 `IrisRunStateError`；`SessionManager.submit(mode=None/auto)` 在锁外等待，醒来后
+用原参数重新准入，不预留名额。显式 steer 不能发送给 terminal Run，follow-up 保持 FIFO，
+完成通知主动唤醒队列。Goal 保留原 managed-task 等待，并观察共享完成状态与准入错误。
+没有适用 finished 处理器时，保留原 observer 与后继 Run 的并发行为。
+
+取消普通 submit 等待者或默认 Manager detach 不取消结束处理；取消实际 start/resume/recover
+驱动或 `close(cancel_run=True)` 则中断 finished 并排空当前命令后返回。后终态清理失败会报告
+`IrisCommandCleanupError` 并拒绝 root 下的新 Run；已有 cancel/resume/recover 与资源关闭仍可
+使用。它不进入可重试 pending、不再提交终态，宿主应等已有驱动退出并关闭 root 后重建。
+
+live 与 rebuilt child 借用 root 的完成 owner，各自使用本 Agent 的处理器。child 在准备完成、
+同步准入前也检查 root 错误；临时 child 关闭不销毁共享任务。root `aclose()` 会等待这些实际
+任务，包括原 child 已关闭后由后台期限触发的 finished，然后关闭共享命令服务。
+
 ## 会话 Todo 读取
 
 启用 `todo.enabled` 后，`await runner.get_todo(session_id)` 返回当前工作区的 Markdown

@@ -19,6 +19,7 @@ from iris.harness import (
     SessionManager,
     SubmissionEvent,
 )
+from iris.harness._hooks import HookLifecycle
 from iris.lifecycle import RunEventKind, RunStopReason
 from iris.store import InMemoryLifecycleStore
 
@@ -47,6 +48,7 @@ class _ReplayRunner:
     _goal_service = None
 
     def __init__(self, events: list[RunEvent]) -> None:
+        self._hook_lifecycle = HookLifecycle(cast(AgentRunner, self))
         self.events = events
         self.on_first_list: Callable[[], None] | None = None
         self.list_calls = 0

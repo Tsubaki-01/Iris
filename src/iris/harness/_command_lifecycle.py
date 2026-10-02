@@ -107,7 +107,9 @@ class CommandLifecycle:
                     raise error
                 return await runner._perform_command_settlement(pending)
         except IrisCommandCleanupError as exc:
-            self.report_failure(pending.run_id, exc)
+            # 后终态 Hook 已移除 pending，其资源错误由共享 Hook owner 报告。
+            if pending.run_id in self.pending:
+                self.report_failure(pending.run_id, exc)
             raise
         except Exception:
             # store/fence 等错误继续走原 durable recovery，不由 close 隐式重试提交。

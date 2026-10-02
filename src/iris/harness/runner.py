@@ -105,7 +105,7 @@ from ..runtime._assembly import (
     assemble_runtime,
     resolve_runtime_boundary,
 )
-from ..runtime.runtime import _project_tool_result_cursor, _tool_run_error
+from ..runtime.runtime import _normalize_run_error, _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..todo import TodoSnapshot
 from ..todo.document import read_todo
@@ -124,6 +124,7 @@ from ._commit_port import StoreRuntimeCommitPort, _WaitingSubagentContinuationAd
 from ._context_access import ContextAccess
 from ._events import _RunEventCollector
 from ._goal import validate_goal_options
+from ._hooks import HookLifecycle, HookStartControl, run_started
 from ._memory_maintenance import MemoryMaintenance
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
@@ -239,7 +240,7 @@ class ActiveActivation:
     run_id: str
     activation_id: str
     signal: _MutableCancellationSignal
-    task: asyncio.Task[RuntimeActivationResult] | None = None
+    task: asyncio.Task[RuntimeActivationResult | HookStartControl] | None = None
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     event_collector: _RunEventCollector = field(default_factory=_RunEventCollector)
     steering: RuntimeSteeringPort | None = None
@@ -303,6 +304,7 @@ class AgentRunner:
         self._prepare_task: asyncio.Task[None] | None = None
         self._resources_closed = False
         self._command_lifecycle = CommandLifecycle(self)
+        self._hook_lifecycle = HookLifecycle(self)
         self._command_target: CommandTarget = RootCommandTarget(self)
         self._live_publisher = live_publisher
         if live_publisher is None:
@@ -428,6 +430,7 @@ class AgentRunner:
             await asyncio.shield(self._prepare_task)
         if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
             await self._command_lifecycle.aclose()
+            await self._hook_lifecycle.aclose()
         await self._close_owned_resources()
 
     async def _close_owned_resources(self) -> None:
@@ -622,6 +625,7 @@ class AgentRunner:
         """
         await self.aprepare()
         command, cursor = self._build_start_facts(request, options=options)
+        self._hook_lifecycle.check_admission(command.request.session_id)
         created = self.store.create_run(command)
         if created.checkpoint != command.initial_checkpoint:
             raise IrisRunConflictError("create_run 返回了意外 initial checkpoint")
@@ -668,6 +672,7 @@ class AgentRunner:
             ),
             options=goal.run_options,
         )
+        self._hook_lifecycle.check_admission(command.request.session_id)
         admitted = service.store.admit_goal_run(AdmitGoalRun(expected=expected, create_run=command))
         return admitted, cursor
 
@@ -1513,23 +1518,37 @@ class AgentRunner:
         new_activation_id = (
             f"act_{uuid.uuid4().hex}" if disposition is not RecoveryDisposition.FINALIZE else None
         )
-        recovered = self.store.recover_active_run(
-            RecoverActiveRun(
-                run_id=run.run_id,
-                expected_run_revision=run.revision,
-                expected_activation_id=expected,
-                expected_checkpoint_sequence=checkpoint.sequence,
-                recovery_disposition=disposition,
-                new_activation_id=new_activation_id,
-                now=self._now(),
+        finished = (
+            self._hook_lifecycle.register_finished(
+                self, run, stop_reason=RunStopReason.COMPLETED, activation_id=expected
             )
+            if disposition is RecoveryDisposition.FINALIZE
+            else None
         )
+        try:
+            recovered = self.store.recover_active_run(
+                RecoverActiveRun(
+                    run_id=run.run_id,
+                    expected_run_revision=run.revision,
+                    expected_activation_id=expected,
+                    expected_checkpoint_sequence=checkpoint.sequence,
+                    recovery_disposition=disposition,
+                    new_activation_id=new_activation_id,
+                    now=self._now(),
+                )
+            )
+        except BaseException:
+            self._hook_lifecycle.withdraw_finished(finished)
+            raise
         recovered_events = self._event_collector(durable_event_callback)
         recovered_events.record(recovered.events)
         if recovered.run.phase is RunPhase.TERMINAL:
             self._command_lifecycle.terminal(run.run_id)
+            result = self._require_result(run.run_id)
+            self._hook_lifecycle.publish_finished(finished, result)
+            await self._hook_lifecycle.join_finished(run.run_id)
             await self._deliver_events(recovered_events.take_pending_events())
-            return self._require_result(run.run_id)
+            return result
         if disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
             result = await self._settle_command(
                 recovered.run,
@@ -2052,20 +2071,21 @@ class AgentRunner:
                 )
                 return self._require_result(active.run_id)
             self._command_lifecycle.register_deadline(port.run, self._command_target)
-            active.task = asyncio.create_task(
-                self.runtime.execute(
-                    activation,
-                    commits=port,
-                    cancellation=active.signal,
-                    steering=active.steering,
-                    stream_sink=self._stream_sink,
-                )
-            )
+            active.task = asyncio.create_task(self._run_engine(active, activation, port))
             # --- 2. 把每种退出路径映射为 durable outcome ---
+            start_control: HookStartControl | None = None
             try:
                 engine_result = await active.task
-                await self._settle_engine_result(active, engine_result, port)
+                if isinstance(engine_result, HookStartControl):
+                    start_control = engine_result
+                    await self._settle_start_control(active, engine_result, port)
+                else:
+                    await self._settle_engine_result(active, engine_result, port)
             except asyncio.CancelledError:
+                # 终态已提交时，结束处理由共享 owner 收口，不能再创建第二份结算。
+                if self.get_run(active.run_id).phase is RunPhase.TERMINAL:
+                    await self._hook_lifecycle.cancel_run(active.run_id)
+                    raise
                 # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
                 if not active.signal.requested:
                     call_id, failed_slot = next(
@@ -2078,6 +2098,9 @@ class AgentRunner:
                         ),
                         (None, None),
                     )
+                    if start_control is not None:
+                        call_id = start_control.control.call_id
+                        failed_slot = start_control.control.stop_slot
                     cleanup = asyncio.create_task(
                         self._settle_command(
                             port.run,
@@ -2128,6 +2151,61 @@ class AgentRunner:
                 active.settled.set()
             await self._deliver_events(active.event_collector.take_pending_events())
         return self._require_result(active.run_id)
+
+    async def _run_engine(
+        self,
+        active: ActiveActivation,
+        activation: RuntimeActivationInput,
+        port: StoreRuntimeCommitPort,
+    ) -> RuntimeActivationResult | HookStartControl:
+        """在同一个受取消管理的任务内完成 START，再进入 inner engine。"""
+        if activation.kind == "start":
+            control = await run_started(self, active, activation)
+            if control is not None:
+                return control
+        return await self.runtime.execute(
+            activation,
+            commits=port,
+            cancellation=active.signal,
+            steering=active.steering,
+            stream_sink=self._stream_sink,
+        )
+
+    async def _settle_start_control(
+        self,
+        active: ActiveActivation,
+        start: HookStartControl,
+        port: StoreRuntimeCommitPort,
+    ) -> None:
+        """直接结算首模型前的控制事实，不制造 engine cursor 或工具 claim。"""
+        control = start.control
+        slot = control.stop_slot
+        unknown = control.unknown_error
+        if unknown is not None:
+            reason = RunStopReason.OUTCOME_UNKNOWN
+            error = _normalize_run_error(unknown)
+        elif control.origin == "task_cancelled" and not active.signal.requested:
+            raise control.error
+        elif active.signal.deadline_requested:
+            reason, error = RunStopReason.DEADLINE_EXCEEDED, None
+        elif active.signal.requested or control.origin in {
+            "run_cancelled",
+            "environment_interrupted",
+        }:
+            reason, error = RunStopReason.CANCELLED, None
+        else:
+            reason = RunStopReason.FAILED
+            error = _normalize_run_error(cast(Exception, control.error))
+        await self._settle_command(
+            port.run,
+            activation_id=active.activation_id,
+            stop_reason=reason,
+            error=error,
+            events=active.event_collector,
+            receipt=slot.receipt if slot is not None else None,
+            call_id=control.call_id,
+            initial_cleanup_error=slot.cleanup_error if slot is not None else None,
+        )
 
     async def _finish_cancelled_task(
         self,
@@ -2339,7 +2417,12 @@ class AgentRunner:
                 initial_error=initial_cleanup_error,
             )
             lifecycle.pending[run.run_id] = pending
-        return await lifecycle.join(pending)
+        try:
+            return await lifecycle.join(pending)
+        except asyncio.CancelledError:
+            # attempt 的 shield 不延长实际调用者已明确取消的结束处理。
+            await self._hook_lifecycle.cancel_run(run.run_id)
+            raise
 
     async def _perform_command_settlement(self, pending: PendingSettlement) -> RunResult | None:
         """单个 attempt 独占 child-first、排空和终态提交。"""
@@ -2365,21 +2448,33 @@ class AgentRunner:
             else:
                 await binding.service.wait_drained(pending.receipt)
         result: RunResult | None = None
+        finished = None
         if pending.stop_reason is not None:
             current = cast(RunRecord, self.store.load_run(run.run_id))
-            committed = self.store.finish_run(
-                FinishRun(
-                    run_id=run.run_id,
-                    expected_run_revision=current.revision,
-                    activation_id=pending.activation_id,
+            if current.phase is not RunPhase.TERMINAL:
+                finished = self._hook_lifecycle.register_finished(
+                    self,
+                    current,
                     stop_reason=pending.stop_reason,
-                    error=pending.error,
-                    model_failure_usage=pending.model_failure_usage,
-                    assistant_message=pending.assistant_message,
-                    interaction_close_reason=pending.interaction_close_reason,
-                    now=self._now(),
+                    activation_id=pending.activation_id,
                 )
-            )
+            try:
+                committed = self.store.finish_run(
+                    FinishRun(
+                        run_id=run.run_id,
+                        expected_run_revision=current.revision,
+                        activation_id=pending.activation_id,
+                        stop_reason=pending.stop_reason,
+                        error=pending.error,
+                        model_failure_usage=pending.model_failure_usage,
+                        assistant_message=pending.assistant_message,
+                        interaction_close_reason=pending.interaction_close_reason,
+                        now=self._now(),
+                    )
+                )
+            except BaseException:
+                self._hook_lifecycle.withdraw_finished(finished)
+                raise
             pending.events.record(committed.events)
             result = committed.result
             self._command_lifecycle.terminal(run.run_id)
@@ -2389,6 +2484,9 @@ class AgentRunner:
             if key[0] == run.run_id:
                 del slots[key]
         self._command_lifecycle.pending.pop(run.run_id)
+        if result is not None:
+            self._hook_lifecycle.publish_finished(finished, result)
+            await self._hook_lifecycle.join_finished(run.run_id)
         await self._deliver_events(pending.events.take_pending_events())
         return result
 
