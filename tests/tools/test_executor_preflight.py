@@ -1,22 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from iris.hitl import PermissionPrompt
 from iris.message import ToolUseBlock
 from iris.tools import (
-    BaseTool,
     CircuitBreaker,
     DefaultPermissionPolicy,
     PermissionDecision,
     PermissionEffect,
+    ToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -73,14 +73,9 @@ def test_prepare_many_returns_human_gate_without_execution_side_effects(
         return "written"
 
     class Middleware(ToolMiddleware):
-        async def before_call(
-            self,
-            tool: BaseTool,
-            params: dict[str, Any],
-            context: ToolExecutionContext,
-        ) -> None:
-            del tool, params, context
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             middleware_calls.append("before")
+            return await call_next()
 
     registry = ToolRegistry()
     registry.register_function(
@@ -152,14 +147,9 @@ async def test_execute_one_applies_deny_before_execution_lifecycle(tmp_path: Pat
         return "written"
 
     class Middleware(ToolMiddleware):
-        async def before_call(
-            self,
-            tool: BaseTool,
-            params: dict[str, Any],
-            context: ToolExecutionContext,
-        ) -> None:
-            del tool, params, context
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             middleware_calls.append("before")
+            return await call_next()
 
     registry = ToolRegistry()
     registry.register_function(write_note, description="写入笔记")

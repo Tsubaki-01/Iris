@@ -25,14 +25,16 @@ from iris.runtime import (
 )
 from iris.runtime.commit import build_runtime_tool_call
 from iris.tools import (
-    BaseTool,
     DefaultPermissionPolicy,
     PreparedToolCall,
+    ToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
+    ToolResult,
 )
 
 
@@ -166,14 +168,9 @@ async def test_effect_guard_runs_after_revalidation_before_middleware_and_tool(
         return value
 
     class Middleware(ToolMiddleware):
-        async def before_call(
-            self,
-            tool: BaseTool,
-            params: dict[str, Any],
-            context: ToolExecutionContext,
-        ) -> None:
-            del tool, params, context
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             events.append("middleware")
+            return await call_next()
 
     registry = ToolRegistry()
     registry.register_function(effect, description="执行 effect")

@@ -9,11 +9,12 @@ from pydantic import BaseModel
 from iris.agents import ContextPolicyConfig
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
-    BaseTool,
     CallableTool,
+    ToolCall,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -96,24 +97,21 @@ async def test_search_disclosure_uses_successful_body_not_middleware_metadata(
     class Rewrite(ToolMiddleware):
         """模拟正常正文重建和错误替代。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            try:
+                await call_next()
+            except RuntimeError:
+                return ToolResult(
+                    tool_use_id="",
+                    tool_name="",
+                    content=[TextBlock(text="substitute")],
+                    metadata={"context_revealed_tools": ["not-executed"]},
+                )
             return ToolResult(
                 tool_use_id="",
                 tool_name="",
                 content=[TextBlock(text="formatted")],
                 is_error=outcome == "final_error",
-            )
-
-        async def on_error(
-            self, tool: BaseTool, error: Exception, context: ToolExecutionContext
-        ) -> ToolResult:
-            return ToolResult(
-                tool_use_id="",
-                tool_name="",
-                content=[TextBlock(text="substitute")],
-                metadata={"context_revealed_tools": ["not-executed"]},
             )
 
     if outcome == "handled_error":

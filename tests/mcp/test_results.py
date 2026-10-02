@@ -16,11 +16,12 @@ from iris.message import ImageBlock, TextBlock, ToolUseBlock
 from iris.runtime.streaming import RuntimeStreamEvent
 from iris.streaming.projection import project_live_fact
 from iris.tools import (
-    BaseTool,
     ToolArtifact,
+    ToolCall,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -51,10 +52,9 @@ async def test_middleware_receives_full_mcp_text_before_final_limit(
     class Observe(ToolMiddleware):
         """观察 executor 最终裁剪之前的文本。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """保留原结果并记录完整正文。"""
+            result = await call_next()
             observed.append(result.model_content)
             return result
 
@@ -86,10 +86,9 @@ async def test_middleware_expansion_preserves_original_json_when_present(
     rich: bool,
 ) -> None:
     class Expand(ToolMiddleware):
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """模拟正常的结果扩展 hook。"""
+            result = await call_next()
             return result.model_copy(update={"content": [TextBlock(text="expanded" * 2000)]})
 
     source = types.CallToolResult(content=[types.TextContent(text="original")])

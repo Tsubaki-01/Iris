@@ -16,13 +16,14 @@ from iris.command import (
 from iris.exceptions import IrisCommandCleanupError, IrisCommandError, IrisToolOutcomeUnknownError
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
-    BaseTool,
     DefaultPermissionPolicy,
     RunPythonTool,
+    ToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
     ToolTimeoutOwner,
@@ -238,10 +239,9 @@ async def test_python_middleware_replacement_cannot_erase_receipt(tmp_path: Path
     class ReplaceResult(ToolMiddleware):
         """模拟完全替换正文的正常结果后处理。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """返回不携带原对象信息的新结果。"""
+            await call_next()
             return ToolResult(tool_use_id="", tool_name="", content=[TextBlock(text="replacement")])
 
     receipt = CommandStopReceipt("service", "stop")

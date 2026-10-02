@@ -29,6 +29,7 @@ from ..exceptions import (
     IrisToolValidationError,
 )
 from ..message import DataBlock, ImageBlock, Msg, Role, TextBlock, ToolResultBlock
+from ._execution_control import ToolExecutionControlSlot
 from ._read_state import ReadFileState
 from .schema import (
     callable_input_model,
@@ -244,6 +245,7 @@ class ToolExecutionContext(BaseModel):
     cancellation: CancellationSignal | None = Field(default=None, exclude=True)
     tool_timeout_seconds: float | None = None
     command_stop_slot: CommandStopSlot = Field(default_factory=CommandStopSlot, exclude=True)
+    execution_control: ToolExecutionControlSlot | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -259,6 +261,8 @@ class ToolExecutionContext(BaseModel):
             copied.cancellation = self.cancellation
         if update is None or "command_stop_slot" not in update:
             copied.command_stop_slot = self.command_stop_slot
+        if update is None or "execution_control" not in update:
+            copied.execution_control = self.execution_control
         return copied
 
 

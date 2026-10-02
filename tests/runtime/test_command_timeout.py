@@ -25,7 +25,14 @@ from iris.exceptions import IrisCommandCleanupError, IrisToolOutcomeUnknownError
 from iris.lifecycle import RuntimeExecutionOptions, ToolErrorPolicy
 from iris.message import TextBlock, ToolUseBlock
 from iris.runtime import RuntimeActivationOutcome
-from iris.tools import DefaultPermissionPolicy, ToolExecutionContext, ToolMiddleware, ToolRegistry
+from iris.tools import (
+    DefaultPermissionPolicy,
+    ToolCall,
+    ToolExecutionContext,
+    ToolMiddleware,
+    ToolNext,
+    ToolRegistry,
+)
 from iris.tools import ToolResult as Result
 from iris.tools.base import BaseTool, ToolCapability, ToolDefinition, ToolTimeoutOwner
 from iris.tools.builtin.exec import ExecCommandTool
@@ -135,10 +142,9 @@ async def test_tool_owned_timeout_can_finish_cleanup_and_return_to_model(
 class ReplaceResult(ToolMiddleware):
     """模拟结果后处理创建一个新对象，停止事实仍须从当前调用槽获取。"""
 
-    async def after_call(
-        self, tool: BaseTool, result: Result, context: ToolExecutionContext
-    ) -> Result:
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> Result:
         """构造独立的结果副本，不持有原结果 identity。"""
+        result = await call_next()
         return Result.model_validate(result.model_dump())
 
 
@@ -218,9 +224,13 @@ async def test_known_result_is_committed_before_cleanup_failure_leaves_runtime(
     )
     activation = start_activation()
     commits = FakeRuntimeCommitPort(activation)
-    with pytest.raises(IrisCommandCleanupError) as caught:
-        await runtime.execute(activation, commits=commits, cancellation=MutableCancellationSignal())
-    assert caught.value is cleanup
+    result = await runtime.execute(
+        activation, commits=commits, cancellation=MutableCancellationSignal()
+    )
+    assert result.outcome is RuntimeActivationOutcome.FAILED
+    assert result.cleanup_error is cleanup
+    assert result.error is not None and result.error.code == "COMMAND_CLEANUP_FAILED"
+    assert result.stop_call_id == "call"
     assert len(commits.tool_commits) == 1
     assert commits.tool_commits[0].result.error.code == (
         "COMMAND_FAILED" if started else "COMMAND_UNAVAILABLE"

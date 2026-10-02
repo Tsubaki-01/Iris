@@ -44,7 +44,7 @@ from .decorators import tool
 from .discovery import DeferredToolIndex, ToolSearchInput, ToolSearchTool
 from .executor import PreparedToolCall, ToolBatchPlan, ToolEffectGuard, ToolExecutor
 from .images import import_tool_image
-from .middleware import ToolMiddleware
+from .middleware import ToolCall, ToolMiddleware, ToolNext
 from .permissions import (
     DefaultPermissionPolicy,
     PermissionDecision,
@@ -102,6 +102,8 @@ __all__ = [
     "ToolExecutor",
     "PreparedToolCall",
     "ToolMiddleware",
+    "ToolCall",
+    "ToolNext",
     "ToolRegistry",
     "ToolRegistryView",
     "ToolResult",

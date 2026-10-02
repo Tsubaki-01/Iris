@@ -552,8 +552,9 @@ An uncommitted tool claim still takes precedence as `OUTCOME_UNKNOWN`.
 `cancellation_requested` is a durable fact, not settlement. The runner persists the request before
 sending the local signal and does not cancel the entire activation task while a claim exists.
 `ToolExecutor` translates the signal into cancellation of an ordinary async callable, custom async
-`BaseTool`, or THREAD callable body task and waits for body cleanup. Slow middleware, coroutines
-that suppress `CancelledError`, and INLINE blocking can still delay settlement; `cancel()` waits
+`BaseTool`, or THREAD callable body task, also interrupts the awaiting Middleware chain, and waits
+for started operations to settle. Coroutines that suppress `CancelledError` and INLINE blocking
+can still delay settlement; `cancel()` waits
 for a durable terminal result without returning cancelled early.
 
 If the body has completed, or returns normally after signal-driven cancellation, its result goes
@@ -563,6 +564,9 @@ fact before responding to task cancellation, timeout, or sibling cancellation. P
 still commit only a contiguous ordinal prefix. External task cancellation without an Iris signal
 first cleans command resources and linked children, then propagates, leaving recoverable ACTIVE facts.
 Repeated task cancellation does not skip that cleanup; failures retain cleanup-only pending work.
+When cancellation during Middleware postprocessing also leaves a cleanup error, the Runtime hands
+both the original stop reason and the live cleanup error to the runner. Pending settlement preserves
+the cancellation or deadline intent; SDK task cancellation remains cleanup-only rather than FAILED.
 Unresolved claims still settle the run as
 `TOOL_OUTCOME_UNKNOWN`, including read-only calls. Custom THREAD callable workers may continue, but late returns
 cannot change the durable result, history, checkpoint, or events.

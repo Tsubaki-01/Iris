@@ -16,11 +16,13 @@ from iris.tools import (
     PermissionEffect,
     PermissionPolicy,
     PublishArtifactTool,
+    ToolCall,
     ToolDefinition,
     ToolErrorInfo,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -66,11 +68,10 @@ async def test_middleware_expanded_images_survive_artifact_and_error_projection(
     class ExpandImages(ToolMiddleware):
         """接收完整结果，再扩展最终文字。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """图片始终透传，结构化错误文字以 error.message 为准。"""
             nonlocal hooks
+            result = await call_next()
             hooks += 1
             assert [block.type for block in result.content] == ["image", "text", "image", "text"]
             assert result.artifact is not None and result.artifact.text_path is None
@@ -158,10 +159,9 @@ async def test_published_binary_keeps_its_path_when_middleware_expands_text(tmp_
     class ExpandPublished(ToolMiddleware):
         """保留原副本，只扩展最终模型正文。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """记录已复制文件路径，让 executor 为新正文执行普通存档。"""
+            result = await call_next()
             assert result.artifact is not None
             published.append(result.artifact.path)
             return result.model_copy(update={"content": [TextBlock(text=full_text)]})
@@ -224,16 +224,15 @@ def test_native_artifact_keeps_separate_final_model_text(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_after_call_expansion_is_persisted_once(tmp_path: Path) -> None:
-    """正常扩展结果的 hook 也遵守工具声明的长度阈值。"""
+async def test_middleware_expansion_is_persisted_once(tmp_path: Path) -> None:
+    """包装器扩展后的结果也遵守工具声明的长度阈值。"""
 
     class ExpandResult(ToolMiddleware):
         """为结果补充描述。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             """补充正文，保持工具 identity。"""
+            result = await call_next()
             return result.model_copy(update={"content": [TextBlock(text="expanded result" * 100)]})
 
     class SmallTool(BaseTool):

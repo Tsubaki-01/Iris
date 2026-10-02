@@ -11,13 +11,14 @@ from math import floor
 from pathlib import Path
 from typing import Any, cast
 
-from ..command.models import CommandStopReceipt
+from ..command.models import CommandStopReceipt, CommandStopSlot
 from ..context import ContextBuildOutput, ContextBuildScope, ContextSnapshot
 from ..context.source import render_context_snapshot
 from ..exceptions import (
     HITLCheckpointInvalidError,
     IrisAPIConnectionError,
     IrisCancellationRequestedError,
+    IrisCommandCleanupError,
     IrisContextCompactionError,
     IrisContextError,
     IrisError,
@@ -66,6 +67,7 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
+from ..tools._execution_control import ToolExecutionControlSlot
 from ..tools.base import ToolTimeoutOwner
 from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentTool
 from ._compaction_summary import (
@@ -340,6 +342,7 @@ class AgentRuntime:
             # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
             subagent_call: SubagentParentCall | None = None
             tool_timed_out = False
+            execution_control = ToolExecutionControlSlot()
             if projected_result is not None:
                 result = projected_result
                 claim = None
@@ -472,6 +475,7 @@ class AgentRuntime:
                             prepared.tool_use.id if approved_projection is not None else None
                         ),
                         tool_timeout_seconds=activation.options.tool_timeout_seconds,
+                        execution_control=execution_control,
                     )
                     completion = await _execute_tool_with_timeout(
                         operation, timeout, prepared.timeout_owner
@@ -537,6 +541,10 @@ class AgentRuntime:
             # --- 8. 提交工具结果并收口 ---
             # durable commit 成功后才推进 cursor，再处理取消或 STOP 失败策略。
             batch_assistant = cursor.assistant_message
+            stop_slot = self.environment.command_stop_slots.get(
+                (activation.run_id, prepared.tool_use.id)
+            )
+            control_error = _tool_completion_control(tool_timed_out, execution_control, stop_slot)
             cursor = await self._commit_tool_result(
                 activation=activation,
                 cursor=cursor,
@@ -545,45 +553,27 @@ class AgentRuntime:
                 claim=claim,
                 result=result,
                 cancellation=cancellation,
-                steering=None if tool_timed_out else steering,
+                steering=None if control_error is not None else steering,
                 stream_sink=stream_sink,
                 subagent_call=subagent_call,
             )
-            stop_slot = self.environment.command_stop_slots.get(
-                (activation.run_id, prepared.tool_use.id)
-            )
-            if stop_slot is not None and stop_slot.cleanup_error is not None:
-                # 已知工具事实先提交；资源失败交由 harness 保留 pending，不能继续模型。
-                raise stop_slot.cleanup_error
             receipt = None if stop_slot is None else stop_slot.receipt
-            receipt_call_id = prepared.tool_use.id if receipt is not None else None
-            if _task_cancellation_pending():
-                raise asyncio.CancelledError
-            if _activation_cancelled(commits, cancellation):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.CANCELLED,
-                    cursor=cursor,
-                    assistant_message=batch_assistant,
-                    stop_receipt=receipt,
-                    stop_call_id=receipt_call_id,
-                )
-            if _deadline_expired(commits):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
-                    cursor=cursor,
-                    assistant_message=batch_assistant,
-                    stop_receipt=receipt,
-                    stop_call_id=receipt_call_id,
-                )
-            if tool_timed_out:
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.FAILED,
-                    cursor=cursor,
-                    assistant_message=batch_assistant,
-                    error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
-                    stop_receipt=receipt,
-                    stop_call_id=receipt_call_id,
-                )
+            cleanup_error = None if stop_slot is None else stop_slot.cleanup_error
+            receipt_call_id = (
+                prepared.tool_use.id if receipt is not None or cleanup_error is not None else None
+            )
+            control_outcome = _post_tool_control_outcome(
+                cursor=cursor,
+                assistant_message=batch_assistant,
+                run_cancelled=_activation_cancelled(commits, cancellation),
+                deadline_expired=_deadline_expired(commits),
+                error=control_error,
+                stop_receipt=receipt,
+                stop_call_id=prepared.tool_use.id,
+                cleanup_error=cleanup_error,
+            )
+            if control_outcome is not None:
+                return control_outcome
             if result.is_error and activation.options.tool_error_policy is ToolErrorPolicy.STOP:
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.FAILED,
@@ -712,9 +702,10 @@ class AgentRuntime:
             for (tool_index, _), guard in zip(window, durable_guards, strict=True)
         ]
         tasks: list[asyncio.Task[_ToolCompletion]] = []
+        controls = [ToolExecutionControlSlot() for _ in window]
         runtime_cancelled_tasks: set[asyncio.Task[_ToolCompletion]] = set()
         timeout = _tool_timeout_seconds(activation, commits)
-        for (_, prepared), guard in zip(window, guards, strict=True):
+        for (_, prepared), guard, control in zip(window, guards, controls, strict=True):
             operation = self.environment.tool_bridge.execute_prepared(
                 prepared,
                 session_id=activation.session_id,
@@ -726,6 +717,7 @@ class AgentRuntime:
                 cancellation=cancellation,
                 effect_guard=guard,
                 tool_timeout_seconds=activation.options.tool_timeout_seconds,
+                execution_control=control,
             )
             tasks.append(
                 asyncio.create_task(
@@ -733,23 +725,51 @@ class AgentRuntime:
                 )
             )
 
+        task_offsets = {task: offset for offset, task in enumerate(tasks)}
         pending = set(tasks)
+        first_stop: tuple[int, BaseException] | None = None
+        stop_run_cancelled = False
+        stop_deadline_expired = False
+        external_cancellation: asyncio.CancelledError | None = None
         try:
             while pending:
                 done, remaining = await asyncio.wait(
                     pending,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if any(
-                    task.cancelled() or task.exception() is not None or task.result().timed_out
-                    for task in done
-                ):
+                if first_stop is None:
+                    # 同一完成批次按 ordinal 锁定首因；后来取消 sibling 的异常不能覆盖它。
+                    for task in sorted(done, key=task_offsets.__getitem__):
+                        offset = task_offsets[task]
+                        try:
+                            completion = task.result()
+                        except BaseException as error:
+                            first_stop = (offset, error)
+                            break
+                        stop_slot = self.environment.command_stop_slots.get(
+                            (activation.run_id, window[offset][1].tool_use.id)
+                        )
+                        control_error = _tool_completion_control(
+                            completion.timed_out, controls[offset], stop_slot
+                        )
+                        if control_error is None and _activation_cancelled(commits, cancellation):
+                            control_error = IrisCancellationRequestedError("工具窗口已取消")
+                        if control_error is None and _deadline_expired(commits):
+                            control_error = TimeoutError("run deadline")
+                        if control_error is not None:
+                            first_stop = (offset, control_error)
+                            break
+                    if first_stop is not None:
+                        stop_run_cancelled = _activation_cancelled(commits, cancellation)
+                        stop_deadline_expired = _deadline_expired(commits)
+                if first_stop is not None:
                     newly_cancelled = remaining - runtime_cancelled_tasks
                     runtime_cancelled_tasks.update(remaining)
                     for task in newly_cancelled:
                         task.cancel()
                 pending = remaining
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            external_cancellation = error
             pending = {task for task in tasks if not task.done()}
             newly_cancelled = pending - runtime_cancelled_tasks
             runtime_cancelled_tasks.update(pending)
@@ -762,41 +782,43 @@ class AgentRuntime:
                 except asyncio.CancelledError:
                     continue
 
-        result_slots: list[ToolResult | BaseException] = []
-        infrastructure_errors: list[tuple[int, BaseException]] = []
-        for offset, task in enumerate(tasks):
-            if task.cancelled():
-                try:
-                    task.result()
-                except asyncio.CancelledError as child_cancellation:
-                    result_slots.append(child_cancellation)
-                    if task not in runtime_cancelled_tasks:
-                        infrastructure_errors.append((offset, child_cancellation))
-                continue
-            exception = task.exception()
-            if exception is None:
-                result_slots.append(task.result().result)
-                continue
-            result_slots.append(exception)
-            if task not in runtime_cancelled_tasks and not isinstance(
-                exception, (IrisCancellationRequestedError, TimeoutError)
-            ):
-                infrastructure_errors.append((offset, exception))
+        result_slots: list[_ToolCompletion | BaseException] = []
+        for task in tasks:
+            try:
+                result_slots.append(task.result())
+            except BaseException as error:
+                result_slots.append(error)
 
-        settlement_exception = next(
+        command_slots = [
+            self.environment.command_stop_slots.get((activation.run_id, prepared.tool_use.id))
+            for _, prepared in window
+        ]
+        cleanup_offset = next(
             (
-                slot
-                for task, slot in zip(tasks, result_slots, strict=True)
-                if isinstance(slot, BaseException) and task not in runtime_cancelled_tasks
+                offset
+                for offset, slot in enumerate(command_slots)
+                if slot is not None and slot.cleanup_error is not None
             ),
             None,
         )
-        tool_timed_out = any(
-            not task.cancelled() and task.exception() is None and task.result().timed_out
-            for task in tasks
+        stop_offset = (
+            cleanup_offset
+            if cleanup_offset is not None
+            else (first_stop[0] if first_stop is not None else None)
         )
-        if settlement_exception is None and tool_timed_out:
-            settlement_exception = TimeoutError()
+        stop_slot = None if stop_offset is None else command_slots[stop_offset]
+        settlement_error = None if first_stop is None else first_stop[1]
+        receipt = None if stop_slot is None else stop_slot.receipt
+        cleanup_error = None if stop_slot is None else stop_slot.cleanup_error
+        if isinstance(settlement_error, IrisToolOutcomeUnknownError):
+            receipt = receipt or settlement_error.stop_receipt
+        if isinstance(settlement_error, IrisCommandCleanupError):
+            cleanup_error = cleanup_error or settlement_error
+        stop_call_id = (
+            window[stop_offset][1].tool_use.id
+            if stop_offset is not None and (receipt is not None or cleanup_error is not None)
+            else None
+        )
         committed_cursor = cursor
         interrupted = False
         for offset, slot in enumerate(result_slots):
@@ -818,74 +840,62 @@ class AgentRuntime:
                 commits=commits,
                 tool_call=tool_call,
                 claim=guard.claim_for(prepared.tool_use.id),
-                result=slot,
+                result=slot.result,
                 cancellation=cancellation,
-                steering=None if tool_timed_out else steering,
+                steering=None
+                if first_stop is not None or external_cancellation is not None
+                else steering,
                 stream_sink=stream_sink,
             )
 
+        if external_cancellation is not None:
+            raise external_cancellation
         if _task_cancellation_pending():
             raise asyncio.CancelledError
-        if infrastructure_errors:
-            _, infrastructure_error = min(infrastructure_errors, key=lambda item: item[0])
-            raise infrastructure_error
+        if settlement_error is not None and not isinstance(
+            settlement_error,
+            (
+                IrisCancellationRequestedError,
+                IrisToolOutcomeUnknownError,
+                IrisCommandCleanupError,
+                TimeoutError,
+            ),
+        ):
+            raise settlement_error
 
         if interrupted:
             committed_count = committed_cursor.next_tool_index - cursor.next_tool_index
             for offset in range(committed_count, len(window)):
                 prepared = window[offset][1]
                 if guards[offset].claim_for(prepared.tool_use.id) is not None:
-                    return _unknown_tool_outcome(
+                    unknown = _unknown_tool_outcome(
                         committed_cursor,
                         prepared,
                         "并发工具窗口存在未提交的 claimed 调用",
+                        stop_receipt=receipt,
                     )
-            assert settlement_exception is not None
-            if _activation_cancelled(commits, cancellation) or isinstance(
-                settlement_exception,
-                IrisCancellationRequestedError,
-            ):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.CANCELLED,
-                    cursor=committed_cursor,
-                    assistant_message=cursor.assistant_message,
-                )
-            if _deadline_expired(commits):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
-                    cursor=committed_cursor,
-                    assistant_message=cursor.assistant_message,
-                )
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.FAILED,
-                cursor=committed_cursor,
-                assistant_message=cursor.assistant_message,
-                error=RunErrorInfo(
-                    code="TOOL_TIMEOUT",
-                    message="工具执行超时",
-                    source="tool",
-                ),
-            )
+                    return unknown.model_copy(
+                        update={"cleanup_error": cleanup_error, "stop_call_id": stop_call_id}
+                    )
 
-        if _activation_cancelled(commits, cancellation):
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.CANCELLED,
-                cursor=committed_cursor,
-                assistant_message=cursor.assistant_message,
-            )
-        if _deadline_expired(commits):
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
-                cursor=committed_cursor,
-                assistant_message=cursor.assistant_message,
-            )
-        if tool_timed_out:
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.FAILED,
-                cursor=committed_cursor,
-                assistant_message=cursor.assistant_message,
-                error=RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool"),
-            )
+        control_outcome = _post_tool_control_outcome(
+            cursor=committed_cursor,
+            assistant_message=cursor.assistant_message,
+            run_cancelled=(
+                stop_run_cancelled
+                if first_stop is not None
+                else _activation_cancelled(commits, cancellation)
+            ),
+            deadline_expired=(
+                stop_deadline_expired if first_stop is not None else _deadline_expired(commits)
+            ),
+            error=settlement_error,
+            stop_receipt=receipt,
+            stop_call_id=stop_call_id,
+            cleanup_error=cleanup_error,
+        )
+        if control_outcome is not None:
+            return control_outcome
         for _, prepared in window:
             self.environment.command_stop_slots.pop((activation.run_id, prepared.tool_use.id), None)
         return committed_cursor
@@ -2094,6 +2104,68 @@ def _tool_timeout_seconds(
     if configured is None:
         return remaining
     return min(remaining, configured)
+
+
+def _tool_completion_control(
+    timed_out: bool,
+    control: ToolExecutionControlSlot,
+    stop_slot: CommandStopSlot | None,
+) -> BaseException | None:
+    """由期限 owner 消除 timeout 注入取消的歧义，其余保留原控制实例。"""
+    if timed_out:
+        return TimeoutError("工具执行超时")
+    if control.control is not None:
+        return control.control.error
+    return None if stop_slot is None else stop_slot.cleanup_error
+
+
+def _post_tool_control_outcome(
+    *,
+    cursor: RuntimeCursor,
+    assistant_message: Msg | None,
+    run_cancelled: bool,
+    deadline_expired: bool,
+    error: BaseException | None,
+    stop_receipt: CommandStopReceipt | None,
+    stop_call_id: str | None,
+    cleanup_error: IrisCommandCleanupError | None,
+) -> RuntimeActivationResult | None:
+    """已知结果提交之后兑现控制；清理失败与原结算意图一起交给 harness。"""
+    if _task_cancellation_pending():
+        raise asyncio.CancelledError
+    if isinstance(error, asyncio.CancelledError):
+        raise error
+    run_error = None
+    if isinstance(error, IrisToolOutcomeUnknownError):
+        outcome = RuntimeActivationOutcome.OUTCOME_UNKNOWN
+        run_error = _normalize_run_error(error)
+        stop_receipt = stop_receipt or error.stop_receipt
+    elif deadline_expired:
+        outcome = RuntimeActivationOutcome.DEADLINE_EXCEEDED
+    elif run_cancelled or isinstance(error, IrisCancellationRequestedError):
+        outcome = RuntimeActivationOutcome.CANCELLED
+    elif isinstance(error, TimeoutError):
+        outcome = RuntimeActivationOutcome.FAILED
+        run_error = RunErrorInfo(code="TOOL_TIMEOUT", message="工具执行超时", source="tool")
+    elif cleanup_error is not None or isinstance(error, IrisCommandCleanupError):
+        cleanup_error = cleanup_error or cast(IrisCommandCleanupError, error)
+        outcome = RuntimeActivationOutcome.FAILED
+        run_error = _normalize_run_error(cleanup_error)
+    elif error is not None:
+        raise error
+    else:
+        return None
+    return RuntimeActivationResult(
+        outcome=outcome,
+        cursor=cursor,
+        assistant_message=assistant_message,
+        error=run_error,
+        stop_receipt=stop_receipt,
+        stop_call_id=stop_call_id
+        if stop_receipt is not None or cleanup_error is not None
+        else None,
+        cleanup_error=cleanup_error,
+    )
 
 
 def _read_state_snapshot(state: ReadFileState | None) -> dict[str, Any] | None:

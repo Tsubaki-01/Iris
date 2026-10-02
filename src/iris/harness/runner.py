@@ -2068,12 +2068,27 @@ class AgentRunner:
             except asyncio.CancelledError:
                 # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
                 if not active.signal.requested:
+                    call_id, failed_slot = next(
+                        (
+                            (call_id, slot)
+                            for (run_id, call_id), slot in (
+                                self.runtime.environment.command_stop_slots.items()
+                            )
+                            if run_id == active.run_id and slot.cleanup_error is not None
+                        ),
+                        (None, None),
+                    )
                     cleanup = asyncio.create_task(
                         self._settle_command(
                             port.run,
                             activation_id=active.activation_id,
                             stop_reason=None,
                             events=active.event_collector,
+                            call_id=call_id,
+                            receipt=failed_slot.receipt if failed_slot is not None else None,
+                            initial_cleanup_error=(
+                                failed_slot.cleanup_error if failed_slot is not None else None
+                            ),
                         )
                     )
                     while not cleanup.done():
@@ -2120,6 +2135,9 @@ class AgentRunner:
         port: StoreRuntimeCommitPort,
         *,
         model_failure_usage: TokenUsage | None = None,
+        initial_cleanup_error: IrisCommandCleanupError | None = None,
+        receipt: CommandStopReceipt | None = None,
+        call_id: str | None = None,
     ) -> None:
         """把被中断的 async operation 映射为可证明的 durable outcome。"""
         current = self.store.load_run(active.run_id)
@@ -2156,6 +2174,9 @@ class AgentRunner:
             error=error,
             model_failure_usage=model_failure_usage,
             events=active.event_collector,
+            initial_cleanup_error=initial_cleanup_error,
+            receipt=receipt,
+            call_id=call_id,
         )
 
     async def _settle_engine_result(
@@ -2192,7 +2213,12 @@ class AgentRunner:
             RuntimeActivationOutcome.FAILED,
         }:
             await self._finish_cancelled_task(
-                active, port, model_failure_usage=result.model_failure_usage
+                active,
+                port,
+                model_failure_usage=result.model_failure_usage,
+                initial_cleanup_error=result.cleanup_error,
+                receipt=result.stop_receipt,
+                call_id=result.stop_call_id,
             )
             return
         stop_reason = {
@@ -2215,6 +2241,7 @@ class AgentRunner:
             events=active.event_collector,
             receipt=result.stop_receipt,
             call_id=result.stop_call_id,
+            initial_cleanup_error=result.cleanup_error,
         )
 
     async def _finish_unexpected(

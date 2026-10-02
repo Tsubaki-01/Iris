@@ -6,18 +6,18 @@ import asyncio
 import threading
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from iris.exceptions import IrisCancellationRequestedError
 from iris.message import ToolUseBlock
 from iris.tools import (
-    BaseTool,
     CallableExecutionMode,
+    ToolCall,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -54,8 +54,8 @@ def _start(
 
 
 @pytest.mark.asyncio
-async def test_completed_body_result_wins_over_signal(tmp_path: Path) -> None:
-    """观察到结果与取消同时存在时，保留已经完成的结果。"""
+async def test_completed_body_signal_propagates_without_runtime_owner(tmp_path: Path) -> None:
+    """低层调用没有延迟提交 owner，已知结果不能吞掉取消请求。"""
     signal = Cancellation()
 
     async def body() -> str:
@@ -63,25 +63,24 @@ async def test_completed_body_result_wins_over_signal(tmp_path: Path) -> None:
         signal.requested = True
         return "known"
 
-    result = await _start(tmp_path, signal, body)
-    assert result.model_content == "known"
+    with pytest.raises(IrisCancellationRequestedError):
+        await _start(tmp_path, signal, body)
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_before_call_skips_body(tmp_path: Path) -> None:
-    """before_call 已让出控制权，因此 body 启动前需读取最新取消状态。"""
+async def test_cancellation_during_middleware_before_next_skips_body(tmp_path: Path) -> None:
+    """包装器已让出控制权，因此 body 启动前需读取最新取消状态。"""
     signal = Cancellation()
     entered = False
 
     class CancelBefore(ToolMiddleware):
-        """在 before_call 挂起后通知取消。"""
+        """在进入下游前通知取消。"""
 
-        async def before_call(
-            self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
-        ) -> None:
-            """模拟 hook 执行期间到达的取消。"""
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            """模拟包装器执行期间到达的取消。"""
             await asyncio.sleep(0)
             signal.requested = True
+            return await call_next()
 
     def body() -> str:
         """记录是否错误地启动了 body。"""
@@ -95,17 +94,16 @@ async def test_cancellation_during_before_call_skips_body(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_cancellation_during_after_call_preserves_result(tmp_path: Path) -> None:
-    """body 已完成时继续已有 after_call 处理，不丢弃结果。"""
+async def test_cancellation_after_next_propagates_without_runtime_owner(tmp_path: Path) -> None:
+    """低层调用没有延迟提交 owner，后置取消仍交回调用者。"""
     signal = Cancellation()
 
     class CancelAfter(ToolMiddleware):
         """在处理确定结果时通知取消。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
-            """取消后依旧交付 hook 的处理结果。"""
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            """工具结果已知后发出取消。"""
+            result = await call_next()
             await asyncio.sleep(0)
             signal.requested = True
             return result
@@ -114,8 +112,8 @@ async def test_cancellation_during_after_call_preserves_result(tmp_path: Path) -
         """提供确定结果。"""
         return "known"
 
-    result = await _start(tmp_path, signal, body, middleware=[CancelAfter()])
-    assert result.model_content == "known"
+    with pytest.raises(IrisCancellationRequestedError):
+        await _start(tmp_path, signal, body, middleware=[CancelAfter()])
 
 
 @pytest.mark.asyncio
@@ -123,7 +121,7 @@ async def test_cancellation_during_after_call_preserves_result(tmp_path: Path) -
 async def test_outer_cancellation_drains_body_without_recancelling_cleanup(
     tmp_path: Path, first_cancel: str
 ) -> None:
-    """signal、外层及重复取消共享一次 body 清理，外层取消仍传播。"""
+    """signal、外层及重复取消共享一次 body 清理，保留最先观察到的原因。"""
     signal = Cancellation()
     entered = asyncio.Event()
     release_body = asyncio.Event()
@@ -167,7 +165,10 @@ async def test_outer_cancellation_drains_body_without_recancelling_cleanup(
         release_cleanup.set()
         [outcome] = await asyncio.gather(execution, return_exceptions=True)
 
-    assert isinstance(outcome, asyncio.CancelledError)
+    expected = (
+        IrisCancellationRequestedError if first_cancel == "signal" else asyncio.CancelledError
+    )
+    assert isinstance(outcome, expected)
     assert cleanup_finished.is_set()
     assert not cleanup_interrupted
 

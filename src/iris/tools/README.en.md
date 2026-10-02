@@ -22,7 +22,7 @@ the parent's reason/metadata.
 The dedicated `ToolExecutor` Sub Agent path preserves raw input parsing, fresh permission refresh,
 and final identity/artifact normalization. Linked continuation skips outer permission. ChildWaiting
 returns directly, without middleware, breaker, parent claim, or ordinary timeout. Ordinary tools
-still normalize and persist the final body after after_call. Controller lifecycle, persistence,
+normalize and persist the final result after the middleware chain returns. Controller lifecycle, persistence,
 and recovery errors propagate unchanged. ACTIVE and WAITING share final normalization and
 `ARTIFACT_ERROR` projection.
 
@@ -177,7 +177,8 @@ hidden from schema and callers cannot override them.
 
 `THREAD` only selects execution placement through `asyncio.to_thread()`; `CallableTool.arun()`
 does not independently consume `context.cancellation`. Direct `arun()` callers own cancellation
-of their task. Through the executor, the executor translates the signal into body-task cancellation.
+of their task. Through the executor, the signal cancels the current wrapped call and waits for
+downstream work to drain.
 
 Each `CallableTool` uses one input model. Without an explicit `input_model`, Iris builds a
 Pydantic model from the function annotations and docstring parameter descriptions. That model
@@ -233,33 +234,39 @@ question; a human tool under require-human fails closed to prevent nested gates;
 require-human call creates a permission prompt.
 
 After approval, execution checks the circuit breaker, cancellation, the effect guard, and
-cancellation again before entering middleware `before_call`, a pre-body cancellation check, tool
-`arun`, middleware after hooks, artifact handling, and breaker accounting. A guard failure starts
+cancellation again before entering the `wrap_tool_call` chain, a pre-body cancellation check, tool
+`arun`, the returning wrappers, and final identity/artifact handling. The breaker records the actual
+body result once; short circuits, middleware post failures, and artifact errors do not count as
+body failures. A guard failure starts
 no tool effect. Cancellation after a claim propagates as control flow to runtime instead of becoming
 a normal tool error.
 Low-level executor callers may omit the guard; lifecycle execution requires it through
 `ToolBridge`. Parallel context copies deep-copy only the isolated `metadata`; typed
 `ReadFileState` and cancellation are shared directly without copying their objects or records.
+Each new call gets independent command/control slots. Context projections within the same call
+preserve slot identity; a subsequent call does not inherit the previous call's stop state.
 `ToolExecutionContext` parses read state at its public raw-input boundary; file
 services consume the typed object directly without repeating type checks.
 
-The executor performs artifact handling once after every `after_call` hook. Hooks receive the full
-tool result; expanded final content is therefore also subject to `max_result_chars`.
+The executor performs artifact handling once after the middleware chain returns. `call_next()`
+returns the full downstream result; expanded final content is also subject to `max_result_chars`.
 Cooperative cancellation uses `IrisCancellationRequestedError` from `iris.exceptions`, and
 `CallableTool` propagates it instead of normalizing it as an ordinary tool error.
 
-`ToolExecutor` is the sole owner of translating a signal into cancellation and draining of an
-ordinary `arun()` body task, covering async callables, custom async `BaseTool` implementations, and
-THREAD callables. Without a signal it awaits the body directly; with a signal it checks body
-completion before cancellation. A completed result wins. If the executor cancels the body because
-of the signal and the body catches `CancelledError` and returns normally, its `ToolResult` is kept.
-If external `Task.cancel()`, timeout, or runtime sibling cancellation has already interrupted the
-executor, it drains the body and keeps a normal return for ordered durable commit. Runtime then
-propagates the pending cancellation or settles the recorded timeout; a known result does not clear
-the interruption. A genuinely cancelled body or unknown exception keeps the existing control path.
+`ToolExecutor` monitors the whole call, including middleware and `arun()`, for async callables,
+custom async `BaseTool` implementations, and THREAD callables. The body checks the signal again
+before starting. A signal, external `Task.cancel()`, timeout, or runtime sibling cancellation sends
+the first cancellation to the current call and waits for downstream work to drain; repeated requests
+do not interrupt cleanup again. A completed body or a normal return after catching `CancelledError`
+remains a known `ToolResult`. Runtime commits it in order before propagating cancellation or settling
+the timeout. A known result does not clear the interruption; a genuinely cancelled body or unknown
+exception keeps the existing control path.
 
-This cancellation bridge covers only the body. A pending request after `before_call` prevents body
-startup; once the body returns, `after_call`, artifact handling, and breaker accounting continue.
+A pending request before a wrapper enters its continuation prevents body startup. Cancellation or
+cleanup failure after a known body result does not replay the tool: with a Runtime owner, the executor
+returns the known result and deferred control so Runtime commits in order before settlement.
+Low-level executor calls without that owner propagate control exceptions to their caller. Finite
+artifact I/O still drains to recover its actual result.
 Slow middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay
 exit. Cancellation of a custom THREAD callable ends only its async waiter; the worker may continue. Unresolved claims
 still settle as `OUTCOME_UNKNOWN`, including read-only calls, and late returns cannot change the
@@ -487,9 +494,45 @@ admission path, and existing views see the published tools.
 YAML name `human.ask` registers model-visible `ask_question`. `AskQuestionTool` converts validated
 input to `QuestionPrompt` and refuses direct `arun()`; runtime owns the interaction.
 
-`ToolMiddleware` defines exact async `before_call`, `after_call`, and `on_error` hooks. Custom
-middleware subclasses it and overrides the required hooks; the executor does not probe partial
-objects, synchronous returns, or legacy hooks. Middleware failures become `MIDDLEWARE_ERROR`.
+`ToolMiddleware` is an abstract base class with one required method:
+`async wrap_tool_call(call: ToolCall, call_next: ToolNext) -> ToolResult`.
+Inject instances through `ToolExecutor(..., middleware=[...])`. The first registered wrapper is
+outermost: A before → B before → body → B after → A after.
+
+`ToolCall` is a frozen view with `tool_use_id`, `tool_name`, `arguments`, `agent_id`, `session_id`,
+optional `run_id`/`activation_id`, and `workspace_root`. It exposes neither a writable execution
+context nor a `BaseTool` instance. Arguments are an independent snapshot; changing it does not
+change the tool's actual input.
+
+`call_next()` takes no arguments and may be called at most once. Omitting it can return a cached or
+other substitute result; permission and claim checks have already run. A saved continuation expires
+when its wrapper returns, and any downstream work already started must be collected before the call
+finishes. Downstream results are read-only; return a new `ToolResult` to change them:
+
+```python
+from iris.message import TextBlock
+from iris.tools import ToolCall, ToolExecutor, ToolMiddleware, ToolNext, ToolResult
+
+
+class LabelResult(ToolMiddleware):
+    """在下游结果后添加来源说明。"""
+
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+        """返回新结果，保留原对象。"""
+        result = await call_next()
+        return result.model_copy(
+            update={"content": [*result.content, TextBlock(text=f"Source: {call.tool_name}")]}
+        )
+
+
+executor = ToolExecutor(registry, middleware=[LabelResult()])
+```
+
+A wrapper can recover ordinary downstream exceptions. An ordinary failure before entering the
+continuation becomes `MIDDLEWARE_ERROR`; a post failure after a downstream result is known is logged
+and preserves that result without replay. Synthesized success cannot erase cancellation, unknown
+outcomes, or cleanup control. The framework owns result identity, disclosure, and stop facts.
+
 `CircuitBreaker` tracks consecutive failures by tool name and returns
 `CIRCUIT_OPEN` during cooldown.
 
@@ -505,7 +548,7 @@ characters, and `group`. No matches return an empty list; full parameter JSON Sc
 A successful system search saves ranked canonical names in the committed tool message's
 `metadata.extra.context_revealed_tools`. Executor does not accept this field from other tools as a
 disclosure fact. Names come from the successful search body and survive an after-middleware text
-replacement; final errors and successful on_error substitutes do not create disclosure.
+replacement; final errors and substitutes for a failed body do not create disclosure.
 
 Search alone does not mutate the registry. With `context_policy.deferred_tools: true`, runtime
 registers the tool automatically and selects candidate tool definitions with full parameter JSON Schema
@@ -517,7 +560,8 @@ and batch recovery.
 ## Public surface and boundaries
 
 The exact top-level API is `src/iris/tools/__init__.py::__all__`, including
-`CallableExecutionMode`, `ToolTimeoutOwner`, `ExecCommandInput`, `ExecCommandTool`, and covering models, base/adapters,
+`CallableExecutionMode`, `ToolTimeoutOwner`, `ToolCall`, `ToolNext`, `ExecCommandInput`,
+`ExecCommandTool`, and covering models, base/adapters,
 registry/view, executor/preflight, permission/artifact/middleware/breaker types, file/human tools,
 deferred discovery, schema helpers, and `tool`. Protected `_impl()` hooks and executor private
 lifecycle methods are internal.

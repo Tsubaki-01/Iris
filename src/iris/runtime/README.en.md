@@ -428,7 +428,7 @@ repeating schema validation. Bodies may finish out of order, while result
 messages, cursors, session history, checkpoints, and committed events advance only as the original
 ordinal prefix. The order of multiple `TOOL_CALL_CLAIMED` telemetry events is not contractual.
 
-A control interruption commits only the known `ToolResult` prefix before the first exception or
+A control interruption commits only the known `ToolResult` prefix before the first unknown body or
 hole; a later in-memory result never skips that hole. Any uncommitted durable claim makes eventual
 cancellation, deadline, or program interruption fail closed as `OUTCOME_UNKNOWN`, including
 read-only calls. Runtime cancels and drains the children it created before a parent-task or
@@ -443,8 +443,12 @@ postprocessing and commit paths. External cancellation, timeout, or sibling canc
 the body and commits known results in ordinal order before propagating cancellation or settling the
 deadline. `asyncio.timeout().expired()` preserves elapsed tool timeouts even when finite IO returns
 normally after cancellation. Missing results retain unknown-outcome semantics.
-The body bridge does not interrupt `before_call` / `after_call`; slow
-middleware, coroutines that suppress `CancelledError`, and INLINE blocking can still delay exit.
+Each call has a separate control slot. Cancellation in the post-processing part of `wrap_tool_call`
+preserves the known downstream result for finalization and commit before Runtime handles the control.
+The parallel window also stops and drains siblings when a returned result carries a control or cleanup
+error. The first completed batch selects the lowest ordinal stop cause; cancelling siblings does not
+turn that cause into SDK cancellation. Pending controls prevent claiming batch-end steer input.
+Coroutines that suppress `CancelledError` and INLINE blocking may still delay exit.
 
 Concurrent file reads share one `ReadFileState` identity. Workers only return immutable
 observations, which the event loop merges. The checkpoint snapshot taken after the window settles
@@ -467,9 +471,11 @@ delta/merge/lock/hash model.
 Command tools declare `ToolTimeoutOwner.TOOL` and own their command deadline and process cleanup.
 Runtime passes the raw tool timeout without wrapping execution in its generic tool timeout; the
 outer owner still handles the run deadline. A shared `CommandStopSlot` retains the current call's
-receipt and cleanup error. Terminal/unknown exits pass live receipt fields to harness; known results
-commit before cleanup errors propagate. Accepting the result and returning to the model releases
-the slot. Receipts never enter history or checkpoints.
+receipt and cleanup error. Terminal/unknown exits pass live receipt fields to harness. Known results
+commit first; `RuntimeActivationResult.cleanup_error` accompanies the original cancellation, deadline,
+or failure outcome so harness retains that settlement intent. Raw SDK task cancellation still raises,
+leaving unconsumed command slots available for harness cleanup. Accepting the result and returning to
+the model releases the slot. Controls and receipts never enter history or checkpoints.
 
 ## Memory overview windows and model-directed reads
 

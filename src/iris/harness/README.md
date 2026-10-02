@@ -460,6 +460,8 @@ Docker 停整个共享容器，其他独立 run 的模型/原生工具/HITL 继�
 保留 ACTIVE/WAITING 和 lane，直接调用者收到异常，并通过 root 发布 `CommandCleanupFailed`
 小型 live fact；没有 publisher 时记录错误。下一次 cancel/recover/resume 优先只重试原结算，
 不改写原失败原因或重跑模型/命令。已知工具结果在清理错误传播前提交，不倒退成未知 claim。
+Middleware 后处理期间取消又遇到清理失败时，Runtime 会同时交回原停止原因和进程内清理错误；
+pending 保留原取消或 deadline 意图。SDK task 取消则保留 cleanup-only 意图，不改写成 FAILED。
 
 总期限 timer 由 root 持有，跨 WAITING 和临时 child runner 关闭继续有效；child 由 typed route
 重建，终态撤销 timer。root close 先撤销尚未触发 timer，等待已触发结算和 pending，再关闭资源。
@@ -473,8 +475,8 @@ Docker 停整个共享容器，其他独立 run 的模型/原生工具/HITL 继�
 
 `cancellation_requested` 是 durable fact，不等于已取消。Runner 先持久化请求，再发送本地
 signal；存在 claim 时不整体取消 activation task。`ToolExecutor` 将 signal 转为普通 async
-callable、自定义异步 `BaseTool` 或 THREAD callable 的 body task 取消，并等待 body 清理结束。
-慢 middleware、压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟 settlement；`cancel()`
+callable、自定义异步 `BaseTool` 或 THREAD callable 的 body task 取消，也中断仍在等待的 Middleware
+包装链，并等待已开始的操作收口。压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟 settlement；`cancel()`
 只等待 durable terminal result，不提前返回 cancelled。
 
 body 已完成，或响应 signal 取消后仍正常返回时，结果经过后处理并按既有顺序 durable commit 后再结算

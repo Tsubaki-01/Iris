@@ -24,6 +24,7 @@ from ..tools import (
     ToolRegistryView,
     ToolResult,
 )
+from ..tools._execution_control import ToolExecutionControlSlot
 from ..tools.subagent import SubagentExecutionOutcome, SubagentParentCall
 
 
@@ -139,6 +140,7 @@ class ToolBridge:
         effect_guard: ToolEffectGuard,
         approved_tool_call_id: str | None = None,
         tool_timeout_seconds: float | None = None,
+        execution_control: ToolExecutionControlSlot | None = None,
     ) -> ToolResult:
         """用 shared signal 与 required effect guard 执行一条预检调用。"""
         context = self._execution_context(
@@ -151,6 +153,7 @@ class ToolBridge:
             cancellation=cancellation,
             tool_call_id=prepared.tool_use.id,
             tool_timeout_seconds=tool_timeout_seconds,
+            execution_control=execution_control,
         )
         result = await self.tool_executor.execute_prepared(
             prepared,
@@ -261,6 +264,7 @@ class ToolBridge:
         cancellation: CancellationSignal | None,
         tool_call_id: str | None = None,
         tool_timeout_seconds: float | None = None,
+        execution_control: ToolExecutionControlSlot | None = None,
     ) -> ToolExecutionContext:
         """构造复用同一 read state 与 cancellation 的工具上下文。"""
         stop_slot = (
@@ -278,6 +282,7 @@ class ToolBridge:
             cancellation=cancellation,
             tool_timeout_seconds=tool_timeout_seconds,
             command_stop_slot=stop_slot,
+            execution_control=execution_control,
         )
 
 
