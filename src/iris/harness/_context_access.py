@@ -5,7 +5,15 @@ from pathlib import Path
 
 from ..exceptions import IrisToolExecutionError, IrisToolValidationError
 from ..lifecycle import LifecycleStore
-from ..message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from ..message import (
+    DataBlock,
+    ImageBlock,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    image_reference_text,
+)
 from ..tools import ToolArtifact, WorkspacePolicy
 from ..tools.context_access import (
     ContextReadInput,
@@ -66,7 +74,7 @@ class ContextAccess:
                     "该结果没有原生 artifact", code="CONTEXT_REPRESENTATION_UNAVAILABLE"
                 )
             if path is None:
-                text = block.text
+                text = _data_text(block.content)
             else:
                 try:
                     resolved = WorkspacePolicy().resolve_path(
@@ -140,6 +148,8 @@ def _message_text(message: Msg) -> str:
         lines.append(f"[block {index} {block.type}]")
         if isinstance(block, TextBlock):
             lines.append(block.text)
+        elif isinstance(block, ImageBlock):
+            lines.append(image_reference_text(block))
         elif isinstance(block, ToolUseBlock):
             lines.append(
                 f"{block.name} call_id={block.id}\n"
@@ -147,7 +157,8 @@ def _message_text(message: Msg) -> str:
             )
         elif isinstance(block, ToolResultBlock):
             lines.append(
-                f"{block.name} call_id={block.tool_use_id} is_error={block.is_error}\n{block.text}"
+                f"{block.name} call_id={block.tool_use_id} is_error={block.is_error}\n"
+                f"{_data_text(block.content)}"
             )
     return "\n".join(lines)
 
@@ -156,9 +167,11 @@ def _search_texts(index: int, message: Msg) -> list[tuple[str, str, str]]:
     texts: list[tuple[str, str, str]] = []
     for block_index, block in enumerate(message.blocks):
         if isinstance(block, ToolResultBlock):
-            texts.append((f"result:{index}:{block_index}", block.name, block.text))
+            texts.append((f"result:{index}:{block_index}", block.name, _data_text(block.content)))
         elif isinstance(block, TextBlock):
             texts.append((f"message:{index}", "", block.text))
+        elif isinstance(block, ImageBlock):
+            texts.append((f"message:{index}", "", image_reference_text(block)))
         elif isinstance(block, ToolUseBlock):
             texts.append(
                 (
@@ -168,3 +181,11 @@ def _search_texts(index: int, message: Msg) -> list[tuple[str, str, str]]:
                 )
             )
     return texts
+
+
+def _data_text(content: list[DataBlock]) -> str:
+    """为内联回读和有限检索渲染已有数据块，不打开图片或 artifact。"""
+    return "\n".join(
+        block.text if isinstance(block, TextBlock) else image_reference_text(block)
+        for block in content
+    )

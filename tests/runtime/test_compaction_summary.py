@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from iris.agents.config.compaction import CompactionConfig
 from iris.exceptions import IrisContextCompactionError
-from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    LLMResponse,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from iris.runtime._compaction_summary import (
     consume_summary_response,
     next_summary_batch,
@@ -16,6 +27,86 @@ from iris.utils import TemplateRenderer
 
 _PROMPT_RENDERER = TemplateRenderer()
 _DEFAULT_PROMPT = _PROMPT_RENDERER.render_file(CompactionConfig().prompt_path, {}).strip()
+
+
+def test_image_summary_keeps_refs_order_and_tool_facts_without_pixels_or_replay(
+    tmp_path: Path,
+) -> None:
+    """摘要只投影既有视觉结论与可定位的引用，完全不读取图片文件。"""
+    original = ImageFileRef(
+        path=tmp_path / "original.png", mime_type="image/png", width=3000, height=1500
+    )
+    model = ImageFileRef(
+        path=tmp_path / "model.jpg", mime_type="image/jpeg", width=2000, height=1000
+    )
+    image = ImageBlock(original=original, model=model, name="发票")
+    second = image.model_copy(update={"name": "附件"})
+    history = [
+        Msg.user([TextBlock(text="之前"), image, TextBlock(text="之间"), second]),
+        Msg.assistant(
+            [
+                TextBlock(text="发票合计100元"),
+                ToolUseBlock(id="inspect-1", name="inspect", input={"q": "合计"}),
+            ],
+            metadata={
+                "responses": {"items": [{"encrypted_content": "secret-encrypted"}]},
+                "chat_completions": {"reasoning_field": "reasoning_content"},
+                "reasoning": "secret-thought",
+            },
+        ),
+        Msg.tool_result(
+            tool_use_id="inspect-1",
+            name="inspect",
+            is_error=True,
+            content=[TextBlock(text="工具之前"), image, TextBlock(text="工具之后"), second],
+            metadata={"error": {"code": "FAILED", "message": "未识别税号"}},
+        ),
+    ]
+    before = [message.model_dump_json() for message in history]
+
+    records = serialize_history(history, 41)
+
+    assert len(records) == 7
+    assert records[0].text == "之前" and records[2].text == "之间"
+    assert "发票" in records[1].text and "message:41" in records[1].text
+    assert "附件" in records[3].text and "message:41" in records[3].text
+    result_record = records[-1]
+    assert "ref=result:43:0" in result_record.header
+    assert (
+        'call_id="inspect-1"' in result_record.header and 'name="inspect"' in result_record.header
+    )
+    assert "execution_status=failed" in result_record.header
+    assert result_record.text.index("工具之前") < result_record.text.index("发票")
+    assert result_record.text.index("发票") < result_record.text.index("工具之后")
+    assert result_record.text.index("工具之后") < result_record.text.index("附件")
+    assert result_record.text.count("result:43:0") == 2
+    assert "FAILED" in result_record.text and "未识别税号" in result_record.text
+    batch = next_summary_batch(
+        _main_request().model_copy(update={"messages": history}),
+        None,
+        records,
+        (0, 0),
+        CompactionConfig(),
+        _estimate,
+        system_prompt=_DEFAULT_PROMPT,
+        prompt_renderer=_PROMPT_RENDERER,
+    )
+    payload = batch.request.model_dump_json()
+    material = batch.request.messages[-1].text
+    assert "发票合计100元" in material and '"q":"合计"' in material
+    assert str(original.path) in material and str(model.path) in material
+    assert "image/png" in material and "image/jpeg" in material
+    assert all(
+        isinstance(block, TextBlock)
+        for message in batch.request.messages
+        for block in message.blocks
+    )
+    assert all(not message.metadata for message in batch.request.messages)
+    assert all(
+        marker not in payload
+        for marker in ("base64", "data:image", "encrypted_content", "secret-thought")
+    )
+    assert [message.model_dump_json() for message in history] == before
 
 
 def _estimate(request: LLMRequest) -> int:

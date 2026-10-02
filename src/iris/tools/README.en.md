@@ -445,7 +445,7 @@ With the default `context_policy.enabled: true`, `AgentRunner` registers `contex
 | Tool | Parameters | Result and scope |
 | --- | --- | --- |
 | `context_read` | `ref`; `offset=0`; `limit=4000` (1..8000); `representation="text"` or `"raw"` | A saved text page; `ToolResult.data` contains `ref/representation/offset/next_offset/has_more/content` |
-| `context_search` | Nonblank `query`; `after=0`; `limit=10` (1..20) | Unicode casefold substring search over committed text and tool previews in the current session; returns `matches/next_after/has_more` |
+| `context_search` | Nonblank `query`; `after=0`; `limit=10` (1..20) | Unicode casefold substring search over committed text, tool previews, and image names/references in the current session; returns `matches/next_after/has_more` |
 
 `message:<index>` names an original message; `result:<message_index>:<block_index>` names a tool
 result block. Both indices are zero-based and are not renumbered by summary projection. Result
@@ -456,6 +456,14 @@ boundaries.
 Use the default `text` to recall ordinary historical content. Inline results and message references
 have no `raw` representation; the tool parameter description makes this distinction explicit.
 
+Message and inline-result text preserve image positions and display each image's name, original/model
+paths, actual MIME types, and dimensions. Image-only results remain readable. Offloaded `text_path`
+files already contain image references, so reading pages does not add another reference prefix.
+To view an image again, use an already registered `read_file` on its model path. The original path is
+available to the host or existing code tools for further processing. References remain readable when
+`file.read` is not configured; context tools do not register it automatically, and the host can also
+resubmit an existing ImageBlock.
+
 Read offsets and limits count Python Unicode characters. The page and short continuation header
 share a 12,000-character tool limit, avoiding another offload during ordinary paging. After hooks
 still apply; exact page reconstruction assumes middleware does not rewrite the returned body.
@@ -464,9 +472,11 @@ representation returns `CONTEXT_REPRESENTATION_UNAVAILABLE`. Reads never rerun t
 substitute current file contents for its saved result.
 
 Search scans at most 200 messages per call, returning at most one match per message and a snippet
-of at most 240 characters. It does not scan complete offloaded artifacts. A page with no matches
-can still have `has_more=true`; continue from `next_after`. Matches carry exact refs for later
-reads. Each complete read or search operation runs in one IO worker.
+of at most 240 characters. It matches saved image names and reference text without opening images,
+performing OCR, or scanning raw artifacts and offloaded full text. A page with no matches can still
+have `has_more=true`; continue from `next_after`. Matches identify the owning message/result: expand
+them with context_read, then use read_file when image pixels are needed. Each complete read or search
+operation runs in one IO worker.
 
 ## Human tool, middleware, breaker, and discovery
 

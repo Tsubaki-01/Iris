@@ -9,7 +9,16 @@ from pathlib import Path
 
 from ..agents.config.compaction import CompactionConfig
 from ..exceptions import IrisContextCompactionError
-from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from ..message import (
+    ImageBlock,
+    LLMRequest,
+    LLMResponse,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    image_reference_text,
+)
 from ..utils import TemplateRenderer
 from ._prompts import render_prompt
 
@@ -36,6 +45,7 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
     """按原始消息和内容块顺序保留摘要所需的全部正文及工具事实。"""
     records: list[SummaryRecord] = []
     for message_index, message in enumerate(messages, start=start_index):
+        message = _strip_images(message, message_index)
         identity = (
             f"message={message_index} | ref=message:{message_index} | role={message.role.value} | "
             f"sender={json.dumps(message.sender, ensure_ascii=False)}"
@@ -77,6 +87,29 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
                     )
                 )
     return tuple(records)
+
+
+def _strip_images(message: Msg, message_index: int) -> Msg:
+    """只在摘要副本中将两层图片替换为带原文位置的文字引用。"""
+    blocks = message.blocks
+    for block_index, block in enumerate(blocks):
+        if isinstance(block, ImageBlock):
+            blocks[block_index] = TextBlock(
+                text=f"{image_reference_text(block)} [原文：message:{message_index}]"
+            )
+        elif isinstance(block, ToolResultBlock):
+            ref = f"result:{message_index}:{block_index}"
+            blocks[block_index] = block.model_copy(
+                update={
+                    "content": [
+                        TextBlock(text=f"{image_reference_text(part)} [原文：{ref}]")
+                        if isinstance(part, ImageBlock)
+                        else part
+                        for part in block.content
+                    ]
+                }
+            )
+    return message.model_copy(update={"content": blocks})
 
 
 def next_summary_batch(

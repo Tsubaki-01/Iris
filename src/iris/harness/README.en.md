@@ -155,11 +155,22 @@ children do not automatically read the parent. `message:<index>` and
 renumber. Forks inherit prefix positions and artifact references without copying files.
 
 Small results come from lifecycle history. Large results use the committed artifact to retrieve
-final text or native MCP JSON without rerunning a tool. Inline tool reads and Search use `.text`,
-joining text blocks with newlines before pagination. Search covers committed text and previews,
-not entire artifact files. See [tools](../tools/README.en.md#current-session-context-reads) for page
+final text or native MCP JSON without rerunning the source tool. Inline text and image references
+retain their order in paginated text; image references include names, MIME types, original/model
+paths, and dimensions. Search can match image names and references, but reads neither pixels nor
+entire artifact files. Existing text_path files are paginated directly, without repeating image
+reference prefixes on each page. See [tools](../tools/README.en.md#current-session-context-reads) for page
 parameters, errors, and scope. Harness owns the read service; runtime receives a narrow interface
 without store ownership.
+
+Images participate in ordinary main-model requests with their messages; viewing one does not
+automatically remove it. Compaction preserves complete images in the current run's initial input,
+latest steer, and retained tail. Summary calls receive only existing text and image references,
+so the summary model needs no vision capability and cannot infer previously unexpressed details
+from a reference. After an old prefix image leaves active context, use `context_read` to obtain its
+model path, then `read_file` through configured `file.read` to bring the image back. Without the file
+tool, references remain readable and the host can resubmit the existing `ImageBlock`; the framework
+does not register file tools automatically.
 
 ## Dynamic host context
 

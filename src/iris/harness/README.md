@@ -132,10 +132,17 @@ parent。`message:<index>` 和 `result:<message_index>:<block_index>` 都使用�
 位置，压缩后的摘要不改变编号。Fork 继承前缀位置和原 artifact 引用，文件不复制。
 
 小结果从 lifecycle 原文读取，大结果通过已提交 artifact 取回最终文本或原生 MCP JSON；
-工具结果的内联读取与 Search 使用 `.text` 文字投影，多个文本块按换行连接后分页。
-读取不会重跑工具。Search 仅查已提交正文与预览，不扫描完整 artifact 文件。具体分页参数、
+内联文字与图片引用按原顺序组成分页文字，图片引用包含名称、MIME、original/model 路径和尺寸。
+Search 可以匹配图片名称与引用；它只查已提交正文和预览，不读取像素或扫描完整 artifact 文件。
+读取不会重跑来源工具；已有 text_path 直接分页该文件，不在每页重复追加图片引用。具体分页参数、
 错误与范围见 [tools 说明](../tools/README.md#当前会话上下文回读)。读取服务位于 harness，
 runtime 只接收窄接口，不取得 store ownership。
+
+图片随消息参加普通主请求；看过一次不会自动移出。压缩保留当前 run 初始输入、最新 steer
+和保留尾部中的完整图片。摘要调用只收到已有文字和图片引用，摘要模型不必具备视觉能力，
+也不能根据引用补出历史尚未表达的图片细节。旧前缀图片随其消息退出活动上下文后，可以先
+`context_read` 获取 model 路径，再调用已配置 `file.read` 的 `read_file` 重新带回图片。
+未配置文件工具时仍可读取引用，由 host 重新提交已有 `ImageBlock`；框架不自动挂载文件工具。
 
 ## 宿主动态上下文
 

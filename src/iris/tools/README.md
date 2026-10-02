@@ -508,7 +508,7 @@ column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和
 | 工具 | 参数 | 返回与范围 |
 | --- | --- | --- |
 | `context_read` | `ref`；`offset=0`；`limit=4000`（1..8000）；`representation="text"` 或 `"raw"` | 读取一页已保存正文；`ToolResult.data` 含 `ref/representation/offset/next_offset/has_more/content` |
-| `context_search` | 非空 `query`；`after=0`；`limit=10`（1..20） | 当前会话已提交正文及工具预览的 Unicode casefold 子串搜索；返回 `matches/next_after/has_more` |
+| `context_search` | 非空 `query`；`after=0`；`limit=10`（1..20） | 当前会话已提交正文、工具预览及图片名称/引用的 Unicode casefold 子串搜索；返回 `matches/next_after/has_more` |
 
 `message:<index>` 引用原始消息；`result:<message_index>:<block_index>` 引用其中的工具结果块。
 两种下标都从零开始，不随摘要投影重编号。`text` 读取结果最终截短前的模型文本，优先使用
@@ -517,15 +517,22 @@ column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和
 普通历史原文回读应使用默认 `text`；内联结果和 message 引用没有 `raw` 表示。
 工具参数说明也明确这一区别，避免把“原文”误解为必须选择 `raw`。
 
+图片在 message 和内联 result 的文字表示中保留原顺序，显示名称、original/model 两份路径、
+实际 MIME 与尺寸；纯图片结果也有可读引用。长结果的 `text_path` 已保存图片引用列表，回读
+直接对文件分页，不在每页重复添加引用。需要再次查看图片时，用已注册的 `read_file` 读取
+model 路径；original 路径供 host 或已有代码工具处理。未配置 `file.read` 时仍可读取这些
+文字引用，但不会自动挂载文件工具，host 也可重新提交已有 ImageBlock。
+
 `context_read` 的 offset/limit 按 Python Unicode 字符计。正文与短分页 header 共同返回，工具额度
 为 12,000 字符，普通分页不会再次 offload。after middleware 仍可改写输出，因此分页还原保证
 适用于未改写正文的 middleware。文件丢失或引用无效返回 `CONTEXT_SOURCE_UNAVAILABLE`；
 请求不存在的 raw 表示返回 `CONTEXT_REPRESENTATION_UNAVAILABLE`。读取不会重新执行原工具，
 也不会用当前文件内容替代历史结果。
 
-Search 每次最多扫描 200 条消息，每条最多一个命中，片段最多 240 字符；不扫描外置 artifact
-的完整正文。即使本页无命中，`has_more=true` 时仍可从 `next_after` 继续。命中给出精确 ref，
-需要完整结果时再 read。完整的一次读取或扫描在同一个 IO worker 内完成。
+Search 每次最多扫描 200 条消息，每条最多一个命中，片段最多 240 字符；图片仅匹配已有名称
+和引用文字，不打开图片、不做 OCR，也不扫描 raw artifact 或外置全文。即使本页无命中，
+`has_more=true` 时仍可从 `next_after` 继续。命中给出所属 message/result 的精确 ref，先用
+context_read 展开，再按需 read_file 查看图片。完整的一次读取或扫描在同一个 IO worker 内完成。
 
 ## Human tool
 

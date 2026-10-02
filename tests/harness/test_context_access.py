@@ -7,7 +7,15 @@ import pytest
 from iris.exceptions import IrisToolExecutionError
 from iris.harness._context_access import ContextAccess
 from iris.lifecycle import SessionReadState, SessionSnapshot
-from iris.message import Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    image_reference_text,
+)
 from iris.store import InMemoryLifecycleStore
 from iris.store._session_projection import advance_session_read_state
 from iris.store.in_memory import _MemorySession
@@ -29,6 +37,33 @@ def _access(messages: list[Msg]) -> ContextAccess:
         snapshot, advance_session_read_state(SessionReadState(), 0, messages)
     )
     return ContextAccess(store)
+
+
+def _image(root: Path, key: str, name: str) -> ImageBlock:
+    """引用无需存在的图片，回读和搜索只消费持久化文件信息。"""
+    return ImageBlock(
+        original=ImageFileRef(
+            path=root / f"original-{key}.png", mime_type="image/png", width=3000, height=2000
+        ),
+        model=ImageFileRef(
+            path=root / f"model-{key}.webp", mime_type="image/webp", width=1500, height=1000
+        ),
+        name=name,
+    )
+
+
+def _read_all(access: ContextAccess, ref: str, workspace: Path, *, limit: int) -> str:
+    """根据真实 next_offset 拼接 Unicode 字符页。"""
+    content = ""
+    offset = 0
+    while True:
+        page = access.read("one", ContextReadInput(ref=ref, offset=offset, limit=limit), workspace)
+        assert page.offset == offset
+        assert page.next_offset == offset + len(page.content)
+        content += page.content
+        if not page.has_more:
+            return content
+        offset = page.next_offset
 
 
 def test_read_text_and_raw_pages_keep_original_result(tmp_path: Path) -> None:
@@ -139,6 +174,100 @@ def test_search_does_not_open_artifact_body(tmp_path: Path) -> None:
     )
     assert access.search("one", ContextSearchInput(query="needle")).matches == ()
     assert access.search("one", ContextSearchInput(query="preview")).matches[0].ref == "result:0:0"
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+def test_message_and_inline_result_render_images_without_opening_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image_only: bool
+) -> None:
+    top = _image(tmp_path, "top", "用户截图 🌌")
+    nested = _image(tmp_path, "tool", "工具图 中文")
+    parts = [nested] if image_only else [TextBlock(text="前文 🖼️"), nested, TextBlock(text="后文")]
+    result = ToolResultBlock(tool_use_id="call", name="camera", content=parts)
+    message = Msg.user(
+        [TextBlock(text="说明"), top, ToolUseBlock(id="call", name="camera", input={}), result]
+    )
+    access = _access([*[Msg.user("earlier") for _ in range(8)], message])
+
+    def no_file_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("内联图片回读不应打开图片文件")
+
+    monkeypatch.setattr(Path, "open", no_file_read)
+    text = _read_all(access, "message:8", tmp_path, limit=19)
+    assert image_reference_text(top) in text and image_reference_text(nested) in text
+    assert "camera call_id=call" in text and "[block 3 tool_result]" in text
+    expected = image_reference_text(nested)
+    if not image_only:
+        expected = "前文 🖼️\n" + expected + "\n后文"
+    assert _read_all(access, "result:8:3", tmp_path, limit=17) == expected
+    assert result.content == parts
+
+
+def test_search_matches_image_names_and_paths_with_absolute_refs_without_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    top = _image(tmp_path, "top", "Straße 星空")
+    nested = _image(tmp_path, "nested", "图表 needle")
+    access = _access(
+        [
+            *[Msg.user("earlier") for _ in range(5)],
+            Msg.user([top]),
+            Msg.user(
+                [
+                    TextBlock(text="note"),
+                    ToolResultBlock(
+                        tool_use_id="call",
+                        name="camera",
+                        content=[nested],
+                        metadata={
+                            "artifact": {
+                                "path": str(tmp_path / "raw.json"),
+                                "text_path": str(tmp_path / "full.txt"),
+                            }
+                        },
+                    ),
+                ]
+            ),
+        ]
+    )
+
+    def no_file_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("检索不能打开图片、raw artifact 或外置正文")
+
+    monkeypatch.setattr(Path, "open", no_file_read)
+    top_hit = access.search("one", ContextSearchInput(query="STRASSE")).matches[0]
+    assert top_hit.ref == "message:5" and "Straße 星空" in top_hit.snippet
+    nested_hit = access.search("one", ContextSearchInput(query="needle")).matches[0]
+    assert nested_hit.ref == "result:6:1" and nested_hit.tool_name == "camera"
+    path_hit = access.search("one", ContextSearchInput(query="model-nested.webp")).matches[0]
+    assert path_hit.ref == "result:6:1"
+
+
+def test_image_text_path_pages_use_saved_references_once_and_preserve_raw(tmp_path: Path) -> None:
+    first = _image(tmp_path, "first", "首图")
+    second = _image(tmp_path, "second", "尾图")
+    artifacts = ToolArtifactStore(tmp_path / "artifacts", preview_chars=8)
+    raw = artifacts.persist_json("call", {"raw": "完整 MCP JSON"}, preview="raw")
+    body = "很长的中文 🖼️\n" * 300
+    result = artifacts.persist_if_large(
+        ToolResult(
+            tool_use_id="call",
+            tool_name="camera",
+            artifact=raw,
+            content=[first, TextBlock(text=body), second],
+        ),
+        max_chars=1000,
+    )
+    access = _access([result.to_msg()])
+    expected = f"{image_reference_text(first)}\n{image_reference_text(second)}\n\n{body}"
+    assert result.artifact.text_path.read_text(encoding="utf-8") == expected
+    text = _read_all(access, "result:0:0", tmp_path, limit=31)
+    assert text == expected
+    assert text.count(image_reference_text(first)) == text.count(image_reference_text(second)) == 1
+    raw_page = access.read(
+        "one", ContextReadInput(ref="result:0:0", representation="raw"), tmp_path
+    )
+    assert raw_page.content == '{"raw": "完整 MCP JSON"}'
 
 
 @pytest.mark.asyncio

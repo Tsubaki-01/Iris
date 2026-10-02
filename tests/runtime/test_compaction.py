@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from fakes import history_snapshot
 
 from iris.agents import CompactionConfig
 from iris.lifecycle import SessionCompaction
-from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.compaction import (
     project_history,
@@ -103,6 +112,47 @@ def test_projection_restores_covered_anchors_once_in_original_order() -> None:
     assert project_history(history_snapshot(messages, initial_count=1), None) == messages
 
 
+def test_images_follow_protected_input_steer_and_complete_retained_tail(tmp_path: Path) -> None:
+    """重复压缩仅移出非保护旧前缀，保留图片消息与尾部完整工具组及其 metadata。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    images = [
+        ImageBlock(original=ref, model=ref, name=name) for name in ("old", "input", "steer", "tail")
+    ]
+    messages = [
+        Msg.user([images[0]]),
+        Msg.assistant("old answer"),
+        Msg.user("BCI", sender="context", metadata={"context_kind": "before_current_input"}),
+        Msg.user([images[1]]),
+        Msg.assistant([ToolUseBlock(id="a", name="read"), ToolUseBlock(id="b", name="read")]),
+        Msg.tool_result(tool_use_id="a", content=[images[0]]),
+        Msg.tool_result(tool_use_id="b", content=[images[0]]),
+        Msg.user([images[2]]),
+        Msg.assistant(
+            [ToolUseBlock(id="c", name="read"), ToolUseBlock(id="d", name="read")],
+            metadata={"provider_replay": {"opaque": "unchanged"}},
+        ),
+        Msg.tool_result(tool_use_id="c", content=[images[3]]),
+        Msg.tool_result(tool_use_id="d", content=[images[3]]),
+    ]
+    before = [message.model_dump_json() for message in messages]
+    snapshot = history_snapshot(messages, initial_count=2)
+    assert snapshot.protected_indices == (2, 3, 7)
+    assert project_history(snapshot, None) == messages
+    previous = None
+    for covered in (7, 8):
+        snapshot = history_snapshot(messages, initial_count=2, compaction=previous)
+        current = SessionCompaction(summary="结论", covered_message_count=covered)
+        projected = project_history(snapshot, current)
+        assert projected[1:] == [messages[2], messages[3], messages[7], *messages[8:]]
+        assert projected[2].blocks[0] is images[1]
+        assert projected[3].blocks[0] is images[2]
+        assert projected[4] is messages[8]
+        assert projected[5].tool_results[0].content == [images[3]]
+        assert projected[6].tool_results[0].content == [images[3]]
+        previous = current
+    assert [message.model_dump_json() for message in messages] == before
+
+
 def test_repeated_projection_uses_only_latest_summary_with_one_wrapper() -> None:
     messages = [Msg.user("任务"), Msg.assistant("第一步"), Msg.assistant("第二步")]
     compacted = SessionCompaction(summary="第一次", covered_message_count=2)
@@ -116,7 +166,10 @@ def test_repeated_projection_uses_only_latest_summary_with_one_wrapper() -> None
 
 
 @pytest.mark.parametrize("covered", [0, 2])
-def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch(covered: int) -> None:
+@pytest.mark.parametrize("with_images", [False, True])
+def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch(
+    covered: int, with_images: bool, tmp_path: Path
+) -> None:
     messages = [
         Msg.user("旧" * 500),
         Msg.assistant("旧" * 500),
@@ -133,6 +186,12 @@ def test_cuts_within_current_run_and_keeps_entire_parallel_tool_batch(covered: i
         Msg.assistant([TextBlock(text="近" * 100), ToolUseBlock(id="c", name="read")]),
         Msg.tool_result(tool_use_id="c", content="C" * 50),
     ]
+    if with_images:
+        ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+        image = ImageBlock(original=ref, model=ref)
+        messages[2] = Msg.user([TextBlock(text="当前任务"), image])
+        for index in (4, 5, 7):
+            messages[index].tool_results[0].content.append(image)
 
     previous = (
         SessionCompaction(summary="已有摘要", covered_message_count=covered) if covered else None

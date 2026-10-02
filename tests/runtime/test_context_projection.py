@@ -11,7 +11,15 @@ from iris.agents import ContextPolicyConfig
 from iris.command import CommandBinding, CommandConfig, CommandEnvironment, CommandMode
 from iris.command.native import NativeCommandService
 from iris.lifecycle import SessionCompaction
-from iris.message import LLMRequest, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from iris.runtime._context_projection import project_context_request
 from iris.runtime._request_measurement import measure_request
 from iris.runtime.compaction import project_history
@@ -95,6 +103,61 @@ def test_exact_duplicates_keep_real_pairs_recent_batches_and_raw() -> None:
     assert sum(len(message.tool_calls) for message in projected.messages) == 3
     assert len(results) == 3
     assert [message.model_dump() for message in raw] == before
+
+
+def test_image_observations_never_fold_equal_text_even_with_same_reference(tmp_path: Path) -> None:
+    """含图结果不采用文字判重，连复用同一图片引用也不改变这条规则。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref)
+    raw = [*_batch("same body" * 100, call_id="a"), *_batch("same body" * 100, call_id="b")]
+    for message in (raw[1], raw[3]):
+        message.tool_results[0].content.append(image)
+    before = [message.model_dump_json() for message in raw]
+    projected = _project(raw, recent=0, preview=10000)
+    assert projected.messages[1:] == raw
+    assert [message.model_dump_json() for message in raw] == before
+
+
+@pytest.mark.parametrize("mode", ["reduce", "unreadable", "no_benefit"])
+def test_image_observation_pressure_changes_only_text_and_keeps_recent_group(
+    tmp_path: Path, mode: str
+) -> None:
+    """视觉成本保留在候选计量中，不能靠丢图制造短化收益。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    first = ImageBlock(original=ref, model=ref, name="first")
+    second = ImageBlock(original=ref, model=ref, name="second")
+    raw = [*_batch("long body" * 300, call_id="a"), *_batch("recent", call_id="b")]
+    raw[1].tool_results[0].content = [
+        first,
+        *raw[1].tool_results[0].content,
+        second,
+        TextBlock(text="tail"),
+    ]
+    raw[3].tool_results[0].content.append(first)
+    before = [message.model_dump_json() for message in raw]
+    measured_images: list[list[ImageBlock]] = []
+
+    def estimate(request: LLMRequest) -> int:
+        images = [
+            part
+            for message in request.messages
+            for block in message.tool_results
+            for part in block.content
+            if isinstance(part, ImageBlock)
+        ]
+        measured_images.append(images)
+        return 10000 if mode == "no_benefit" else _estimate(request) + len(images) * 1000
+
+    projected = _project(raw, recent=1, preview=8, tools=mode != "unreadable", estimate=estimate)
+    older = projected.messages[2].tool_results[0]
+    if mode == "reduce":
+        assert "原文：result:1:0" in older.text
+        assert [block.type for block in older.content] == ["image", "text", "image"]
+    else:
+        assert older == raw[1].tool_results[0]
+    assert projected.messages[3:] == raw[2:]
+    assert measured_images and all(images == [first, second, first] for images in measured_images)
+    assert [message.model_dump_json() for message in raw] == before
 
 
 def test_aliases_use_saved_canonical_name_and_json_key_order() -> None:
