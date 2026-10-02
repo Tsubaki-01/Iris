@@ -160,10 +160,30 @@ async for event in client.stream(request):
         final_response = event.response
 ```
 
-Tool result bodies are ordered data blocks. Responses encodes their text blocks as ordered input_text;
-Chat projects them into a text receipt. Local counting uses the same text content. Model calls currently
-support text and tools; image request projection remains pending. The agreed Chat projection appends user images after the entire tool receipt group,
-while durable history retains actual tool results; that behavior is not implemented here yet.
+### Image input
+
+User messages and tool results can contain `ImageBlock`. Both mappers use `_images.image_data_url()`
+to read the saved `model` copy, encode a data URL with its actual MIME, and request `detail=high`.
+They neither read `original` nor resize images. `utils.images` owns processing and saving; providers
+own request encoding and projection.
+
+Responses preserves ordered `input_text/input_image` in user content and the matching call ID's
+`function_call_output.output`. Chat uses `text/image_url` for user content. Tool receipts retain text
+and image associations; after every receipt in the batch, the mapper appends a user message containing
+source call IDs, tool names, and images. It precedes subsequent real messages, including steer, and
+exists only in the request projection, without changing durable history or context reference indices.
+
+Both counting projections retain image semantics for LiteLLM's local high-detail estimate. Chat source
+labels count as text; each image counts once, and base64 is never treated as body text. This is an
+approximate window budget; actual usage comes from the provider. Complete and stream share encoding.
+Unreadable copies fail complete/counting with a provider error and yield a failed stream terminal.
+There is no image stripping, original-source reread, or protocol fallback. Models must support the
+selected protocol's image input and required tool capabilities.
+
+The minimum LiteLLM version is 1.103.2. DeepSeek Chat forwards images for models registered with
+vision support. Current offline HTTP/SSE tests use `deepseek-flash` with the default `deepseek`
+transport; older text models such as `deepseek-chat` do not gain vision by selecting Chat. Iris adds
+neither a model capability catalog nor automatic transport switching.
 
 ## Errors and limitations
 
@@ -183,7 +203,7 @@ terminal without raw exception, header, or key details. Local `asyncio.Cancelled
 ## Maintenance
 
 Iris uses LiteLLM for both protocols. OpenAI SDK remains a transitive LiteLLM dependency and is not
-declared or called directly by Iris. Locked LiteLLM 1.90.2 may obtain a complete Responses result
+declared or called directly by Iris. Locked LiteLLM 1.103.2 may obtain a complete Responses result
 and then emit synthetic events for unregistered models. The first delta then waits for the whole
 generation, while the endpoint remains `/responses`. Iris accepts this behavior without a second
 SDK path or global model registration changes.

@@ -42,6 +42,31 @@ finally:
 `store=`, every durable read and write uses that exact object. Otherwise `session.backend: none`
 selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`.
 
+On an open runner, import an image before submitting its data blocks. The main model must support vision through
+the selected API protocol:
+
+```python
+from pathlib import Path
+from iris.message import TextBlock
+
+image = await runner.import_image(Path("invoice.png"), session_id="default", name="invoice")
+result = await runner.start(
+    AgentRunRequest(input=[TextBlock(text="What is the invoice total?"), image], session_id="default")
+)
+```
+
+`import_image(Path | bytes, *, session_id, name=None)` resolves relative paths against the runner
+workspace, processes and saves the image in a worker thread under
+`.iris/image-cache/<encoded session>/`, and returns an `ImageBlock`. Importing does not create a run
+or occupy its session lane; later source-file changes do not affect the copy. Image-only `[image]`
+input is valid; empty strings/lists and whitespace-only text lists are rejected. Idle, steer, and
+follow-up `SessionManager.submit()` calls accept the same `str | list[DataBlock]` input. Import
+before submitting so the admission lock only handles saved references. Start, HITL resume, and
+recovery reuse complete blocks from the durable request/history without importing again.
+`ContextBuildScope.run_input` remains text-only; image-only `ForkPoint.input` displays
+`[image: name]` labels. Goal continuation and subagent prompts remain text without implicit parent
+image forwarding.
+
 MCP construction does not connect. Call `aprepare()` to warm up, or let the execution entry prepare
 automatically. The complete catalog publishes before creating a run. Required preparation failure
 closes resources without creating a run; construct a new runner after correcting configuration.

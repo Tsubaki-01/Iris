@@ -331,7 +331,9 @@ Its `point.message_count` comes from the selected run's terminal cutoff, and mes
 that prefix, excluding later turns. SQLite reads the source and messages with `ordinal <= count`
 in one read transaction. `_sqlite_messages.py` provides the shared decoder for prefix and full
 history reads. A run whose deadline expired at creation before committing its input can have an
-empty preview; its `ForkPoint.input` still retains the original request.
+empty preview; its `ForkPoint.input` still retains a text display of the request, using
+`[image: name]` labels for image-only input. Complete `AgentRunRequest.input` and history messages
+store ordered data blocks and file references; stores neither read source images nor add attachment tables.
 
 The `ForkSession` command carries `source_run_id`, a new `target_session_id`, and `now`.
 The new session starts at `revision=0`, with its direct source in `forked_from_run_id`; later

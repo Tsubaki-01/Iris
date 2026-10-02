@@ -16,6 +16,10 @@ activation/checkpoint/tool-call/event/result 边界模型、JSON-safe validation
 commands，但不拥有运行控制流或具体数据库。持久化模型使用 Pydantic 校验 raw/load 数据；
 同进程 command 使用 frozen slots dataclass，只携带调用方已经类型化的事实。
 
+`AgentRunRequest.input` 保存 `str | list[DataBlock]`，允许有序文字/图片及纯图片输入。
+public admission 只规范化一次：字符串去除首尾空白，块列表至少含有效文字或图片；图片仅保存
+已导入的文件引用。恢复读取同一请求契约，不在 lifecycle 解码或复制图片。
+
 ## 依赖边界
 
 ```text
@@ -177,7 +181,7 @@ gateway 可以据此确认 run 属于所请求的 session，无需加载完整 r
 `history.py` 定义四个 frozen slots dataclass，均从 `iris.lifecycle` 导出：
 
 - `ForkPointCursor(created_at, run_id)`：分支点分页位置；
-- `ForkPoint`：run/session/agent identity、原始 input、stop reason、创建与结束时间及 `message_count`；
+- `ForkPoint`：run/session/agent identity、input 的文字展示、stop reason、创建与结束时间及 `message_count`；纯图片显示图片名称标签；
 - `ForkPointPage(items, next_cursor)`：分支点 tuple 和下一页游标；
 - `RunHistorySnapshot(point, messages)`：指定 run 末尾的历史预览，messages 为独立消息对象的 tuple，
   不携带当前 session 的 CAS revision。

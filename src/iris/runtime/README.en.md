@@ -102,8 +102,9 @@ result = await runtime.execute(
 frozen `RuntimeExecutionOptions`, and a JSON-safe cursor. `RuntimeActivationResult` is an engine
 fact only; the owner must reload the final `RunResult` from durable storage.
 
-Every activation carries the original `run_input` and `initial_session_message_count` captured
-when the run was created. In `before_input`, the engine prepares the initial window, BCI, and user input,
+Every activation carries the original `run_input` (`str | list[DataBlock]`) and
+`initial_session_message_count` captured when the run was created. In `before_input`, the engine
+prepares the initial window, BCI, and user input,
 then saves the window and input atomically through `commit_run_input()` before entering `before_model`. This
 does not consume a model reservation or increment the step index. BCI is built only during input
 preparation; later steps and recovery after the input commit replay history without appending or
@@ -123,7 +124,8 @@ reservation and does not consume an additional model-step budget slot.
 [`iris.context`](../context/README.en.md#dynamic-host-snapshots) for the protocol and example. At each
 `before_model`, runtime collects once after model-step reservation and cancellation/deadline checks.
 Unadmitted steps do not collect. The scope carries session/run identity, step index, workspace, and
-original `run_input`. The next step and recovery at `before_model` recollect; children do not inherit
+the text projection of original `run_input`, empty for image-only input. The next step and recovery
+at `before_model` recollect; children do not inherit
 the parent's source.
 
 Collection uses the run's remaining deadline. Budget expiry returns `DEADLINE_EXCEEDED`; ordinary

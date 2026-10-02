@@ -82,6 +82,7 @@ result = await runtime.execute(
 事实；调用方必须从 durable store 重载最终 `RunResult`。
 
 所有 activation 都携带原始 `run_input` 与创建 run 时的 `initial_session_message_count`。
+`run_input` 为 `str | list[DataBlock]`；输入归档保持图片与文字顺序，不重新处理图片。
 engine 在 `before_input` 准备首次窗口、BCI 和用户输入，通过 `commit_run_input()`
 原子保存窗口与输入后进入 `before_model`，不消耗模型 reservation 或增加 step index。
 BCI 只在输入阶段构建；后续步骤及已提交输入的 resume/recover 使用历史，不重复追加或渲染。
@@ -103,8 +104,8 @@ checkpoint 使用版本 4，cursor 必须提供 `visible_tool_names` 和 `todo_r
 `RuntimeFactory.from_config()` 与 `from_config_path()` 接收可选 `context_source=`，协议与示例见
 [`iris.context`](../context/README.md#宿主动态快照)。source 存在时，每次 `before_model` 在
 model-step reservation 获准并检查取消和 deadline 后采集一次；未获准的步骤不采集。scope
-提供 session/run 身份、step index、workspace 和原始 `run_input`。下一步骤及恢复到
-`before_model` 时重新采集，child 不继承 parent source。
+提供 session/run 身份、step index、workspace 和原始输入的纯文字 `run_input`；纯图片时为空字符串。
+下一步骤及恢复到 `before_model` 时重新采集，child 不继承 parent source。
 
 采集受当前 run 剩余 deadline 限制，额度到期返回 `DEADLINE_EXCEEDED`；source 自身的普通
 异常（包括自行抛出的 `TimeoutError`）以 `IrisContextError` 结束本次 activation，不沿用旧值。

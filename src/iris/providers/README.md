@@ -181,9 +181,25 @@ async for event in client.stream(request):
         final_response = event.response
 ```
 
-工具结果内部正文使用有序数据块；Responses 将文字块映射为有序 input_text，Chat 将其投影为文字回执，
-两者的本地计量消费同一文字内容。当前模型调用仍交付文字与工具闭环，图片请求投影尚待接入；Chat 工具图片的既定交接
-要求是整组工具回执之后追加 user 图片投影，真实历史仍保留工具结果，此处尚未实现。
+### 图片输入
+
+用户消息和工具结果可包含 `ImageBlock`。两个 mapper 通过 `_images.image_data_url()` 读取
+已保存的 `model` 副本，以实际 MIME 编码 data URL，并使用 `detail=high`；不读取 original，
+不在请求时重新缩放或压缩。图片处理/保存属于 `utils.images`，provider 只负责编码与投影。
+
+Responses 用户内容使用有序 `input_text/input_image`，工具结果在对应 call_id 的
+`function_call_output.output` 内保留相同顺序。Chat 用户内容使用 `text/image_url`；工具回执
+保留文字及图片关联说明，在该轮全部回执之后追加包含来源 call ID、工具名和图片的 user 消息。
+追加消息位于后续真实消息（包括 steer）之前，仅存在于请求投影，不写入历史或改变 context 引用编号。
+
+两个 adapter 的计量投影都保留图片语义，使用 LiteLLM 本地 high 视觉估算；Chat 来源说明计入文字，
+每张图只计算一次，base64 不按正文字符计数。这是窗口预算近似值，实际用量仍取服务端 usage。
+complete 与 stream 共用编码；副本不可读时 complete/计量报告 provider 错误，stream 产生失败终态，
+不会静默去图、重新读取原始来源或切换协议。模型必须支持所选协议下的视觉和所需工具能力。
+
+LiteLLM 最低版本为 1.103.2。DeepSeek Chat 的图片透传依赖其已登记的视觉能力：当前离线
+HTTP/SSE 用例使用 `deepseek-flash`，保留默认 `deepseek` 传输；`deepseek-chat` 等旧文字模型
+不因选择 Chat 协议而获得视觉能力。Iris 不增加模型能力目录或自动传输切换。
 
 ## 错误映射
 
@@ -204,7 +220,7 @@ async for event in client.stream(request):
 ## 维护与验证
 
 Iris 统一通过 LiteLLM 调用两种协议；OpenAI SDK 是 LiteLLM 的传递依赖，Iris 不单独声明或
-直接调用它。锁定 LiteLLM 1.90.2 对未登记模型可能先取得完整 Responses 响应，再模拟流式事件；
+直接调用它。锁定 LiteLLM 1.103.2 对未登记模型可能先取得完整 Responses 响应，再模拟流式事件；
 此时首个增量需等待整次生成完成，HTTP endpoint 仍是 `/responses`。Iris 沿用该行为，
 不增加第二条 SDK 调用路径，也不改变全局模型登记。
 

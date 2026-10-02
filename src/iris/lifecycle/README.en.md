@@ -19,6 +19,11 @@ validation, projections, and CAS commands. Persisted models use Pydantic to vali
 same-process commands are frozen slots dataclasses carrying already typed facts. The package owns
 neither execution control flow nor a concrete database.
 
+`AgentRunRequest.input` stores `str | list[DataBlock]`, including ordered text/images and
+image-only input. Public admission normalizes once: strings are trimmed, and block lists must
+contain meaningful text or an image. Images contain imported file references only. Recovery reads
+the same request contract; lifecycle does not decode or copy image files.
+
 ## Dependency boundary
 
 ```text
@@ -210,7 +215,8 @@ boundary.
 `history.py` defines four frozen slots dataclasses, all exported from `iris.lifecycle`:
 
 - `ForkPointCursor(created_at, run_id)`: a pagination position for fork points;
-- `ForkPoint`: run/session/agent identities, original input, stop reason, creation and finish times,
+- `ForkPoint`: run/session/agent identities, a text display of input (image-name labels for
+  image-only input), stop reason, creation and finish times,
   and `message_count`;
 - `ForkPointPage(items, next_cursor)`: a tuple of fork points and the next-page cursor;
 - `RunHistorySnapshot(point, messages)`: history through the selected run, with a tuple of independent

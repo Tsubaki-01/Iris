@@ -155,7 +155,7 @@ class ProviderClient(BaseModel):
             不包含 LiteLLM 原始对象的连续模型流式事件。
 
         Raises:
-            IrisProviderError: 请求未启用stream或使用不支持的传输路线。
+            IrisProviderError: 请求未启用 stream。
             asyncio.CancelledError: 本地consumer task被取消。
         """
         if not request.stream:
@@ -169,9 +169,9 @@ class ProviderClient(BaseModel):
             model=request.model,
             attempt=1,
         )
-        kwargs = self._to_adapter_kwargs(request)
-        kwargs["stream"] = True
         try:
+            kwargs = self._to_adapter_kwargs(request)
+            kwargs["stream"] = True
             raw_stream = await self._adapter.invoke(kwargs)
         except Exception as exc:
             yield failed_before_start(

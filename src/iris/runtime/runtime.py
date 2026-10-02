@@ -54,6 +54,7 @@ from ..message import (
     Msg,
     ToolUseBlock,
 )
+from ..message.message import data_text
 from ..todo import TodoSnapshot, TodoStatus
 from ..todo.context import render_todo_context
 from ..todo.document import read_todo
@@ -1225,7 +1226,7 @@ class AgentRuntime:
                                 run_id=activation.run_id,
                                 step_index=cursor.step_index,
                                 workspace_root=self.environment.workspace_root,
-                                run_input=activation.run_input,
+                                run_input=data_text(activation.run_input),
                             )
                         )
                     if todo_enabled:

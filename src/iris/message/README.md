@@ -90,7 +90,9 @@ result = Msg.tool_result(tool_use_id=call.id, content="查询完成", name=call.
 完整内容应读取 `content`/`blocks`，不能以纯文本投影代替。
 
 `ImageBlock` 的文件处理由 [`iris.utils.images`](../utils/images.py) 完成，消息层只负责引用和
-JSON 往返；无需变换时 original/model 可指向同一文件。本阶段提供数据契约，不负责 SDK 图片导入或 provider 图片编码。
+JSON 往返；无需变换时 original/model 可指向同一文件。SDK 通过
+[`AgentRunner.import_image()`](../harness/README.md#快速入门) 导入图片，`Msg.user([TextBlock(...), image])`
+保留有序完整内容。消息层不读取图片文件；请求编码由所选 provider adapter 负责。
 
 ### `Conversation`
 

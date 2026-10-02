@@ -27,7 +27,7 @@ from pydantic import (
 from ..exceptions import IrisRunStateError
 from ..hitl.models import HumanInteraction
 from ..message.llm import ProviderOptions, ResponseFormat, ToolChoice
-from ..message.message import Msg
+from ..message.message import DataBlock, ImageBlock, Msg
 from ..tools.base import ToolResult
 
 _REQUEST_OPTION_ADAPTERS = {
@@ -162,6 +162,15 @@ def _trim_required(value: str, *, field_name: str) -> str:
     return normalized
 
 
+def normalize_run_input(value: str | list[DataBlock]) -> str | list[DataBlock]:
+    """在 public admission 边界规范化文字，保留有效数据块的顺序和内容。"""
+    if isinstance(value, str):
+        return _trim_required(value, field_name="input")
+    if not any(isinstance(block, ImageBlock) or block.text.strip() for block in value):
+        raise ValueError("input 至少需要文字或图片")
+    return value
+
+
 def _aware_utc(value: datetime | None, *, field_name: str) -> datetime | None:
     if value is None:
         return None
@@ -238,12 +247,17 @@ class RunLimits(_FrozenModel):
 class AgentRunRequest(_FrozenModel):
     """调用方提交的一次 logical run 请求。"""
 
-    input: str
+    input: str | list[DataBlock]
     session_id: str = "default"
     run_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("input", "session_id")
+    @field_validator("input")
+    @classmethod
+    def _validate_input(cls, value: str | list[DataBlock]) -> str | list[DataBlock]:
+        return normalize_run_input(value)
+
+    @field_validator("session_id")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))

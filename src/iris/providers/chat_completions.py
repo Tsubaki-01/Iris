@@ -16,6 +16,7 @@ import litellm
 from ..exceptions import IrisProviderError
 from ..message import (
     ContentBlock,
+    ImageBlock,
     LLMRequest,
     LLMResponse,
     Msg,
@@ -25,6 +26,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.llm import ResponseFormat
+from ._images import image_data_url
 from ._tool_encoding import chat_tool_choice, chat_tools
 
 # endregion
@@ -34,18 +36,43 @@ class ChatCompletionsMapper:
     """在 Iris 消息与 Chat Completions 消息格式之间转换。"""
 
     def format_messages(self, messages: list[Msg]) -> list[dict[str, Any]]:
-        """转换消息列表为 Chat Completions messages 形状。"""
+        """转换完整历史；整组工具回执结束后追加该组图片。"""
         result: list[dict[str, Any]] = []
+        pending_calls: dict[str, str] = {}
+        tool_images: list[dict[str, Any]] = []
         for msg in messages:
-            result.extend(self._format_message(msg))
+            if msg.tool_calls:
+                pending_calls = {block.id: block.name for block in msg.tool_calls}
+            if not msg.tool_results:
+                result.extend(self._format_message(msg))
+                continue
+            for block in msg.tool_results:
+                receipt = self._format_tool_result(block)
+                images = [part for part in block.content if isinstance(part, ImageBlock)]
+                if images:
+                    tool_name = block.name or pending_calls.get(block.tool_use_id, "")
+                    source = f"[tool images: name={tool_name}, call_id={block.tool_use_id}]"
+                    receipt["content"] = "\n".join(text for text in (block.text, source) if text)
+                    tool_images.append({"type": "text", "text": source})
+                    tool_images.extend(_image_part(image) for image in images)
+                result.append(receipt)
+                pending_calls.pop(block.tool_use_id, None)
+            if not pending_calls and tool_images:
+                result.append({"role": "user", "content": tool_images})
+                tool_images = []
         return result
 
     def _format_message(self, msg: Msg) -> list[dict[str, Any]]:
         """转换单条 Iris 消息为 Chat Completions message。"""
-        if msg.tool_results:
-            return [self._format_tool_result(block) for block in msg.tool_results]
-
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
+        if msg.role is Role.USER and any(isinstance(block, ImageBlock) for block in msg.blocks):
+            item["content"] = [
+                _image_part(block)
+                if isinstance(block, ImageBlock)
+                else {"type": "text", "text": block.text}
+                for block in msg.blocks
+                if isinstance(block, (TextBlock, ImageBlock))
+            ]
         replay = msg.metadata.get("chat_completions")
         if msg.role is Role.ASSISTANT and replay is not None:
             item[replay["reasoning_field"]] = msg.metadata.get("reasoning", "")
@@ -148,6 +175,11 @@ class ChatCompletionsMapper:
             metadata=metadata,
             **tokens,
         )
+
+
+def _image_part(block: ImageBlock) -> dict[str, Any]:
+    """将已准备图片引用编码为 Chat 图片内容块。"""
+    return {"type": "image_url", "image_url": {"url": image_data_url(block), "detail": "high"}}
 
 
 def chat_response_format(response_format: ResponseFormat) -> dict[str, Any]:

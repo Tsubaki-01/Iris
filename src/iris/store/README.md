@@ -277,7 +277,8 @@ admission 顺序或跨页固定快照，刷新时从首页开始。
 `point.message_count` 来自选定 run 的终态截点，messages 仅包含该前缀，不含后续轮次。
 SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_sqlite_messages.py` 为前缀
 和完整历史读取共用解码器。创建时 deadline 已过且没有提交 input 的 run 可以预览空历史，
-其 `ForkPoint.input` 仍保留原始请求。
+其 `ForkPoint.input` 仍保留请求的文字展示；纯图片输入显示 `[image: 名称]` 标签。
+完整 `AgentRunRequest.input` 与历史消息保存有序数据块及文件引用，store 不读源图或写附件表。
 
 `ForkSession` command 携带 `source_run_id`、全新的 `target_session_id` 和 `now`。
 新 session 从 `revision=0` 开始，`forked_from_run_id` 记录直接来源；后续追加或摘要提交推进 revision，
