@@ -16,10 +16,10 @@ from iris.context import ContextBuildScope, ContextSnapshot
 from iris.exceptions import IrisImageError, IrisRunStateError
 from iris.harness import AgentRunner, SessionHistory, SessionManager, SubmissionEvent
 from iris.hitl import QuestionInteractionResponse
-from iris.lifecycle import AgentRunRequest, LifecycleStore, RunStopReason
-from iris.message import DataBlock, ImageBlock, TextBlock, ToolUseBlock
+from iris.lifecycle import AgentRunRequest, LifecycleStore, RunEvent, RunEventKind, RunStopReason
+from iris.message import DataBlock, ImageBlock, LLMRequest, LLMResponse, TextBlock, ToolUseBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
-from iris.tools import AskQuestionTool, ToolRegistry
+from iris.tools import AskQuestionTool, ToolCapability, ToolRegistry
 from iris.tools._paths import safe_path_segment
 from iris.utils.images import SavedImage
 
@@ -152,10 +152,29 @@ async def test_start_keeps_order_and_projects_text_for_context_and_fork_point(
 
 @pytest.mark.asyncio
 async def test_manager_idle_steer_and_follow_up_keep_imported_blocks(tmp_path: Path) -> None:
-    """排队图片已保存；三条路径保留原 delivery 时点和完整块。"""
-    provider = BlockingProvider(text_response())
+    """工具循环、图片 steer 与后续文字提问保图，delivery 仍晚于 durable commit。"""
+
+    class ToolThenTextProvider(BlockingProvider):
+        """首步阻塞后调用工具，后续步骤正常回答。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            """沿用同步点，仅将首个响应换成普通工具调用。"""
+            response = await super().complete(request)
+            if len(self.requests) == 1:
+                return tool_response(ToolUseBlock(id="note", name="get_note", input={}))
+            return response
+
+    def get_note() -> str:
+        """提供图片比较所需的文字备注。"""
+        return "compare the two colors"
+
+    provider = ToolThenTextProvider(text_response())
+    registry = ToolRegistry()
+    registry.register_function(get_note, description="查看备注", capabilities={ToolCapability.READ})
     store = InMemoryLifecycleStore()
-    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, registry=registry, provider=provider), store=store
+    )
     first = await runner.import_image(_png(), session_id="managed", name="first")
     second = await runner.import_image(_png("blue"), session_id="managed", name="second")
     initial: list[DataBlock] = [first]
@@ -174,6 +193,11 @@ async def test_manager_idle_steer_and_follow_up_keep_imported_blocks(tmp_path: P
 
     provider.release.set()
     await _wait_until(lambda: store.load_result(follow_up.run_id) is not None)
+    await _wait_until(lambda: manager._current_run_id is None)
+    later = await manager.submit("再比较两张图片")
+    assert later.state == "delivered"
+    assert store.load_run(later.run_id).request.input == "再比较两张图片"
+    await _wait_until(lambda: store.load_result(later.run_id) is not None)
     await manager.close()
     events = [event async for event in stream]
     delivered = [
@@ -182,12 +206,50 @@ async def test_manager_idle_steer_and_follow_up_keep_imported_blocks(tmp_path: P
         if isinstance(event, SubmissionEvent) and event.state == "delivered"
     ]
     assert delivered == [steer.submission_id, follow_up.submission_id]
+    for receipt, kind in (
+        (steer, RunEventKind.TOOL_CALL_COMMITTED),
+        (follow_up, RunEventKind.RUN_STARTED),
+    ):
+        delivery_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, SubmissionEvent)
+            and event.submission_id == receipt.submission_id
+            and event.state == "delivered"
+        )
+        assert any(
+            isinstance(event, RunEvent) and event.run_id == receipt.run_id and event.kind is kind
+            for event in events[:delivery_index]
+        )
     messages = store.load_session("managed").messages
-    assert [message.content for message in messages if message.role.value == "user"] == [
+    assert [
+        message.content
+        for message in messages
+        if message.role.value == "user" and not message.tool_results
+    ] == [
         initial,
         steering,
         following,
+        "再比较两张图片",
     ]
+    result = next(block for message in messages for block in message.tool_results)
+    assert result.tool_use_id == "note" and result.text == "compare the two colors"
+    assert len(provider.requests) == 4
+    assert [
+        message.content
+        for message in provider.requests[1].messages
+        if message.role.value == "user" and not message.tool_results
+    ] == [
+        initial,
+        steering,
+    ]
+    for request in provider.requests[2:]:
+        assert [
+            block
+            for message in request.messages
+            for block in message.blocks
+            if isinstance(block, ImageBlock)
+        ] == [first, second, first, second]
     assert store.load_run(follow_up.run_id).request.input == following
     assert second.model.path.read_bytes() == _png("blue")
 

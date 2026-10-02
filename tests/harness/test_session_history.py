@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iris.exceptions import IrisRunStateError
 from iris.harness import AgentRunner, SessionHistory, SessionManager
@@ -23,7 +24,9 @@ from iris.lifecycle import (
     RunStopReason,
     SessionSnapshot,
 )
+from iris.message import ImageBlock, TextBlock
 from iris.store import InMemoryLifecycleStore, SQLiteStore
+from iris.tools._paths import safe_path_segment
 
 from .fakes import BlockingProvider, StaticProvider, build_runtime, text_response
 
@@ -34,6 +37,69 @@ def history_store(request: pytest.FixtureRequest, tmp_path: Path) -> LifecycleSt
     if request.param == "sqlite":
         return SQLiteStore(tmp_path / "history.db")
     return InMemoryLifecycleStore()
+
+
+@pytest.mark.asyncio
+async def test_image_fork_reuses_source_cache_and_imports_into_branch_after_source_close(
+    tmp_path: Path, history_store: LifecycleStore
+) -> None:
+    """分支只复制稳定引用；来源关闭和原文件变更不影响继承图片。"""
+    response = text_response("source conclusion").model_copy(
+        update={
+            "reasoning": "source reasoning",
+            "metadata": {"chat_completions": {"reasoning_field": "reasoning_content"}},
+        }
+    )
+    original = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=StaticProvider(response)), store=history_store
+    )
+    source = tmp_path / "source.png"
+    with Image.new("RGB", (20, 10), "red") as pixels:
+        pixels.save(source)
+    old_image = await original.import_image(source, session_id="source", name="old")
+    old_bytes = old_image.model.path.read_bytes()
+    await original.start(
+        AgentRunRequest(input=[old_image], session_id="source", run_id="source-run")
+    )
+    source_before = history_store.load_session("source")
+    branch = SessionHistory(history_store).fork("source-run")
+    assert branch.messages == source_before.messages
+    await original.aclose()
+    with Image.new("RGB", (20, 10), "blue") as pixels:
+        pixels.save(source)
+
+    reopened = (
+        SQLiteStore(history_store.path) if isinstance(history_store, SQLiteStore) else history_store
+    )
+    provider = StaticProvider(text_response("branch answer"))
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=reopened)
+    new_image = await runner.import_image(source, session_id=branch.session_id, name="new")
+    assert old_image.model.path.parent.name == safe_path_segment("source")
+    assert new_image.model.path.parent.name == safe_path_segment(branch.session_id)
+    assert old_image.model.path.read_bytes() == old_bytes
+    assert new_image.model.path.read_bytes() != old_bytes
+    result = await runner.start(
+        AgentRunRequest(
+            input=[TextBlock(text="compare"), new_image],
+            session_id=branch.session_id,
+        )
+    )
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    request = provider.requests[-1]
+    assert [
+        block
+        for message in request.messages
+        for block in message.blocks
+        if isinstance(block, ImageBlock)
+    ] == [old_image, new_image]
+    inherited = next(message for message in request.messages if message.text == "source conclusion")
+    assert inherited.metadata == source_before.messages[1].metadata
+    assert inherited.metadata["reasoning"] == "source reasoning"
+    assert reopened.load_session("source") == source_before
+    assert reopened.load_session(branch.session_id).messages[:2] == branch.messages
+    await runner.aclose()
+    assert old_image.model.path.read_bytes() == old_bytes
+    assert new_image.model.path.read_bytes() == source.read_bytes()
 
 
 @pytest.mark.asyncio

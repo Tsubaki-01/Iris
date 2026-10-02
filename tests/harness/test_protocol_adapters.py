@@ -1,16 +1,19 @@
 """同一 runtime 工具、持久化恢复与摘要契约经过真实双协议 adapter。"""
 
+import base64
 from collections.abc import AsyncIterator
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
 import pytest
+from PIL import Image
 
 from iris.agents import CompactionConfig
 from iris.harness import AgentRunner
 from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import AgentRunRequest, RunStopReason
-from iris.message import LLMRequest, Msg, ToolSpec
+from iris.message import ImageBlock, LLMRequest, Msg, TextBlock, ToolSpec
 from iris.providers import ProviderClient
 from iris.providers.chat_completions import ChatCompletionsAdapter
 from iris.providers.responses import ResponsesAdapter
@@ -20,7 +23,7 @@ from iris.runtime._compaction_summary import (
     serialize_history,
 )
 from iris.store import SQLiteStore
-from iris.tools import ToolCapability, ToolRegistry
+from iris.tools import ToolCapability, ToolRegistry, ToolResult
 from iris.utils import TemplateRenderer
 
 from .fakes import RecordingPublisher, build_runtime
@@ -52,11 +55,24 @@ def _raw_response(style: ApiStyle, *, call: bool, text: str = "done") -> dict[st
             "id": "resp-test",
             "model": "gpt-4o",
             "status": "completed",
-            "output": [output],
+            "output": (
+                [
+                    {
+                        "type": "reasoning",
+                        "id": "rs-saved",
+                        "summary": [],
+                        "encrypted_content": "saved-reasoning",
+                    }
+                ]
+                if call
+                else []
+            )
+            + [output],
             "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
         }
     message = {"role": "assistant", "content": None if call else text}
     if call:
+        message["reasoning_content"] = "saved reasoning"
         message["tool_calls"] = [
             {
                 "id": "call-save",
@@ -125,26 +141,50 @@ async def test_protocol_tool_loop_resumes_from_sqlite_with_same_runtime(
     client = ProviderClient(provider="openai", api_key="test", api_style=style)
     writes: list[str] = []
 
-    def save(value: str) -> str:
+    def save(value: str) -> ToolResult:
         writes.append(value)
-        return value
+        return ToolResult(
+            tool_use_id="",
+            tool_name="save",
+            content=[TextBlock(text=value), tool_image, TextBlock(text="after image")],
+        )
 
     registry = ToolRegistry()
     registry.register_function(save, description="保存", capabilities={ToolCapability.WRITE})
     database = tmp_path / "protocol.db"
     publisher = RecordingPublisher() if stream else None
-    waiting = await AgentRunner(
+    first_runner = AgentRunner(
         runtime=build_runtime(tmp_path, registry=registry, provider=client),
         store=SQLiteStore(database),
         live_publisher=publisher,
-    ).start(AgentRunRequest(input="save a value", run_id="protocol-run"))
+    )
+    source = tmp_path / "source.png"
+    with Image.new("RGB", (20, 10), "red") as pixels:
+        pixels.save(source)
+    user_image = await first_runner.import_image(source, session_id="default", name="user")
+    buffer = BytesIO()
+    with Image.new("RGB", (20, 10), "blue") as pixels:
+        pixels.save(buffer, format="PNG")
+    tool_image = await first_runner.import_image(
+        buffer.getvalue(), session_id="default", name="tool"
+    )
+    user_content = [TextBlock(text="save a value"), user_image, TextBlock(text="after user image")]
+    waiting = await first_runner.start(AgentRunRequest(input=user_content, run_id="protocol-run"))
     assert waiting.pending_interaction is not None
     assert writes == []
-    result = await AgentRunner(
+    before = first_runner.store.load_session("default")
+    before_json = [message.model_dump_json() for message in before.messages]
+    saved_assistant = before.messages[-1]
+    assert saved_assistant.tool_calls[0].id == "call-save"
+    assert style in saved_assistant.metadata
+    await first_runner.aclose()
+    source.write_bytes(b"original source is unavailable as an image")
+    restarted = AgentRunner(
         runtime=build_runtime(tmp_path, registry=registry, provider=client),
         store=SQLiteStore(database),
         live_publisher=publisher,
-    ).resume(
+    )
+    result = await restarted.resume(
         "protocol-run",
         interaction_id=waiting.pending_interaction.interaction_id,
         response=PermissionInteractionResponse(decision="approve"),
@@ -153,16 +193,69 @@ async def test_protocol_tool_loop_resumes_from_sqlite_with_same_runtime(
     assert writes == ["saved"]
     assert result.run.usage.input_tokens == 6
     assert result.run.usage.output_tokens == 4
+    history = restarted.store.load_session("default").messages
+    assert [message.model_dump_json() for message in history[: len(before.messages)]] == before_json
+    assert sum(message.content == user_content for message in history) == 1
+    result_block = next(block for message in history for block in message.tool_results)
+    assert result_block.tool_use_id == "call-save"
+    assert result_block.content == [
+        TextBlock(text="saved"),
+        tool_image,
+        TextBlock(text="after image"),
+    ]
+    assert (
+        sum(isinstance(block, ImageBlock) for message in history for block in message.blocks) == 1
+    )
+    user_url = (
+        f"data:image/png;base64,{base64.b64encode(user_image.model.path.read_bytes()).decode()}"
+    )
+    tool_url = (
+        f"data:image/png;base64,{base64.b64encode(tool_image.model.path.read_bytes()).decode()}"
+    )
     if style == "responses":
         receipt = next(
             item for item in requests[1]["input"] if item["type"] == "function_call_output"
         )
         assert receipt["call_id"] == "call-save"
-        assert "saved" in str(receipt["output"])
+        assert [part["type"] for part in receipt["output"]] == [
+            "input_text",
+            "input_image",
+            "input_text",
+        ]
+        assert receipt["output"][1] == {
+            "type": "input_image",
+            "image_url": tool_url,
+            "detail": "high",
+        }
+        user = next(item for item in requests[1]["input"] if item.get("role") == "user")
+        assert [part["type"] for part in user["content"]] == [
+            "input_text",
+            "input_image",
+            "input_text",
+        ]
+        assert user["content"][1]["image_url"] == user_url
+        replay = next(item for item in requests[1]["input"] if item["type"] == "reasoning")
+        assert replay["id"] == "rs-saved" and replay["encrypted_content"] == "saved-reasoning"
+        call = next(item for item in requests[1]["input"] if item["type"] == "function_call")
+        assert call["id"] == "fc-save" and call["call_id"] == "call-save"
     else:
-        receipt = next(item for item in requests[1]["messages"] if item["role"] == "tool")
+        wire = requests[1]["messages"]
+        receipt_index = next(index for index, item in enumerate(wire) if item["role"] == "tool")
+        receipt = wire[receipt_index]
         assert receipt["tool_call_id"] == "call-save"
         assert "saved" in receipt["content"]
+        assert "after image" in receipt["content"] and "call_id=call-save" in receipt["content"]
+        projected = wire[receipt_index + 1]
+        assert projected["role"] == "user" and "save" in projected["content"][0]["text"]
+        assert projected["content"][1] == {
+            "type": "image_url",
+            "image_url": {"url": tool_url, "detail": "high"},
+        }
+        user = next(item for item in wire if item["role"] == "user")
+        assert [part["type"] for part in user["content"]] == ["text", "image_url", "text"]
+        assert user["content"][1]["image_url"]["url"] == user_url
+        assert wire[receipt_index - 1]["reasoning_content"] == "saved reasoning"
+    await restarted.aclose()
 
 
 @pytest.mark.asyncio

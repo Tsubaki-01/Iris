@@ -41,6 +41,19 @@ uv run python -m examples.web.tools --env-file .env.local search "Python asyncio
 uv run python -m examples.web.agent --env-file .env.local
 ```
 
+## 图片输入
+
+[图片 SDK 示例](image/README.md) 演示导入本地 PNG、JPEG 或 WebP，提交文字加图片或纯图片，
+并将会话与图片引用保存到 SQLite。默认使用 Responses，可在 YAML 中切换为 Chat Completions；
+所选模型须支持相应协议的视觉与工具能力。
+
+```powershell
+uv run python -m examples.image.basic --env-file .env.local --image "path/to/photo.png" --session-id image-demo
+```
+
+图片缓存是恢复数据，备份需同时保留数据库和 `image-cache`。`iris chat` 当前没有发图或图片
+渲染界面，图片输入通过 SDK 提交；缓存、fork 与摘要后的回读规则见示例说明。
+
 ## MCP
 
 本地 MCP 的 JSON/Codex TOML 双格式示例见 [mcp/README.md](mcp/README.md)。服务提供无需凭据的

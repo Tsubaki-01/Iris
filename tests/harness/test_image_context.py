@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 from io import BytesIO
@@ -12,7 +13,7 @@ from PIL import Image
 
 from iris.agents import AgentConfig
 from iris.harness import AgentRunner
-from iris.lifecycle import AgentRunRequest, RunStopReason
+from iris.lifecycle import AgentRunRequest, LifecycleStore, RunStopReason
 from iris.message import (
     ImageBlock,
     LLMRequest,
@@ -24,10 +25,10 @@ from iris.message import (
 )
 from iris.providers.chat_completions import ChatCompletionsMapper
 from iris.providers.responses import ResponsesMapper
-from iris.store import InMemoryLifecycleStore
+from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolResult
 
-from .fakes import StaticProvider, text_response, tool_response
+from .fakes import StaticProvider, text_response, tool_batch_response, tool_response
 from .test_context_compaction import CompactionProvider
 
 _CONCLUSION = "此前已确认图片是蓝色色块。"
@@ -65,6 +66,7 @@ class ImageRecallProvider(CompactionProvider):
     def __init__(self) -> None:
         super().__init__()
         self.recalled_path: Path | None = None
+        self.recalled_ref: str | None = None
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """摘要只消费文字；主请求依次定位原文、读取缓存图、完成回答。"""
@@ -86,11 +88,12 @@ class ImageRecallProvider(CompactionProvider):
             )
             ref = re.search(r"result:\d+:\d+", summary)
             assert ref is not None
+            self.recalled_ref = ref.group(0)
             response = tool_response(
                 ToolUseBlock(
                     id="locate-image",
                     name="context_read",
-                    input={"ref": ref.group(0), "limit": 8000},
+                    input={"ref": self.recalled_ref, "limit": 8000},
                 )
             )
         elif len(self.requests) == 1:
@@ -103,12 +106,17 @@ class ImageRecallProvider(CompactionProvider):
             match = re.search(r"model=(.+?) \(image/", result.text)
             assert match is not None
             self.recalled_path = Path(match.group(1))
-            response = tool_response(
+            response = tool_batch_response(
                 ToolUseBlock(
                     id="reload-image",
                     name="read_file",
                     input={"file_path": str(self.recalled_path)},
-                )
+                ),
+                ToolUseBlock(
+                    id="confirm-image-source",
+                    name="context_read",
+                    input={"ref": self.recalled_ref, "limit": 8000},
+                ),
             )
         else:
             assert len(_images(request.messages)) == 1
@@ -118,14 +126,19 @@ class ImageRecallProvider(CompactionProvider):
 
 
 @pytest.mark.asyncio
-async def test_compacted_tool_image_is_recalled_from_saved_model_copy(tmp_path: Path) -> None:
-    """真实工具/store/压缩/回读闭环保留原历史，活动历史只重新带回读到的模型版。"""
+@pytest.mark.parametrize("restart", [False, True], ids=["memory", "sqlite-restart"])
+async def test_compacted_tool_image_is_recalled_from_saved_model_copy(
+    tmp_path: Path, restart: bool
+) -> None:
+    """内存与 SQLite 重启均复用已提交摘要和缓存，经真实工具回读图片。"""
     output = BytesIO()
     with Image.new("RGB", (2400, 1200), "blue") as pixels:
         pixels.save(output, format="PNG")
     source = tmp_path / "source.png"
     source.write_bytes(output.getvalue())
-    store = InMemoryLifecycleStore()
+    store: LifecycleStore = (
+        SQLiteStore(tmp_path / "image-context.db") if restart else InMemoryLifecycleStore()
+    )
     seed = AgentRunner.from_config(
         _config(tmp_path),
         store=store,
@@ -156,11 +169,34 @@ async def test_compacted_tool_image_is_recalled_from_saved_model_copy(tmp_path: 
     source.write_bytes(b"original external source is no longer an image")
 
     provider = ImageRecallProvider()
+    summary_provider = provider
     runner = AgentRunner.from_config(_config(tmp_path), store=store, provider=provider)
     try:
-        result = await runner.start(
-            AgentRunRequest(input="回看刚才图片的细节", session_id="main", run_id="recall")
-        )
+        request = AgentRunRequest(input="回看刚才图片的细节", session_id="main", run_id="recall")
+        if restart:
+            provider.block_main = True
+            running = asyncio.create_task(runner.start(request))
+            try:
+                await asyncio.wait_for(provider.main_started.wait(), timeout=2)
+            finally:
+                running.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await running
+            compacted = store.load_session("main").compaction
+            assert compacted is not None
+            await runner.aclose()
+            store = SQLiteStore(tmp_path / "image-context.db")
+            assert store.load_session("main").compaction == compacted
+            crashed = store.load_run("recall")
+            assert crashed.current_activation_id is not None
+            provider = ImageRecallProvider()
+            runner = AgentRunner.from_config(_config(tmp_path), store=store, provider=provider)
+            result = await runner.recover(
+                "recall", expected_activation_id=crashed.current_activation_id
+            )
+            assert provider.summary_requests == []
+        else:
+            result = await runner.start(request)
         assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
     finally:
         await runner.aclose()
@@ -169,7 +205,7 @@ async def test_compacted_tool_image_is_recalled_from_saved_model_copy(tmp_path: 
     assert after.compaction is not None and after.compaction.covered_message_count >= 4
     assert after.messages[: len(before.messages)] == before.messages
     assert _images(before.messages) == [image]
-    assert len(provider.summary_requests) == 1 and len(provider.requests) == 3
+    assert len(summary_provider.summary_requests) == 1 and len(provider.requests) == 3
     assert _CONCLUSION in after.compaction.summary
     assert "result:2:0" in after.compaction.summary
     assert not _images(provider.requests[0].messages)
@@ -187,7 +223,17 @@ async def test_compacted_tool_image_is_recalled_from_saved_model_copy(tmp_path: 
     assert [call.tool_name for call in store.list_tool_calls("recall")] == [
         "context_read",
         "read_file",
+        "context_read",
     ]
+    assert [
+        message.text
+        for message in after.messages
+        if message.role.value == "user" and not message.tool_results
+    ] == [
+        "读取图片",
+        "回看刚才图片的细节",
+    ]
+    assert _images(after.messages) == [image, recalled]
 
     effective = provider.requests[-1].messages
     saved_effective = [message.model_dump() for message in effective]
@@ -201,13 +247,26 @@ async def test_compacted_tool_image_is_recalled_from_saved_model_copy(tmp_path: 
     responses_image = next(
         part for part in responses_output["output"] if part["type"] == "input_image"
     )
-    chat_image = next(
-        part
-        for item in chat_wire
-        if isinstance(item.get("content"), list)
-        for part in item["content"]
-        if part["type"] == "image_url"
+    image_message_index = next(
+        index
+        for index, item in enumerate(chat_wire)
+        if item["role"] == "user" and isinstance(item["content"], list)
     )
+    chat_parts = chat_wire[image_message_index]["content"]
+    assert chat_parts[0] == {
+        "type": "text",
+        "text": "[tool images: name=read_file, call_id=reload-image]",
+    }
+    assert [
+        item["tool_call_id"] for item in chat_wire[image_message_index - 2 : image_message_index]
+    ] == [
+        "reload-image",
+        "confirm-image-source",
+    ]
+    assert all(
+        item["role"] == "tool" for item in chat_wire[image_message_index - 2 : image_message_index]
+    )
+    chat_image = next(part for part in chat_parts if part["type"] == "image_url")
     expected_url = "data:image/png;base64," + base64.b64encode(
         image.model.path.read_bytes()
     ).decode("ascii")
