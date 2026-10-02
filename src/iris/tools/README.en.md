@@ -542,6 +542,33 @@ continuation becomes `MIDDLEWARE_ERROR`; a post failure after a downstream resul
 and preserves that result without replay. Synthesized success cannot erase cancellation, unknown
 outcomes, or cleanup control. The framework owns result identity, disclosure, and stop facts.
 
+Tool Hooks use the Agent's shared internal dependencies through
+`ToolExecutor(..., hook_dispatcher=dispatcher, command_binding=binding)`. Python-only handlers do
+not require a command binding; command scripts and stop-receipt draining use the existing binding.
+`RuntimeEnvironment` wires both dependencies into its executor. Hooks YAML and public SDK assembly
+arguments are not yet exposed; see [iris.hooks](../hooks/README.md) for events and script results.
+
+The order is permission refresh, breaker/cancellation checks, durable effect claim, `tool.before`,
+Middleware/body, then eligible `tool.after`. Before rejection or ordinary handler failure produces
+`HOOK_REJECTED` or `HOOK_ERROR` and skips Middleware/body/after. These remain error results, but
+`ToolErrorPolicy.STOP` does not terminate the Run solely for either code. Other errors and budgets
+retain their existing behavior.
+
+After runs only for a body that actually executed and has a known result. It excludes cached
+substitutes, preflight failures, cancellation, environment interruption, and unresolved cleanup.
+Ordinary body errors remain eligible; `body_status` stays `error` even if Middleware recovers the
+result. An ordinary command timeout is drained before after handlers run. An exited body with an
+environment stop receipt skips after without changing its existing Run settlement behavior.
+The parent subagent path bypasses Hooks; ordinary child tools use their own handlers.
+
+The Dispatcher is the sole source of `hook_feedback`. The final exit overwrites any value supplied
+by a tool or Middleware, including when a known result is recovered after cancellation. Real
+feedback shares one result block and one artifact projection with the original body. After control
+keeps previously collected feedback and commits the known result before settlement. An unknown
+after-script action stops remaining handlers and drains command resources: successful draining
+logs the supplementary failure without changing the body to unknown; failed draining preserves
+cleanup facts. Recovery reuses committed results without replaying handlers.
+
 `CircuitBreaker` tracks consecutive failures by tool name and returns
 `CIRCUIT_OPEN` during cooldown.
 

@@ -2,7 +2,7 @@
 
 `iris.hooks` 定义四种事件、Python 处理器注册和工具反馈结果。`HookDispatcher` 按固定顺序派发事件，区分普通处理器失败与调用取消，并把已取得的反馈和控制事实交回执行 owner。
 
-当前已实现核心模型、独立派发器和 Native/Docker 命令适配器。`AgentConfig` 尚未开放 `hooks` YAML；RuntimeEnvironment 可保存派发器依赖，但工具与 logical run 的自动触发、公共 SDK 装配入口尚未接通。
+当前已实现核心模型、独立派发器、Native/Docker 命令适配器，以及真实工具执行中的 before/after。`RuntimeEnvironment` 将同一个派发器交给工具执行器。`AgentConfig` 尚未开放 `hooks` YAML；logical run 的自动触发和公共 SDK 装配入口尚未接通。
 
 ## 独立派发示例
 
@@ -92,6 +92,10 @@ sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 ## 顺序、错误和取消
 
 同一事件按注册顺序串行执行，不同调用可以同时派发。`tool.before` 的第一次拒绝或普通失败停止余项，分别返回 `HOOK_REJECTED` 或 `HOOK_ERROR`；其他事件记录普通失败并继续。`tool.after` 的有效反馈按顺序累积，不作为下一处理器的输入，也不改写工具正文。
+
+工具执行器在权限刷新、熔断检查及 durable claim 后派发 before，拒绝时跳过 Middleware、body 和 after。拒绝结果保持 `is_error=True`，这两个 Hook 错误码不触发 `ToolErrorPolicy.STOP`。after 只跟随实际 body 的已知结果；Middleware 短路、前检失败、body 取消或未收口的命令不触发 after。body 的普通失败被 Middleware 恢复后，after 仍可看到真实的 `body_status="error"`。
+
+反馈与工具原结果一起完成一次 artifact 处理，再由 Runtime 原子提交结果、消息和 checkpoint。后置处理被取消或清理失败时，先保存可提交的已知结果及已有反馈，再交接控制；未知脚本结果不能把已知工具 body 改记为 unknown。恢复直接复用已提交内容，不补发工具 Hook。父侧 subagent 委派使用专用路径，child 自己的普通工具使用自身派发器。
 
 Python 处理器必须可等待，默认期限为 10 秒。派发器使用协作式 `asyncio.timeout`，处理器吞掉超时取消后返回的迟到结果也会被丢弃。同步回调不会自动搬到线程。命令注册使用独立私有类型，其期限由命令后端拥有，不再套 Python 超时。
 

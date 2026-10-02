@@ -600,7 +600,7 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 不同 ID 在大小写不敏感的文件系统上保持不同路径，目录归属检查仍在落盘处执行。恢复和 fork
 沿用已保存的不可变路径，不复制或重写 payload。
 
-Executor 在包装链返回后执行一次 artifact 处理，因此 middleware 扩展后的最终正文也受
+Executor 在包装链及符合资格的 `tool.after` 返回后执行一次 artifact 处理，因此最终正文也受
 `max_result_chars` 约束；`call_next()` 返回的是下游完整结果。
 
 ### Middleware
@@ -640,6 +640,29 @@ executor = ToolExecutor(registry, middleware=[LabelResult()])
 包装器可捕获下游普通异常并返回替代结果。进入下游前的普通错误产生 `MIDDLEWARE_ERROR`；
 下游已经返回后再抛普通错误，则记录日志并保留下游结果，不重放。取消、unknown 和清理控制
 不能被包装器合成的成功覆盖。结果 identity、披露和停止事实由框架保存，不从替代结果推断。
+
+### 工具 Hooks
+
+通过 `ToolExecutor(..., hook_dispatcher=dispatcher, command_binding=binding)` 注入同一 Agent 的
+内部 Hook 依赖。纯 Python 处理器不需要命令 binding；命令脚本与命令停止收据的收口使用既有
+binding。`RuntimeEnvironment` 会把本 Agent 的这两项依赖接到其工具执行器；当前尚未开放
+Hooks YAML 或公共 SDK 装配参数。事件与命令协议见 [iris.hooks](../hooks/README.md)。
+
+执行顺序是权限刷新、熔断检查、取消检查与 durable effect claim，随后 `tool.before`，再进入
+Middleware/body，最后对真正执行且结果已知的 body 派发 `tool.after`。before 拒绝与普通失败
+分别产生 `HOOK_REJECTED`、`HOOK_ERROR`，跳过 Middleware/body/after；二者仍是错误结果，但
+Runtime 不因 `ToolErrorPolicy.STOP` 单独终止 Run。其他错误、取消与预算规则保持不变。
+
+缓存短路、预检失败、body 取消、环境中断与尚未收口的清理错误不触发 after。普通 body 错误
+可以触发，事件的 `body_status` 保留真实失败，即使 Middleware 已将结果恢复为成功。普通命令
+timeout 的收据先排空再派发 after；已退出命令若仍带环境停止收据，则跳过 after，保留原工具
+调用的结算语义。父侧 subagent 专用入口不触发工具 Hooks，child 的普通工具使用 child 自己的处理器。
+
+Dispatcher 是 `hook_feedback` 的唯一来源。Executor 在最终出口覆盖工具或 Middleware 自行
+填入的该字段，控制中断的恢复路径也不例外；真实反馈与原结果进入同一个工具结果块和一次
+artifact 投影。after 中断保留已取得的反馈，已知结果先交 Runtime 提交，再结算控制或清理。
+after 脚本的结果未知会停止本事件余项并收口命令，收口成功只记录附加动作失败，不把已知 body
+改记 unknown；失败则保留收据与清理错误。已提交的结果恢复时直接复用，不重放处理器。
 
 ### CircuitBreaker
 

@@ -3,8 +3,19 @@
 # `iris.runtime`
 
 `RuntimeEnvironment.hook_dispatcher` holds the current Agent's optional process-local dispatcher;
-it is never checkpointed. This stage provides the Hooks core and result feedback projection.
-Tool and Run event integration and YAML configuration are not enabled yet.
+it is never checkpointed. Environment construction connects the same dispatcher and command binding
+to its tool executor. Internal `assemble_runtime` accepts this dependency; public Factory/Runner
+configuration and Run event integration are not enabled yet.
+
+Ordinary tools dispatch `tool.before` after permission refresh and durable claim, then eligible
+`tool.after` handlers after a known body result. Feedback commits through the existing `ToolResult`,
+history message, and cursor; recovery does not dispatch handlers for saved results again.
+`HOOK_REJECTED` and `HOOK_ERROR` remain tool errors but do not trigger `ToolErrorPolicy.STOP`, so the
+batch can accept steer input and report the reason to the next admitted model step. Other errors,
+cancellation, deadlines, and resource cleanup retain their rules. After controls use per-call slots:
+serial and parallel execution first commit the allowed known prefix. The tool layer drains unknown
+additional actions without changing a known body into an unknown one after successful cleanup.
+The parent's dedicated subagent path continues to bypass tool Hooks.
 
 `iris.runtime` is the low-level inner engine for Agent lifecycle. Starting from a durable
 `RuntimeCursor`, it uses a caller-provided `RuntimeCommitPort` to advance provider and tool work
