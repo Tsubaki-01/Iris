@@ -207,7 +207,7 @@ async def test_native_cancel_during_inflight_launch_recovers_handle(
 ) -> None:
     """模拟 spawn 已成功但句柄尚未交回，仍在取消后收回并停止真实进程。"""
     loop = asyncio.get_running_loop()
-    method = "subprocess_shell" if os.name == "nt" else "subprocess_exec"
+    method = "_make_subprocess_transport" if os.name == "nt" else "subprocess_exec"
     original = getattr(loop, method)
     spawned = asyncio.Event()
     release = asyncio.Event()

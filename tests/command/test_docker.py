@@ -71,8 +71,8 @@ class FakeExec:
         self.container = container
         self.cmd = cmd
         self.kwargs = kwargs
-        self.command = cmd[5] if len(cmd) == 8 else None
-        if len(cmd) == 8 and cmd[4] == "python":
+        self.command = cmd[5] if len(cmd) == 9 else None
+        if len(cmd) == 9 and cmd[4] == "python":
             self.command = container.sources[cmd[5]].decode("utf-8")
         self.started = asyncio.Event()
         self.running = False
@@ -143,6 +143,7 @@ class FakeContainer:
         self.delete_failures = 0
         self.start_response_error = False
         self.sources: dict[str, bytes] = {}
+        self.archives: list[tuple[str, ...]] = []
         self.archive_gate: asyncio.Event | None = None
         self.archive_entered = asyncio.Event()
         self.archive_error = False
@@ -155,12 +156,14 @@ class FakeContainer:
         if self.archive_error:
             raise FakeDockerError(500, "upload response lost")
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-            member = archive.getmembers()[0]
-            assert member.mode & 0o444
-            assert member.uid == member.gid == 1000
-            source = archive.extractfile(member)
-            assert source is not None
-            self.sources[f"/tmp/{member.name}"] = source.read()
+            members = archive.getmembers()
+            self.archives.append(tuple(member.name for member in members))
+            for member in members:
+                assert member.mode & 0o444
+                assert member.uid == member.gid == 1000
+                source = archive.extractfile(member)
+                assert source is not None
+                self.sources[f"/tmp/{member.name}"] = source.read()
 
     async def start(self) -> None:
         self.starts += 1

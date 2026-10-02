@@ -73,6 +73,7 @@ class _Call:
     released: bool = False
     result: _CommandResult | None = None
     source_path: str | None = None
+    stdin_path: str | None = None
 
 
 def _observe_completion(task: asyncio.Task[Any]) -> None:
@@ -263,24 +264,31 @@ class DockerCommandService:
                 return None
             container = cast("DockerContainer", self._sandbox.container)
             payload = call.request.payload
+            uploads: list[tuple[str, bytes]] = []
             if isinstance(payload, PythonCode):
                 name = f"iris-python-{uuid4().hex}.py"
                 call.source_path = f"/tmp/{name}"
-                source = payload.code.encode("utf-8")
+                uploads.append((name, payload.code.encode("utf-8")))
+                kind, value = "python", call.source_path
+            else:
+                kind, value = "shell", payload.command
+            if call.request.stdin is not None:
+                name = f"iris-stdin-{uuid4().hex}.bin"
+                call.stdin_path = f"/tmp/{name}"
+                uploads.append((name, call.request.stdin))
+            if uploads:
                 archive_bytes = io.BytesIO()
                 with tarfile.open(fileobj=archive_bytes, mode="w") as archive:
-                    entry = tarfile.TarInfo(name)
-                    entry.size = len(source)
-                    entry.mode = 0o444
-                    entry.uid, entry.gid = (int(value) for value in self._sandbox.user.split(":"))
-                    archive.addfile(entry, io.BytesIO(source))
+                    for name, content in uploads:
+                        entry = tarfile.TarInfo(name)
+                        entry.size = len(content)
+                        entry.mode = 0o444
+                        entry.uid, entry.gid = (int(part) for part in self._sandbox.user.split(":"))
+                        archive.addfile(entry, io.BytesIO(content))
                 async with asyncio.timeout(CONTROL_SECONDS):
                     await container.put_archive("/tmp", archive_bytes.getvalue())
                 if call.stop_operation is not None:
                     return None
-                kind, value = "python", call.source_path
-            else:
-                kind, value = "shell", payload.command
             cwd = "/workspace"
             relative = call.request.cwd.relative_to(self._workspace_root).as_posix()
             if relative != ".":
@@ -295,6 +303,7 @@ class DockerCommandService:
                         kind,
                         value,
                         str(call.request.timeout_seconds),
+                        call.stdin_path or "",
                         result_path,
                     ],
                     stdin=False,

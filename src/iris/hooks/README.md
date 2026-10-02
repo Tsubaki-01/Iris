@@ -2,7 +2,7 @@
 
 `iris.hooks` 定义四种事件、Python 处理器注册和工具反馈结果。`HookDispatcher` 按固定顺序派发事件，区分普通处理器失败与调用取消，并把已取得的反馈和控制事实交回执行 owner。
 
-当前已实现核心模型与独立派发器。`AgentConfig` 尚未开放 `hooks` YAML；RuntimeEnvironment 可保存派发器依赖，但工具与 logical run 的自动触发尚未接通。命令脚本适配器、SDK 装配入口由后续阶段接入。
+当前已实现核心模型、独立派发器和 Native/Docker 命令适配器。`AgentConfig` 尚未开放 `hooks` YAML；RuntimeEnvironment 可保存派发器依赖，但工具与 logical run 的自动触发、公共 SDK 装配入口尚未接通。
 
 ## 独立派发示例
 
@@ -64,7 +64,30 @@ asyncio.run(main())
 
 所有事件还包含 agent/session/run/activation 身份、host workspace 和 UTC 时间。低层独立工具事件允许 run/activation 身份为空。事件是 frozen dataclass；每个处理器收到原事件的独立深快照，修改嵌套字段不会影响执行数据或后续处理器。输入仍以只读使用。
 
-结果模型在公开构造边界约束非空文本，禁止额外字段。Python 返回 `{}`、错误事件的结果模型或其他值属于协议错误。脚本的空 JSON 对象需要由后续命令 adapter 转换为 `None`，Python 处理器不使用该约定。
+结果模型在公开构造边界约束非空文本，禁止额外字段。Python 返回 `{}`、错误事件的结果模型或其他值属于协议错误。命令 adapter 将脚本的空 JSON 对象转换为 `None`，Python 处理器不使用该约定。
+
+## 命令 Hook
+
+框架装配代码使用 [`command.py`](command.py) 的 `CommandHookAdapter(binding=..., workspace=..., command=..., timeout_seconds=10)`，再将该 callable 放入私有 `CommandHookRegistration.handler`。它持有当前 Agent 的命令 binding 与 host workspace，直接调用 `CommandService.execute`；不经过工具注册表或 `exec.command`，因此不会递归触发工具 Hook。
+
+每次执行生成独立 `hook_*` call ID，原工具 call ID 只保留在事件数据中。事件通过显式 JSON 投影编码为 UTF-8 bytes，作为一次性 stdin 传入。Native 使用二进制临时文件句柄，Docker 上传独立输入文件供 helper 打开；读取到末尾后得到 EOF，不提供交互式输入。
+
+脚本只向 stdout 输出一个 JSON object。下面的 Python 脚本接受任意事件，在工具完成时追加反馈：
+
+```python
+import json
+import sys
+
+event = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+result = {"feedback": "请说明验证结果。"} if event["event"] == "tool.after" else {}
+sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+```
+
+`tool.before` 可以输出 `{"deny_reason": "本次调用的拒绝原因"}`；`tool.after` 可以输出 `{"feedback": "追加反馈"}`；四种事件都接受 `{}`。空 stdout、`null`、多个 JSON、额外字段或错误事件的结果字段都是协议错误。stderr 作为日志记录，不作为反馈。stdout 字节被截断时禁止解析预览；只有 stderr 达到 byte limit 时，完整 stdout JSON 仍可使用。任何流出现 drain timeout、stream error 或 stream closed 都按采集不完整处理。
+
+命令直接采用 Hook 的期限，不与 `command.timeout_seconds` 取最小值，也不额外套 Python timeout。外层 Run 或工具期限仍能取消调用。Python 扩展在宿主执行；Docker 模式的命令脚本与依赖需要已存在于该环境，不自动安装。
+
+适配器先处理控制事实，再决定是否解析 JSON。服务即使消费了 `CancelledError` 并返回成功，也不能清除当前 task/Run 的取消。`EXITED + 0` 同时带 stop receipt 表示该调用参与了环境停止；没有直接取消来源时按环境中断交回，合法 JSON 也不能使其继续执行后续处理器。普通超时或非零退出若带 receipt，先等待原停止操作排空，再报告普通处理器失败；清理失败或等待期间取消则保留收据交回 owner。unknown/cleanup 使用独立控制字段与唯一命令槽，不写入 JSON 或模型反馈。
 
 ## 顺序、错误和取消
 

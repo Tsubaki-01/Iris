@@ -17,10 +17,15 @@ from iris.command._python import PYTHON_LOADER_SOURCE
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="助手运行于 Linux 容器，需 POSIX 进程组")
 
 
-def _run(tmp_path: Path, code: str, timeout: float = 3) -> tuple[dict[str, object], bytes]:
+def _run(
+    tmp_path: Path, code: str, timeout: float = 3, *, stdin: bytes | None = None
+) -> tuple[dict[str, object], bytes]:
     script = tmp_path / "command.py"
     script.write_text(code, encoding="utf-8")
     result_path = tmp_path / "result.json"
+    input_path = tmp_path / "stdin.bin"
+    if stdin is not None:
+        input_path.write_bytes(stdin)
     helper = subprocess.run(
         [
             sys.executable,
@@ -29,13 +34,35 @@ def _run(tmp_path: Path, code: str, timeout: float = 3) -> tuple[dict[str, objec
             "shell",
             "exec " + shlex.join([sys.executable, "-u", str(script)]),
             str(timeout),
+            str(input_path) if stdin is not None else "",
             str(result_path),
         ],
         capture_output=True,
         timeout=timeout + 5,
     )
     assert helper.returncode == 0, helper.stderr
+    assert not input_path.exists()
     return json.loads(result_path.read_text(encoding="utf-8")), helper.stdout
+
+
+@pytest.mark.parametrize(
+    "stdin", [None, b"", "中文无换行".encode() + b"\x00\xff"], ids=["none", "empty", "binary"]
+)
+def test_stdin_is_complete_reaches_eof_and_is_removed(tmp_path: Path, stdin: bytes | None) -> None:
+    result, output = _run(tmp_path, "import sys; print(sys.stdin.buffer.read().hex())", stdin=stdin)
+    assert result == {"reason": "exited", "returncode": 0}
+    assert output.strip() == (stdin or b"").hex().encode()
+
+
+def test_timeout_removes_input_file(tmp_path: Path) -> None:
+    result, output = _run(
+        tmp_path,
+        "import sys, time; print(sys.stdin.buffer.read().hex(), flush=True); time.sleep(30)",
+        timeout=0.5,
+        stdin=b"read before timeout",
+    )
+    assert result["reason"] == "timed_out"
+    assert output.strip() == b"read before timeout".hex().encode()
 
 
 @pytest.mark.parametrize("code", [0, 7, 124, 137])
@@ -94,6 +121,7 @@ def test_normal_exit_publishes_result_without_waiting_for_background_pipe(tmp_pa
             "shell",
             shlex.join([sys.executable, str(command)]),
             "5",
+            "",
             str(result_path),
         ],
         stdout=subprocess.PIPE,

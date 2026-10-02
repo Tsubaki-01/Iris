@@ -62,12 +62,13 @@ class PythonCode:
 
 @dataclass(frozen=True, slots=True)
 class CommandRequest:
-    """工具边界已解析的命令、宿主工作目录与最终前台期限。"""
+    """已解析的命令、宿主目录、最终期限与可选的一次性 stdin 字节。"""
 
     call_id: str
     payload: ShellCommand | PythonCode
     cwd: Path
     timeout_seconds: float
+    stdin: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)

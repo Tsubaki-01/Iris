@@ -10,7 +10,8 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from tempfile import TemporaryFile
+from typing import Any, BinaryIO, cast
 from uuid import uuid4
 
 from ..exceptions import IrisCommandCleanupError, IrisCommandError, IrisToolOutcomeUnknownError
@@ -93,6 +94,32 @@ def _observe_completion(task: asyncio.Task[Any]) -> None:
     """取回后台停止异常；显式等待者仍会收到同一个失败。"""
     if not task.cancelled():
         task.exception()
+
+
+async def _launch_windows_shell(
+    loop: asyncio.AbstractEventLoop,
+    protocol: _ProcessProtocol,
+    command: str,
+    *,
+    cwd: Path,
+    stdin: BinaryIO | int,
+) -> None:
+    """禁用 cmd AutoRun，避免宿主启动脚本提前消费本次文件 stdin。"""
+    executable = str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
+    # subprocess_shell 固定使用 /c；直接复用其 transport 层才能加入 /d，
+    # 同时保留 shell 原始命令文本，避免 subprocess_exec 的 argv 二次转义。
+    await loop._make_subprocess_transport(  # type: ignore[attr-defined]
+        protocol=protocol,
+        args=f'"{executable}" /d /s /c "{command}"',
+        shell=False,
+        stdin=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        cwd=cwd,
+        executable=executable,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 class _NativeStopOperation:
@@ -311,50 +338,57 @@ class NativeCommandService:
     async def _launch(self, request: CommandRequest, source_path: Path | None) -> _ProcessProtocol:
         loop = asyncio.get_running_loop()
         protocol = _ProcessProtocol()
-        if isinstance(request.payload, PythonCode):
-            options: dict[str, Any] = (
-                {"creationflags": subprocess.CREATE_NO_WINDOW}
-                if os.name == "nt"
-                else {"start_new_session": True}
-            )
-            await loop.subprocess_exec(
-                lambda: protocol,
-                sys.executable,
-                "-X",
-                "utf8",
-                "-u",
-                "-c",
-                PYTHON_LOADER_SOURCE,
-                str(source_path),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=request.cwd,
-                **options,
-            )
-        elif os.name == "nt":
-            await loop.subprocess_shell(
-                lambda: protocol,
-                request.payload.command,
-                executable=str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=request.cwd,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        else:
-            await loop.subprocess_exec(
-                lambda: protocol,
-                "/bin/sh",
-                "-c",
-                cast(ShellCommand, request.payload).command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=request.cwd,
-                start_new_session=True,
-            )
+        input_file: BinaryIO | None = None
+        try:
+            if request.stdin is not None:
+                input_file = TemporaryFile()
+                input_file.write(request.stdin)
+                input_file.seek(0)
+            stdin = subprocess.DEVNULL if input_file is None else input_file
+            if isinstance(request.payload, PythonCode):
+                options: dict[str, Any] = (
+                    {"creationflags": subprocess.CREATE_NO_WINDOW}
+                    if os.name == "nt"
+                    else {"start_new_session": True}
+                )
+                await loop.subprocess_exec(
+                    lambda: protocol,
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-u",
+                    "-c",
+                    PYTHON_LOADER_SOURCE,
+                    str(source_path),
+                    stdin=stdin,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=request.cwd,
+                    **options,
+                )
+            elif os.name == "nt":
+                await _launch_windows_shell(
+                    loop,
+                    protocol,
+                    request.payload.command,
+                    stdin=stdin,
+                    cwd=request.cwd,
+                )
+            else:
+                await loop.subprocess_exec(
+                    lambda: protocol,
+                    "/bin/sh",
+                    "-c",
+                    cast(ShellCommand, request.payload).command,
+                    stdin=stdin,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=request.cwd,
+                    start_new_session=True,
+                )
+        finally:
+            if input_file is not None:
+                input_file.close()
         return protocol
 
     async def _remove_source(self, call: _Call) -> None:

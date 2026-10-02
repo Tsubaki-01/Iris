@@ -1,6 +1,6 @@
 """在 Linux 容器内直接执行的标准库助手，不依赖 Iris 的安装。
 
-argv 依次为同源启动器、载荷种类/内容、前台期限和框架生成的结果路径。
+argv 依次为同源启动器、载荷种类/内容、前台期限、stdin 路径和结果路径。
 """
 
 import json
@@ -15,7 +15,14 @@ from pathlib import Path
 _TERM_GRACE_SECONDS = 0.5
 
 
-def run(loader: str, kind: str, payload: str, timeout_seconds: float, result_path: Path) -> None:
+def run(
+    loader: str,
+    kind: str,
+    payload: str,
+    timeout_seconds: float,
+    stdin_path: Path | None,
+    result_path: Path,
+) -> None:
     """转发输出，等待前台退出，单独记录真实退出与业务期限。
 
     Args:
@@ -23,17 +30,23 @@ def run(loader: str, kind: str, payload: str, timeout_seconds: float, result_pat
         kind (str): shell 或 python。
         payload (str): shell 文本或本次临时源码路径。
         timeout_seconds (float): 已由工具边界确定的前台期限。
+        stdin_path (Path | None): 本次二进制输入文件；None 使用 DEVNULL。
         result_path (Path): 当前调用独有的临时结果文件。
     """
-    process = subprocess.Popen(
-        (
-            [sys.executable, "-X", "utf8", "-u", "-c", loader, payload]
-            if kind == "python"
-            else ["/bin/sh", "-c", payload]
-        ),
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    stdin = stdin_path.open("rb") if stdin_path is not None else None
+    try:
+        process = subprocess.Popen(
+            (
+                [sys.executable, "-X", "utf8", "-u", "-c", loader, payload]
+                if kind == "python"
+                else ["/bin/sh", "-c", payload]
+            ),
+            stdin=stdin if stdin is not None else subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        if stdin is not None:
+            stdin.close()
     reason = "exited"
     try:
         returncode = process.wait(timeout=timeout_seconds)
@@ -69,15 +82,26 @@ def run(loader: str, kind: str, payload: str, timeout_seconds: float, result_pat
 
 def main() -> None:
     """消费框架生成的固定 argv；异常由宿主按缺失结果处理。"""
-    loader, kind, payload, timeout, result_path = sys.argv[1:]
+    loader, kind, payload, timeout, stdin_path, result_path = sys.argv[1:]
     try:
-        run(loader, kind, payload, float(timeout), Path(result_path))
+        run(
+            loader,
+            kind,
+            payload,
+            float(timeout),
+            Path(stdin_path) if stdin_path else None,
+            Path(result_path),
+        )
     finally:
-        if kind == "python":
+        for path in (payload if kind == "python" else "", stdin_path):
+            if not path:
+                continue
             try:
-                Path(payload).unlink(missing_ok=True)
+                Path(path).unlink(missing_ok=True)
             except OSError:
-                logging.getLogger(__name__).debug("容器临时 Python 源码删除失败", exc_info=True)
+                logging.getLogger(__name__).debug(
+                    "容器临时输入文件删除失败：%s", path, exc_info=True
+                )
 
 
 if __name__ == "__main__":
