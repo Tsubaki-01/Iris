@@ -130,7 +130,8 @@ children do not automatically read the parent. `message:<index>` and
 renumber. Forks inherit prefix positions and artifact references without copying files.
 
 Small results come from lifecycle history. Large results use the committed artifact to retrieve
-final text or native MCP JSON without rerunning a tool. Search covers committed text and previews,
+final text or native MCP JSON without rerunning a tool. Inline tool reads and Search use `.text`,
+joining text blocks with newlines before pagination. Search covers committed text and previews,
 not entire artifact files. See [tools](../tools/README.en.md#current-session-context-reads) for page
 parameters, errors, and scope. Harness owns the read service; runtime receives a narrow interface
 without store ownership.
@@ -613,7 +614,8 @@ ID before committing their first new message. Compaction hints, WAITING/terminal
 only the unrecorded suffix. WAITING leaves the source open; completion, failure, cancellation, and
 recovery paths that finish without runtime execution retain the actual outcome. BCI, system/reasoning,
 and memory readback text are excluded; Search/Fetch retain item references, and tool calls/results retain
-stable provenance. Durable watermarks make repeated hints idempotent.
+stable provenance. Result bodies and memory-item JSON are read from the `.text` projection.
+Durable watermarks make repeated hints idempotent.
 An automatically captured Episode stores the run ID in top-level `source_id`; its metadata holds the
 lifecycle source ID and session boundaries.
 

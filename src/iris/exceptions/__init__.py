@@ -62,9 +62,11 @@ from .goal import (
     IrisGoalPersistenceError,
     IrisGoalStateError,
 )
+from .image import IrisImageError
 from .todo import IrisTodoError
 
 __all__ = [
+    "IrisImageError",
     "IrisTodoError",
     "IrisGoalError",
     "IrisGoalStateError",

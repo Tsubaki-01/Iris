@@ -14,7 +14,7 @@ def test_refs_survive_compaction_without_mutating_raw_messages() -> None:
     result = ToolResultBlock(
         tool_use_id="same",
         name="read",
-        content="preview",
+        content=[TextBlock(text="preview")],
         metadata={"artifact": {"path": "/result.txt", "text_path": "/result.txt"}},
     )
     messages = [
@@ -25,8 +25,10 @@ def test_refs_survive_compaction_without_mutating_raw_messages() -> None:
     compaction = SessionCompaction(summary="旧轮摘要", covered_message_count=2)
     snapshot = history_snapshot(messages, initial_count=len(messages), compaction=compaction)
     projected = project_history(with_context_refs(snapshot), compaction)
-    assert "result:2:1" in projected[1].tool_results[0].content
-    assert messages[2].tool_results[0].content == "preview"
+    assert "result:2:1" in projected[1].tool_results[0].text
+    assert projected[1].tool_results[0].content[0] == result.content[0]
+    assert len(projected[1].tool_results[0].content) == 2
+    assert messages[2].tool_results[0].text == "preview"
     records = serialize_history(messages[2:], 2)
     assert "ref=message:2" in records[0].header
     assert "ref=result:2:1" in records[1].header
@@ -36,10 +38,14 @@ def test_refs_survive_compaction_without_mutating_raw_messages() -> None:
 def test_refs_keep_absolute_indices_with_sparse_anchors_and_multiple_result_blocks() -> None:
     """前缀仅保留BCI/input，后缀结果仍按原始消息及block坐标生成引用。"""
     first = ToolResultBlock(
-        tool_use_id="first", content="first-preview", metadata={"artifact": {"path": "/first"}}
+        tool_use_id="first",
+        content=[TextBlock(text="first-preview")],
+        metadata={"artifact": {"path": "/first"}},
     )
     second = ToolResultBlock(
-        tool_use_id="second", content="second-preview", metadata={"artifact": {"path": "/second"}}
+        tool_use_id="second",
+        content=[TextBlock(text="second-preview")],
+        metadata={"artifact": {"path": "/second"}},
     )
     messages = [
         Msg.assistant("old"),
@@ -58,10 +64,10 @@ def test_refs_keep_absolute_indices_with_sparse_anchors_and_multiple_result_bloc
     assert rendered.raw_tail[1] is snapshot.raw_tail[1]
     actual = project_history(rendered, compaction)
     assert actual[1:3] == [messages[1], messages[2]]
-    assert "result:4:1" in actual[3].tool_results[0].content
-    assert "result:4:2" in actual[3].tool_results[1].content
-    assert snapshot.raw_tail[0].tool_results[0].content == "first-preview"
-    assert snapshot.raw_tail[0].tool_results[1].content == "second-preview"
+    assert "result:4:1" in actual[3].tool_results[0].text
+    assert "result:4:2" in actual[3].tool_results[1].text
+    assert snapshot.raw_tail[0].tool_results[0].text == "first-preview"
+    assert snapshot.raw_tail[0].tool_results[1].text == "second-preview"
 
 
 def test_empty_tail_ref_projection_keeps_prefix_only_history() -> None:

@@ -53,12 +53,16 @@ and the safe `ProviderStreamError` DTO. The event union includes all three respo
 Use `Msg.system()`, `Msg.user()`, `Msg.assistant()`, and `Msg.tool_result()` to create messages.
 `text`, `tool_calls`, `tool_results`, and `has_tool_calls` are convenience projections.
 
+`ImageFileRef` describes an absolute file path, actual MIME type, width, and height. `ImageBlock`
+holds original/model references and an optional display name, without base64 or provider file IDs.
+`DataBlock` is `TextBlock | ImageBlock`; `ContentBlock` also includes tool calls and results.
+
 ```python
 from iris.message import Msg, TextBlock, ToolUseBlock
 
 call = ToolUseBlock(id="call_1", name="search", input={"query": "Iris"})
 assistant = Msg.assistant([TextBlock(text="I will search."), call])
-result = Msg.tool_result(call.id, "done", name=call.name)
+result = Msg.tool_result(tool_use_id=call.id, content="done", name=call.name)
 ```
 
 Tool-result messages retain `Role.USER` internally; the provider mapper converts them to the
@@ -66,6 +70,17 @@ provider's tool-message wire shape. `ToolResultBlock.metadata` keeps supported f
 unknown extensions under `extra`.
 The tool kernel projects trusted `ToolResult` values through `to_msg()`, reusing normalized
 metadata; raw message inputs are still parsed by this package.
+
+`Msg.tool_result(content=...)` accepts a string or data-block list and immediately wraps strings
+in `TextBlock`. Direct `ToolResultBlock` construction and persisted message recovery accept only
+`list[DataBlock]` bodies. `Msg.text` and `ToolResultBlock.text` extract text from their respective
+bodies; they do not include image content or reference descriptions. Use `content`/`blocks` for
+the complete body.
+
+[`iris.utils.images`](../utils/images.py) owns image processing and file saving.
+`image_block_from_saved()` projects its trusted saved-file result into an `ImageBlock`; this
+package owns references and JSON round trips. Original/model can share one file when no transform
+is needed. These data contracts do not yet provide SDK image import or provider image encoding.
 
 ### `Conversation`
 
@@ -131,6 +146,7 @@ generate tool parameter JSON Schema, execute tools, persist history, or manage c
 | Change | Main location | Tests |
 | --- | --- | --- |
 | Message construction and conversation/request assembly | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
+| Image references, tool-result data blocks, and JSON round trips | `message.py` | `tests/message/test_image_blocks.py`, `tests/tools/test_result_projection.py` |
 | Request/response models and `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | Provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
 | Provider wire mapping | `../providers/chat_completions.py`, `../providers/responses.py` | `tests/test_provider_client.py` |

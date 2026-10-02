@@ -160,8 +160,9 @@ async for event in client.stream(request):
         final_response = event.response
 ```
 
-This branch delivers text and tool calls. Image types and image projection await integration from
-the image branch. The agreed Chat projection appends user images after the entire tool receipt group,
+Tool result bodies are ordered data blocks. Responses encodes their text blocks as ordered input_text;
+Chat projects them into a text receipt. Local counting uses the same text content. Model calls currently
+support text and tools; image request projection remains pending. The agreed Chat projection appends user images after the entire tool receipt group,
 while durable history retains actual tool results; that behavior is not implemented here yet.
 
 ## Errors and limitations

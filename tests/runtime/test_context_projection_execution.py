@@ -43,7 +43,7 @@ class CountingProvider:
         self.estimates.append(request)
         return len(str(request.tools)) + sum(
             len(
-                block.content
+                block.text
                 if isinstance(block, ToolResultBlock)
                 else block.text
                 if isinstance(block, TextBlock)
@@ -109,7 +109,7 @@ async def test_remaining_pressure_summarizes_raw_body_and_accepts_final_projecti
     assert "result-A-full-prefix" in material
     assert "历史正文已移出当前窗口" not in material
     assert any(
-        "历史正文已移出当前窗口" in block.content
+        "历史正文已移出当前窗口" in block.text
         for request in provider.estimates
         for message in request.messages
         for block in message.tool_results
@@ -184,9 +184,7 @@ async def test_memory_delta_uses_unpruned_history_then_final_window_is_reduced(
     actual = provider.requests[0]
     assert actual.messages[0].text.endswith(navigation.memory_overview)
     assert any(
-        "重复正文见" in block.content
-        for message in actual.messages
-        for block in message.tool_results
+        "重复正文见" in block.text for message in actual.messages for block in message.tool_results
     )
     assert (
         provider.estimate_input_tokens(actual)
@@ -203,7 +201,7 @@ async def test_memory_delta_uses_unpruned_history_then_final_window_is_reduced(
         for request in full_trials
     )
     assert all(
-        block.content == "body" * 750
+        block.text == "body" * 750
         for request in full_trials
         for message in request.messages
         for block in message.tool_results

@@ -181,7 +181,8 @@ async for event in client.stream(request):
         final_response = event.response
 ```
 
-本分支交付文字与工具闭环。图片类型和输入投影尚待 image 分支集成；Chat 工具图片的既定交接
+工具结果内部正文使用有序数据块；Responses 将文字块映射为有序 input_text，Chat 将其投影为文字回执，
+两者的本地计量消费同一文字内容。当前模型调用仍交付文字与工具闭环，图片请求投影尚待接入；Chat 工具图片的既定交接
 要求是整组工具回执之后追加 user 图片投影，真实历史仍保留工具结果，此处尚未实现。
 
 ## 错误映射

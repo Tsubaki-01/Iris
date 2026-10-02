@@ -51,7 +51,7 @@ def test_history_preserves_all_blocks_and_necessary_tool_semantics() -> None:
         Msg.tool_result(
             tool_use_id="call-9",
             name="read_file",
-            content="文件无法读取",
+            content=[TextBlock(text="文件无法读取"), TextBlock(text="请检查路径")],
             is_error=True,
             metadata={
                 "error": {"code": "NOT_FOUND", "message": "缺少日志.txt"},
@@ -77,6 +77,7 @@ def test_history_preserves_all_blocks_and_necessary_tool_semantics() -> None:
     assert "read_file" in rendered
     assert "execution_status=failed" in records[3].header
     assert "is_error=true" in records[3].header
+    assert records[3].text.startswith("文件无法读取\n请检查路径\nerror:")
     assert "NOT_FOUND" in rendered and "tmp/report.txt" in rendered
     assert "1234567890" not in rendered
     assert "987654" not in rendered and "999999" not in rendered
@@ -293,7 +294,7 @@ def test_summary_consumption_rejects_incomplete_termination(finish_reason: str) 
         [],
         [TextBlock(text=" \n ")],
         [TextBlock(text="摘要"), ToolUseBlock(id="call", name="shell")],
-        [ToolResultBlock(tool_use_id="call", content="工具结果")],
+        [ToolResultBlock(tool_use_id="call", content=[TextBlock(text="工具结果")])],
     ],
 )
 def test_summary_consumption_rejects_empty_or_nontext_content(

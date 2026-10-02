@@ -60,7 +60,7 @@ class ChatCompletionsMapper:
         return {
             "role": "tool",
             "tool_call_id": block.tool_use_id,
-            "content": block.content,
+            "content": block.text,
         }
 
     def _format_tool_call(self, block: ToolUseBlock) -> dict[str, Any]:

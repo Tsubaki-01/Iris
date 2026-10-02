@@ -46,9 +46,12 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 
 - `Role`: `system`、`user`、`assistant`、`tool` 角色枚举。
 - `TextBlock`: 文本内容块。
+- `ImageFileRef`、`ImageBlock`: 图片的绝对文件路径、实际 MIME、尺寸，以及 original/model 两份文件引用；不保存 base64 或 provider file ID。
+- `DataBlock`: `TextBlock | ImageBlock`，用于有序文字/图片正文。
 - `ToolUseBlock`: 工具调用的 `id`、`name` 与结构化 `input`。
-- `ToolResultBlock`: 工具结果的调用 ID、名称、文本、错误标记和元数据。
-- `ContentBlock`: 上述三类 block 的联合类型。
+- `ToolResultBlock`: 工具结果的调用 ID、名称、`list[DataBlock]` 正文、错误标记和元数据。
+- `ContentBlock`: 数据块与工具调用/结果块的联合类型。
+- `image_block_from_saved()`: 将图片保存器返回的可信文件信息投影为 `ImageBlock`。
 - `Msg`: 一条统一消息。
 - `Conversation`: 有序消息集合。
 - `LLMRequest`: 一次 provider-neutral 模型请求。
@@ -75,11 +78,19 @@ from iris.message import Msg, TextBlock, ToolUseBlock
 
 call = ToolUseBlock(id="call_1", name="search", input={"query": "Iris"})
 assistant = Msg.assistant([TextBlock(text="我来查询。"), call])
-result = Msg.tool_result(call.id, "查询完成", name=call.name)
+result = Msg.tool_result(tool_use_id=call.id, content="查询完成", name=call.name)
 ```
 
 `ToolResultBlock.metadata` 会保留标准字段，并把未知扩展收纳到 `extra`，避免与后续标准字段冲突。
 工具内核的可信 `ToolResult` 使用 `to_msg()` 直接投影，复用已归一化的元数据；原始消息输入仍由本包解析。
+
+`Msg.tool_result(content=...)` 接收字符串或数据块列表，字符串立即包装为 `TextBlock`。
+直接构造 `ToolResultBlock` 和恢复持久化消息时，正文只接受块列表，不接受旧字符串形状。
+`Msg.text` 和 `ToolResultBlock.text` 只提取各自正文中的文字，不包含图片内容或文件引用说明。
+完整内容应读取 `content`/`blocks`，不能以纯文本投影代替。
+
+`ImageBlock` 的文件处理由 [`iris.utils.images`](../utils/images.py) 完成，消息层只负责引用和
+JSON 往返；无需变换时 original/model 可指向同一文件。本阶段提供数据契约，不负责 SDK 图片导入或 provider 图片编码。
 
 ### `Conversation`
 
@@ -152,6 +163,7 @@ def consume(event: ModelStreamEvent) -> str | None:
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
 | 消息构造与 conversation/request 装配 | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
+| 图片文件引用、工具结果数据块与 JSON 往返 | `message.py` | `tests/message/test_image_blocks.py`, `tests/tools/test_result_projection.py` |
 | 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
 | provider wire mapping | `../providers/chat_completions.py`, `../providers/responses.py` | `tests/test_provider_client.py` |

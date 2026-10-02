@@ -45,7 +45,7 @@ def test_duplicate_folding_precedes_optional_removal() -> None:
     snapshot = ContextSnapshot((ContextContribution("optional", "notes" * 100, required=False),))
     request, selected = _project([*_batch(body), *_batch(body)], snapshot, trigger=5500)
     assert selected is snapshot
-    assert "重复正文见" in request.messages[2].tool_results[0].content
+    assert "重复正文见" in request.messages[2].tool_results[0].text
     assert "notes" in request.messages[-1].text
 
 
@@ -54,7 +54,7 @@ def test_optional_removal_precedes_old_observation_shortening() -> None:
     snapshot = ContextSnapshot((ContextContribution("optional", "notes" * 1000, required=False),))
     request, selected = _project(_batch(body), snapshot, trigger=4000)
     assert selected.contributions == ()
-    assert request.messages[2].tool_results[0].content == body
+    assert request.messages[2].tool_results[0].text == body
 
 
 def test_priority_tie_required_and_frozen_selection_without_tools() -> None:

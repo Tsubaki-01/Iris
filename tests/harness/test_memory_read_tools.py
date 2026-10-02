@@ -145,13 +145,13 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         query, namespaces = queries[0]
         assert query.query == "deploytoken" and namespaces == ("project",)
         assert query.required_terms == ["当前部署版本"]
-        hit = json.loads(results[0].content)["items"][0]
+        hit = json.loads(results[0].text)["items"][0]
         assert hit["item_id"] == item.id and hit["is_complete"]
         assert hit["snippet"] == item.text
         assert provider.requests[1].messages[-1].tool_results[0].content == results[0].content
     if strategy == "fetch":
         current = service.get_item(item.id, ["project"])
-        fetched = json.loads(results[1].content)
+        fetched = json.loads(results[1].text)
         assert fetched == {"item": current.model_dump(mode="json")}
         assert fetched["item"]["metadata"] == {"version": 2}
         assert fetched["item"]["source_id"] == "correction-message"

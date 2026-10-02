@@ -216,7 +216,8 @@ With the default `context_policy`, offloaded tool results receive
 `result:<message_index>:<block_index>` references before history projection. Indices refer to original
 history: suffix positions start at the persisted coverage boundary and prefix anchors retain their
 absolute positions. A summary does not renumber them. This copy-on-write view does not persist
-the retrieval notice in durable messages. Notices and `context_read/search` tool definitions both enter full
+the retrieval notice in durable messages. Notices append a separate `TextBlock`, keeping existing
+data blocks in order. Notices and `context_read/search` tool definitions both enter full
 request estimation.
 
 [`_context_projection.py`](./_context_projection.py)'s `project_context_request()` runs when the
@@ -234,7 +235,7 @@ medium-sized results across many calls.
   calls and all their results; ordinary messages do not count. This protection applies only to
   deterministic reduction and does not add a hard retention requirement to LLM summarization.
 - Exact equality uses the saved canonical tool name, key-sorted JSON arguments, and complete inline
-  body. The newest representative and recent protected batches remain full; older copies receive
+  text projection. The newest representative and recent protected batches remain full; older copies receive
   explicit representative and original-result refs. Changed results, artifact previews, and paths
   are not equality evidence, and comparison does not read large files. Every tool call still executes
   and every call/result remains present.
@@ -259,7 +260,7 @@ Without a summary the suffix remains the whole history. Fork still copies and re
 cutoff prefix once, initializes discovery from that prefix, and excludes later parent discoveries
 and the parent's execution checkpoint.
 
-`_compaction_summary.py` serializes every text block, call argument, result, and required error/artifact
+`_compaction_summary.py` serializes every text block, call argument, result `.text`, and required error/artifact
 reference in order. Large blocks carry character coverage markers separately from execution status.
 Each batch is measured with the current working summary; unprocessed fragments are never dropped.
 Record headers include original `message:<index>` and `result:<message_index>:<block_index>` refs;

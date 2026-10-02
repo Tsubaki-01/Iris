@@ -70,13 +70,13 @@ def capture_episode(
                     record_kind="tool_result",
                 )
                 if block.name in {"memory_search", "memory_fetch"}:
-                    metadata["memory_item_ids"] = _memory_item_ids(block.content)
+                    metadata["memory_item_ids"] = _memory_item_ids(block.text)
                     metadata["evidence_allowed"] = False
                     text = ""
                 else:
-                    text = block.content
+                    text = block.text
                     if block.name in {"memory_remember", "memory_update"}:
-                        metadata["memory_item_ids"] = _memory_item_ids(block.content)
+                        metadata["memory_item_ids"] = _memory_item_ids(block.text)
                 artifact = block.metadata.get("artifact")
                 if artifact is not None:
                     metadata["artifact"] = artifact

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..agents.config.compaction import CompactionConfig
 from ..exceptions import IrisContextCompactionError
-from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
+from ..message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from ..utils import TemplateRenderer
 from ._prompts import render_prompt
 
@@ -59,9 +59,9 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
                         + json.dumps(block.input, ensure_ascii=False, separators=(",", ":")),
                     )
                 )
-            else:
+            elif isinstance(block, ToolResultBlock):
                 status = "failed" if block.is_error else "completed"
-                text = block.content
+                text = block.text
                 for key in ("error", "artifact"):
                     if key in block.metadata:
                         text += f"\n{key}: " + json.dumps(

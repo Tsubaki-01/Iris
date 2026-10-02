@@ -1,7 +1,8 @@
 # `iris.utils`
 
-`iris.utils` 提供跨领域共享的基础工具，目前导出 `TemplateRenderer`，用于从 Jinja2 文件生成
-文本。Context、runtime、memory 和 skill 可直接使用它，无需通过其他领域模块取得渲染器。
+`iris.utils` 提供跨领域共享的基础工具。包入口导出 `TemplateRenderer`，用于从 Jinja2 文件生成
+文本；`iris.utils.images` 提供图片处理与文件副本保存。调用方可直接使用这些工具，无需通过
+其他领域模块取得能力。
 
 ## 使用文件模板
 
@@ -59,3 +60,34 @@ print(text)  # 你好，Iris。
 实现位于 [`templating.py`](templating.py)，公共导出位于 [`__init__.py`](__init__.py)。
 模板加载、更新、转义与异常契约由 `tests/utils/test_templating.py` 验证；各领域测试覆盖请求装配
 和领域异常转换。
+
+## 准备和保存图片
+
+[`images.py`](images.py) 接收原始图片字节或明确的文件路径，不持有 session、消息模型或
+provider 格式。调用方负责选定 session 的 image-cache 目录，并将返回信息投影为消息块。
+
+```python
+from pathlib import Path
+
+from iris.utils.images import save_image
+
+saved = save_image(Path("photo.png"), cache_dir=Path("chosen-image-cache"))
+print(saved.original.path)  # 保留输入字节的绝对路径
+print(saved.model.path, saved.model.mime_type)  # 模型应读取的文件及实际 MIME
+```
+
+- `prepare_image(data: bytes) -> PreparedImage` 一次解码静态 PNG、JPEG 或 WebP；返回包含
+  字节、实际 MIME、宽高的 `original` 和 `model`，不产生 base64。
+- 小图无需方向修正、尺寸和字节均合适时保留原编码，不放大。否则按 EXIF 修正方向，等比
+  缩至宽高各不超过 2000px，模型版最多 3.75MiB。PNG/透明图先无损 PNG；不透明图可依次
+  尝试 JPEG 质量 85、70、50、30。仍超限时最多再减半两次，每个候选由原始解码图生成。
+- 透明图不转 JPEG、不填充背景、不做 palette 量化；编码后的实际 MIME 写入结果。上述限制
+  是 Iris 的客户端处理策略，不代表所有 provider 的限制，也不等于视觉 token 计费规则。
+- `save_image(source: Path | bytes, *, cache_dir: Path) -> SavedImage` 保存同一次读取的快照；
+  路径来源分块读取，文件全部关闭后返回 `SavedImageFile` 信息。每次导入使用新的随机资产 ID；
+  有变换时保留 original/model 两份文件，无变换时两个引用指向同一份文件。
+- 解码、处理、读取或写入失败抛出 `IrisImageError`；有限候选用尽不返回超限图。写入失败只
+  清理本次创建的半成品，不影响已有文件。正常完成后不自动删除副本。
+
+图片处理和文件契约由 `tests/utils/test_images.py` 验证。`PreparedImage`、`SavedImage` 及其
+子对象是进程内不可变 DTO，不负责 JSON 持久化或 session 生命周期。

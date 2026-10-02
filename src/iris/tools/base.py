@@ -28,7 +28,7 @@ from ..exceptions import (
     IrisToolExecutionError,
     IrisToolValidationError,
 )
-from ..message import Msg, Role, TextBlock, ToolResultBlock
+from ..message import DataBlock, ImageBlock, Msg, Role, TextBlock, ToolResultBlock
 from ._read_state import ReadFileState
 from .schema import (
     callable_input_model,
@@ -343,7 +343,7 @@ class ToolResult(BaseModel):
     Attributes:
         tool_use_id (str): 与此结果匹配的工具调用回执 ID。
         tool_name (str): 引发此结果的工具映射名。
-        content (list[TextBlock]): 向模型展示和传输的实际文本块。
+        content (list[DataBlock]): 向模型展示和传输的有序文字/图片块。
         is_error (bool): 是否执行发生错误且模型应当感知。
         error (ToolErrorInfo | None): 被格式化后的异常。
         data (dict[str, Any]): 透明传递被抽取出的纯数据副本。
@@ -357,7 +357,7 @@ class ToolResult(BaseModel):
 
     tool_use_id: str
     tool_name: str
-    content: list[TextBlock] = Field(default_factory=list)
+    content: list[DataBlock] = Field(default_factory=list)
     is_error: bool = False
     error: ToolErrorInfo | None = None
     data: dict[str, Any] = Field(default_factory=dict)
@@ -366,20 +366,19 @@ class ToolResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
-    def model_content(self) -> str:
-        """返回可回灌给模型的文本内容。
-
-        提供给不支持结构化复杂回传内容的老旧通道一个纯字符串。
-
-        Returns:
-            str: 格式为错误码或逐行合并的多 Block 纯文本内容。
-
-        Example:
-            txt_response = result.model_content
-        """
+    def model_blocks(self) -> list[DataBlock]:
+        """完整模型内容投影；结构化错误替换文字，保留图片的相对顺序。"""
         if self.is_error and self.error is not None:
-            return f"Error[{self.error.code}]: {self.error.message}"
-        return "\n".join(block.text for block in self.content)
+            return [
+                TextBlock(text=f"Error[{self.error.code}]: {self.error.message}"),
+                *(block for block in self.content if isinstance(block, ImageBlock)),
+            ]
+        return list(self.content)
+
+    @property
+    def model_content(self) -> str:
+        """从同一模型块投影汇总文字；完整多模态内容使用 model_blocks。"""
+        return "\n".join(block.text for block in self.model_blocks if isinstance(block, TextBlock))
 
     def to_block_metadata(self) -> dict[str, Any]:
         """生成 ToolResultBlock.metadata 的标准子集。
@@ -421,7 +420,7 @@ class ToolResult(BaseModel):
         """
         block = ToolResultBlock.model_construct(
             tool_use_id=self.tool_use_id,
-            content=self.model_content,
+            content=self.model_blocks,
             is_error=self.is_error,
             name=self.tool_name,
             metadata=self.to_block_metadata(),

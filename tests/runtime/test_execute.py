@@ -663,7 +663,7 @@ async def test_execute_runs_multi_step_tool_loop_through_required_commits(
     assert len(commits.tool_commits) == 1
     assert commits.tool_commits[0].claim is not None
     assert commits.events.index("claim_tool_call") < commits.events.index("commit_tool_result")
-    assert provider.requests[1].messages[-1].tool_results[0].content == "echo:Iris"
+    assert provider.requests[1].messages[-1].tool_results[0].text == "echo:Iris"
     assert steering.events == [
         ("claim", activation.run_id, activation.activation_id),
         ("claim", activation.run_id, activation.activation_id),

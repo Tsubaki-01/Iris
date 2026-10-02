@@ -50,7 +50,11 @@ class ResponsesMapper:
                         {
                             "type": "function_call_output",
                             "call_id": block.tool_use_id,
-                            "output": [{"type": "input_text", "text": block.content}],
+                            "output": [
+                                {"type": "input_text", "text": part.text}
+                                for part in block.content
+                                if isinstance(part, TextBlock)
+                            ],
                         }
                     )
             if text_parts:

@@ -88,8 +88,8 @@ async def test_runner_reads_offload_without_file_tool_and_fork_keeps_ref(
         assert calls == 1
         assert "read_file" not in {tool.name for tool in registry._active_tools}
         original = store.read_session_messages("main", start=2, limit=1).items[0][1]
-        assert "历史原文：result:2:0" not in original.tool_results[0].content
-        assert "历史原文：result:2:0" in provider.requests[1].messages[3].tool_results[0].content
+        assert "历史原文：result:2:0" not in original.tool_results[0].text
+        assert "历史原文：result:2:0" in provider.requests[1].messages[3].tool_results[0].text
         read_result = runner.list_tool_calls(result.run.run_id)[1].result
         assert read_result is not None and read_result.data["content"] == full_text
         assert read_result.artifact is None

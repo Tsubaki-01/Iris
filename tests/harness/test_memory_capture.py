@@ -226,6 +226,7 @@ def test_capture_excludes_bci_and_memory_readback_but_keeps_write_targets() -> N
     assert records[2].metadata["memory_item_ids"] == ["existing"]
     assert records[3].metadata["memory_item_ids"] == ["hit"]
     assert records[4].metadata["memory_item_ids"] == ["new"]
+    assert json.loads(records[4].text) == {"item": {"id": "new", "text": "项目使用 uv"}}
 
 
 def test_child_does_not_install_automatic_memory_maintenance(tmp_path: Path) -> None:

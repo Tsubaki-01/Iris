@@ -116,10 +116,18 @@ See [command](../command/README.md) for backend behavior and stopping scope.
 `ToolDefinition` holds the validated name, description, object JSON schema, capabilities, group,
 aliases, deferred flag, output limits, `preview_mode`, `context_retention`, and metadata. `ToolExecutionContext` carries call, workspace,
 session, agent, permission, metadata, shared read-state information, and a shared live
-`cancellation` signal that serialization excludes. `ToolResult` is the single result boundary;
-`model_content` produces model-facing text and `to_block_metadata()` keeps the supported metadata
-subset. `to_msg()` projects this trusted result directly into a history message, without
-normalizing metadata again. Runtime commits and terminal tool closure share this projection.
+`cancellation` signal that serialization excludes. `ToolResult` is the single result boundary:
+its `content` is an ordered `list[DataBlock]`, `model_blocks` produces the complete model body,
+and `model_content` extracts only text from that same projection. `to_block_metadata()` keeps the
+supported metadata subset. `to_msg()` preserves all projected blocks in the history message,
+without normalizing metadata again. Runtime commits and terminal tool closure share this projection.
+
+`DataBlock` is `TextBlock | ImageBlock`, defined in [`iris.message`](../message/README.en.md).
+Successful results and errors without an `error` object retain their original block order.
+When `is_error=True` and `error` exists, `model_blocks` replaces the text with one authoritative
+`Error[code]: message` block, followed by images in their original order. The original `content`
+is unchanged. Neither the text-only `model_content` nor `artifact`/`data` represents the full
+image body sent to a model.
 
 `ToolDefinition.context_retention` defaults to `"keep"`. Authors can explicitly choose
 `"observation"` to let runtime shorten committed successful result bodies under request pressure,

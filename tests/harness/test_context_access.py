@@ -67,7 +67,11 @@ def test_read_text_and_raw_pages_keep_original_result(tmp_path: Path) -> None:
 def test_search_continues_after_empty_scan_and_returns_original_ref(tmp_path: Path) -> None:
     """一页无命中不代表完整会话无匹配，且匹配使用 Unicode casefold。"""
     messages = [Msg.user("nothing") for _ in range(200)]
-    messages.append(Msg.user([ToolResultBlock(tool_use_id="call", name="read", content="Straße")]))
+    messages.append(
+        Msg.user(
+            [ToolResultBlock(tool_use_id="call", name="read", content=[TextBlock(text="Straße")])]
+        )
+    )
     access = _access(messages)
     first = access.search("one", ContextSearchInput(query="STRASSE"))
     assert first.matches == () and first.has_more and first.next_after == 200
@@ -100,6 +104,24 @@ def test_inline_result_raw_unavailable_and_deleted_artifact_fails(tmp_path: Path
     with pytest.raises(IrisToolExecutionError) as deleted:
         missing.read("one", ContextReadInput(ref="result:0:0"), tmp_path)
     assert deleted.value.context["code"] == "CONTEXT_SOURCE_UNAVAILABLE"
+
+
+def test_multiple_text_blocks_are_read_and_searched_as_text(tmp_path: Path) -> None:
+    """分页与检索消费有序文字投影，保持跨文本块的字符偏移。"""
+    access = _access(
+        [
+            Msg.tool_result(
+                tool_use_id="call", content=[TextBlock(text="first"), TextBlock(text="last")]
+            )
+        ]
+    )
+    page = access.read("one", ContextReadInput(ref="result:0:0", offset=4, limit=4), tmp_path)
+    assert page.content == "t\nla"
+    assert page.next_offset == 8 and page.has_more
+    message = access.read("one", ContextReadInput(ref="message:0"), tmp_path)
+    assert message.content.endswith("first\nlast")
+    hit = access.search("one", ContextSearchInput(query="last")).matches[0]
+    assert hit.ref == "result:0:0" and hit.snippet == "first\nlast"
 
 
 def test_search_does_not_open_artifact_body(tmp_path: Path) -> None:

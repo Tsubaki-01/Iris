@@ -61,7 +61,7 @@ async def test_researcher_example_returns_child_result_to_parent(
     assert child_run.stop_reason == RunStopReason.COMPLETED
     assert child_run.session_id != result.run.session_id
     assert any(
-        block.content == "目标用户：Python 开发者；入口：YAML。"
+        block.text == "目标用户：Python 开发者；入口：YAML。"
         for message in parent.requests[-1].messages
         for block in message.tool_results
     )

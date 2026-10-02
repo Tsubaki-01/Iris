@@ -135,7 +135,7 @@ async def test_memory_allowance_cannot_use_body_savings_triggered_only_by_full_w
         def estimate_input_tokens(self, request: LLMRequest) -> int:
             self.estimates.append(request)
             original = any(
-                result.content == body
+                result.text == body
                 for message in request.messages
                 for result in message.tool_results
             )
@@ -200,7 +200,7 @@ async def test_memory_allowance_cannot_use_body_savings_triggered_only_by_full_w
     )
     assert base.input_tokens < config.compaction.trigger_tokens <= full_candidate.input_tokens
     assert projected_base is base
-    assert projected_full.request.messages[2].tool_results[0].content != body
+    assert projected_full.request.messages[2].tool_results[0].text != body
     memory_allowance = (
         config.compaction.input_budget_tokens * config.memory.overview.system_budget_ratio
     )
