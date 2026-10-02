@@ -1,6 +1,6 @@
 """Goal 状态、版本与持久化领域异常。"""
 
-from .exceptions import IrisError
+from .base import IrisError
 
 
 class IrisGoalError(IrisError):

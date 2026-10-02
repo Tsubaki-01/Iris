@@ -1,6 +1,6 @@
 """图片解码、处理与本地副本保存异常。"""
 
-from .exceptions import IrisError
+from .base import IrisError
 
 
 class IrisImageError(IrisError):

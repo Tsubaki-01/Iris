@@ -1,60 +1,9 @@
 """公开 Iris 当前使用的领域异常。"""
 
-from .exceptions import (
-    # HITL
-    HITLCheckpointInvalidError,
-    HITLConflictError,
-    HITLResponseMismatchError,
-    IrisAPIConnectionError,
-    IrisAuthenticationError,
-    # Runtime control
-    IrisCancellationRequestedError,
-    IrisCommandCleanupError,
-    IrisCommandError,
-    # Core / Config
-    IrisConfigError,
-    IrisContextCompactionError,
-    IrisContextError,
-    IrisError,
-    IrisHITLError,
-    # Lifecycle / Run
-    IrisLifecycleSchemaError,
-    # MCP
-    IrisMCPCallError,
-    IrisMCPError,
-    IrisMCPToolError,
-    # Memory
-    IrisMemoryError,
-    # Provider
-    IrisProviderError,
-    IrisProviderStreamError,
-    IrisProviderStreamInterruptedError,
-    IrisProviderStreamProtocolError,
-    IrisRateLimitExceededError,
-    IrisRunConflictError,
-    IrisRunError,
-    IrisRunNotFoundError,
-    IrisRunObservationTimeoutError,
-    IrisRunPersistenceError,
-    IrisRunRecoveryError,
-    IrisRunStateError,
-    IrisSandboxError,
-    # Skill
-    IrisSkillError,
-    IrisSkillFormatError,
-    IrisSkillNotFoundError,
-    IrisSkillPathError,
-    # Template
-    IrisTemplateError,
-    IrisTemplateNotFoundError,
-    # Tool
-    IrisToolError,
-    IrisToolExecutionError,
-    IrisToolNotFoundError,
-    IrisToolOutcomeUnknownError,
-    IrisToolValidationError,
-    IrisValidationError,
-)
+from .base import IrisError, IrisValidationError
+from .command import IrisCommandCleanupError, IrisCommandError
+from .config import IrisConfigError
+from .context import IrisContextCompactionError, IrisContextError
 from .goal import (
     IrisGoalConflictError,
     IrisGoalError,
@@ -62,9 +11,52 @@ from .goal import (
     IrisGoalPersistenceError,
     IrisGoalStateError,
 )
+from .hitl import (
+    HITLCheckpointInvalidError,
+    HITLConflictError,
+    HITLResponseMismatchError,
+    IrisHITLError,
+)
 from .hooks import IrisHookError, IrisHookProtocolError
 from .image import IrisImageError
+from .lifecycle import (
+    IrisLifecycleSchemaError,
+    IrisRunConflictError,
+    IrisRunError,
+    IrisRunNotFoundError,
+    IrisRunObservationTimeoutError,
+    IrisRunPersistenceError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
+)
+from .mcp import IrisMCPCallError, IrisMCPError, IrisMCPToolError
+from .memory import IrisMemoryError
+from .provider import (
+    IrisAPIConnectionError,
+    IrisAuthenticationError,
+    IrisProviderError,
+    IrisProviderStreamError,
+    IrisProviderStreamInterruptedError,
+    IrisProviderStreamProtocolError,
+    IrisRateLimitExceededError,
+)
+from .runtime import IrisCancellationRequestedError
+from .sandbox import IrisSandboxError
+from .skill import (
+    IrisSkillError,
+    IrisSkillFormatError,
+    IrisSkillNotFoundError,
+    IrisSkillPathError,
+)
+from .template import IrisTemplateError, IrisTemplateNotFoundError
 from .todo import IrisTodoError
+from .tools import (
+    IrisToolError,
+    IrisToolExecutionError,
+    IrisToolNotFoundError,
+    IrisToolOutcomeUnknownError,
+    IrisToolValidationError,
+)
 
 __all__ = [
     "IrisImageError",

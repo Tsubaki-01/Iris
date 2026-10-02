@@ -1,6 +1,6 @@
 """Todo 查询、文件读取与提示构造的领域异常。"""
 
-from .exceptions import IrisError
+from .base import IrisError
 
 
 class IrisTodoError(IrisError):

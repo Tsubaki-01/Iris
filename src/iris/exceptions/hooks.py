@@ -1,6 +1,6 @@
 """Hook 执行与公开返回协议的领域错误。"""
 
-from .exceptions import IrisError
+from .base import IrisError
 
 
 class IrisHookError(IrisError):
