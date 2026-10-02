@@ -43,6 +43,7 @@ from .circuit import CircuitBreaker, CircuitBreakerState
 from .decorators import tool
 from .discovery import DeferredToolIndex, ToolSearchInput, ToolSearchTool
 from .executor import PreparedToolCall, ToolBatchPlan, ToolEffectGuard, ToolExecutor
+from .images import import_tool_image
 from .middleware import ToolMiddleware
 from .permissions import (
     DefaultPermissionPolicy,
@@ -114,6 +115,7 @@ __all__ = [
     "WorkspaceFileService",
     "WorkspacePolicy",
     "WriteFileInput",
+    "import_tool_image",
     "register_file_tools",
     "schema_from_callable",
     "schema_from_pydantic_model",

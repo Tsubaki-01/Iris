@@ -83,9 +83,11 @@ print(saved.model.path, saved.model.mime_type)  # 模型应读取的文件及实
   尝试 JPEG 质量 85、70、50、30。仍超限时最多再减半两次，每个候选由原始解码图生成。
 - 透明图不转 JPEG、不填充背景、不做 palette 量化；编码后的实际 MIME 写入结果。上述限制
   是 Iris 的客户端处理策略，不代表所有 provider 的限制，也不等于视觉 token 计费规则。
-- `save_image(source: Path | bytes, *, cache_dir: Path) -> SavedImage` 保存同一次读取的快照；
+- `save_image(source: Path | bytes, *, cache_dir: Path, reuse_source=False) -> SavedImage` 保存同一次读取的快照；
   路径来源分块读取，文件全部关闭后返回 `SavedImageFile` 信息。每次导入使用新的随机资产 ID；
   有变换时保留 original/model 两份文件，无变换时两个引用指向同一份文件。
+- 工具调用方确认源路径属于已有 image-cache 后可使用 `reuse_source=True`：仍完整解码处理，
+  合规则两个引用复用该文件；需变换则保留原文件，仅向目标目录写新模型版。普通 SDK 导入仍保存新快照。
 - 解码、处理、读取或写入失败抛出 `IrisImageError`；有限候选用尽不返回超限图。写入失败只
   清理本次创建的半成品，不影响已有文件。正常完成后不自动删除副本。
 

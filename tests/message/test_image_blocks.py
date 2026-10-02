@@ -15,6 +15,7 @@ from iris.message import (
     ToolResultBlock,
     ToolUseBlock,
     image_block_from_saved,
+    image_reference_text,
 )
 
 
@@ -65,6 +66,23 @@ def test_tool_result_factory_wraps_strings_and_preserves_data_blocks() -> None:
         ToolResultBlock(tool_use_id="c", content="old string")
     with pytest.raises(ValidationError):
         ToolResultBlock(tool_use_id="c", content=[ToolUseBlock(name="nested")])
+
+
+def test_image_reference_locates_both_versions_without_reading_pixels() -> None:
+    image = _image()
+    text = image_reference_text(image)
+    for value in (
+        "[image:",
+        "截图",
+        str(image.original.path),
+        str(image.model.path),
+        "image/png",
+        "image/jpeg",
+        "3000x1500",
+        "2000x1000",
+    ):
+        assert value in text
+    assert "original.png" in image_reference_text(image.model_copy(update={"name": None}))
 
 
 @pytest.mark.parametrize("transformed", [False, True])

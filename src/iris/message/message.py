@@ -83,6 +83,16 @@ def data_text(content: str | Sequence[DataBlock]) -> str:
     return "\n".join(block.text for block in content if isinstance(block, TextBlock))
 
 
+def image_reference_text(image: ImageBlock) -> str:
+    """渲染可回读的图片引用；只投影已有信息，不读取像素或生成位置编号。"""
+    original, model = image.original, image.model
+    return (
+        f"[image: {image.name or original.path.name}; "
+        f"original={original.path} ({original.mime_type}, {original.width}x{original.height}); "
+        f"model={model.path} ({model.mime_type}, {model.width}x{model.height})]"
+    )
+
+
 def image_block_from_saved(saved: SavedImage, *, name: str | None = None) -> ImageBlock:
     """将图片保存器交付的可信文件信息投影为消息块。"""
     original = ImageFileRef.model_construct(

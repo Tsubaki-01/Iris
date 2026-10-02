@@ -156,6 +156,10 @@ tool result data/stats/metadata 与 pending interaction 的 workspace path；这
 Phase 03 projection 已在更早边界删除 raw provider chunk/header/key/traceback，以及 artifact path、
 bytes 和任意 metadata。Gateway filtering 只消费该 trusted allowlist，不重新解析 payload。
 
+`tool.completed.payload.content` 仍为文字列表：文字块保留正文，图片块仅显示
+`[image: 名称]` 或 `[image]`。该事件不附加图片路径、编码或下载入口；完整图片引用保存在
+typed 工具结果和消息历史中。纯文字 CLI 可继续消费同一 live fact，不承担图片显示。
+
 成功 `edit_file` 的 live `tool.completed` 额外提供顶层 `file_change`，仅包含相对 workspace 的
 `file_path` 与文本 `patch`。SSE/WS 使用同一投影；模型历史仍只有编辑短摘要，其他任意工具 data
 不进入事件。durable snapshot 继续遵循上述字段范围；host 可通过已提交 ToolCallRecord 的

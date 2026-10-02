@@ -113,22 +113,36 @@ The existing executor cancels SDK requests and waits for cleanup before settleme
 does not prove remote effects stopped. CLI shutdown waits for `manager.close(cancel_run=True)`,
 closes the runner, then finishes output and the background loop.
 
-Rich content, structuredContent, SDK-retained metadata, and oversized projections are saved as
-complete `.mcp.json` files. Models receive bounded text and a path. If the text after middleware
-exceeds the limit, the JSON stays at `artifact.path` and a separate `.model.txt` file preserves the
+`TextContent` and `ImageContent` become ordered text/image blocks under the original tool call ID.
+MCP base64 is decoded at the result boundary, then `tools.images.import_tool_image` prepares and
+saves the image in the current session's `.iris/image-cache/` directory. The shared image processor
+detects the actual PNG/JPEG/WebP format rather than trusting the server's declared MIME type.
+Models read the prepared model copy while original bytes remain available. MCP code does not choose
+the API image format. Audio, resource links, embedded resources, and structuredContent retain their
+existing text previews.
+
+Rich content, structuredContent, SDK-retained metadata, and oversized projections are still saved as
+complete `.mcp.json` files. Models receive bounded text, image blocks, and a result file path.
+If the text after middleware exceeds the limit, the JSON stays at `artifact.path` and a separate
+`.model.txt` file preserves the
 complete final text at `artifact.text_path`. Large text without a native artifact uses one `.txt`
-file for both fields. Raw MCP JSON and final model text are separate representations, not substitutes.
+file for both fields. Truncation retains images; text_path starts with image-copy references and then
+the full model text. Raw MCP JSON and final model text are separate representations, not substitutes.
 The adapter preserves full text for middleware; the executor alone applies the final limit using
 ToolDefinition.preview_chars. Direct MCPTool.arun calls return results before this final limit.
 Files are scoped to the current context.session_id and receive a fresh random identifier on each
 write; error paths appear in the model-visible error.message.
+Remote `isError` results retain all images and use the single authoritative error-text projection.
+An error containing only images receives an explicit business-error message.
 Complete runners with the default context policy attach a historical result reference.
 `context_read` retrieves final model text with `representation="text"` or native MCP JSON with
 `"raw"`, without another remote call. See [context reads](../tools/README.en.md#current-session-context-reads)
 for scope and pagination.
-After the SDK returns, complete projection, `model_dump`, JSON encoding, and writing run in a tool IO
-worker. Cancellation drains this local job and preserves the known result or `ARTIFACT_ERROR`
-without another remote call. The SDK network wait remains cancellable.
+After the SDK returns, image import, complete projection, `model_dump`, JSON encoding, and writing
+run in the same tool IO worker. Cancellation drains that local job. Image decoding or saving failures
+produce `IMAGE_ERROR`; JSON writing failures remain `ARTIFACT_ERROR`. These are known local failures
+after a remote result was received, so they do not become outcome-unknown or replay the remote call.
+The SDK network wait remains cancellable.
 
 - `config.py`: the single owner of source normalization and environment resolution.
 - `models.py`: external declarations and internal config/resolved/diagnostic data.

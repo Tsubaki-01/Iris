@@ -63,6 +63,24 @@ result = await executor.execute_one(
 )
 ```
 
+## Importing tool images
+
+Ordinary tools can call `import_tool_image(source: Path | bytes, context, *, name=None) -> ImageBlock`
+and place the returned block in `ToolResult.content`, interleaved with `TextBlock` values.
+[`images.py`](images.py) takes the workspace/session from `ToolExecutionContext`, resolves relative
+paths against that workspace, and reuses `utils.images.save_image()` to save images under
+`.iris/image-cache/<encoded session>/`. The helper performs synchronous image I/O and processing;
+async tools should call it within their existing I/O worker operation.
+
+Ordinary files and bytes create a new snapshot on each import, unaffected by later source changes.
+Files already within the workspace's image-cache are still decoded and processed against the
+dimension/size policy. Compliant files serve as both original and model references; when a transform
+is needed, the original stays in place and only a new model copy is written under the current
+session. Cache membership never bypasses image processing. Blocks are returned only after saving
+completes. Read, decode, processing, or save failures raise `IrisImageError` through the existing tool
+failure path. Tools produce references; they do not choose API protocols, encode base64, or invoke
+an auxiliary vision model.
+
 ## Explicit command execution
 
 Declare `exec.command` in Agent `tools.builtin` to expose `exec_command`. Its only parameters are
@@ -261,8 +279,10 @@ use the existing thread pool, with no new persistent worker or registry. This do
 `WorkspaceFileService.read_text_observed()` supplies complete text and a file observation from one
 open file for Skill loading, sharing the workspace and regular-file boundaries.
 It does not update shared read state; callers merge after a successful await. Ordinary
-`read_file_observed(..., max_chars=...)` reads only the budgeted page plus one lookahead character.
-Skipping preceding lines and columns is also chunked, without loading an entire long line.
+`read_file_observed(..., max_chars=...)` first examines a short header to distinguish images from text.
+For text it reads only the budgeted page plus one lookahead character; preceding lines and columns
+are skipped in chunks without loading a whole long line. Images return an `ImageBlock` with no read
+observation. `read_text_observed()` remains text-only.
 
 `ToolExecutor` provides classification, permission refresh, and per-call execution primitives only. The
 lifecycle active path layers a fixed internal runtime window bound of 8 over those primitives.
@@ -294,6 +314,13 @@ Standalone SDK `register_memory_tools()` still defaults to an empty selection; s
 
 `register_file_tools()` registers, in stable order, `read_file`, `list_files`, `grep_search`,
 `write_file`, and `edit_file`, injecting one shared `WorkspaceFileService`.
+
+`file.read`/`read_file` reads both text and static PNG/JPEG/WebP images, selecting by a short file
+header rather than extension. Image paths pass through the shared file service, then follow the
+[tool image import](#importing-tool-images) contract and return reference text plus an `ImageBlock`.
+`offset`, `column`, `limit`, and `with_line_numbers` apply only to text. Images ignore these parameters,
+return the complete model copy, and create neither text-page cursors nor edit-related `ReadFileState`.
+There is no additional image tool or configuration alias.
 
 Write/edit operations share a process-wide lock per resolved path, spanning cancellation and
 freshness checks through replacement and final stat. Different service instances, sessions, roots,
@@ -334,7 +361,7 @@ flowchart LR
     Service --> Boundary["WorkspacePolicy / ReadFileState / filesystem"]
 ```
 
-- reads preserve decoded newlines, may include `L0001 |` line numbers, and update `ReadFileState`
+- text reads preserve decoded newlines, may include `L0001 |` line numbers, and update `ReadFileState`
   through loop-side observation merge;
 - list uses streaming `os.scandir` discovery order and does not guarantee global lexicographic
   order; list patterns retain `Path.rglob()` recursion semantics, including `**` matching zero or
@@ -349,7 +376,7 @@ flowchart LR
 - resolved parent/symlink escapes are rejected;
 - successful paths use workspace-relative `/` separators.
 
-`ReadFileInput` uses zero-based line `offset` and Unicode character `column` within that line.
+For text, `ReadFileInput` uses zero-based line `offset` and Unicode character `column` within that line.
 `limit` defaults to 1000 lines and accepts 0..1000. The tool budgets source text, optional line
 numbers, and a model-visible footer together:
 
@@ -364,6 +391,8 @@ creating another artifact during ordinary paging. Page text retains trailing new
 only reports remaining content without consuming source text; no total-line scan is performed.
 An invalid starting column returns COLUMN_OUT_OF_RANGE. An insufficient page budget returns
 READ_BUDGET_TOO_SMALL. Direct service read_file/read_file_observed calls require max_chars.
+The former returns `str | ImageBlock`; the latter also returns a `ReadFileRecord` for text or
+`None` for images.
 
 Large execution output, including errors, is stored at
 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}-{random_id}.txt`, and the result becomes a preview
@@ -381,6 +410,11 @@ the current context.session_id. Oversized final `model_content` is saved after a
 Plain text uses one `.txt` file, with `ToolArtifact.text_path == path`. When a native artifact already
 exists, its `path` is preserved and a separate `.model.txt` file supplies `text_path`; the raw payload
 cannot replace the text produced by middleware. Results within the limit need no additional text file.
+
+Truncation preserves every image and its order; images do not consume the text character budget.
+For mixed results, `text_path` starts with each image's name, MIME, original/model paths and dimensions,
+then a blank line and the complete model text. Text-only files retain their existing layout. Image
+references are not clipped with the preview, so `context_read` can locate either saved version.
 
 Successes, returned errors, raised tool exceptions, and middleware errors share the final output
 handling. The budget includes the error prefix and retrieval notice; `error.message` retains the

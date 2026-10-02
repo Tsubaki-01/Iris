@@ -21,7 +21,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from ..exceptions import IrisToolExecutionError
-from ..message import TextBlock
+from ..message import DataBlock, ImageBlock, TextBlock, image_reference_text
 from ._paths import safe_path_segment
 from .base import ToolArtifact, ToolExecutionContext, ToolResult
 
@@ -168,9 +168,13 @@ class ToolArtifactStore:
 
         # --- 2. Write artifact payload to disk ---
         preview = _preview_text(content, self.preview_chars, self.preview_mode)
+        image_refs = "\n".join(
+            image_reference_text(block) for block in result.content if isinstance(block, ImageBlock)
+        )
+        saved_content = f"{image_refs}\n\n{content}" if image_refs else content
         text_artifact = self._persist_text(
             result.tool_use_id,
-            content,
+            saved_content,
             suffix=".model.txt" if result.artifact is not None else ".txt",
             mime_type="text/plain",
             preview=preview,
@@ -236,9 +240,19 @@ def truncate_tool_result(
     body = error.message if error else result.model_content
     available = max(0, max_chars - len(suffix) - prefix_chars)
     message = _preview_text(body, min(preview_chars, available), preview_mode) + suffix
+    content: list[DataBlock] = []
+    text_replaced = False
+    for block in result.content:
+        if isinstance(block, ImageBlock):
+            content.append(block)
+        elif not text_replaced:
+            content.append(TextBlock(text=message))
+            text_replaced = True
+    if not text_replaced:
+        content.insert(0, TextBlock(text=message))
     return result.model_copy(
         update={
-            "content": [TextBlock(text=message)],
+            "content": content,
             "error": error.model_copy(update={"message": message}) if error else result.error,
         }
     )
