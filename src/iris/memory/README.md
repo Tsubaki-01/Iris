@@ -95,6 +95,8 @@ flowchart LR
 
 ### 记忆生命周期
 
+生成请求使用统一的 `response_format="json_object"`；所选 provider adapter 负责协议编码。
+
 - `observe()` 保存不可变 `MemoryEpisode` 与 `OBSERVE` 事件，不会直接创建长期条目。
 - `await flush()` 将原文片段提炼为带证据和适用条件的 `MemoryObservation`，同步推进原文游标。
 - `await dream()` 将观察和显式改动整理为正式 `MemoryItem`，可以新增、修改、合并、退役或补充支持。

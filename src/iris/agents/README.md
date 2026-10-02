@@ -285,16 +285,19 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 
 - `provider`: provider 名称，例如 `openai`。
 - `name`: 模型名称，例如 `gpt-4o-mini`。
+- `api_style`: 默认 `responses`；显式 `chat_completions` 选择 Chat Completions。只在 provider 构造时使用。
 - `base_url`: 可选自定义 endpoint。
 - `temperature`、`top_p`、`max_tokens`、`tool_choice`、`response_format`、
   `timeout`、`provider_options`、`metadata`: 可选请求级参数，会由 runtime 透传给
   `LLMRequest`。
 - Streaming 由 host 给 runner 注入 `live_publisher` 开启，模型配置不声明 `stream`。
-- 调用契约固定为 LiteLLM Chat Completion，不提供 `api_style` 配置字段。
+- 两种协议共用逻辑请求：强制选择使用 `tool_choice: {name: read_file}`；
+  `response_format` 使用 `text`、`json_object` 或 `{name, schema, strict?}`。协议包装由 providers 生成。
+- `provider_options` 不接受 `api_style`，也不能通过 run 请求覆盖协议。
 
 调用 `to_model_route()` 可转换为 providers 层使用的 `ModelRoute`。
 调用 `to_llm_request_options()` 可得到 `LLMRequest` 支持的请求级参数；`provider`、
-`name` 和 `base_url` 不会进入该结果。
+`name`、`base_url` 和 `api_style` 不会进入该结果。
 
 ### `ToolsConfig`
 

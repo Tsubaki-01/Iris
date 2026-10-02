@@ -105,6 +105,7 @@ from ..lifecycle.store import (
 )
 from ..lifecycle.transitions import (
     abandon_activation,
+    add_model_failure_usage,
     claim_tool_call,
     commit_tool_call,
     commit_tool_usage,
@@ -2643,6 +2644,7 @@ class SQLiteStore:
             phase=RunPhase.TERMINAL,
             stop_reason=command.stop_reason,
             revision=run.revision + 1,
+            usage=add_model_failure_usage(run.usage, command.model_failure_usage),
             current_activation_id=None,
             pending_interaction_id=None,
             assistant_message=command.assistant_message,

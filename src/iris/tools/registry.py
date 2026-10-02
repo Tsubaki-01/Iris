@@ -17,17 +17,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from ..exceptions import IrisToolNotFoundError, IrisToolValidationError
+from ..message.llm import ToolSpec
 from .base import (
     BaseTool,
     CallableExecutionMode,
     CallableTool,
     ToolCapability,
     ToolDefinition,
-)
-from .schema import (
-    to_anthropic_tool_schema,
-    to_openai_chat_tool_schema,
-    to_openai_responses_tool_schema,
 )
 
 # endregion
@@ -49,7 +45,7 @@ class ToolRegistry:
     Example:
         registry = ToolRegistry()
         registry.register(tool)
-        schemas = registry.active_schemas()
+        specs = registry.active_specs()
     """
 
     # ==========================================
@@ -218,24 +214,9 @@ class ToolRegistry:
             deny=deny,
         )
 
-    def active_schemas(
-        self,
-        *,
-        provider: str | None = None,
-        api_style: str | None = None,
-    ) -> list[dict[str, object]]:
-        """导出当前活动工具 schema。
-
-        代理通过生成默认全局视图导出兼容具体 Provider 标准的 schema 定义结构体。
-
-        Args:
-            provider (str | None): 可选的 LLM 供应商名称（如 openai）。
-            api_style (str | None): 具体提供者的特殊调用分格类型定义。
-
-        Returns:
-            list[dict[str, object]]: 符合 API 要求的 JSON schema 一维数组。
-        """
-        return self.view().active_schemas(provider=provider, api_style=api_style)
+    def active_specs(self) -> list[ToolSpec]:
+        """导出当前活动工具的逻辑定义，不选择 API 协议。"""
+        return self.view().active_specs()
 
     def search_deferred(
         self,
@@ -391,82 +372,26 @@ class ToolRegistryView:
             if not tool.definition.deferred or tool.name in self.allow
         ]
 
-    def schemas_for(self, names: tuple[str, ...]) -> list[dict[str, object]]:
-        """按注册顺序导出本步骤选定的完整 Chat schema。"""
+    def specs_for(self, names: tuple[str, ...]) -> list[ToolSpec]:
+        """按注册顺序投影本步骤选定的逻辑工具定义。"""
         selected = set(names)
         return [
-            _format_schema(tool.definition, provider="openai", api_style="chat")
+            _tool_spec(tool.definition)
             for tool in self.available_tools
             if tool.name in selected
         ]
 
-    def active_schemas(
-        self,
-        *,
-        provider: str | None = None,
-        api_style: str | None = None,
-    ) -> list[dict[str, object]]:
-        """导出活动工具 schema。
-
-        格式化符合权限标准的工具供外部对接消费。
-
-        Args:
-            provider (str | None): 要对齐的指定大模型底层规范字柄。
-            api_style (str | None): API 要求的特殊封装架构方式风格。
-
-        Returns:
-            list[dict[str, object]]: 生成妥当随时可挂载作为参数的模型集合。
-        """
-        return [
-            _format_schema(tool.definition, provider=provider, api_style=api_style)
-            for tool in self.active_tools
-        ]
+    def active_specs(self) -> list[ToolSpec]:
+        """投影当前活动工具，协议编码由 providers 负责。"""
+        return [_tool_spec(tool.definition) for tool in self.active_tools]
 
     # endregion
 
 
-def _format_schema(
-    definition: ToolDefinition,
-    *,
-    provider: str | None,
-    api_style: str | None,
-) -> dict[str, object]:
-    """按 provider 生成 schema。
-
-    支持对 OpenAI (包含常规和 response), Anthropic 特殊格式的定向翻译操作。
-
-    Args:
-        definition (ToolDefinition): 用于提供源元信息的描述定义。
-        provider (str | None): 需要对应映射构建配置的外部供应商名称。
-        api_style (str | None): 仅给 OpenAI 处理响应定制结构时作为补充区别使用。
-
-    Returns:
-        dict[str, object]: 按指派供应商生成的词典数据。若未设定提供商就回滚中继形式。
-
-    Raises:
-        IrisToolValidationError: 在风格不明晰或不支持的供应商被硬性匹配时引发。
-
-    Example:
-        >>> _format_schema(tool_def, provider="anthropic", api_style=None)
-        {'name': '...', 'description': '...', 'input_schema': {...}}
-    """
-    if provider is None:
-        return {
-            "name": definition.name,
-            "description": definition.description,
-            "input_schema": definition.input_schema,
-        }
-
-    provider_name = provider.lower()
-    if provider_name == "openai":
-        style = api_style or "chat"
-        if style == "chat":
-            return to_openai_chat_tool_schema(definition)
-        if style == "responses":
-            return to_openai_responses_tool_schema(definition)
-        raise IrisToolValidationError("不支持的 OpenAI API 风格", api_style=style)
-
-    if provider_name == "anthropic":
-        return to_anthropic_tool_schema(definition)
-
-    raise IrisToolValidationError("不支持的工具 schema provider", provider=provider)
+def _tool_spec(definition: ToolDefinition) -> ToolSpec:
+    """投影已验证定义中的模型可见字段，不复制执行策略。"""
+    return ToolSpec.model_construct(
+        name=definition.name,
+        description=definition.description,
+        input_schema=definition.input_schema,
+    )

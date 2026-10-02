@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from ..command import CommandStopReceipt
 from ..exceptions import IrisCommandCleanupError
-from ..lifecycle import RunErrorInfo, RunRecord, RunResult, RunStopReason
+from ..lifecycle import RunErrorInfo, RunRecord, RunResult, RunStopReason, TokenUsage
 from ..message import Msg
 from ..tools.subagent import SubagentRoute
 from ._events import _RunEventCollector
@@ -64,6 +64,7 @@ class PendingSettlement:
     assistant_message: Msg | None
     interaction_close_reason: str | None
     events: _RunEventCollector
+    model_failure_usage: TokenUsage | None = None
     receipt: CommandStopReceipt | None = None
     call_id: str | None = None
     initial_error: IrisCommandCleanupError | None = None

@@ -56,12 +56,12 @@ def test_search_first_candidate_protection_consumed_by_final_and_fork_prefix() -
 
 def test_forced_alias_is_required_and_denied_target_is_configuration_error() -> None:
     registry = _registry()
-    choice = {"type": "function", "function": {"name": "alias_b"}}
+    choice = {"name": "alias_b"}
     selected = select_tool_context(
         registry.view(), SessionToolDiscovery(), include_tools=True, tool_choice=choice
     )
     assert selected.names == ("eager", "b") and not selected.optional_names
-    assert selected.tool_choice["function"]["name"] == "b"
+    assert selected.tool_choice["name"] == "b"
     for view in (registry.view(deny={"b"}), registry.view(include_groups={"outside"})):
         with pytest.raises(IrisConfigError):
             select_tool_context(
@@ -72,7 +72,7 @@ def test_forced_alias_is_required_and_denied_target_is_configuration_error() -> 
             registry.view(),
             SessionToolDiscovery(),
             include_tools=True,
-            tool_choice={"type": "function", "function": {"name": "missing"}},
+            tool_choice={"name": "missing"},
         )
 
 
@@ -145,7 +145,7 @@ def test_forced_target_still_works_when_discovery_was_not_requested() -> None:
         _registry().view(),
         None,
         include_tools=True,
-        tool_choice={"type": "function", "function": {"name": "alias_b"}},
+        tool_choice={"name": "alias_b"},
     )
     assert selected.names == ("eager", "b")
     assert selected.optional_names == ()

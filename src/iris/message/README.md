@@ -52,6 +52,7 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 - `Msg`: 一条统一消息。
 - `Conversation`: 有序消息集合。
 - `LLMRequest`: 一次 provider-neutral 模型请求。
+- `ToolSpec`、`ToolChoice`、`ResponseFormat`：工具定义、工具选择与输出格式的逻辑契约。
 - `LLMResponse`: 一次 provider-neutral 模型响应。
 - `ModelStreamScope`、`ModelBlockRef`、`ModelUsageSnapshot`：一次 provider attempt、
   内容块和 token 用量的稳定标识。
@@ -66,8 +67,8 @@ provider 适配发生在 `iris.providers` 内；本包不会保留或暴露 Lite
 推荐使用 `Msg.system()`、`Msg.user()`、`Msg.assistant()` 和 `Msg.tool_result()` 创建消息。
 `text`、`tool_calls`、`tool_results` 与 `has_tool_calls` 提供只读投影视图。
 
-工具结果在 Iris 内部仍使用 `Role.USER`，由 provider mapper 在 wire format 阶段转换成对应的
-tool message。不要根据内部 role 自行拼接厂商请求。
+工具结果在 Iris 内部仍使用 `Role.USER`；provider adapter 根据所选协议映射为 Responses
+`function_call_output` 或 Chat tool message，并保留调用 ID。不要根据内部 role 自行拼接厂商请求。
 
 ```python
 from iris.message import Msg, TextBlock, ToolUseBlock
@@ -92,14 +93,23 @@ result = Msg.tool_result(call.id, "查询完成", name=call.name)
 `response_format`、`stream`、`timeout`、`provider_options` 和 `metadata`。
 `from_conversation()`、`system_prompt()` 与 `non_system_messages()` 用于构建和读取请求快照。
 
-`provider_options` 只承载少量明确支持的 provider 选项；当前 active provider path 只读取
-`api_style` 和 `reasoning_effort`。
+`tools` 使用 `ToolSpec(name, description, input_schema, strict=False)`；注册表直接投影已验证字段。
+`tool_choice` 接受 `auto`、`none`、`required` 或 `{"name": "lookup"}`。`response_format`
+接受 `text`、`json_object` 或 `{"name": "answer", "schema": {...}, "strict": True}`，其中
+`strict` 可省略。协议包装只由 provider adapter 生成。
+
+`provider_options` 只承载 `reasoning_effort` 和 `num_retries` 等调用选项；`ProviderOptions`
+拒绝其中的 `api_style`。协议选择属于模型或 `ProviderClient` 构造参数，不在每次请求中覆盖。
 
 ### `LLMResponse`
 
 响应字段包括 provider、响应/模型标识、内容块、结束原因、token 用量、reasoning 与 metadata。
 `to_msg()` 创建 assistant `Msg`，并把 provider、model、finish reason 与 usage 放入消息元数据。
 原始厂商响应到 `LLMResponse` 的解析由 provider client 完成，不属于该模型的方法。
+
+原生 Responses 的 status、item 顺序/ID、phase 和完整 reasoning 保存在专用 metadata 中。
+正文和工具参数始终以 typed content 为准，重放时按关联信息重建请求；metadata 不保存第二份
+可执行正文。`completed` 无工具映射为 `stop`，有工具映射为 `tool_calls`。
 
 ### `ModelStreamEvent`
 

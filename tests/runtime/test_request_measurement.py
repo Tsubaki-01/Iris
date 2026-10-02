@@ -45,7 +45,7 @@ def test_optional_changes_return_the_exact_last_measured_candidate() -> None:
     request = LLMRequest(
         model="test",
         messages=[Msg.user("required"), render_context_snapshot(snapshot)],
-        tools=[{"function": {"name": "extra"}}],
+        tools=[{"name": "extra", "input_schema": {}}],
     )
     projected, selected = project_context_request(
         measure_request(request, provider.estimate_input_tokens),

@@ -111,6 +111,9 @@ the store separately maintains flush cursors and observation processing states. 
 applicability guides dreaming, while formal Item text includes the conditions needed to use its
 knowledge. Search, Fetch, and overviews read only active Items, not Episodes or Observations.
 
+Generation requests use logical `response_format="json_object"`; the selected provider adapter
+handles protocol encoding.
+
 Flush selects information useful for future tasks: preferences, corrections, project conventions,
 reusable experience, and important pending work. Chitchat, routine activity, and temporary requests
 with no future value may produce no observations. Dreaming checks drafts against original evidence

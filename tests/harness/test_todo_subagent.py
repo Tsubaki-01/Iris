@@ -128,7 +128,7 @@ async def test_parent_child_yaml_switches_keep_independent_todo_files_and_remind
             if child_enabled:
                 assert str(child_path) in snapshot
             else:
-                assert all(tool["function"]["name"] != "write_file" for tool in request.tools)
+                assert all(tool.name != "write_file" for tool in request.tools)
         if child_enabled:
             assert child_path.read_text(encoding="utf-8") == "- [ ] child-exclusive-work\n"
             assert "child-exclusive-work" in _snapshot(child.requests[1])

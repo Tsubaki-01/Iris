@@ -164,7 +164,10 @@ commit together. Initialization advances the revision once even with no messages
 messages and the window also advances it only once. Later runs, HITL, and recovery
 reuse that window. Only a successful `CommitCompaction.context_window` replaces it; cancellation,
 failure, and CAS conflicts preserve the previous value. Checkpoint v4 binds the window through the
-session revision without duplicating its text. `RuntimeExecutionOptions` no longer accepts memory
+session revision without duplicating its text. `request_options` parses logical `tool_choice`,
+`response_format`, and `provider_options` once at this boundary, rejecting protocol wrappers and
+request-level `api_style`; runtime applies the validated overrides directly.
+`RuntimeExecutionOptions` no longer accepts memory
 queries, result snapshots, or character budgets; runtime composition owns reading and selection.
 
 ### Summary state and usage

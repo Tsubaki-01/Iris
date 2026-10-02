@@ -31,7 +31,7 @@ from iris.lifecycle import (
     ToolCallPhase,
 )
 from iris.message import ToolUseBlock
-from iris.providers.openai import OpenAIChatMapper
+from iris.providers.responses import ResponsesMapper
 from iris.runtime import RuntimeCompactionCommit, RuntimeCursor
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
@@ -243,25 +243,28 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
     ).start(AgentRunRequest(input="继续", run_id="run-after-claim-recover"))
 
     assert follow_up.run.stop_reason is RunStopReason.COMPLETED
-    wire_messages = OpenAIChatMapper().format_messages(follow_up_provider.requests[0].messages)
+    wire_messages = ResponsesMapper().format_messages(follow_up_provider.requests[0].messages)
     tool_call_ids = [
-        call["id"] for message in wire_messages for call in message.get("tool_calls", [])
+        item["call_id"] for item in wire_messages if item["type"] == "function_call"
     ]
     tool_result_ids = [
-        message["tool_call_id"] for message in wire_messages if message["role"] == "tool"
+        item["call_id"] for item in wire_messages if item["type"] == "function_call_output"
     ]
     assert tool_call_ids == ["effect-1"]
     assert tool_result_ids == tool_call_ids
     tool_call_index = next(
-        index for index, message in enumerate(wire_messages) if message.get("tool_calls")
+        index for index, message in enumerate(wire_messages) if message["type"] == "function_call"
     )
     tool_result_index = next(
-        index for index, message in enumerate(wire_messages) if message["role"] == "tool"
+        index
+        for index, message in enumerate(wire_messages)
+        if message["type"] == "function_call_output"
     )
     next_user_index = next(
         index
         for index, message in enumerate(wire_messages)
-        if message["role"] == "user" and message["content"] == "继续"
+        if message.get("role") == "user"
+        and message["content"] == [{"type": "input_text", "text": "继续"}]
     )
     assert tool_call_index < tool_result_index < next_user_index
 

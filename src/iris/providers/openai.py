@@ -11,7 +11,21 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from ..message import ContentBlock, Msg, Role, TextBlock, ToolResultBlock, ToolUseBlock
+import litellm
+
+from ..exceptions import IrisProviderError
+from ..message import (
+    ContentBlock,
+    LLMRequest,
+    LLMResponse,
+    Msg,
+    Role,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
+from ..message.llm import ResponseFormat
+from ._encoding import chat_tool_choice, chat_tools
 
 # endregion
 
@@ -32,6 +46,9 @@ class OpenAIChatMapper:
             return [self._format_tool_result(block) for block in msg.tool_results]
 
         item: dict[str, Any] = {"role": msg.role, "content": msg.text}
+        replay = msg.metadata.get("chat_completions")
+        if msg.role is Role.ASSISTANT and replay is not None:
+            item[replay["reasoning_field"]] = msg.metadata.get("reasoning", "")
         if msg.sender and msg.role == Role.USER:
             item["name"] = msg.sender
         if msg.tool_calls:
@@ -78,13 +95,112 @@ class OpenAIChatMapper:
         return blocks
 
     def _parse_arguments(self, arguments: Any) -> dict[str, Any]:
-        """解析 OpenAI Chat 工具调用参数。"""
-        if isinstance(arguments, dict):
-            return arguments
-        if not isinstance(arguments, str) or not arguments:
-            return {}
+        """在 provider 边界解析完整工具参数，不交付无效工具。"""
         try:
             parsed = json.loads(arguments)
-        except json.JSONDecodeError:
-            return {"_raw_arguments": arguments}
-        return parsed if isinstance(parsed, dict) else {"value": parsed}
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise IrisProviderError("Chat 工具参数不是合法 JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise IrisProviderError("Chat 工具参数必须是 JSON object")
+        return parsed
+
+    def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
+        """归一化成功终态，失败保留用量且不返回工具意图。"""
+        usage = data.get("usage") or {}
+        tokens = {
+            "input_tokens": int(usage.get("prompt_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+        }
+        context: dict[str, Any] = {"provider": provider}
+        if data.get("usage") is not None:
+            context["usage"] = tokens
+        choices = data.get("choices") or []
+        if len(choices) != 1:
+            raise IrisProviderError("Chat 响应必须包含一个 choice", **context)
+        choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason not in {"stop", "tool_calls"}:
+            raise IrisProviderError("Chat 响应未完成", status=finish_reason, **context)
+        message = choice.get("message") or {}
+        if message.get("refusal"):
+            raise IrisProviderError("Chat 拒绝生成回答", **context)
+        try:
+            blocks = self.content_blocks_from_chat_message(message)
+            for block in blocks:
+                if isinstance(block, ToolUseBlock) and (not block.id or not block.name):
+                    raise IrisProviderError("Chat 工具调用缺少有效身份")
+        except (IrisProviderError, KeyError, TypeError, ValueError) as exc:
+            raise IrisProviderError("Chat 响应内容无效", **context) from exc
+        reasoning_field = chat_reasoning_field(message)
+        metadata = {"raw_object": data.get("object") or "chat.completion"}
+        if reasoning_field is not None:
+            metadata["chat_completions"] = {"reasoning_field": reasoning_field}
+        return LLMResponse(
+            provider=provider,
+            id=str(data.get("id") or ""),
+            model=str(data.get("model") or ""),
+            content=blocks,
+            finish_reason="tool_calls"
+            if any(isinstance(block, ToolUseBlock) for block in blocks)
+            else "stop",
+            reasoning=message[reasoning_field] if reasoning_field is not None else "",
+            metadata=metadata,
+            **tokens,
+        )
+
+
+def chat_response_format(response_format: ResponseFormat) -> dict[str, Any]:
+    """将逻辑输出模式编码为 Chat response_format。"""
+    if isinstance(response_format, str):
+        return {"type": response_format}
+    return {"type": "json_schema", "json_schema": dict(response_format)}
+
+
+class ChatCompletionsAdapter:
+    """固定的 Chat Completions 编码、调用和计量适配。"""
+
+    def encode_request(self, request: LLMRequest, *, transport: str) -> dict[str, Any]:
+        """生成 Chat 请求参数，运输路由由 LiteLLM provider 决定。"""
+        kwargs: dict[str, Any] = {"messages": OpenAIChatMapper().format_messages(request.messages)}
+        if request.tools:
+            kwargs["tools"] = chat_tools(request.tools)
+        if request.tool_choice is not None:
+            kwargs["tool_choice"] = chat_tool_choice(request.tool_choice)
+        if request.max_tokens is not None:
+            kwargs["max_tokens"] = request.max_tokens
+        if request.response_format is not None:
+            kwargs["response_format"] = chat_response_format(request.response_format)
+        if "reasoning_effort" in request.provider_options:
+            kwargs["reasoning_effort"] = request.provider_options["reasoning_effort"]
+        if request.stream:
+            kwargs["stream_options"] = {"include_usage": True}
+        return kwargs
+
+    async def invoke(self, kwargs: dict[str, Any]) -> Any:
+        """直接调用 Chat Completions，不尝试 Responses 回退。"""
+        return await litellm.acompletion(**kwargs)
+
+    def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
+        """解析完整 Chat 响应。"""
+        return OpenAIChatMapper().parse_response(data, provider=provider)
+
+    def token_count_projection(self, request: LLMRequest, *, transport: str) -> dict[str, Any]:
+        """使用实际 Chat messages、工具和选择生成本地计量输入。"""
+        kwargs = self.encode_request(request, transport=transport)
+        return {
+            "messages": kwargs["messages"],
+            "tools": kwargs.get("tools", []),
+            "tool_choice": kwargs.get("tool_choice"),
+        }
+
+    def format_for_count(self, response_format: ResponseFormat) -> dict[str, Any]:
+        """返回实际结构化输出格式，供本地计量。"""
+        return chat_response_format(response_format)
+
+
+def chat_reasoning_field(message: Mapping[str, Any]) -> str | None:
+    """标识 Chat 原生 reasoning 字段，只存来源不复制推理正文。"""
+    return next(
+        (key for key in ("reasoning_content", "reasoning") if message.get(key) is not None), None
+    )

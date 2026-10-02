@@ -99,6 +99,7 @@ from ..lifecycle.store import (
 )
 from ..lifecycle.transitions import (
     abandon_activation,
+    add_model_failure_usage,
     claim_tool_call,
     commit_tool_call,
     commit_tool_usage,
@@ -1333,6 +1334,7 @@ class InMemoryLifecycleStore:
                 terminal_session_message_count=len(updated_session.snapshot.messages),
                 terminal_compaction=updated_session.snapshot.compaction,
                 revision=run.revision + 1,
+                usage=add_model_failure_usage(run.usage, command.model_failure_usage),
                 current_activation_id=None,
                 pending_interaction_id=None,
                 assistant_message=command.assistant_message,

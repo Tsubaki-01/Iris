@@ -23,7 +23,7 @@ from iris.context import (
     ContextSlot,
 )
 from iris.exceptions import IrisProviderError
-from iris.lifecycle import RuntimeExecutionOptions, SessionCompaction
+from iris.lifecycle import RuntimeExecutionOptions, SessionCompaction, TokenUsage
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock
 from iris.providers import ProviderClient
 from iris.providers.protocols import CompletionProvider
@@ -199,6 +199,32 @@ async def test_actual_main_provider_overflow_does_not_add_compaction_retry(
 
 
 @pytest.mark.asyncio
+async def test_model_failure_usage_from_summary_is_only_compaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _ThresholdProvider(95000, 70000)
+
+    async def fail(request: LLMRequest) -> LLMResponse:
+        assert request.provider_options.get("num_retries") == 0
+        raise IrisProviderError(
+            "summary incomplete",
+            usage={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        )
+
+    monkeypatch.setattr(provider, "complete", fail)
+    activation = start_activation(initial_session_message_count=2)
+    port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务"), Msg.assistant("旧结果")])
+    result = await _runtime(provider).execute(
+        activation, commits=port, cancellation=MutableCancellationSignal()
+    )
+    assert result.outcome is RuntimeActivationOutcome.FAILED
+    assert result.model_failure_usage is None
+    assert port.compaction_usages == [TokenUsage(input_tokens=7, output_tokens=3, total_tokens=10)]
+    assert port.model_commits == []
+    assert port.compaction_commits == []
+
+
+@pytest.mark.asyncio
 async def test_steer_queued_during_summary_waits_for_main_response_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,7 +339,7 @@ async def test_candidate_reuses_context_and_effective_main_options() -> None:
         request_options={
             "model": "effective-model",
             "temperature": 0.1,
-            "response_format": {"type": "json_object"},
+            "response_format": "json_object",
             "provider_options": {"reasoning_effort": "low"},
         }
     )
@@ -331,7 +357,7 @@ async def test_candidate_reuses_context_and_effective_main_options() -> None:
     assert summary.temperature == main.temperature == 0.1
     assert summary.response_format is None
     assert summary.provider_options == {"reasoning_effort": "low", "num_retries": 0}
-    assert main.response_format == {"type": "json_object"}
+    assert main.response_format == "json_object"
     assert main.provider_options == {"reasoning_effort": "low"}
     assert all(
         request.response_format == main.response_format
@@ -357,13 +383,19 @@ async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
         if len(calls) == 1:
             raise RateLimitError("retry this summary")
         return {
-            "choices": [
+            "status": "completed",
+            "output": [
                 {
-                    "message": {"content": "新摘要" if len(calls) == 2 else "主回答"},
-                    "finish_reason": "stop",
+                    "type": "message",
+                    "id": f"msg-{len(calls)}",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [
+                        {"type": "output_text", "text": "新摘要" if len(calls) == 2 else "主回答"}
+                    ],
                 }
             ],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 2, "total_tokens": 22},
+            "usage": {"input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
         }
 
     def estimate(self: ProviderClient, request: LLMRequest) -> int:
@@ -373,7 +405,9 @@ async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
             return 10000
         return 95000
 
-    monkeypatch.setattr(client_module.litellm, "acompletion", completion)
+    monkeypatch.setattr(
+        client_module.ResponsesAdapter, "invoke", staticmethod(lambda kwargs: completion(**kwargs))
+    )
     monkeypatch.setattr(ProviderClient, "estimate_input_tokens", estimate)
     provider = ProviderClient(provider="openai", api_key="test")
     activation = start_activation(initial_session_message_count=1)

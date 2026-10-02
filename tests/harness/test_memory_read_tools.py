@@ -128,7 +128,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         AgentRunRequest(input="确认项目部署版本", run_id="read-memory"), options=options
     )
     assert first.run.stop_reason is RunStopReason.COMPLETED, first.error
-    assert [tool["function"]["name"] for tool in provider.requests[0].tools] == (
+    assert [tool.name for tool in provider.requests[0].tools] == (
         ["memory_search", "memory_fetch", "context_read", "context_search"] if include_tools else []
     )
     for name in ("memory_search", "memory_fetch"):
@@ -234,7 +234,7 @@ async def test_disabled_config_ignores_injected_service_and_saved_overview(
     assert result.run.stop_reason is RunStopReason.COMPLETED, result.error
     request = provider.requests[0]
     # 关闭长期记忆不影响默认启用的会话原文回读工具。
-    assert [tool["function"]["name"] for tool in request.tools] == [
+    assert [tool.name for tool in request.tools] == [
         "context_read",
         "context_search",
     ]

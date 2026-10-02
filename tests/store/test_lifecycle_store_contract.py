@@ -2138,6 +2138,45 @@ def test_finish_rejects_stale_command_and_releases_lane(
     assert next_run.run.phase == "active"
 
 
+@pytest.mark.parametrize("prior_step", [False, True])
+def test_model_failure_usage_settles_once_without_committing_model_step(
+    lifecycle_store: LifecycleStore,
+    prior_step: bool,
+) -> None:
+    created = _compaction_ready(lifecycle_store) if prior_step else _create(lifecycle_store)
+    if prior_step:
+        created = lifecycle_store.record_compaction_usage(
+            RecordCompactionUsage(
+                run_id="run-1",
+                expected_run_revision=created.run.revision,
+                activation_id="activation-1",
+                usage=TokenUsage(input_tokens=5, output_tokens=1, total_tokens=6),
+                now=_T3,
+            )
+        )
+    command = FinishRun(
+        run_id="run-1",
+        expected_run_revision=created.run.revision,
+        activation_id="activation-1",
+        stop_reason=RunStopReason.FAILED,
+        error=RunErrorInfo(code="PROVIDER_ERROR", message="incomplete", source="provider"),
+        model_failure_usage=TokenUsage(input_tokens=7, output_tokens=3, total_tokens=10),
+        now=_T1,
+    )
+    terminal = lifecycle_store.finish_run(command)
+    assert terminal.run.usage.input_tokens == created.run.usage.input_tokens + 7
+    assert terminal.run.usage.output_tokens == created.run.usage.output_tokens + 3
+    assert terminal.run.usage.total_tokens == created.run.usage.total_tokens + 10
+    assert terminal.run.usage.model_steps_reserved == created.run.usage.model_steps_reserved
+    assert terminal.run.usage.model_steps_committed == created.run.usage.model_steps_committed
+    assert terminal.run.usage.compaction == created.run.usage.compaction
+    assert terminal.run.terminal_session_message_count == (2 if prior_step else 0)
+    assert lifecycle_store.list_tool_calls("run-1") == []
+    with pytest.raises(IrisRunConflictError):
+        lifecycle_store.finish_run(command)
+    assert lifecycle_store.load_result("run-1") == terminal.result
+
+
 def test_terminal_finish_closes_claimed_and_prepared_history_atomically(
     lifecycle_store: LifecycleStore,
 ) -> None:

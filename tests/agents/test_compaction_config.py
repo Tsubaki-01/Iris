@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from iris.agents import AgentConfig, CompactionConfig, load_agent_config
 from iris.exceptions import IrisConfigError
+from iris.providers.responses import ResponsesAdapter
 
 
 def test_compaction_defaults_and_derived_budgets() -> None:
@@ -59,7 +60,7 @@ def test_load_compaction_config_without_model_or_tokenizer_calls(
     count = Mock(side_effect=AssertionError("配置加载不能计量 token"))
     complete = Mock(side_effect=AssertionError("配置加载不能调用模型"))
     monkeypatch.setattr(litellm, "token_counter", count)
-    monkeypatch.setattr(litellm, "acompletion", complete)
+    monkeypatch.setattr(ResponsesAdapter, "invoke", complete)
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: agent\nmodel: openai/test\nsystem: instructions\n"

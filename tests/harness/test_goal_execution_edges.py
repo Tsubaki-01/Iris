@@ -275,7 +275,7 @@ async def test_runtime_tool_choice_override_controls_create_edit_and_execution(
     for invalid in (
         {},
         {"tool_choice": "none"},
-        {"tool_choice": {"type": "function", "function": {"name": "get_goal"}}},
+        {"tool_choice": {"name": "get_goal"}},
     ):
         with pytest.raises(IrisConfigError):
             service.edit(
@@ -290,7 +290,7 @@ async def test_runtime_tool_choice_override_controls_create_edit_and_execution(
     result = await runner._start_goal_managed(resumed.ref, run_id="configured-goal")
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert provider.requests[0].tool_choice == override
-    assert {tool["function"]["name"] for tool in provider.requests[0].tools} >= {
+    assert {tool.name for tool in provider.requests[0].tools} >= {
         "get_goal",
         "report_goal",
     }

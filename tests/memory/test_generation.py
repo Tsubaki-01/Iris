@@ -189,7 +189,7 @@ async def test_flush_evidence_then_dream_publishes_formal_item(tmp_path: Path) -
     assert item.evidence == observation.evidence
     assert memory.generation_state("project").pending_observations == 0
     assert all(not request.tools for request in provider.requests)
-    assert all(request.response_format == {"type": "json_object"} for request in provider.requests)
+    assert all(request.response_format == "json_object" for request in provider.requests)
     assert all(request.temperature == 0 for request in provider.requests)
     assert (await memory.dream("project")).status == "empty"
     assert len(provider.requests) == 2

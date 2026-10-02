@@ -281,6 +281,7 @@ class FinishRun:
     stop_reason: RunStopReason
     assistant_message: Msg | None = None
     error: RunErrorInfo | None = None
+    model_failure_usage: TokenUsage | None = None
     interaction_close_reason: str | None = None
     now: datetime
 

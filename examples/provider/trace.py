@@ -132,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         Exception: 配置或 provider 调用失败时原样传播。
     """
     parser = argparse.ArgumentParser(description="追踪 Iris provider 流式调用。")
-    parser.add_argument("--model", default="deepseek/deepseek-chat")
+    parser.add_argument("--model", default="deepseek/deepseek-flash")
     parser.add_argument("--prompt", default="用一句话介绍 Iris。")
     parser.add_argument("--env-file", type=Path)
     args = parser.parse_args(argv)

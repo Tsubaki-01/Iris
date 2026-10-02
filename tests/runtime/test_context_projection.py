@@ -42,7 +42,7 @@ def _batch(
 
 def _estimate(request: LLMRequest) -> int:
     """计量整包选项、schema 和消息文本。"""
-    return len(json.dumps(request.tools)) + sum(
+    return len(json.dumps([tool.model_dump() for tool in request.tools])) + sum(
         len(
             block.content
             if isinstance(block, ToolResultBlock)
@@ -68,7 +68,7 @@ def _project(
     request = LLMRequest(
         model="test",
         messages=[Msg.system("rules"), *messages],
-        tools=[{"type": "function", "function": {"name": "context_read"}}] if tools else [],
+        tools=[{"name": "context_read", "input_schema": {}}] if tools else [],
         tool_choice=choice,
     )
     return project_context_request(
@@ -175,7 +175,7 @@ def test_command_tool_preview_remains_intact_under_history_pressure(
 
 @pytest.mark.parametrize(
     "choice,tools",
-    [(None, False), ("none", True), ({"type": "function", "function": {"name": "other"}}, True)],
+    [(None, False), ("none", True), ({"name": "other"}, True)],
 )
 def test_unavailable_context_read_keeps_all_bodies(choice: str | dict | None, tools: bool) -> None:
     raw = [*_batch("body" * 500), *_batch("body" * 500)]
@@ -202,7 +202,9 @@ def test_each_compaction_candidate_recomputes_representatives_at_original_indice
         return project_context_request(
             measure_request(
                 LLMRequest(
-                    model="test", messages=history, tools=[{"function": {"name": "context_read"}}]
+                    model="test",
+                    messages=history,
+                    tools=[{"name": "context_read", "input_schema": {}}],
                 ),
                 _estimate,
             ),

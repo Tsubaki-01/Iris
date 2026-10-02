@@ -1,4 +1,4 @@
-"""工具 schema 生成与 provider 包装函数。
+"""工具参数 JSON Schema 生成。
 
 负责将 Python 代码（Pydantic 模型或普通函数签名）转换为各个 LLM Provider
 （如 OpenAI, Anthropic）所需的不同格式的工具定义 Schema。
@@ -121,38 +121,6 @@ def callable_input_model(
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[name] = (annotation, Field(default=default, description=doc_info.args.get(name)))
     return create_model(f"{func.__name__.title().replace('_', '')}ToolInput", **fields)  # ty:ignore[unresolved-attribute]
-
-
-def to_openai_chat_tool_schema(definition: Any) -> dict[str, Any]:
-    """生成 OpenAI Chat Completions 工具 schema。"""
-    return {
-        "type": "function",
-        "function": {
-            "name": definition.name,
-            "description": definition.description,
-            "parameters": definition.input_schema,
-        },
-    }
-
-
-def to_openai_responses_tool_schema(definition: Any) -> dict[str, Any]:
-    """生成 OpenAI Responses 工具 schema。"""
-    return {
-        "type": "function",
-        "name": definition.name,
-        "description": definition.description,
-        "parameters": definition.input_schema,
-        "strict": False,
-    }
-
-
-def to_anthropic_tool_schema(definition: Any) -> dict[str, Any]:
-    """生成 Anthropic Messages 工具 schema。"""
-    return {
-        "name": definition.name,
-        "description": definition.description,
-        "input_schema": definition.input_schema,
-    }
 
 
 def _type_hints(func: Callable[..., Any]) -> dict[str, Any]:

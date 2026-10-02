@@ -27,6 +27,8 @@ from iris.message import (
     ModelResponseStarted,
     ModelStreamEvent,
     ModelStreamScope,
+    ModelUsageSnapshot,
+    ModelUsageUpdated,
     ProviderStreamError,
     ToolUseBlock,
 )
@@ -224,7 +226,7 @@ async def test_provider_cleanup_error_preserves_deadline_cause(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expired", [False, True])
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
+async def test_model_failure_usage_absolute_deadline_before_timer_signal(
     tmp_path: Path,
     expired: bool,
     streaming: bool,
@@ -246,7 +248,10 @@ async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
             del request
             entered.set()
             await release.wait()
-            raise IrisProviderError("provider request failed")
+            raise IrisProviderError(
+                "provider request failed",
+                usage={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            )
 
         async def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
             """按完整 started/failed 协议返回流式失败。"""
@@ -259,9 +264,15 @@ async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
             )
             entered.set()
             await release.wait()
-            yield ModelResponseFailed(
+            yield ModelUsageUpdated(
                 scope=scope,
                 sequence=2,
+                occurred_at=clock.now(),
+                usage=ModelUsageSnapshot(input_tokens=7, output_tokens=3, total_tokens=10),
+            )
+            yield ModelResponseFailed(
+                scope=scope,
+                sequence=3,
                 occurred_at=clock.now(),
                 error=ProviderStreamError(
                     code="PROVIDER_STREAM_ERROR", message="provider stream failed", retryable=False
@@ -292,6 +303,10 @@ async def test_absolute_deadline_settles_provider_failure_before_timer_signal(
     assert result.run.stop_reason is (
         RunStopReason.DEADLINE_EXCEEDED if expired else RunStopReason.FAILED
     )
+    assert result.run.usage.input_tokens == 7
+    assert result.run.usage.output_tokens == 3
+    assert result.run.usage.total_tokens == 10
+    assert result.run.usage.model_steps_committed == 0
     if expired:
         assert result.error is None
     else:

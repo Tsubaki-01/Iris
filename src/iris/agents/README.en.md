@@ -108,7 +108,10 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
   returns a provider route; `to_llm_request_options()` returns only request-level fields. The active
-  provider path uses only LiteLLM Chat Completion and exposes no `api_style` configuration field.
+  provider is selected at construction through `model.api_style`: `responses` by default or explicit
+  `chat_completions`. This field is excluded from request options and cannot be set through
+  `provider_options`. Forced tool choice is `{name: read_file}`; response format is `text`,
+  `json_object`, or `{name, schema, strict?}`. Protocol wrappers belong to providers.
   Streaming is selected by host injection of the runner's `live_publisher`; model configuration
   has no `stream` field.
 - `ToolsConfig.builtin` supports `file.read`, `file.list`, `file.grep`, `file.write`, `file.edit`,

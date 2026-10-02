@@ -204,6 +204,7 @@ def assemble_runtime(
         create_provider_client(
             config.to_model_route(),
             api_key=api_key,
+            api_style=config.model.api_style,
             base_url=config.model.base_url,
             timeout=config.model.timeout,
         )

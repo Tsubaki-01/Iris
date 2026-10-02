@@ -10,8 +10,17 @@ Example:
 """
 
 # region imports
-from iris.message.llm import LLMRequest, LLMResponse
-from iris.message.message import (
+from .llm import (
+    JsonSchemaFormat,
+    LLMRequest,
+    LLMResponse,
+    NamedToolChoice,
+    ProviderOptions,
+    ResponseFormat,
+    ToolChoice,
+    ToolSpec,
+)
+from .message import (
     ContentBlock,
     Conversation,
     Msg,
@@ -20,7 +29,6 @@ from iris.message.message import (
     ToolResultBlock,
     ToolUseBlock,
 )
-
 from .streaming import (
     ModelBlockCompleted,
     ModelBlockDelta,
@@ -44,6 +52,7 @@ from .streaming import (
 __all__ = [
     "ContentBlock",
     "Conversation",
+    "JsonSchemaFormat",
     "LLMRequest",
     "LLMResponse",
     "ModelBlockCompleted",
@@ -61,9 +70,14 @@ __all__ = [
     "ModelUsageSnapshot",
     "ModelUsageUpdated",
     "Msg",
+    "NamedToolChoice",
+    "ProviderOptions",
     "ProviderStreamError",
+    "ResponseFormat",
     "Role",
     "TextBlock",
+    "ToolChoice",
     "ToolResultBlock",
+    "ToolSpec",
     "ToolUseBlock",
 ]

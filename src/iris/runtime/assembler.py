@@ -113,8 +113,10 @@ class RuntimeMessageAssembler:
             current_input=current_input,
         )
 
-        return conversation.to_llm_request(
+        # 配置与消息已在各自入口验证，这里只做可信字段投影。
+        return LLMRequest.model_construct(
             model=agent_config.model.name,
+            messages=list(conversation.messages),
             **agent_config.model.to_llm_request_options(),
         )
 

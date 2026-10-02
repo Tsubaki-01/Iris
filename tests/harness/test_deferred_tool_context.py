@@ -17,7 +17,7 @@ from .fakes import FrozenClock, StaticProvider, text_response, tool_batch_respon
 
 def _schema_names(request: LLMRequest) -> set[str]:
     """读取真正交给 provider 的完整 schema 名称。"""
-    return {schema["function"]["name"] for schema in request.tools}
+    return {schema.name for schema in request.tools}
 
 
 @pytest.mark.asyncio
@@ -99,12 +99,12 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
         assert not {"alpha", "beta"} & initial_names
         assert "alpha" in discovered_names and "beta" not in discovered_names
         schema = next(
-            item["function"]
+            item
             for item in provider.requests[1].tools
-            if item["function"]["name"] == "alpha"
+            if item.name == "alpha"
         )
-        assert schema["parameters"]["properties"]["document"]["type"] == "string"
-        assert schema["parameters"]["required"] == ["document"]
+        assert schema.input_schema["properties"]["document"]["type"] == "string"
+        assert schema.input_schema["required"] == ["document"]
         checkpoint = store.load_checkpoint("first")
         assert set(checkpoint.engine_cursor["visible_tool_names"]) == discovered_names
 

@@ -21,6 +21,7 @@ from ..exceptions import (
     IrisContextCompactionError,
     IrisContextError,
     IrisError,
+    IrisProviderError,
     IrisProviderStreamError,
     IrisProviderStreamInterruptedError,
     IrisRateLimitExceededError,
@@ -49,6 +50,7 @@ from ..message import (
     ModelResponseCancelled,
     ModelResponseCompleted,
     ModelResponseFailed,
+    ModelUsageUpdated,
     Msg,
     ToolUseBlock,
 )
@@ -1095,7 +1097,7 @@ class AgentRuntime:
             current_input=None,
         )
         request = _apply_request_options(request, options.request_options)
-        request = _apply_tool_schemas(
+        request = _apply_tool_specs(
             request,
             tool_view=self.environment.tool_bridge.tool_view,
             selection=tool_selection,
@@ -1320,7 +1322,7 @@ class AgentRuntime:
             )
             request = measured.request
             tool_selection = ToolContextSelection(
-                tuple(tool["function"]["name"] for tool in request.tools),
+                tuple(tool.name for tool in request.tools),
                 (),
                 request.tool_choice,
             )
@@ -1403,6 +1405,8 @@ class AgentRuntime:
                     source="provider",
                 ),
             )
+        except IrisProviderError as exc:
+            return _failed_activation(cursor, exc, model_failure_usage=_provider_error_usage(exc))
         except Exception as exc:
             return _failed_activation(cursor, exc)
 
@@ -1664,7 +1668,15 @@ class AgentRuntime:
                         response = await asyncio.wait_for(
                             provider.complete(summary_request), timeout=timeout
                         )
-                    except (IrisAPIConnectionError, IrisRateLimitExceededError, TimeoutError):
+                    except (IrisProviderError, TimeoutError) as exc:
+                        if isinstance(exc, IrisProviderError):
+                            usage = _provider_error_usage(exc)
+                            if usage is not None:
+                                commits.record_compaction_usage(usage)
+                        if not isinstance(
+                            exc, (IrisAPIConnectionError, IrisRateLimitExceededError, TimeoutError)
+                        ):
+                            raise
                         stopped = _compaction_stop(
                             cursor, commits, cancellation, operation_deadline
                         )
@@ -1795,8 +1807,15 @@ class AgentRuntime:
 
         stream_request = request.model_copy(update={"stream": True})
         event_stream = provider.stream(stream_request)
+        usage: TokenUsage | None = None
         try:
             async for model_event in event_stream:
+                if isinstance(model_event, ModelUsageUpdated):
+                    usage = TokenUsage.model_construct(
+                        input_tokens=model_event.usage.input_tokens,
+                        output_tokens=model_event.usage.output_tokens,
+                        total_tokens=model_event.usage.total_tokens,
+                    )
                 try:
                     stream_sink.emit(
                         _runtime_stream_event(
@@ -1813,7 +1832,7 @@ class AgentRuntime:
                 if isinstance(model_event, ModelResponseCompleted):
                     return model_event.response
                 if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
-                    return _provider_stream_failure(cursor, model_event)
+                    return _provider_stream_failure(cursor, model_event, usage)
         finally:
             # Terminal 会提前结束 async for，仍需释放 provider iterator 及其底层连接。
             close = getattr(event_stream, "aclose", None)
@@ -1829,6 +1848,7 @@ class AgentRuntime:
                 "Provider stream 在合法终态前结束",
                 provider=self.environment.agent_config.model.provider,
             ),
+            model_failure_usage=usage,
         )
 
     def _suspend_existing_batch(
@@ -1950,6 +1970,7 @@ def _emit_tool_preparing(
 def _provider_stream_failure(
     cursor: RuntimeCursor,
     event: ModelResponseFailed | ModelResponseCancelled,
+    usage: TokenUsage | None,
 ) -> RuntimeActivationResult:
     """把 provider stream terminal 映射为未提交的 activation failure。"""
     error = event.error
@@ -1957,6 +1978,7 @@ def _provider_stream_failure(
         outcome=RuntimeActivationOutcome.FAILED,
         cursor=cursor,
         assistant_message=cursor.assistant_message,
+        model_failure_usage=usage,
         error=RunErrorInfo(
             code=error.code if error is not None else "PROVIDER_STREAM_ERROR",
             message=error.message if error is not None else "Provider stream cancelled",
@@ -2094,9 +2116,17 @@ def _normalize_run_error(error: Exception) -> RunErrorInfo:
     )
 
 
+def _provider_error_usage(error: IrisProviderError) -> TokenUsage | None:
+    """读取 provider 已规范化的失败响应用量。"""
+    usage = error.context.get("usage")
+    return TokenUsage.model_construct(**usage) if usage is not None else None
+
+
 def _failed_activation(
     cursor: RuntimeCursor,
     error: Exception,
+    *,
+    model_failure_usage: TokenUsage | None = None,
 ) -> RuntimeActivationResult:
     """构造未产生 required durable fact 的 engine failure。"""
     return RuntimeActivationResult(
@@ -2104,6 +2134,7 @@ def _failed_activation(
         cursor=cursor,
         assistant_message=cursor.assistant_message,
         error=_normalize_run_error(error),
+        model_failure_usage=model_failure_usage,
     )
 
 
@@ -2177,25 +2208,23 @@ def _apply_request_options(
         return request
     update = dict(request_options)
     if "provider_options" in update:
-        provider_options = update["provider_options"]
-        if isinstance(provider_options, Mapping):
-            update["provider_options"] = {
-                **request.provider_options,
-                **dict(provider_options),
-            }
+        update["provider_options"] = {
+            **request.provider_options,
+            **update["provider_options"],
+        }
     return request.model_copy(update=update)
 
 
-def _apply_tool_schemas(
+def _apply_tool_specs(
     request: LLMRequest,
     *,
     tool_view: ToolRegistryView,
     selection: ToolContextSelection,
 ) -> LLMRequest:
-    """按当前活动工具视图挂载 LiteLLM Chat 工具 schema。"""
+    """按当前活动工具视图挂载逻辑工具定义。"""
     return request.model_copy(
         update={
-            "tools": tool_view.schemas_for(selection.names),
+            "tools": tool_view.specs_for(selection.names),
             "tool_choice": selection.tool_choice,
         }
     )

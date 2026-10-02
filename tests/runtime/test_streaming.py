@@ -22,8 +22,8 @@ from pydantic import BaseModel
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
-from iris.exceptions import IrisRunPersistenceError
-from iris.lifecycle import RuntimeExecutionOptions
+from iris.exceptions import IrisProviderError, IrisRunPersistenceError
+from iris.lifecycle import RuntimeExecutionOptions, TokenUsage
 from iris.message import (
     LLMRequest,
     LLMResponse,
@@ -37,6 +37,8 @@ from iris.message import (
     ModelResponseStarted,
     ModelStreamEvent,
     ModelStreamScope,
+    ModelUsageSnapshot,
+    ModelUsageUpdated,
     ProviderStreamError,
     TextBlock,
     ToolUseBlock,
@@ -433,6 +435,90 @@ async def test_stream_failure_cancel_and_eof_never_commit(tmp_path: Path) -> Non
         assert result.outcome is RuntimeActivationOutcome.FAILED
         assert result.error is not None and result.error.code == expected_code
         assert commits.model_commits == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["failed", "cancelled", "eof"])
+async def test_model_failure_usage_keeps_latest_snapshot_without_tool_commit(
+    tmp_path: Path, terminal: str
+) -> None:
+    effects: list[str] = []
+    registry = ToolRegistry()
+    registry.register_function(
+        lambda: effects.append("called"), name="probe", description="记录调用"
+    )
+    response = _tool_response(ToolUseBlock(id="call-1", name="probe", input={}))
+    events = _stream_events(response, stream_id="incomplete-tools")[:-1]
+    scope = events[0].scope
+    for input_tokens, output_tokens in ((4, 1), (7, 3)):
+        events.append(
+            ModelUsageUpdated(
+                scope=scope,
+                sequence=len(events) + 1,
+                occurred_at=datetime.now(UTC),
+                usage=ModelUsageSnapshot(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                ),
+            )
+        )
+    if terminal == "failed":
+        events.append(
+            ModelResponseFailed(
+                scope=scope,
+                sequence=len(events) + 1,
+                occurred_at=datetime.now(UTC),
+                error=ProviderStreamError(
+                    code="PROVIDER_STREAM_ERROR", message="incomplete", retryable=False
+                ),
+                semantic_output_emitted=True,
+            )
+        )
+    elif terminal == "cancelled":
+        events.append(
+            ModelResponseCancelled(
+                scope=scope,
+                sequence=len(events) + 1,
+                occurred_at=datetime.now(UTC),
+                semantic_output_emitted=True,
+            )
+        )
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    result = await _runtime(FakeStreamingProvider([events]), tmp_path, registry=registry).execute(
+        activation,
+        commits=commits,
+        cancellation=MutableCancellationSignal(),
+        stream_sink=RecordingSink(),
+    )
+    assert result.outcome is RuntimeActivationOutcome.FAILED
+    assert result.model_failure_usage == TokenUsage(
+        input_tokens=7, output_tokens=3, total_tokens=10
+    )
+    assert commits.model_commits == []
+    assert effects == []
+
+
+@pytest.mark.asyncio
+async def test_model_failure_usage_from_nonstream_provider_error(tmp_path: Path) -> None:
+    class IncompleteProvider(FakeProvider):
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            raise IrisProviderError(
+                "incomplete",
+                usage={"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            )
+
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    result = await _runtime(IncompleteProvider([]), tmp_path).execute(
+        activation, commits=commits, cancellation=MutableCancellationSignal()
+    )
+    assert result.outcome is RuntimeActivationOutcome.FAILED
+    assert result.model_failure_usage == TokenUsage(
+        input_tokens=7, output_tokens=3, total_tokens=10
+    )
+    assert commits.model_commits == []
 
 
 @pytest.mark.asyncio

@@ -115,7 +115,7 @@ def project_context_request(
         for name in reversed(optional_tool_names):
             request = request.model_copy(
                 update={
-                    "tools": [tool for tool in request.tools if tool["function"]["name"] != name]
+                    "tools": [tool for tool in request.tools if tool.name != name]
                 }
             )
             measured = measure_request(request, estimate_input_tokens)
@@ -157,9 +157,9 @@ def _can_read_context(request: LLMRequest) -> bool:
     choice = request.tool_choice
     if choice == "none":
         return False
-    if isinstance(choice, dict) and choice.get("function", {}).get("name") != "context_read":
+    if isinstance(choice, dict) and choice["name"] != "context_read":
         return False
-    return any(tool["function"]["name"] == "context_read" for tool in request.tools)
+    return any(tool.name == "context_read" for tool in request.tools)
 
 
 def _closed_observations(

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 
 from ..command.models import CommandStopReceipt
 from ..hitl import HumanInteraction
-from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions
+from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions, TokenUsage
 from ..message import Msg, ToolUseBlock
 from ..tools import ToolResult
 
@@ -145,6 +145,7 @@ class RuntimeActivationResult(_FrozenRuntimeModel):
     assistant_message: Msg | None = None
     suspension: HumanInteraction | None = None
     error: RunErrorInfo | None = None
+    model_failure_usage: TokenUsage | None = None
     stop_receipt: CommandStopReceipt | None = Field(default=None, exclude=True)
     stop_call_id: str | None = Field(default=None, exclude=True)
 

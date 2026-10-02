@@ -18,6 +18,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -25,8 +26,15 @@ from pydantic import (
 
 from ..exceptions import IrisRunStateError
 from ..hitl.models import HumanInteraction
+from ..message.llm import ProviderOptions, ResponseFormat, ToolChoice
 from ..message.message import Msg
 from ..tools.base import ToolResult
+
+_REQUEST_OPTION_ADAPTERS = {
+    "tool_choice": TypeAdapter(ToolChoice | None),
+    "response_format": TypeAdapter(ResponseFormat | None),
+    "provider_options": TypeAdapter(ProviderOptions),
+}
 
 RunErrorSource = Literal[
     "config",
@@ -262,7 +270,13 @@ class RuntimeExecutionOptions(_FrozenModel):
     @field_validator("request_options")
     @classmethod
     def _validate_request_options(cls, value: dict[str, Any]) -> dict[str, Any]:
-        return validate_json_safe(value, field_name="request_options")
+        options = validate_json_safe(value, field_name="request_options")
+        return {
+            key: _REQUEST_OPTION_ADAPTERS[key].validate_python(item)
+            if key in _REQUEST_OPTION_ADAPTERS
+            else item
+            for key, item in options.items()
+        }
 
 
 class AgentRunOptions(_FrozenModel):

@@ -16,6 +16,19 @@ from iris.tools import (
 )
 
 
+def test_registry_exports_logical_tool_specs() -> None:
+    registry = ToolRegistry()
+    registry.register_function(lambda: "ok", name="lookup", description="lookup")
+    view = registry.view()
+    expected = view.active_specs()
+    assert view.specs_for(("lookup",)) == expected
+    assert registry.active_specs() == expected
+    assert expected[0].name == "lookup"
+    assert expected[0].strict is False
+    assert expected[0].input_schema is registry.get("lookup").definition.input_schema
+
+
+
 @pytest.mark.parametrize(
     "collision", ["batch_name", "batch_alias", "existing_name", "existing_alias"]
 )
@@ -149,7 +162,7 @@ async def test_callable_explicit_thread_runs_on_worker() -> None:
     assert result.model_content != str(loop_thread_id)
     assert result.stats["execution_mode"] == "thread"
     assert registered.definition.metadata["execution_mode"] == "thread"
-    provider_schema = registry.active_schemas()[0]
+    provider_schema = registry.active_specs()[0].model_dump()
     assert "execution_mode" not in provider_schema
     assert "concurrency_safe" not in provider_schema
 
@@ -204,7 +217,7 @@ def test_callable_rejects_async_function_in_thread_mode() -> None:
             execution_mode=CallableExecutionMode.THREAD,
         )
 
-    assert registry.active_schemas() == []
+    assert registry.active_specs() == []
 
 
 @pytest.mark.asyncio

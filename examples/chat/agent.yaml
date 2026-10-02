@@ -2,7 +2,8 @@ name: iris-example-chat
 
 model:
   provider: deepseek
-  name: deepseek-chat
+  name: deepseek-flash
+  api_style: responses  # 可显式改为 chat_completions
   temperature: 0.2
   max_tokens: 1024
   timeout: 60

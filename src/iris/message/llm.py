@@ -14,17 +14,57 @@ Example:
 # region imports
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, Self
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, with_config
+from typing_extensions import TypedDict
 
+from ..exceptions import IrisConfigError
 from .message import ContentBlock, Msg, Role
 
 if TYPE_CHECKING:
     from .message import Conversation
 # endregion
 
-__all__ = ["LLMRequest", "LLMResponse"]
+@with_config(ConfigDict(extra="forbid"))
+class NamedToolChoice(TypedDict):
+    """指定本次请求必须调用的逻辑工具。"""
+
+    name: str
+
+
+@with_config(ConfigDict(extra="forbid"))
+class JsonSchemaFormat(TypedDict):
+    """命名的 JSON Schema 输出约束。"""
+
+    name: str
+    schema: dict[str, Any]
+    strict: NotRequired[bool]
+
+
+ToolChoice = Literal["auto", "none", "required"] | NamedToolChoice
+ResponseFormat = Literal["text", "json_object"] | JsonSchemaFormat
+
+
+def validate_provider_options(value: dict[str, Any]) -> dict[str, Any]:
+    """请求参数不承担 provider 构造时的协议选择。"""
+    if "api_style" in value:
+        raise IrisConfigError("api_style 必须在模型或 ProviderClient 构造时设置")
+    return value
+
+
+ProviderOptions = Annotated[dict[str, Any], AfterValidator(validate_provider_options)]
+
+
+class ToolSpec(BaseModel):
+    """提供给模型的逻辑工具定义，不包含执行策略或协议包装。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any]
+    strict: bool = False
 
 
 class LLMRequest(BaseModel):
@@ -40,9 +80,9 @@ class LLMRequest(BaseModel):
         temperature (float | None): 采样温度。
         top_p (float | None): nucleus sampling 参数。
         max_tokens (int | None): 最大输出 token 数。
-        tools (list[dict[str, Any]]): 可用工具定义。
-        tool_choice (str | dict[str, Any] | None): 工具选择策略。
-        response_format (dict[str, Any] | None): 结构化输出配置。
+        tools (list[ToolSpec]): 可用工具定义。
+        tool_choice (ToolChoice | None): 工具选择策略。
+        response_format (ResponseFormat | None): 结构化输出配置。
         stream (bool): 是否请求流式响应。
         timeout (float | None): 单次请求超时时间，单位秒。
         provider_options (dict[str, Any]): 少量 provider 专属选项。
@@ -60,12 +100,12 @@ class LLMRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
-    tools: list[dict[str, Any]] = Field(default_factory=list)
-    tool_choice: str | dict[str, Any] | None = None
-    response_format: dict[str, Any] | None = None
+    tools: list[ToolSpec] = Field(default_factory=list)
+    tool_choice: ToolChoice | None = None
+    response_format: ResponseFormat | None = None
     stream: bool = False
     timeout: float | None = None
-    provider_options: dict[str, Any] = Field(default_factory=dict)
+    provider_options: ProviderOptions = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -190,3 +230,15 @@ class LLMResponse(BaseModel):
             metadata["reasoning"] = self.reasoning
         metadata.update(self.metadata)
         return Msg.assistant(content=self.content, metadata=metadata)
+
+
+__all__ = [
+    "JsonSchemaFormat",
+    "LLMRequest",
+    "LLMResponse",
+    "NamedToolChoice",
+    "ProviderOptions",
+    "ResponseFormat",
+    "ToolChoice",
+    "ToolSpec",
+]

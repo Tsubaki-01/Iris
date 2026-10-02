@@ -76,13 +76,22 @@ Token estimation is character-based and is not a model tokenizer.
 ### `LLMRequest` and `LLMResponse`
 
 Requests include model, messages, sampling options, tools, tool choice, response format, stream,
-timeout, provider options, and metadata. The current provider path reads only the explicitly
-supported `api_style` and `reasoning_effort` provider options.
+timeout, provider options, and metadata. Tools use `ToolSpec(name, description, input_schema,
+strict=False)`. `ToolChoice` accepts `auto`, `none`, `required`, or `{"name": "lookup"}`.
+`ResponseFormat` accepts `text`, `json_object`, or `{"name": "answer", "schema": {...},
+"strict": True}` with optional `strict`. Provider adapters own all protocol wrappers.
+
+`ProviderOptions` accepts call options such as `reasoning_effort` and `num_retries`, but rejects
+`api_style`: protocol selection belongs to model or `ProviderClient` construction.
 
 Responses contain provider/model identity, content blocks, finish reason, token usage, reasoning,
 and metadata. `to_msg()` creates an assistant message and copies provider, model, finish reason,
 and usage into message metadata. Parsing a raw provider response is `ProviderClient`'s job, not an
 `LLMResponse` method.
+
+Responses status, item order/IDs, phase, and complete reasoning items live in dedicated metadata.
+Typed content remains the only source of message text and tool arguments when rebuilding input.
+A completed response maps to `stop` without calls or `tool_calls` with calls.
 
 ### `ModelStreamEvent`
 

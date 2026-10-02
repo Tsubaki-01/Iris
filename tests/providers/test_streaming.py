@@ -1,9 +1,8 @@
-"""LiteLLM Chat streaming provider 边界测试。"""
+"""原生 Responses 流式事件与终态解析契约。"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -14,6 +13,7 @@ from iris.message import (
     ModelBlockDelta,
     ModelResponseCompleted,
     ModelResponseFailed,
+    ModelUsageUpdated,
     Msg,
     TextBlock,
     ToolUseBlock,
@@ -22,11 +22,12 @@ from iris.providers import ProviderClient
 
 
 class _RawStream(AsyncIterator[dict[str, Any]]):
-    """按脚本返回 LiteLLM-shaped chunks 的测试流。"""
+    """逐项返回 Responses 事件并记录关闭次数。"""
 
     def __init__(self, *items: dict[str, Any] | BaseException) -> None:
         self._items = list(items)
         self.close_calls = 0
+        self.reads = 0
 
     def __aiter__(self) -> _RawStream:
         return self
@@ -34,6 +35,7 @@ class _RawStream(AsyncIterator[dict[str, Any]]):
     async def __anext__(self) -> dict[str, Any]:
         if not self._items:
             raise StopAsyncIteration
+        self.reads += 1
         item = self._items.pop(0)
         if isinstance(item, BaseException):
             raise item
@@ -43,59 +45,103 @@ class _RawStream(AsyncIterator[dict[str, Any]]):
         self.close_calls += 1
 
 
-def _chunk(
-    *,
-    delta: dict[str, Any] | None = None,
-    finish_reason: str | None = None,
-    usage: dict[str, int] | None = None,
-    choices: bool = True,
-) -> dict[str, Any]:
+def _response(*output: dict[str, Any], status: str = "completed") -> dict[str, Any]:
     return {
-        "id": "chatcmpl-stream-1",
+        "id": "resp-1",
+        "object": "response",
         "model": "gpt-4o",
-        "object": "chat.completion.chunk",
-        "choices": (
-            [{"index": 0, "delta": delta or {}, "finish_reason": finish_reason}] if choices else []
-        ),
-        "usage": usage,
+        "status": status,
+        "output": list(output),
+        "usage": {
+            "input_tokens": 4,
+            "output_tokens": 5,
+            "total_tokens": 9,
+            "input_tokens_details": {"cached_tokens": 2},
+            "output_tokens_details": {"reasoning_tokens": 3},
+        },
     }
 
 
-async def _collect(client: ProviderClient, request: LLMRequest) -> list[Any]:
+def _message(text: str) -> dict[str, Any]:
+    return {
+        "type": "message",
+        "id": "msg-1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _call(item_id: str, call_id: str, name: str, arguments: str) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "id": item_id,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "status": "completed",
+    }
+
+
+def _event(kind: str, **values: Any) -> dict[str, Any]:
+    return {"type": f"response.{kind}", **values}
+
+
+def _install_stream(monkeypatch: pytest.MonkeyPatch, raw: _RawStream) -> dict[str, Any]:
+    import iris.providers.client as provider_client
+
+    seen: dict[str, Any] = {}
+
+    async def fake_aresponses(**kwargs: Any) -> _RawStream:
+        seen.update(kwargs)
+        return raw
+
+    async def no_chat(**kwargs: Any) -> None:
+        pytest.fail("流式主链不得调用 Chat Completion")
+
+    monkeypatch.setattr(
+        provider_client.ResponsesAdapter,
+        "invoke",
+        staticmethod(lambda kwargs: fake_aresponses(**kwargs)),
+    )
+    monkeypatch.setattr(provider_client.litellm, "acompletion", no_chat)
+    return seen
+
+
+async def _collect() -> list[Any]:
+    client = ProviderClient(provider="openai", api_key="test-key")
+    request = LLMRequest(model="gpt-4o", messages=[Msg.user("你好")], stream=True)
     return [event async for event in client.stream(request)]
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_aggregates_text_and_usage_tail(
+async def test_provider_stream_text_typed_events_and_terminal_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(delta={"role": "assistant", "content": "你"}),
-        _chunk(delta={"content": "好"}),
-        _chunk(finish_reason="stop"),
-        _chunk(
-            choices=False,
-            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    raw = _RawStream(
+        _event("created", response=_response(status="in_progress")),
+        _event("in_progress", response=_response(status="in_progress")),
+        _event("output_item.added", output_index=0, item=_message("")),
+        _event(
+            "content_part.added",
+            output_index=0,
+            item_id="msg-1",
+            content_index=0,
+            part={"type": "output_text", "text": "", "annotations": []},
         ),
+        _event("output_text.delta", output_index=0, item_id="msg-1", content_index=0, delta="你"),
+        _event("output_text.delta", output_index=0, item_id="msg-1", content_index=0, delta="好"),
+        _event("output_text.done", output_index=0, item_id="msg-1", content_index=0, text="你好"),
+        _event("output_item.done", output_index=0, item=_message("你好")),
+        _event("completed", response=_response(_message("你好"))),
+        RuntimeError("terminal 后不得继续拉取"),
     )
-    seen_kwargs: dict[str, Any] = {}
+    seen = _install_stream(monkeypatch, raw)
+    events = await _collect()
 
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        seen_kwargs.update(kwargs)
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-    client = ProviderClient(provider="openai", api_key="test-key")
-
-    events = await _collect(
-        client,
-        LLMRequest(model="gpt-4o", messages=[Msg.user("你好")], stream=True),
-    )
-
-    assert seen_kwargs["stream"] is True
-    assert seen_kwargs["stream_options"] == {"include_usage": True}
+    assert seen["stream"] is True
+    assert seen["store"] is False
+    assert "stream_options" not in seen
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert [event.kind for event in events] == [
         "response.started",
@@ -104,325 +150,269 @@ async def test_provider_client_stream_aggregates_text_and_usage_tail(
         "block.delta",
         "block.completed",
         "usage.updated",
-        "usage.updated",
         "response.completed",
     ]
     terminal = events[-1]
     assert isinstance(terminal, ModelResponseCompleted)
     assert terminal.response.to_msg().text == "你好"
     assert terminal.response.finish_reason == "stop"
-    assert terminal.response.input_tokens == 2
-    assert terminal.response.output_tokens == 1
-    assert terminal.response.total_tokens == 3
-    assert raw_stream.close_calls == 1
+    assert (
+        terminal.response.input_tokens,
+        terminal.response.output_tokens,
+        terminal.response.total_tokens,
+    ) == (4, 5, 9)
+    assert raw.close_calls == 1
+    assert raw.reads == 9
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_accepts_usage_tail_placeholder_choice(
+async def test_provider_stream_final_output_supplies_full_reasoning_and_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(delta={"content": "完成"}),
-        _chunk(finish_reason="stop"),
-        _chunk(
-            delta={
-                "content": None,
-                "role": None,
-                "function_call": None,
-                "tool_calls": None,
-            },
-            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    reasoning = {
+        "type": "reasoning",
+        "id": "reason-1",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "完整推理"}],
+        "encrypted_content": "opaque-replay-data",
+    }
+    final = _response(reasoning, _message("完整回答"), _call("fc-1", "call-1", "lookup", "{}"))
+    raw = _RawStream(
+        _event(
+            "reasoning_text.delta",
+            output_index=0,
+            item_id="reason-1",
+            content_index=0,
+            delta="完整",
         ),
+        _event(
+            "reasoning_text.done",
+            output_index=0,
+            item_id="reason-1",
+            content_index=0,
+            text="完整推理",
+        ),
+        _event("completed", response=final),
     )
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
 
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
+    from iris.providers.responses import ResponsesMapper
 
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="deepseek", api_key="test-key"),
-        LLMRequest(model="deepseek-chat", messages=[Msg.user("你好")], stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseCompleted)
-    assert terminal.response.to_msg().text == "完成"
-    assert terminal.response.total_tokens == 3
-    assert raw_stream.close_calls == 1
+    assert events[-1].response == ResponsesMapper().parse_response(final, provider="openai")
+    assert events[-1].response.content == [
+        TextBlock(text="完整回答"),
+        ToolUseBlock(id="call-1", name="lookup", input={}),
+    ]
+    assert "opaque-replay-data" in events[-1].response.model_dump_json()
+    thinking = [event for event in events if isinstance(event, ModelBlockDelta)]
+    assert [event.channel for event in thinking] == ["thinking", "thinking"]
+    assert thinking[-1].snapshot == "完整推理"
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_rejects_semantic_choice_after_finish(
+async def test_provider_stream_parallel_tool_arguments_use_call_id_and_final_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(finish_reason="stop"),
-        _chunk(
-            delta={"content": "迟到内容"},
-            usage={"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    raw = _RawStream(
+        _event("output_item.added", output_index=0, item=_call("fc-a", "call-a", "lookup", "")),
+        _event("output_item.added", output_index=1, item=_call("fc-b", "call-b", "list", "")),
+        _event("function_call_arguments.delta", output_index=0, item_id="fc-a", delta='{"query":'),
+        _event("function_call_arguments.delta", output_index=1, item_id="fc-b", delta="{}"),
+        _event("function_call_arguments.delta", output_index=0, item_id="fc-a", delta='"Iris"}'),
+        _event(
+            "function_call_arguments.done",
+            output_index=0,
+            item_id="fc-a",
+            name="lookup",
+            arguments='{"query":"Iris"}',
+        ),
+        _event(
+            "output_item.done",
+            output_index=0,
+            item=_call("fc-a", "call-a", "lookup", '{"query":"Iris"}'),
+        ),
+        _event(
+            "completed",
+            response=_response(
+                _call("fc-a", "call-a", "lookup", '{"query":"Iris"}'),
+                _call("fc-b", "call-b", "list", "{}"),
+            ),
         ),
     )
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
 
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="deepseek", api_key="test-key"),
-        LLMRequest(model="deepseek-chat", messages=[Msg.user("你好")], stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.error.code == "PROVIDER_STREAM_PROTOCOL_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_provider_client_stream_aggregates_split_tool_call_only_at_completion(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import iris.providers.client as provider_client
-
-    parsed_arguments: list[str] = []
-    original_loads = json.loads
-
-    def count_argument_parses(value: str, **kwargs: Any) -> Any:
-        if value == '{"query":"Iris"}':
-            parsed_arguments.append(value)
-        return original_loads(value, **kwargs)
-
-    monkeypatch.setattr(json, "loads", count_argument_parses)
-    raw_stream = _RawStream(
-        _chunk(
-            delta={
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "call-1",
-                        "type": "function",
-                        "function": {"name": "look", "arguments": '{"query":'},
-                    }
-                ]
-            }
-        ),
-        _chunk(
-            delta={
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "function": {"name": "up", "arguments": '"Iris"}'},
-                    }
-                ]
-            }
-        ),
-        _chunk(finish_reason="tool_calls"),
-    )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    argument_deltas = [
+    arguments = [
         event
         for event in events
         if isinstance(event, ModelBlockDelta) and event.channel == "tool_arguments"
     ]
-    assert [event.snapshot for event in argument_deltas] == [
-        '{"query":',
-        '{"query":"Iris"}',
+    assert [(event.block.tool_call_id, event.snapshot) for event in arguments] == [
+        ("call-a", '{"query":'),
+        ("call-b", "{}"),
+        ("call-a", '{"query":"Iris"}'),
     ]
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseCompleted)
-    [tool_call] = terminal.response.to_msg().tool_calls
-    assert tool_call.id == "call-1"
-    assert tool_call.name == "lookup"
-    assert tool_call.input == {"query": "Iris"}
-    assert parsed_arguments == ['{"query":"Iris"}']
+    assert arguments[0].block.block_id != arguments[0].block.tool_call_id
+    assert [call.id for call in events[-1].response.to_msg().tool_calls] == ["call-a", "call-b"]
+    assert events[-1].response.finish_reason == "tool_calls"
+    assert len([event for event in events if event.kind == "block.completed"]) == 2
 
 
 @pytest.mark.asyncio
-async def test_provider_stream_preserves_response_fields_and_tool_order(
+@pytest.mark.parametrize("status", ["incomplete", "failed"])
+async def test_provider_stream_failure_reports_usage_without_committing_tools(
     monkeypatch: pytest.MonkeyPatch,
+    status: str,
 ) -> None:
-    """交错块按现有响应契约生成文本、首见顺序的工具及独立 reasoning。"""
-    import iris.providers.client as provider_client
+    final = _response(_call("fc-1", "call-1", "lookup", "{"), status=status)
+    final["incomplete_details"] = {"reason": "max_output_tokens"}
+    final["error"] = {"code": "server_error", "message": "处理失败"}
+    raw = _RawStream(_event(status, response=final))
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
 
-    raw_stream = _RawStream(
-        _chunk(
-            delta={
-                "tool_calls": [
-                    {
-                        "index": 2,
-                        "id": "second-index",
-                        "function": {"name": "lookup", "arguments": '{"query":"Iris"}'},
-                    }
-                ]
-            }
-        ),
-        _chunk(delta={"reasoning_content": "先思考", "content": "结果"}),
-        _chunk(
-            delta={
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "first-index",
-                        "function": {"name": "list", "arguments": "{}"},
-                    }
-                ]
-            }
-        ),
-        _chunk(finish_reason="tool_calls"),
-        _chunk(
-            choices=False, usage={"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9}
-        ),
-    )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-    events = await _collect(
-        ProviderClient(provider="deepseek", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseCompleted)
-    response = terminal.response
-    assert response.provider == "deepseek"
-    assert response.id == "chatcmpl-stream-1"
-    assert response.model == "gpt-4o"
-    assert response.content == [
-        TextBlock(text="结果"),
-        ToolUseBlock(id="second-index", name="lookup", input={"query": "Iris"}),
-        ToolUseBlock(id="first-index", name="list", input={}),
-    ]
-    assert response.reasoning == "先思考"
-    assert response.finish_reason == "tool_calls"
-    assert (response.input_tokens, response.output_tokens, response.total_tokens) == (4, 5, 9)
-    assert response.metadata == {"raw_object": "chat.completion"}
+    assert isinstance(events[-1], ModelResponseFailed)
+    assert not any(isinstance(event, ModelResponseCompleted) for event in events)
+    usage = [event for event in events if isinstance(event, ModelUsageUpdated)]
+    assert len(usage) == 1
+    assert usage[0].usage.total_tokens == 9
+    assert usage[0].usage.complete is True
+    assert status in events[-1].error.message
+    assert raw.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_maps_eof_without_finish_to_failed_terminal(
+async def test_provider_stream_error_event_is_terminal_with_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(_chunk(delta={"content": "未完成"}))
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.error.code == "PROVIDER_STREAM_INTERRUPTED"
-    assert terminal.semantic_output_emitted is True
-    assert raw_stream.close_calls == 1
+    raw = _RawStream({"type": "error", "code": "server_error", "message": "处理失败"})
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
+    assert isinstance(events[-1], ModelResponseFailed)
+    assert "server_error" in events[-1].error.message
+    assert "处理失败" in events[-1].error.message
+    assert not any(event.kind == "usage.updated" for event in events)
+    assert raw.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_rejects_malformed_completed_tool_arguments(
+async def test_provider_stream_eof_after_output_item_done_is_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
+    raw = _RawStream(
+        _event("output_item.added", output_index=0, item=_call("fc-1", "call-1", "lookup", "")),
+        _event("function_call_arguments.delta", output_index=0, item_id="fc-1", delta="{}"),
+        _event("output_item.done", output_index=0, item=_call("fc-1", "call-1", "lookup", "{}")),
+    )
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
+    assert isinstance(events[-1], ModelResponseFailed)
+    assert events[-1].error.code == "PROVIDER_STREAM_INTERRUPTED"
+    assert events[-1].semantic_output_emitted is True
+    assert raw.close_calls == 1
 
-    raw_stream = _RawStream(
-        _chunk(
-            delta={
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "call-invalid",
-                        "type": "function",
-                        "function": {"name": "lookup", "arguments": "{"},
-                    }
-                ]
-            }
+
+@pytest.mark.asyncio
+async def test_provider_stream_rejects_malformed_final_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _RawStream(
+        _event("completed", response=_response(_call("fc-1", "call-1", "lookup", "{")))
+    )
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
+    assert isinstance(events[-1], ModelResponseFailed)
+    assert not any(isinstance(event, ModelResponseCompleted) for event in events)
+    assert raw.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_stream_reasoning_summary_keeps_separate_parts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _RawStream(
+        _event(
+            "reasoning_summary_text.delta",
+            output_index=0,
+            item_id="reason-1",
+            summary_index=0,
+            delta="先核对",
         ),
-        _chunk(finish_reason="tool_calls"),
+        _event(
+            "reasoning_summary_text.done",
+            output_index=0,
+            item_id="reason-1",
+            summary_index=0,
+            text="先核对",
+        ),
+        _event(
+            "reasoning_summary_text.delta",
+            output_index=0,
+            item_id="reason-1",
+            summary_index=1,
+            delta="再回答",
+        ),
+        _event(
+            "completed",
+            response=_response(
+                {
+                    "type": "reasoning",
+                    "id": "reason-1",
+                    "encrypted_content": "opaque",
+                    "summary": [
+                        {"type": "summary_text", "text": "先核对"},
+                        {"type": "summary_text", "text": "再回答"},
+                    ],
+                },
+                _message("完成"),
+            ),
+        ),
     )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.error.code == "PROVIDER_STREAM_PROTOCOL_ERROR"
-    assert all(event.kind != "block.completed" for event in events)
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
+    deltas = [event for event in events if isinstance(event, ModelBlockDelta)]
+    assert [event.snapshot for event in deltas] == ["先核对", "再回答"]
+    assert deltas[0].block.block_id != deltas[1].block.block_id
+    assert events[-1].response.reasoning == "先核对\n再回答"
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_maps_raw_failure_after_partial(
+async def test_provider_stream_maps_raw_failure_after_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(
-        _chunk(delta={"content": "部分"}),
+    raw = _RawStream(
+        _event("output_text.delta", output_index=0, item_id="msg-1", content_index=0, delta="部分"),
         RuntimeError("raw-secret"),
     )
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
-    events = await _collect(
-        ProviderClient(provider="openai", api_key="test-key"),
-        LLMRequest(model="gpt-4o", stream=True),
-    )
-
-    terminal = events[-1]
-    assert isinstance(terminal, ModelResponseFailed)
-    assert terminal.semantic_output_emitted is True
-    assert "raw-secret" not in terminal.error.message
-    assert raw_stream.close_calls == 1
+    _install_stream(monkeypatch, raw)
+    events = await _collect()
+    assert isinstance(events[-1], ModelResponseFailed)
+    assert events[-1].semantic_output_emitted is True
+    assert "raw-secret" not in events[-1].error.message
+    assert raw.close_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_provider_client_stream_propagates_local_cancellation_and_closes_raw_stream(
+async def test_provider_stream_propagates_local_cancellation_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import iris.providers.client as provider_client
-
-    raw_stream = _RawStream(asyncio.CancelledError())
-
-    async def fake_acompletion(**kwargs: Any) -> _RawStream:
-        return raw_stream
-
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
-
+    raw = _RawStream(asyncio.CancelledError())
+    _install_stream(monkeypatch, raw)
     with pytest.raises(asyncio.CancelledError):
-        await _collect(
-            ProviderClient(provider="openai", api_key="test-key"),
-            LLMRequest(model="gpt-4o", stream=True),
-        )
+        await _collect()
+    assert raw.close_calls == 1
 
-    assert raw_stream.close_calls == 1
+
+@pytest.mark.asyncio
+async def test_provider_stream_closes_when_consumer_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _RawStream(_event("created", response=_response(status="in_progress")))
+    _install_stream(monkeypatch, raw)
+    stream = ProviderClient(provider="openai", api_key="test-key").stream(
+        LLMRequest(model="gpt-4o", stream=True)
+    )
+    assert (await anext(stream)).kind == "response.started"
+    await stream.aclose()
+    assert raw.close_calls == 1

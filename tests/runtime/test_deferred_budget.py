@@ -47,7 +47,7 @@ def test_hundred_deferred_tools_start_hidden_and_latest_first_fits_complete_sche
         include_tools=True,
         tool_choice=None,
     )
-    schemas = view.schemas_for(selected.names)
+    schemas = view.specs_for(selected.names)
     measured, _ = project_context_request(
         measure_request(
             LLMRequest(model="test", messages=[Msg.user("question")], tools=schemas), _estimate
@@ -60,9 +60,9 @@ def test_hundred_deferred_tools_start_hidden_and_latest_first_fits_complete_sche
         optional_tool_names=selected.optional_names,
     )
     request = measured.request
-    assert [schema["function"]["name"] for schema in request.tools] == ["tool_3"]
+    assert [schema.name for schema in request.tools] == ["tool_3"]
     assert request.tools[0] == next(
-        schema for schema in schemas if schema["function"]["name"] == "tool_3"
+        schema for schema in schemas if schema.name == "tool_3"
     )
 
 
@@ -124,7 +124,7 @@ async def test_frozen_schema_selection_survives_summary_and_new_memory_window(
     first_main = next(
         request for request in provider.requests if request.provider_options.get("num_retries") != 0
     )
-    assert [tool["function"]["name"] for tool in first_main.tools] == ["eager"]
+    assert [tool.name for tool in first_main.tools] == ["eager"]
     assert first_main.messages[0].text.endswith(window.memory_overview)
     assert port.model_commits[0].cursor_after.visible_tool_names == ("eager",)
     assert port.tool_commits[0].cursor_after.visible_tool_names == ()
@@ -145,7 +145,7 @@ async def test_effective_forced_target_is_in_schema_and_cursor(tmp_path: Path) -
             model={
                 "provider": "openai",
                 "name": "test",
-                "tool_choice": {"type": "function", "function": {"name": "missing"}},
+                "tool_choice": {"name": "missing"},
             },
             system="rules",
             context_policy={"deferred_tools": True},
@@ -162,7 +162,7 @@ async def test_effective_forced_target_is_in_schema_and_cursor(tmp_path: Path) -
     )
     activation = start_activation(
         options=RuntimeExecutionOptions(
-            request_options={"tool_choice": {"type": "function", "function": {"name": "deferred"}}}
+            request_options={"tool_choice": {"name": "deferred"}}
         )
     )
     port = FakeRuntimeCommitPort(activation)
@@ -173,7 +173,7 @@ async def test_effective_forced_target_is_in_schema_and_cursor(tmp_path: Path) -
     assert calls == ["executed"]
     assert "deferred" in port.model_commits[0].cursor_after.visible_tool_names
     assert all(
-        request.tool_choice["function"]["name"] == "deferred"
-        and any(tool["function"]["name"] == "deferred" for tool in request.tools)
+        request.tool_choice["name"] == "deferred"
+        and any(tool.name == "deferred" for tool in request.tools)
         for request in provider.requests
     )

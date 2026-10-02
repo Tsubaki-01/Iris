@@ -57,9 +57,6 @@ from .schema import (
     DocstringSchemaExtractor,
     schema_from_callable,
     schema_from_pydantic_model,
-    to_anthropic_tool_schema,
-    to_openai_chat_tool_schema,
-    to_openai_responses_tool_schema,
 )
 
 __all__ = [
@@ -120,8 +117,5 @@ __all__ = [
     "register_file_tools",
     "schema_from_callable",
     "schema_from_pydantic_model",
-    "to_anthropic_tool_schema",
-    "to_openai_chat_tool_schema",
-    "to_openai_responses_tool_schema",
     "tool",
 ]

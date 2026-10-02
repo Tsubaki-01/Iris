@@ -2,7 +2,7 @@ name: iris-web-example
 
 model:
   provider: deepseek
-  name: deepseek-chat
+  name: deepseek-flash
   temperature: 0
   max_tokens: 2048
   timeout: 60

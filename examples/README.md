@@ -20,6 +20,9 @@ $env:IRIS_PROVIDER_API_KEYS__DEEPSEEK = "sk-..."
 uv run iris chat examples/chat/agent.yaml --session-id example
 ```
 
+示例 `model.api_style` 默认 `responses`，可改成 `chat_completions` 后重建 Agent。SDK 对应
+`create_provider_client(route, api_style="chat_completions")`；逻辑请求与工具循环保持一致，失败不切换协议。
+
 Chat 的本地输出器在 runtime 所属 event loop 中直接消费 typed 文本 delta 并同步写入终端。
 `SessionManager` 的单一事件消费者负责 durable 终态与 HITL 提示；已显示的成功响应不会重复
 打印，没有文本增量时仍补显完整结果，失败或取消时会收尾已输出的文本行。
@@ -131,13 +134,13 @@ Child 是普通 Agent 配置，当前只支持一层委派；它仅接收委派 
 仍携带标准化完整响应：
 
 ```powershell
-uv run python -m examples.provider.basic --model deepseek/deepseek-chat
+uv run python -m examples.provider.basic --model deepseek/deepseek-flash
 ```
 
 进程内 trace 包装器会逐条转发同一事件流，并在结束后额外打印标准化请求、最终响应或安全错误：
 
 ```powershell
-uv run python -m examples.provider.trace --model deepseek/deepseek-chat
+uv run python -m examples.provider.trace --model deepseek/deepseek-flash
 ```
 
 ## Lifecycle

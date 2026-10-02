@@ -37,6 +37,7 @@ from iris.lifecycle import (
     RunLimits,
     RunPhase,
     RunStopReason,
+    TokenUsage,
     ToolCallPhase,
 )
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
@@ -122,8 +123,9 @@ class ControlledService:
 class FailedProvider:
     """确定失败，不依赖远程模型。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, usage: TokenUsage | None = None) -> None:
         self.calls = 0
+        self.usage = usage
 
     def estimate_input_tokens(self, request: LLMRequest) -> int:
         """固定估算。"""
@@ -132,7 +134,9 @@ class FailedProvider:
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """标记调用次数后失败。"""
         self.calls += 1
-        raise IrisProviderError("original provider failure")
+        raise IrisProviderError(
+            "original provider failure", usage=self.usage.model_dump() if self.usage else None
+        )
 
 
 def bind_service(runner: AgentRunner, service: ControlledService) -> None:
@@ -197,6 +201,42 @@ async def test_cleanup_retry_preserves_original_result(tmp_path: Path, retry: st
     assert result.run.stop_reason is RunStopReason.FAILED
     assert result.error.code == "PROVIDER_ERROR"
     assert result.run.cancellation_requested_at is None
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlite", [False, True])
+async def test_model_failure_usage_survives_cleanup_retry_and_terminal_recovery(
+    tmp_path: Path, sqlite: bool
+) -> None:
+    usage = TokenUsage(input_tokens=7, output_tokens=3, total_tokens=10)
+    provider = FailedProvider(usage=usage)
+    database = tmp_path / "lifecycle.db"
+    store = SQLiteStore(database) if sqlite else InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, provider=provider), store=store)
+    service = ControlledService()
+    service.fail = True
+    bind_service(runner, service)
+    with pytest.raises(IrisCommandCleanupError):
+        await runner.start(AgentRunRequest(input="x", run_id="failed"))
+    assert runner.get_run("failed").usage.total_tokens == 0
+    service.fail = False
+    service.release()
+    result = await runner.recover("failed")
+    assert result.run.stop_reason is RunStopReason.FAILED
+    assert result.run.usage.input_tokens == usage.input_tokens
+    assert result.run.usage.output_tokens == usage.output_tokens
+    assert result.run.usage.total_tokens == usage.total_tokens
+    assert result.run.usage.model_steps_reserved == 1
+    assert result.run.usage.model_steps_committed == 0
+    assert result.run.usage.compaction == TokenUsage()
+    assert [message.role for message in runner.get_session("default").messages] == ["user"]
+    assert store.list_tool_calls("failed") == []
+    recovered_store = SQLiteStore(database) if sqlite else store
+    recovered = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=provider), store=recovered_store
+    )
+    assert (await recovered.recover("failed")).run.usage == result.run.usage
     assert provider.calls == 1
 
 

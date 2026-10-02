@@ -10,6 +10,14 @@ It does not create logical runs, select stores, or own public cancellation/recov
 Use `iris.harness.AgentRunner` for complete runs. Call `AgentRuntime.execute()` directly only when
 implementing a custom lifecycle owner.
 
+Runtime always consumes the same logical request, tool definitions, and streaming events. Provider
+construction defaults to Responses and also supports explicit Chat Completions. Adapters own wire
+tool schemas, forced choices, and protocol-specific request measurement. Only complete successful
+responses can commit assistant output or execute tools; incomplete, failed, and interrupted streams
+fail the run. Runtime carries the
+unsettled model usage to harness's existing FinishRun path for one atomic settlement. Summary usage
+remains in the separate compaction total.
+
 MCPTool uses the ordinary serial tool path. The shared `IrisToolOutcomeUnknownError` reaches the existing
 `_unknown_tool_outcome` settlement without new stop reasons or persistence protocols. Trusted
 read-only SDK failures remain ordinary ToolResults governed by ToolErrorPolicy. MCP adds no

@@ -80,6 +80,7 @@ from ..lifecycle import (
     RunStopReason,
     RunToolCallRecord,
     SessionSnapshot,
+    TokenUsage,
     ToolCallPhase,
     ToolErrorPolicy,
     snapshot_run,
@@ -2089,6 +2090,8 @@ class AgentRunner:
         self,
         active: ActiveActivation,
         port: StoreRuntimeCommitPort,
+        *,
+        model_failure_usage: TokenUsage | None = None,
     ) -> None:
         """把被中断的 async operation 映射为可证明的 durable outcome。"""
         current = self.store.load_run(active.run_id)
@@ -2123,6 +2126,7 @@ class AgentRunner:
             activation_id=active.activation_id,
             stop_reason=stop_reason,
             error=error,
+            model_failure_usage=model_failure_usage,
             events=active.event_collector,
         )
 
@@ -2159,7 +2163,9 @@ class AgentRunner:
             RuntimeActivationOutcome.CANCELLED,
             RuntimeActivationOutcome.FAILED,
         }:
-            await self._finish_cancelled_task(active, port)
+            await self._finish_cancelled_task(
+                active, port, model_failure_usage=result.model_failure_usage
+            )
             return
         stop_reason = {
             RuntimeActivationOutcome.COMPLETED: RunStopReason.COMPLETED,
@@ -2177,6 +2183,7 @@ class AgentRunner:
             stop_reason=stop_reason,
             assistant_message=result.assistant_message,
             error=result.error,
+            model_failure_usage=result.model_failure_usage,
             events=active.event_collector,
             receipt=result.stop_receipt,
             call_id=result.stop_call_id,
@@ -2251,6 +2258,7 @@ class AgentRunner:
         stop_reason: RunStopReason | None,
         events: _RunEventCollector,
         error: RunErrorInfo | None = None,
+        model_failure_usage: TokenUsage | None = None,
         assistant_message: Msg | None = None,
         interaction_close_reason: str | None = None,
         receipt: CommandStopReceipt | None = None,
@@ -2267,6 +2275,7 @@ class AgentRunner:
                 activation_id=activation_id,
                 stop_reason=stop_reason,
                 error=error,
+                model_failure_usage=model_failure_usage,
                 assistant_message=assistant_message,
                 interaction_close_reason=interaction_close_reason,
                 events=events,
@@ -2310,6 +2319,7 @@ class AgentRunner:
                     activation_id=pending.activation_id,
                     stop_reason=pending.stop_reason,
                     error=pending.error,
+                    model_failure_usage=pending.model_failure_usage,
                     assistant_message=pending.assistant_message,
                     interaction_close_reason=pending.interaction_close_reason,
                     now=self._now(),

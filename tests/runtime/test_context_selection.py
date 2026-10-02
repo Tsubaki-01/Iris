@@ -26,7 +26,7 @@ def _project(
                     *history,
                     render_context_snapshot(snapshot),
                 ],
-                tools=[{"function": {"name": "context_read"}}] if tools else [],
+                tools=[{"name": "context_read", "input_schema": {}}] if tools else [],
             ),
             _estimate,
         ),

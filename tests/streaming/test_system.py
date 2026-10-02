@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-import litellm
 import pytest
 from pydantic import BaseModel
 
@@ -26,6 +25,7 @@ from iris.lifecycle import (
 )
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, TextBlock
 from iris.providers import ProviderClient
+from iris.providers.responses import ResponsesAdapter
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.streaming import (
     CancelAccepted,
@@ -88,7 +88,7 @@ class _ControlledRawStream(AsyncIterator[dict[str, Any]]):
         return self
 
     async def __anext__(self) -> dict[str, Any]:
-        """在受控同步点后返回下一个 Chat Completion chunk。"""
+        """在受控同步点后返回下一个 Responses event。"""
         if self._index >= len(self._chunks):
             raise StopAsyncIteration
         index = self._index
@@ -111,17 +111,26 @@ class _ControlledRawStream(AsyncIterator[dict[str, Any]]):
         self.closed = True
 
 
-class _FakeChatBackend:
-    """替代 LiteLLM 网络调用并按顺序返回受控 raw streams。"""
+class _FakeResponsesBackend:
+    """替代 Responses adapter 调用并按顺序返回受控 raw streams。"""
 
     def __init__(self, streams: Sequence[_ControlledRawStream]) -> None:
         self._streams = list(streams)
         self.calls: list[dict[str, Any]] = []
 
     async def __call__(self, **kwargs: Any) -> _ControlledRawStream:
-        """记录 Chat Completion 参数并返回下一条脚本。"""
+        """记录 Responses 参数并返回下一条脚本。"""
         self.calls.append(kwargs)
         return self._streams.pop(0)
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """在协议调用边界注入 raw stream，保留实际解析与运行链路。"""
+        async def invoke(
+            adapter: ResponsesAdapter, kwargs: dict[str, Any]
+        ) -> _ControlledRawStream:
+            return await self(**kwargs)
+
+        monkeypatch.setattr(ResponsesAdapter, "invoke", invoke)
 
 
 class _RecordingStreamingProvider:
@@ -214,14 +223,31 @@ class _SensitiveWriteTool(BaseTool):
         )
 
 
+def _response(output: list[dict[str, Any]], *, tool_calls: bool = False) -> dict[str, Any]:
+    """保留原测试用量，返回完整原生 Responses 终态。"""
+    return {
+        "id": "response-tools" if tool_calls else "response-system",
+        "object": "response",
+        "model": "fake-model",
+        "status": "completed",
+        "output": output,
+        "usage": {
+            "input_tokens": 5 if tool_calls else 7,
+            "output_tokens": 4 if tool_calls else 3,
+            "total_tokens": 9 if tool_calls else 10,
+        },
+    }
+
+
 def _text_chunks(*parts: str, finish: bool = True) -> list[dict[str, Any]]:
-    """构造可由真实 accumulator 消费的 Chat Completion chunks。"""
+    """文字增量后跟 done 与完整终态，维持原有同步点。"""
     chunks = [
         {
-            "id": "response-system",
-            "model": "fake-model",
-            "object": "chat.completion.chunk",
-            "choices": [{"index": 0, "delta": {"content": part}}],
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "item_id": "msg-system",
+            "content_index": 0,
+            "delta": part,
         }
         for part in parts
     ]
@@ -229,21 +255,31 @@ def _text_chunks(*parts: str, finish: bool = True) -> list[dict[str, Any]]:
         chunks.extend(
             [
                 {
-                    "id": "response-system",
-                    "model": "fake-model",
-                    "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    "type": "response.output_text.done",
+                    "output_index": 0,
+                    "item_id": "msg-system",
+                    "content_index": 0,
+                    "text": "".join(parts),
                 },
                 {
-                    "id": "response-system",
-                    "model": "fake-model",
-                    "object": "chat.completion.chunk",
-                    "choices": [],
-                    "usage": {
-                        "prompt_tokens": 7,
-                        "completion_tokens": 3,
-                        "total_tokens": 10,
-                    },
+                    "type": "response.completed",
+                    "response": _response(
+                        [
+                            {
+                                "type": "message",
+                                "id": "msg-system",
+                                "role": "assistant",
+                                "status": "completed",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "".join(parts),
+                                        "annotations": [],
+                                    }
+                                ],
+                            }
+                        ]
+                    ),
                 },
             ]
         )
@@ -255,65 +291,50 @@ def _tool_chunks(
     *,
     fragmented: bool = False,
 ) -> list[dict[str, Any]]:
-    """构造一个或多个 function tool calls 的 raw chunks。"""
+    """function_call 的身份由 item 提供，参数增量在终态前仅用于展示。"""
     chunks: list[dict[str, Any]] = []
+    output: list[dict[str, Any]] = []
     for index, (call_id, name, arguments) in enumerate(calls):
-        name_parts = (name[: len(name) // 2], name[len(name) // 2 :]) if fragmented else (name,)
+        item = {
+            "type": "function_call",
+            "id": f"fc-{index}",
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+            "status": "completed",
+        }
+        output.append(item)
+        chunks.append(
+            {
+                "type": "response.output_item.added",
+                "output_index": index,
+                "item": {**item, "arguments": "", "status": "in_progress"},
+            }
+        )
         argument_parts = (
             (arguments[: len(arguments) // 2], arguments[len(arguments) // 2 :])
             if fragmented
             else (arguments,)
         )
-        part_count = max(len(name_parts), len(argument_parts))
-        for part_index in range(part_count):
-            function: dict[str, str] = {}
-            if part_index < len(name_parts) and name_parts[part_index]:
-                function["name"] = name_parts[part_index]
-            if part_index < len(argument_parts) and argument_parts[part_index]:
-                function["arguments"] = argument_parts[part_index]
+        for part in argument_parts:
             chunks.append(
                 {
-                    "id": "response-tools",
-                    "model": "fake-model",
-                    "object": "chat.completion.chunk",
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "tool_calls": [
-                                    {
-                                        "index": index,
-                                        "id": call_id if part_index == 0 else None,
-                                        "type": "function",
-                                        "function": function,
-                                    }
-                                ]
-                            },
-                        }
-                    ],
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": index,
+                    "item_id": item["id"],
+                    "delta": part,
                 }
             )
-    chunks.extend(
-        [
+        chunks.append(
             {
-                "id": "response-tools",
-                "model": "fake-model",
-                "object": "chat.completion.chunk",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-            },
-            {
-                "id": "response-tools",
-                "model": "fake-model",
-                "object": "chat.completion.chunk",
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": 5,
-                    "completion_tokens": 4,
-                    "total_tokens": 9,
-                },
-            },
-        ]
-    )
+                "type": "response.function_call_arguments.done",
+                "output_index": index,
+                "item_id": item["id"],
+                "name": name,
+                "arguments": arguments,
+            }
+        )
+    chunks.append({"type": "response.completed", "response": _response(output, tool_calls=True)})
     return chunks
 
 
@@ -405,8 +426,8 @@ async def test_text_streaming_commits_only_complete_response_once(
 ) -> None:
     """Partial 只走 live plane，完成响应只提交一次并保留 usage。"""
     raw = _ControlledRawStream(_text_chunks("分段", "完成"), gated_indexes=(0, 2))
-    backend = _FakeChatBackend([raw])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([raw])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     runner, manager, broker, gateway, store = _build_system(tmp_path, provider)
     session_subscription = gateway.subscribe(
@@ -473,7 +494,8 @@ async def test_text_streaming_commits_only_complete_response_once(
     assert provider.complete_requests == []
     assert len(provider.stream_requests) == 1
     assert provider.stream_requests[0].stream is True
-    assert backend.calls[0]["stream_options"] == {"include_usage": True}
+    assert backend.calls[0]["store"] is False
+    assert "stream_options" not in backend.calls[0]
     assert raw.closed
 
     for items in (run_items, session_items):
@@ -528,8 +550,8 @@ async def test_midstream_eof_fails_without_durable_partial_or_model_commit(
         _text_chunks("仅在live可见", finish=False),
         gated_indexes=(0,),
     )
-    backend = _FakeChatBackend([raw])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([raw])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     runner, manager, broker, gateway, store = _build_system(tmp_path, provider)
     session_subscription = gateway.subscribe(
@@ -603,11 +625,11 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
             [("write-1", "write_secret", '{"value":"x"}')],
             fragmented=True,
         ),
-        gated_indexes=(0, 2),
+        gated_indexes=(0, 3),
     )
     final_stream = _ControlledRawStream(_text_chunks("工具已完成"))
-    backend = _FakeChatBackend([tool_stream, final_stream])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([tool_stream, final_stream])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     policy = _RecordingPermissionPolicy()
     tool = _SensitiveWriteTool(tmp_path)
@@ -630,7 +652,7 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
     )
 
     tool_stream.gates[0].set()
-    await asyncio.wait_for(tool_stream.waiting[2].wait(), timeout=1)
+    await asyncio.wait_for(tool_stream.waiting[3].wait(), timeout=1)
     partial_items = await _take_until(
         subscription,
         lambda item: (
@@ -644,7 +666,7 @@ async def test_fragmented_tool_hitl_resume_preserves_effect_guards_and_projectio
     assert policy.checks == []
     assert runner.list_tool_calls(receipt.run_id) == []
 
-    tool_stream.gates[2].set()
+    tool_stream.gates[3].set()
     waiting_items = await _take_until(
         subscription,
         _is_live_kind("interaction.suspended"),
@@ -716,7 +738,7 @@ async def test_publish_artifact_commits_readable_copy_before_streaming_summary(
     contents = "name,total\n示例,42\n".encode()
     source.write_bytes(contents)
     final_stream = _ControlledRawStream(_text_chunks("报告已发布"), gated_indexes=(0,))
-    backend = _FakeChatBackend(
+    backend = _FakeResponsesBackend(
         [
             _ControlledRawStream(
                 _tool_chunks([("publish-1", "publish_artifact", '{"file_path":"report.csv"}')])
@@ -724,7 +746,7 @@ async def test_publish_artifact_commits_readable_copy_before_streaming_summary(
             final_stream,
         ]
     )
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     broker = LiveStreamBroker(replay_capacity_per_scope=128, subscription_capacity=128)
     store = SQLiteStore(tmp_path / "publication.db")
@@ -827,8 +849,8 @@ async def test_slow_consumer_isolated_while_normal_consumer_and_run_complete(
         _text_chunks(*("片段" for _ in range(12))),
         gated_indexes=(12,),
     )
-    backend = _FakeChatBackend([raw])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([raw])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     runner, manager, broker, gateway, _ = _build_system(
         tmp_path,
@@ -908,8 +930,8 @@ async def test_transport_disconnect_keeps_run_active_and_cancel_command_stops_ne
         _text_chunks("不会完成"),
         gated_indexes=(0,),
     )
-    backend = _FakeChatBackend([disconnect_raw, cancel_raw])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([disconnect_raw, cancel_raw])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     runner, manager, broker, gateway, _ = _build_system(tmp_path, provider)
     session_events = gateway.subscribe(
@@ -977,10 +999,10 @@ async def test_websocket_resume_keeps_sync_steer_cancel_and_disconnect_responsiv
     """Resume 后 provider 暂停期间仍处理后续控制命令与断线。"""
     tool_stream = _ControlledRawStream(_tool_chunks([("write-1", "write_secret", '{"value":"x"}')]))
     resumed_stream = _ControlledRawStream(_text_chunks("恢复完成"), gated_indexes=(0,))
-    backend = _FakeChatBackend(
+    backend = _FakeResponsesBackend(
         [tool_stream, resumed_stream, _ControlledRawStream(_text_chunks("补充完成"))]
     )
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend.install(monkeypatch)
     registry = ToolRegistry()
     registry.register(_SensitiveWriteTool(tmp_path))
     runner, manager, broker, gateway, _ = _build_system(
@@ -1068,8 +1090,8 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
     waiting_raw = _ControlledRawStream(
         _tool_chunks([("write-1", "write_secret", '{"value":"persisted"}')])
     )
-    backend = _FakeChatBackend([success_raw, failed_raw, waiting_raw])
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend = _FakeResponsesBackend([success_raw, failed_raw, waiting_raw])
+    backend.install(monkeypatch)
     provider = _RecordingStreamingProvider()
     policy = _RecordingPermissionPolicy()
     tool = _SensitiveWriteTool(tmp_path)
@@ -1183,8 +1205,10 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
             )
         }
         dump = "\n".join(connection.iterdump())
-    assert identity == [("agent_lifecycle", 9)]
+    assert identity == [("agent_lifecycle", 11)]
     expected_tables = {
+        "goals",
+        "goal_runs",
         "agent_runs",
         "lifecycle_schema",
         "run_activations",
@@ -1200,6 +1224,7 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
     assert objects == {("table", table) for table in expected_tables} | {
         ("index", "one_open_interaction_per_run"),
         ("index", "terminal_runs_by_session"),
+        ("index", "one_current_goal_per_session"),
     }
     assert "sqlite-failure-live-only" not in dump
     assert "model.block.delta" not in dump
@@ -1220,13 +1245,13 @@ async def test_compaction_uses_complete_then_streams_main_without_exposing_summa
     """真实 runner/broker 链路先持久化摘要，只流式发布后续主响应。"""
     old_text = "历史细节" * 20_000
     summary_body = "摘要内部内容_不应输出"
-    backend = _FakeChatBackend(
+    backend = _FakeResponsesBackend(
         [
             _ControlledRawStream(_text_chunks(old_text)),
             _ControlledRawStream(_text_chunks("继续完成")),
         ]
     )
-    monkeypatch.setattr(litellm, "acompletion", backend)
+    backend.install(monkeypatch)
 
     class CompactionStreamingProvider(_RecordingStreamingProvider):
         """以字符计量稳定触发历史压缩，主响应仍经过真实 provider stream。"""

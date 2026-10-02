@@ -1,38 +1,25 @@
-"""LiteLLM Chat Completion 流式响应归一化。
+"""将原生 Responses typed events 投影为 Iris 模型流式事件。
 
-该内部模块直接拉取 raw chunks，并在 provider 边界内完成block聚合和终态构造。
-
-Example:
-    `ProviderClient.stream()` 使用本模块并只向调用方产出 `ModelStreamEvent`。
+增量只用于展示，最终 response.output 经共用 mapper 解析后才成为可提交响应。
 """
-
-# region imports
 
 from __future__ import annotations
 
-import json
-import logging
-from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 from ..exceptions import (
-    IrisAPIConnectionError,
     IrisProviderError,
-    IrisProviderStreamError,
     IrisProviderStreamInterruptedError,
     IrisProviderStreamProtocolError,
-    IrisRateLimitExceededError,
 )
 from ..message import (
-    ContentBlock,
-    LLMResponse,
     ModelBlockCompleted,
     ModelBlockDelta,
     ModelBlockRef,
     ModelBlockStarted,
-    ModelResponseCancelled,
     ModelResponseCompleted,
     ModelResponseFailed,
     ModelResponseStarted,
@@ -40,545 +27,316 @@ from ..message import (
     ModelStreamScope,
     ModelUsageSnapshot,
     ModelUsageUpdated,
-    ProviderStreamError,
-    TextBlock,
-    ToolUseBlock,
 )
-
-# endregion
-
-# ==========================================
-#                 内部常量
-# ==========================================
-# region constants
-
-_logger = logging.getLogger(__name__)
+from ._stream_utils import close_raw_stream, safe_provider_error
+from .responses import ResponsesMapper
 
 _AsMapping = Callable[[Any], Mapping[str, Any]]
 _ErrorMapper = Callable[[Exception], IrisProviderError]
-
-# endregion
+_TEXT_EVENTS = {
+    "response.output_text": ("text", "content_index", "text"),
+    "response.refusal": ("text", "content_index", "refusal"),
+    "response.reasoning_text": ("thinking", "content_index", "text"),
+    "response.reasoning_summary_text": ("thinking", "summary_index", "text"),
+}
 
 
 @dataclass(slots=True)
 class _BlockState:
-    """维护单个响应块在当前 provider attempt 内的累积状态。"""
+    """一段可展示内容的稳定身份与当前文本。"""
 
     block: ModelBlockRef
     snapshot: str = ""
-    tool_name: str = ""
-    tool_arguments: str = ""
-    parsed_arguments: dict[str, Any] = field(default_factory=dict)
     completed: bool = False
 
 
 class ModelStreamAccumulator:
-    """将 LiteLLM-shaped chunks 聚合为稳定模型流式事件。"""
+    """消费 Responses 事件，保留完整终态与有序 Iris 展示事件。"""
 
-    # ==========================================
-    #                 状态初始化
-    # ==========================================
-    # region
-
-    def __init__(
-        self,
-        *,
-        scope: ModelStreamScope,
-        as_mapping: _AsMapping,
-    ) -> None:
-        """初始化一次 provider stream 的内存状态。
-
-        Args:
-            scope: 本次 provider attempt 的稳定标识。
-            as_mapping: 将 LiteLLM 对象转换为只读 mapping 的边界函数。
-        """
+    def __init__(self, *, scope: ModelStreamScope, as_mapping: _AsMapping) -> None:
+        """初始化当前 provider attempt 的展示状态。"""
         self._scope = scope
         self._as_mapping = as_mapping
-        self._next_sequence = 1
-        self._next_block_index = 0
+        self._sequence = 1
         self._response_id = ""
-        self._model = ""
-        self._raw_object = ""
-        self._finish_reason = ""
-        self._usage = ModelUsageSnapshot()
         self._started = False
-        self._terminal_emitted = False
+        self.terminal_emitted = False
         self._semantic_output_emitted = False
-        self._blocks: dict[tuple[str, int], _BlockState] = {}
+        self._blocks: dict[tuple[int, str, int], _BlockState] = {}
+        self._tool_items: dict[int, Mapping[str, Any]] = {}
 
-    # endregion
-
-    # ==========================================
-    #                 公开接口
-    # ==========================================
-    # region
-
-    def feed(self, raw_chunk: Any) -> tuple[ModelStreamEvent, ...]:
-        """消费一个 raw chunk 并返回对应的连续 typed events。
-
-        Args:
-            raw_chunk: LiteLLM 返回的单个 Chat Completion chunk。
-
-        Returns:
-            本 chunk 产生的零个或多个 provider-neutral events。
-
-        Raises:
-            IrisProviderStreamProtocolError: chunk shape、顺序或block identity无效。
-        """
-        if self._terminal_emitted:
-            raise IrisProviderStreamProtocolError("provider terminal 后仍收到 chunk")
-
-        sequence_before = self._next_sequence
-        semantic_output_before = self._semantic_output_emitted
+    def feed(self, raw_event: Any) -> tuple[ModelStreamEvent, ...]:
+        """完整处理一个原生事件后才向调用方交付其展示事件。"""
+        if self.terminal_emitted:
+            raise IrisProviderStreamProtocolError("provider terminal 后仍收到 event")
+        sequence_before = self._sequence
+        semantic_before = self._semantic_output_emitted
         try:
-            return self._feed_chunk(raw_chunk)
+            return self._feed_event(self._as_mapping(raw_event))
         except Exception:
-            # 一个raw chunk只在完整通过协议校验后才对consumer可见。
-            self._next_sequence = sequence_before
-            self._semantic_output_emitted = semantic_output_before
+            self._sequence = sequence_before
+            self._semantic_output_emitted = semantic_before
             raise
 
-    def _feed_chunk(self, raw_chunk: Any) -> tuple[ModelStreamEvent, ...]:
-        """处理单个chunk；协议失败时由`feed()`回滚可观察计数。"""
-
-        chunk = self._as_mapping(raw_chunk)
-        if not chunk:
-            raise IrisProviderStreamProtocolError("provider chunk 不是可解析的 mapping")
-
-        self._merge_response_identity(chunk)
-        choices = self._choices(chunk)
-        usage = self._usage_mapping(chunk)
+    def _feed_event(self, event: Mapping[str, Any]) -> tuple[ModelStreamEvent, ...]:
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            raise IrisProviderStreamProtocolError("Responses event 缺少 type")
+        response = self._as_mapping(event.get("response"))
+        if response.get("id"):
+            self._response_id = response["id"]
         events: list[ModelStreamEvent] = []
-
         if not self._started:
             self._started = True
             events.append(
                 ModelResponseStarted(
                     **self._event_fields(),
-                    response_id=self._response_id_or_fallback(),
+                    response_id=self._response_id
+                    or (f"{self._scope.model_stream_id}:response:{self._scope.attempt}"),
                 )
             )
 
-        if choices:
-            choice = choices[0]
-            delta = self._delta(choice)
-            finish_reason = choice.get("finish_reason")
-            delta_events = self._consume_delta(delta)
-            # LiteLLM usage 尾包可能保留字段全为空的占位 choice。
-            if self._finish_reason:
-                if delta_events or (finish_reason is not None and finish_reason != ""):
-                    raise IrisProviderStreamProtocolError("finish reason 后不得再出现语义 choice")
-            else:
-                events.extend(delta_events)
-                if finish_reason is not None and finish_reason != "":
-                    if not isinstance(finish_reason, str):
-                        raise IrisProviderStreamProtocolError("finish_reason 必须是字符串")
-                    self._finish_reason = finish_reason
-                    events.extend(self._complete_blocks())
-
-        if usage is not None:
-            self._usage = self._usage_from_mapping(usage, complete=False)
-            events.append(ModelUsageUpdated(**self._event_fields(), usage=self._usage))
-        return tuple(events)
-
-    def finish(self) -> tuple[ModelStreamEvent, ...]:
-        """在 raw iterator EOF 后生成合法 terminal。
-
-        Returns:
-            最终完整usage事件和唯一response terminal。
-
-        Raises:
-            IrisProviderStreamInterruptedError: EOF前没有合法finish reason。
-        """
-        if self._terminal_emitted:
-            raise IrisProviderStreamProtocolError("provider terminal 已生成")
-        if not self._finish_reason:
-            raise IrisProviderStreamInterruptedError("provider stream 在 finish reason 前结束")
-
-        completed_usage = self._usage.model_copy(update={"complete": True})
-        self._usage = completed_usage
-        events: list[ModelStreamEvent] = [
-            ModelUsageUpdated(**self._event_fields(), usage=completed_usage)
-        ]
-        self._terminal_emitted = True
-        if self._finish_reason in {"cancelled", "canceled"}:
+        if event_type in {"response.completed", "response.failed", "response.incomplete"}:
+            if response.get("status") != event_type.removeprefix("response."):
+                raise IrisProviderStreamProtocolError("Responses event 与 response.status 不一致")
+            parsed = ResponsesMapper().parse_response(response, provider=self._scope.provider)
+            events.extend(self._complete_blocks())
             events.append(
-                ModelResponseCancelled(
+                ModelUsageUpdated(
                     **self._event_fields(),
+                    usage=ModelUsageSnapshot(
+                        input_tokens=parsed.input_tokens,
+                        output_tokens=parsed.output_tokens,
+                        total_tokens=parsed.total_tokens,
+                        complete=True,
+                    ),
+                )
+            )
+            self.terminal_emitted = True
+            events.append(
+                ModelResponseCompleted(
+                    **self._event_fields(),
+                    response=parsed,
                     semantic_output_emitted=self._semantic_output_emitted,
                 )
             )
-            return tuple(events)
-
-        events.append(
-            ModelResponseCompleted(
-                **self._event_fields(),
-                response=self._build_response(),
-                semantic_output_emitted=self._semantic_output_emitted,
+        elif event_type == "error":
+            raise IrisProviderError(
+                "Responses stream 返回 error",
+                status="error",
+                reason=f"{event.get('code') or 'error'}: {event.get('message', '')}",
+                **({"usage": event["usage"]} if event.get("usage") is not None else {}),
             )
-        )
+        elif event_type == "response.output_item.added":
+            item = self._as_mapping(event.get("item"))
+            if item.get("type") == "function_call":
+                output_index = self._output_index(event)
+                self._tool_items[output_index] = item
+                state = self._tool_state(output_index, events)
+                name = item.get("name", "")
+                if name:
+                    events.append(self._delta(state, "tool_name", name, name))
+                # added 只提供工具身份；参数以 delta/done 为准，避免重复累计快照。
+        elif event_type in {
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+        }:
+            state = self._tool_state(self._output_index(event), events)
+            if event_type.endswith(".delta"):
+                events.extend(self._append(state, event.get("delta"), "tool_arguments"))
+            else:
+                events.extend(self._finish_block(state, event.get("arguments"), "tool_arguments"))
+        elif event_type == "response.output_item.done":
+            events.extend(self._complete_blocks(output_index=self._output_index(event)))
+        else:
+            prefix, _, suffix = event_type.rpartition(".")
+            if prefix in _TEXT_EVENTS and suffix in {"delta", "done"}:
+                kind, index_field, text_field = _TEXT_EVENTS[prefix]
+                state = self._text_state(event, prefix, kind, index_field, events)
+                if suffix == "delta":
+                    events.extend(self._append(state, event.get("delta"), kind))
+                else:
+                    events.extend(self._finish_block(state, event.get(text_field), kind))
+        return tuple(events)
+
+    def finish(self) -> tuple[ModelStreamEvent, ...]:
+        """EOF 不能替代原生 response.completed。"""
+        if not self.terminal_emitted:
+            raise IrisProviderStreamInterruptedError("Responses stream 在原生终态前结束")
+        return ()
+
+    def failure_events(self, error: IrisProviderError) -> tuple[ModelStreamEvent, ...]:
+        """先交付失败响应已知用量，再交付唯一失败终态。"""
+        events: list[ModelStreamEvent] = []
+        usage = error.context.get("usage")
+        if usage is not None:
+            events.append(
+                ModelUsageUpdated(
+                    **self._event_fields(),
+                    usage=ModelUsageSnapshot(
+                        input_tokens=usage.get("input_tokens", 0),
+                        output_tokens=usage.get("output_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0),
+                        complete=True,
+                    ),
+                )
+            )
+        events.append(self.fail(error))
         return tuple(events)
 
     def fail(self, error: IrisProviderError) -> ModelResponseFailed:
-        """把 provider异常转换为唯一安全失败terminal。
-
-        Args:
-            error: 已归一化到 Iris provider领域的异常。
-
-        Returns:
-            不包含raw异常详情的失败事件。
-        """
-        if self._terminal_emitted:
+        """将已归一化的 provider 异常转换为唯一失败终态。"""
+        if self.terminal_emitted:
             raise IrisProviderStreamProtocolError("provider terminal 已生成")
-        self._terminal_emitted = True
+        self.terminal_emitted = True
         return ModelResponseFailed(
             **self._event_fields(),
-            error=_safe_provider_error(error),
+            error=safe_provider_error(error),
             semantic_output_emitted=self._semantic_output_emitted,
         )
 
-    # endregion
+    @staticmethod
+    def _output_index(event: Mapping[str, Any]) -> int:
+        value = event.get("output_index")
+        if not isinstance(value, int) or value < 0:
+            raise IrisProviderStreamProtocolError("Responses output_index 必须为非负整数")
+        return value
 
-    # ==========================================
-    #                 内部辅助
-    # ==========================================
-    # region
-
-    def _merge_response_identity(self, chunk: Mapping[str, Any]) -> None:
-        """合并并校验跨chunk稳定的response identity。"""
-        for field_name, attribute_name in (
-            ("id", "_response_id"),
-            ("model", "_model"),
-            ("object", "_raw_object"),
-        ):
-            value = chunk.get(field_name)
-            if value is None or value == "":
-                continue
-            if not isinstance(value, str):
-                raise IrisProviderStreamProtocolError(f"{field_name} 必须是字符串")
-            current = getattr(self, attribute_name)
-            if current and current != value:
-                raise IrisProviderStreamProtocolError(f"{field_name} 在chunks之间不一致")
-            setattr(self, attribute_name, value)
-
-    def _choices(self, chunk: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        """读取且校验单choice Chat Completion stream。"""
-        raw_choices = chunk.get("choices", [])
-        if raw_choices is None:
-            return []
-        if not isinstance(raw_choices, list):
-            raise IrisProviderStreamProtocolError("choices 必须是list")
-        if len(raw_choices) > 1:
-            raise IrisProviderStreamProtocolError("Iris只支持单choice stream")
-        choices = [self._as_mapping(item) for item in raw_choices]
-        if any(not item for item in choices):
-            raise IrisProviderStreamProtocolError("choice 不是可解析的mapping")
-        if choices:
-            choice_index = choices[0].get("index", 0)
-            if choice_index != 0:
-                raise IrisProviderStreamProtocolError("stream choice index 必须为0")
-        return choices
-
-    def _usage_mapping(self, chunk: Mapping[str, Any]) -> Mapping[str, Any] | None:
-        """读取可选usage mapping。"""
-        raw_usage = chunk.get("usage")
-        if raw_usage is None:
-            return None
-        usage = self._as_mapping(raw_usage)
-        if not usage:
-            raise IrisProviderStreamProtocolError("usage 不是可解析的mapping")
-        return usage
-
-    def _delta(self, choice: Mapping[str, Any]) -> Mapping[str, Any]:
-        """读取choice delta mapping。"""
-        raw_delta = choice.get("delta")
-        if raw_delta is None:
-            return {}
-        delta = self._as_mapping(raw_delta)
-        if not delta and raw_delta not in ({}, None):
-            raise IrisProviderStreamProtocolError("choice delta 不是可解析的mapping")
-        return delta
-
-    def _consume_delta(self, delta: Mapping[str, Any]) -> list[ModelStreamEvent]:
-        """按固定语义顺序消费thinking、text与tool-call fragments。"""
-        events: list[ModelStreamEvent] = []
-        reasoning = delta.get("reasoning_content", delta.get("reasoning"))
-        if reasoning is not None:
-            if not isinstance(reasoning, str):
-                raise IrisProviderStreamProtocolError("reasoning delta 必须是字符串")
-            if reasoning:
-                events.extend(self._append_text_delta("thinking", reasoning))
-
-        content = delta.get("content")
-        if content is not None:
-            if not isinstance(content, str):
-                raise IrisProviderStreamProtocolError("content delta 必须是字符串")
-            if content:
-                events.extend(self._append_text_delta("text", content))
-
-        raw_tool_calls = delta.get("tool_calls")
-        if raw_tool_calls is not None:
-            if not isinstance(raw_tool_calls, list):
-                raise IrisProviderStreamProtocolError("tool_calls delta 必须是list")
-            for raw_tool_call in raw_tool_calls:
-                events.extend(self._consume_tool_delta(self._as_mapping(raw_tool_call)))
-        return events
-
-    def _append_text_delta(
+    def _text_state(
         self,
+        event: Mapping[str, Any],
+        prefix: str,
         kind: str,
-        delta: str,
-    ) -> list[ModelStreamEvent]:
-        """追加text或thinking channel并返回对应events。"""
-        key = (kind, 0)
+        index_field: str,
+        events: list[ModelStreamEvent],
+    ) -> _BlockState:
+        key = (self._output_index(event), prefix, event.get(index_field, 0))
         state = self._blocks.get(key)
-        events: list[ModelStreamEvent] = []
         if state is None:
-            block = self._new_block(kind=kind)
-            state = _BlockState(block=block)
-            self._blocks[key] = state
-            events.append(ModelBlockStarted(**self._event_fields(), block=block))
-        if state.completed:
-            raise IrisProviderStreamProtocolError("completed block 后仍收到delta")
-        state.snapshot += delta
-        self._semantic_output_emitted = True
-        events.append(
-            ModelBlockDelta(
-                **self._event_fields(),
-                block=state.block,
-                channel="thinking" if kind == "thinking" else "text",
-                delta=delta,
-                snapshot=state.snapshot,
+            state = self._new_block(
+                key,
+                kind=kind,
+                block_id=f"{event.get('item_id') or key[0]}:{prefix}:{key[2]}",
+            )
+            events.append(ModelBlockStarted(**self._event_fields(), block=state.block))
+        return state
+
+    def _tool_state(self, output_index: int, events: list[ModelStreamEvent]) -> _BlockState:
+        key = (output_index, "function_call", 0)
+        state = self._blocks.get(key)
+        if state is None:
+            item = self._tool_items.get(output_index)
+            if item is None or not item.get("call_id") or not item.get("id"):
+                raise IrisProviderStreamProtocolError("工具参数事件缺少对应 function_call item")
+            state = self._new_block(
+                key,
+                kind="tool_call",
+                block_id=item["id"],
+                tool_call_id=item["call_id"],
+            )
+            events.append(ModelBlockStarted(**self._event_fields(), block=state.block))
+        return state
+
+    def _new_block(
+        self,
+        key: tuple[int, str, int],
+        *,
+        kind: str,
+        block_id: str,
+        tool_call_id: str | None = None,
+    ) -> _BlockState:
+        state = _BlockState(
+            ModelBlockRef(
+                index=len(self._blocks),
+                block_id=block_id,
+                kind=kind,
+                tool_call_id=tool_call_id,
             )
         )
-        return events
+        self._blocks[key] = state
+        return state
 
-    def _consume_tool_delta(
-        self,
-        tool_call: Mapping[str, Any],
-    ) -> list[ModelStreamEvent]:
-        """追加一个function tool-call fragment。"""
-        if not tool_call:
-            raise IrisProviderStreamProtocolError("tool call不是可解析的mapping")
-        provider_index = tool_call.get("index")
-        if isinstance(provider_index, bool) or not isinstance(provider_index, int):
-            raise IrisProviderStreamProtocolError("tool call index必须是整数")
-        if provider_index < 0:
-            raise IrisProviderStreamProtocolError("tool call index不得为负数")
-        tool_type = tool_call.get("type")
-        if tool_type not in {None, "", "function"}:
-            raise IrisProviderStreamProtocolError("只支持function tool call")
-
-        key = ("tool_call", provider_index)
-        state = self._blocks.get(key)
-        events: list[ModelStreamEvent] = []
-        raw_call_id = tool_call.get("id")
-        if raw_call_id is not None and not isinstance(raw_call_id, str):
-            raise IrisProviderStreamProtocolError("tool call id必须是字符串")
-        if state is None:
-            call_id = raw_call_id or (
-                f"{self._scope.model_stream_id}:tool:{self._scope.attempt}:{provider_index}"
-            )
-            block = self._new_block(
-                kind="tool_call",
-                block_id=call_id,
-                tool_call_id=call_id,
-            )
-            state = _BlockState(block=block)
-            self._blocks[key] = state
-            events.append(ModelBlockStarted(**self._event_fields(), block=block))
-        elif raw_call_id and raw_call_id != state.block.tool_call_id:
-            raise IrisProviderStreamProtocolError("tool call id在fragments之间不一致")
+    def _append(self, state: _BlockState, value: Any, channel: str) -> list[ModelStreamEvent]:
+        if not isinstance(value, str):
+            raise IrisProviderStreamProtocolError("Responses 文本增量必须是字符串")
+        if not value:
+            return []
         if state.completed:
-            raise IrisProviderStreamProtocolError("completed tool block后仍收到delta")
+            raise IrisProviderStreamProtocolError("已完成内容块后仍收到增量")
+        state.snapshot += value
+        return [self._delta(state, channel, value, state.snapshot)]
 
-        function = self._as_mapping(tool_call.get("function") or {})
-        name_delta = function.get("name")
-        argument_delta = function.get("arguments")
-        for field_name, value in (("name", name_delta), ("arguments", argument_delta)):
-            if value is not None and not isinstance(value, str):
-                raise IrisProviderStreamProtocolError(f"tool function {field_name}必须是字符串")
-        if name_delta:
-            state.tool_name += name_delta
-            self._semantic_output_emitted = True
-            events.append(
-                ModelBlockDelta(
-                    **self._event_fields(),
-                    block=state.block,
-                    channel="tool_name",
-                    delta=name_delta,
-                    snapshot=state.tool_name,
-                )
-            )
-        if argument_delta:
-            state.tool_arguments += argument_delta
-            self._semantic_output_emitted = True
-            events.append(
-                ModelBlockDelta(
-                    **self._event_fields(),
-                    block=state.block,
-                    channel="tool_arguments",
-                    delta=argument_delta,
-                    snapshot=state.tool_arguments,
-                )
-            )
-        return events
+    def _delta(
+        self, state: _BlockState, channel: str, delta: str, snapshot: str
+    ) -> ModelBlockDelta:
+        self._semantic_output_emitted = True
+        return ModelBlockDelta(
+            **self._event_fields(),
+            block=state.block,
+            channel=channel,
+            delta=delta,
+            snapshot=snapshot,
+        )
 
-    def _complete_blocks(self) -> list[ModelStreamEvent]:
-        """按source order完成所有已开始的blocks。"""
-        events: list[ModelStreamEvent] = []
-        for state in sorted(self._blocks.values(), key=lambda item: item.block.index):
-            if state.completed:
-                continue
-            if state.block.kind == "tool_call":
-                self._validate_completed_tool(state)
+    def _finish_block(
+        self,
+        state: _BlockState,
+        text: Any,
+        channel: str,
+    ) -> list[ModelStreamEvent]:
+        if not isinstance(text, str) or not text.startswith(state.snapshot):
+            raise IrisProviderStreamProtocolError("Responses done 内容与已发送增量不一致")
+        events = self._append(state, text[len(state.snapshot) :], channel)
+        if not state.completed:
             state.completed = True
             events.append(ModelBlockCompleted(**self._event_fields(), block=state.block))
         return events
 
-    def _validate_completed_tool(self, state: _BlockState) -> None:
-        """在block completion边界验证完整tool name与JSON object arguments。"""
-        if not state.tool_name:
-            raise IrisProviderStreamProtocolError("tool call缺少完整name")
-        if not state.tool_arguments:
-            raise IrisProviderStreamProtocolError("tool call缺少完整arguments")
-        try:
-            arguments = json.loads(state.tool_arguments)
-        except json.JSONDecodeError as exc:
-            raise IrisProviderStreamProtocolError("tool arguments不是合法JSON object") from exc
-        if not isinstance(arguments, dict):
-            raise IrisProviderStreamProtocolError("tool arguments必须是JSON object")
-        state.parsed_arguments = arguments
-
-    def _new_block(
-        self,
-        *,
-        kind: str,
-        block_id: str | None = None,
-        tool_call_id: str | None = None,
-    ) -> ModelBlockRef:
-        """按首次出现顺序分配稳定block identity。"""
-        index = self._next_block_index
-        self._next_block_index += 1
-        stable_block_id = block_id or (
-            f"{self._scope.model_stream_id}:block:{self._scope.attempt}:{index}"
-        )
-        return ModelBlockRef(
-            index=index,
-            block_id=stable_block_id,
-            kind=kind,
-            tool_call_id=tool_call_id,
-        )
-
-    def _build_response(self) -> LLMResponse:
-        """从已完成的块构造响应，复用完成边界解析的工具参数。"""
-        blocks = self._ordered_blocks()
-        text = "".join(state.snapshot for state in blocks if state.block.kind == "text")
-        reasoning = "".join(state.snapshot for state in blocks if state.block.kind == "thinking")
-        content: list[ContentBlock] = [TextBlock(text=text)] if text else []
-        content.extend(
-            ToolUseBlock(
-                id=cast(str, state.block.tool_call_id),
-                name=state.tool_name,
-                input=state.parsed_arguments,
-            )
-            for state in blocks
-            if state.block.kind == "tool_call"
-        )
-        raw_object = self._raw_object.removesuffix(".chunk")
-        return LLMResponse(
-            provider=self._scope.provider,
-            id=self._response_id_or_fallback(),
-            model=self._model or self._scope.model,
-            content=content,
-            finish_reason=self._finish_reason,
-            input_tokens=self._usage.input_tokens,
-            output_tokens=self._usage.output_tokens,
-            total_tokens=self._usage.total_tokens,
-            reasoning=reasoning,
-            metadata={"raw_object": raw_object or "chat.completion"},
-        )
-
-    def _ordered_blocks(self) -> list[_BlockState]:
-        """返回按source order排列的blocks。"""
-        return sorted(self._blocks.values(), key=lambda item: item.block.index)
-
-    def _usage_from_mapping(
-        self,
-        usage: Mapping[str, Any],
-        *,
-        complete: bool,
-    ) -> ModelUsageSnapshot:
-        """把provider usage mapping转换为typed snapshot。"""
-        try:
-            return ModelUsageSnapshot(
-                input_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                output_tokens=int(usage.get("completion_tokens", 0) or 0),
-                total_tokens=int(usage.get("total_tokens", 0) or 0),
-                complete=complete,
-            )
-        except (TypeError, ValueError) as exc:
-            raise IrisProviderStreamProtocolError("usage token字段无效") from exc
-
-    def _response_id_or_fallback(self) -> str:
-        """返回provider response id或attempt-local稳定fallback。"""
-        return self._response_id or (
-            f"{self._scope.model_stream_id}:response:{self._scope.attempt}"
-        )
+    def _complete_blocks(self, *, output_index: int | None = None) -> list[ModelStreamEvent]:
+        events: list[ModelStreamEvent] = []
+        for key, state in self._blocks.items():
+            if state.completed or output_index is not None and key[0] != output_index:
+                continue
+            state.completed = True
+            events.append(ModelBlockCompleted(**self._event_fields(), block=state.block))
+        return events
 
     def _event_fields(self) -> dict[str, Any]:
-        """分配下一个连续provider sequence及aware UTC时间。"""
-        fields: dict[str, Any] = {
+        fields = {
             "scope": self._scope,
-            "sequence": self._next_sequence,
+            "sequence": self._sequence,
             "occurred_at": datetime.now(UTC),
         }
-        self._next_sequence += 1
+        self._sequence += 1
         return fields
 
-    # endregion
 
-
-async def _iter_litellm_events(
+async def _iter_responses_events(
     raw_stream: AsyncIterator[Any],
     *,
     scope: ModelStreamScope,
     as_mapping: _AsMapping,
     error_mapper: _ErrorMapper,
-) -> AsyncIterator[ModelStreamEvent]:
-    """直接拉取LiteLLM raw stream并只产出typed events。
-
-    Args:
-        raw_stream: LiteLLM返回的raw async iterator。
-        scope: 当前provider attempt identity。
-        as_mapping: LiteLLM object转换函数。
-        error_mapper: LiteLLM异常到Iris provider异常的mapper。
-
-    Yields:
-        连续的provider-neutral模型流式事件。
-    """
-    accumulator = ModelStreamAccumulator(
-        scope=scope,
-        as_mapping=as_mapping,
-    )
+) -> AsyncGenerator[ModelStreamEvent, None]:
+    """拉取原生 Responses 事件；唯一终态后停止拉取并关闭底层流。"""
+    accumulator = ModelStreamAccumulator(scope=scope, as_mapping=as_mapping)
     try:
         try:
-            async for raw_chunk in raw_stream:
-                for event in accumulator.feed(raw_chunk):
+            async for raw_event in raw_stream:
+                for event in accumulator.feed(raw_event):
                     yield event
+                if accumulator.terminal_emitted:
+                    return
             for event in accumulator.finish():
                 yield event
-        except IrisProviderStreamError as exc:
-            yield accumulator.fail(exc)
+        except IrisProviderError as exc:
+            for event in accumulator.failure_events(exc):
+                yield event
         except Exception as exc:
-            yield accumulator.fail(error_mapper(exc))
+            for event in accumulator.failure_events(error_mapper(exc)):
+                yield event
     finally:
-        close = getattr(raw_stream, "aclose", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:
-                _logger.warning("关闭provider raw stream失败", exc_info=True)
+        await close_raw_stream(raw_stream)
 
 
 def failed_before_start(
@@ -587,27 +345,5 @@ def failed_before_start(
     error: IrisProviderError,
     as_mapping: _AsMapping,
 ) -> ModelResponseFailed:
-    """构造网络调用在首个chunk前失败时的唯一terminal。"""
-    accumulator = ModelStreamAccumulator(
-        scope=scope,
-        as_mapping=as_mapping,
-    )
-    return accumulator.fail(error)
-
-
-def _safe_provider_error(error: IrisProviderError) -> ProviderStreamError:
-    """删除raw异常详情并保留稳定provider code。"""
-    if isinstance(error, IrisProviderStreamInterruptedError):
-        message = "provider stream在合法终态前结束"
-    elif isinstance(error, IrisProviderStreamProtocolError):
-        message = "provider stream响应协议无效"
-    else:
-        message = "provider stream调用失败"
-    return ProviderStreamError(
-        code=error.runtime_code,
-        message=message,
-        retryable=isinstance(
-            error,
-            (IrisAPIConnectionError, IrisRateLimitExceededError),
-        ),
-    )
+    """构造首个事件之前网络调用失败的终态。"""
+    return ModelStreamAccumulator(scope=scope, as_mapping=as_mapping).fail(error)

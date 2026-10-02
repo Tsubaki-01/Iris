@@ -20,6 +20,7 @@ from .models import (
     RunRecord,
     RunToolCallRecord,
     RunUsage,
+    TokenUsage,
     ToolCallPhase,
 )
 
@@ -47,6 +48,19 @@ def reserve_model_step(usage: RunUsage) -> RunUsage:
 def commit_tool_usage(usage: RunUsage) -> RunUsage:
     """把已提交工具调用计数推进一次。"""
     return usage.model_copy(update={"tool_calls_committed": usage.tool_calls_committed + 1})
+
+
+def add_model_failure_usage(usage: RunUsage, increment: TokenUsage | None) -> RunUsage:
+    """终态事务结算未提交主模型响应的用量，不增加成功步骤数。"""
+    if increment is None:
+        return usage
+    return usage.model_copy(
+        update={
+            "input_tokens": usage.input_tokens + increment.input_tokens,
+            "output_tokens": usage.output_tokens + increment.output_tokens,
+            "total_tokens": usage.total_tokens + increment.total_tokens,
+        }
+    )
 
 
 def rebind_checkpoint(
@@ -143,6 +157,7 @@ def mark_tool_call_outcome_unknown(
 
 __all__ = [
     "abandon_activation",
+    "add_model_failure_usage",
     "claim_tool_call",
     "commit_tool_call",
     "commit_tool_usage",

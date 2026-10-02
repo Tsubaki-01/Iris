@@ -2,7 +2,7 @@ name: command-native-example
 
 model:
   provider: deepseek
-  name: deepseek-chat
+  name: deepseek-flash
   temperature: 0
   timeout: 30
 

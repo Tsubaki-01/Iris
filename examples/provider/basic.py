@@ -3,7 +3,7 @@
 Example:
     from examples.provider.basic import build_request
 
-    request = build_request(model="deepseek-chat", prompt="介绍 Iris")
+    request = build_request(model="deepseek-flash", prompt="介绍 Iris")
 """
 
 # region imports
@@ -125,7 +125,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         Exception: 配置或 provider 调用失败时原样传播。
     """
     parser = argparse.ArgumentParser(description="流式调用 Iris provider。")
-    parser.add_argument("--model", default="deepseek/deepseek-chat")
+    parser.add_argument("--model", default="deepseek/deepseek-flash")
     parser.add_argument("--prompt", default="用一句话介绍 Iris。")
     parser.add_argument("--env-file", type=Path)
     args = parser.parse_args(argv)

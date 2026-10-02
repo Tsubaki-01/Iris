@@ -1,7 +1,7 @@
 """配置字段拥有唯一生效入口。"""
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from iris.agents import ModelConfig
 from iris.config import Config, ProviderConfig
@@ -30,16 +30,12 @@ def test_global_config_does_not_expose_inert_provider_options() -> None:
     assert client.timeout == 17
 
 
-@pytest.mark.parametrize(
-    ("config_type", "values"),
-    [
-        (ModelConfig, {"provider": "openai", "name": "gpt-4o", "api_style": "chat"}),
-        (ProviderConfig, {"api_style": "chat"}),
-    ],
-)
-def test_config_rejects_api_style_without_a_behavior_choice(
-    config_type: type[BaseModel], values: dict[str, str]
-) -> None:
-    """唯一 Chat 调用契约不再接受无行为选择的配置字段。"""
+def test_model_owns_protocol_selection_outside_request_options() -> None:
+    """协议在组合时选择，不进入每次逻辑请求。"""
+    assert ModelConfig(provider="openai", name="model").api_style == "responses"
+    model = ModelConfig(provider="openai", name="model", api_style="chat_completions")
+    assert "api_style" not in model.to_llm_request_options()
+    with pytest.raises(ValidationError):
+        ModelConfig(provider="openai", name="model", api_style="chat")
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        config_type.model_validate(values)
+        ProviderConfig.model_validate({"api_style": "chat_completions"})

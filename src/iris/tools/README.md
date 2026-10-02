@@ -43,7 +43,7 @@ graph TD
 核心流程：
 
 1. 用 `CallableTool`、`ToolRegistry.register_function()` 或自定义 `BaseTool` 生成 `ToolDefinition`。
-2. `ToolRegistry` 管理工具名称、别名、分组、deferred 可见性，并导出 provider schema。
+2. `ToolRegistry` 管理工具名称、别名、分组、deferred 可见性，并导出模型可见的逻辑 `ToolSpec`。
 3. `ToolExecutor` 接收 `iris.message.ToolUseBlock`，查找工具、校验输入、检查权限、执行工具、运行 middleware，并返回 `ToolResult`。
 4. 超过 `ToolDefinition.max_result_chars` 的执行结果（含错误）会由 `ToolArtifactStore` 写入 `.iris/tool-results/{encoded_session_id}/{encoded_call_id}-{随机标识}.txt`，返回预览和 artifact 元数据。预检短路错误只裁剪说明，不写入文件。
 
@@ -252,22 +252,19 @@ tool_obj = registry.register_function(
 - `register_function(func, ...)`: 创建 `CallableTool` 并注册，支持 `name`、`description`、`input_model`、`capabilities`、`group`、`deferred`、`preset_kwargs`、`examples`、`tags`、`version`、`deprecated`、`deprecation_message`、`execution_mode`、`concurrency_safe`。显式参数优先于 `@tool` 元数据。
 - `get(name)`: 按主名称或别名获取工具，未找到时抛出工具不存在错误。
 - `view(include_groups=None, allow=None, deny=None)`: 创建只读过滤视图。
-- `active_schemas(provider=None, api_style=None)`: 导出当前活动工具 schema。
+- `active_specs()`: 导出当前活动工具的 `ToolSpec` 逻辑定义。
 - `search_deferred(query, include_groups=None, limit=10, allowed_names=None)`: 搜索 deferred 工具定义；组与名称过滤先于排名和 limit。
 
 `ToolRegistryView.active_tools` 会隐藏 `deferred=True` 的工具，除非名称在 `allow` 中；`deny` 优先级高于 `allow`。`include_groups` 可按 `definition.group` 过滤。
 `available_tools` 返回同一静态过滤范围内的完整目录，包含 deferred 工具；只有宿主原有 `allow`
-可越过组过滤。`schemas_for(names)` 按注册顺序导出指定 canonical names 的完整 Chat schema，
+可越过组过滤。`specs_for(names)` 按注册顺序导出指定 canonical names 的完整 `ToolSpec`，
 不会修改共享视图或激活其它工具。
 
 名称冲突检查直接使用注册表已有的名称和别名索引，不重新遍历已注册工具的定义。
 
-`active_schemas()` 支持的 provider 包装：
-
-- 默认：`{"name", "description", "input_schema"}`
-- `provider="openai", api_style="chat"`: OpenAI Chat Completions function schema
-- `provider="openai", api_style="responses"`: OpenAI Responses function schema
-- `provider="anthropic"`: Anthropic Messages tool schema
+`ToolSpec` 包含 `name`、`description`、`input_schema` 和 `strict`，从已验证的
+`ToolDefinition` 直接投影，不携带执行策略。注册表不接受 provider 或 API 风格参数；
+Responses 与 Chat Completions 的工具包装由 [providers adapter](../providers/README.md) 负责。
 
 ### ToolExecutor
 
@@ -588,7 +585,7 @@ tool-call snapshot/fingerprint 均由 executor 的同一路径构造。
 
 ## Deferred discovery / tool_search
 
-`deferred=True` 的工具默认不会出现在 `active_schemas()` 中，适合注册表内存在大量按需工具时降低模型可见面。
+`deferred=True` 的工具默认不会出现在 `active_specs()` 中，适合注册表内存在大量按需工具时降低模型可见面。
 
 `registry.search_deferred()` 使用 `DeferredToolIndex.search()` 的 BM25-like 本地排序：
 它会对 `name`、`tags`、`group`、`description` 分字段加权，使用 IDF、词频饱和和文档长度归一化计算相关性。
@@ -639,7 +636,6 @@ registry.register(ToolSearchTool(registry.view()))
 - `DocstringSchemaExtractor.extract(func)`: 解析 Google Style docstring 的 summary、Args、Returns、Example/Examples。
 - `schema_from_callable(func, preset_kwargs=...)`: 通过动态 Pydantic 输入模型导出 JSON Schema；函数参数必须有可解析类型注解，支持普通参数和 keyword-only 参数，跳过 `*args`/`**kwargs`，保留 docstring Args 参数说明。
 - `schema_from_pydantic_model(model)`: 导出 Pydantic 模型的完整 JSON Schema，包括 `$defs` 与 `additionalProperties` 等根约束。
-- `to_openai_chat_tool_schema(definition)`、`to_openai_responses_tool_schema(definition)`、`to_anthropic_tool_schema(definition)`: 将 `ToolDefinition` 包装为 provider 需要的 schema 形状。
 
 常见类型映射包括 `str`、`int`、`float`、`bool`、`list`、`set`、`tuple`、`dict`、`Literal`、`Union`/`|`、`Any` 和嵌套 `BaseModel`。不支持的参数类型会触发工具校验错误。
 
@@ -661,9 +657,7 @@ ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolTim
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool,
-register_file_tools, schema_from_callable, schema_from_pydantic_model,
-to_anthropic_tool_schema, to_openai_chat_tool_schema,
-to_openai_responses_tool_schema, tool
+register_file_tools, schema_from_callable, schema_from_pydantic_model, tool
 ```
 
 ## 维护与验证

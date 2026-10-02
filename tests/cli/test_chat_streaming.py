@@ -35,6 +35,7 @@ from iris.message import (
     ModelStreamScope,
     ProviderStreamError,
 )
+from iris.providers.responses import ResponsesAdapter
 from iris.runtime import RuntimeStreamEvent
 from iris.store import InMemoryLifecycleStore
 from tests.harness.fakes import build_runtime, text_response
@@ -166,7 +167,6 @@ def test_run_chat_displays_each_delta_before_reading_the_next_chunk(
     """本地输出在每个增量到达时完成，不等待独立 consumer 调度。"""
     chat = importlib.import_module("iris.cli.chat")
     config = importlib.import_module("iris.config")
-    provider_client = importlib.import_module("iris.providers.client")
     monkeypatch.setattr(config, "_config", config.Config(api_key="test-key"))
     config_path = tmp_path / "agent.yaml"
     config_path.write_text(
@@ -182,16 +182,42 @@ def test_run_chat_displays_each_delta_before_reading_the_next_chunk(
     async def raw_chunks() -> AsyncIterator[dict[str, Any]]:
         try:
             for fragment in ("你", "好"):
-                yield {"choices": [{"delta": {"content": fragment}}]}
+                yield {
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "item_id": "msg-chat",
+                    "content_index": 0,
+                    "delta": fragment,
+                }
                 observed.append("".join(outputs))
-            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+            yield {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-chat",
+                    "model": "test-model",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": "msg-chat",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {"type": "output_text", "text": "你好", "annotations": []}
+                            ],
+                        }
+                    ],
+                },
+            }
         finally:
             closed.set()
 
-    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+    async def fake_invoke(
+        self: ResponsesAdapter, kwargs: dict[str, Any]
+    ) -> AsyncIterator[dict[str, Any]]:
         return raw_chunks()
 
-    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(ResponsesAdapter, "invoke", fake_invoke)
     input_index = 0
 
     def read_input(prompt: str) -> str:

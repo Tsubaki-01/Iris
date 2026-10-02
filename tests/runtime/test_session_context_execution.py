@@ -42,7 +42,7 @@ async def test_initial_memory_budget_includes_discovery_covered_by_summary(
         def estimate_input_tokens(self, request: LLMRequest) -> int:
             self.estimates.append(request)
             base = (
-                950 if any(tool["function"]["name"] == "lookup" for tool in request.tools) else 100
+                950 if any(tool.name == "lookup" for tool in request.tools) else 100
             )
             system = request.messages[0].text
             return base + (60 if "FULL" in system else 20 if "NAV" in system else 0)
@@ -93,7 +93,7 @@ async def test_initial_memory_budget_includes_discovery_covered_by_summary(
     ]
     assert full_candidates
     assert all(
-        any(tool["function"]["name"] == "lookup" for tool in request.tools)
+        any(tool.name == "lookup" for tool in request.tools)
         for request in full_candidates
     )
 

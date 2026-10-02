@@ -33,7 +33,7 @@ def _estimate(request: LLMRequest) -> int:
                 count += len(block.id) + len(block.name) + len(json.dumps(block.input))
             elif isinstance(block, ToolResultBlock):
                 count += len(block.tool_use_id) + len(block.content)
-    count += len(json.dumps(request.tools)) if request.tools else 0
+    count += len(json.dumps([tool.model_dump() for tool in request.tools])) if request.tools else 0
     count += len(json.dumps(request.response_format)) if request.response_format else 0
     return count
 
@@ -209,8 +209,8 @@ def test_planning_counts_fixed_content_tools_schema_and_summary_wrapper() -> Non
         return LLMRequest(
             model="test-model",
             messages=[Msg.system("规则" * 250), *history],
-            tools=[{"description": "工具定义" * 15}],
-            response_format={"description": "响应schema" * 10},
+            tools=[{"name": "tool", "input_schema": {}, "description": "工具定义" * 15}],
+            response_format={"name": "answer", "schema": {"description": "响应schema" * 10}},
         )
 
     assert _select(messages, initial_count=2) == 1

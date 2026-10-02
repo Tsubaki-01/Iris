@@ -10,6 +10,12 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 完整运行请使用 `iris.harness.AgentRunner`。只有实现自定义 lifecycle owner 时才直接调用
 `AgentRuntime.execute()`。
 
+runtime 始终使用同一逻辑请求、工具定义与流式事件契约；provider 构造时默认选择 Responses，
+也可显式选择 Chat Completions。工具 schema、强制选择和请求计量的协议投影由 adapter 负责。
+只有完整成功响应可以提交 assistant 或执行工具；失败、未完成和终态前断流走失败结算。
+runtime 只携带本次未结算的主模型用量，
+由 harness 的既有 FinishRun 路径原子累加；摘要用量仍独立归入 compaction，不重复记账。
+
 MCPTool 经普通工具链进入串行执行。公共 `IrisToolOutcomeUnknownError` 使用已有
 `_unknown_tool_outcome` 结算未确定的 claim，不新增 stop reason 或持久化协议；受信只读的
 SDK 错误仍是普通 ToolResult，遵守 ToolErrorPolicy。MCP 不另建取消 watcher。

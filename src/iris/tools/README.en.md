@@ -165,13 +165,13 @@ It requires resolvable annotations, supports ordinary and keyword-only parameter
 including `$defs` and root constraints such as `additionalProperties`.
 
 `ToolRegistry` registers tools/functions, resolves names and aliases, creates filtered views, exports
-active schemas, and searches deferred definitions. Deny filters override allow filters. Deferred
-tools are hidden unless explicitly allowed. Schema helpers support Iris-native, OpenAI Chat,
-OpenAI Responses, and Anthropic wrapper shapes; runtime's active provider path currently mounts the
-OpenAI Chat shape.
+logical definitions through `active_specs()`, and searches deferred definitions. Deny filters override
+allow filters. Deferred tools are hidden unless explicitly allowed. `ToolSpec` projects validated
+`name`, `description`, and `input_schema` fields with `strict=False`; execution policies stay in the
+registry. [Provider adapters](../providers/README.en.md) own Responses and Chat Completions wrappers.
 `ToolRegistryView.available_tools` includes deferred definitions within the same static filters;
-only the host's original `allow` can bypass a group filter. `schemas_for(names)` exports complete
-Chat schemas for selected canonical names in registration order without changing the shared view.
+only the host's original `allow` can bypass a group filter. `specs_for(names)` exports complete
+logical definitions for selected canonical names in registration order without changing the shared view.
 `search_deferred(query, include_groups=None, limit=10, allowed_names=None)` filters before ranking
 and applying the limit.
 

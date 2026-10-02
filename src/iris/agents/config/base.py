@@ -21,6 +21,7 @@ from ...command.config import CommandConfig
 from ...exceptions import IrisConfigError, IrisValidationError
 from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
+from ...message.llm import ProviderOptions, ResponseFormat, ToolChoice
 from ...providers import ModelRoute, parse_model_route
 from ...todo.config import TodoConfig
 from .compaction import CompactionConfig
@@ -36,12 +37,13 @@ class ModelConfig(BaseModel):
     Attributes:
         provider (str): Provider 名称，例如 `openai`。
         name (str): Provider 下的模型名，例如 `gpt-4o-mini`。
+        api_style: Provider 协议，默认 responses，可显式选择 chat_completions。
         base_url (str | None): 可选 provider base URL。
         temperature (float | None): 采样温度。
         top_p (float | None): nucleus sampling 参数。
         max_tokens (int | None): 最大输出 token 数。
-        tool_choice (str | dict[str, Any] | None): 工具选择策略。
-        response_format (dict[str, Any] | None): 结构化输出配置。
+        tool_choice (ToolChoice | None): 策略或仅含 name 的强制工具选择。
+        response_format (ResponseFormat | None): 文本、JSON object 或命名 JSON Schema。
         timeout (float | None): 单次请求超时时间，单位秒。
         provider_options (dict[str, Any]): 少量 provider 专属选项。
         metadata (dict[str, Any]): 请求级元数据。
@@ -49,14 +51,15 @@ class ModelConfig(BaseModel):
 
     provider: str
     name: str
+    api_style: Literal["responses", "chat_completions"] = "responses"
     base_url: str | None = None
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
-    tool_choice: str | dict[str, Any] | None = None
-    response_format: dict[str, Any] | None = None
+    tool_choice: ToolChoice | None = None
+    response_format: ResponseFormat | None = None
     timeout: float | None = None
-    provider_options: dict[str, Any] = Field(default_factory=dict)
+    provider_options: ProviderOptions = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -87,6 +90,7 @@ class ModelConfig(BaseModel):
                 "provider",
                 "name",
                 "base_url",
+                "api_style",
             },
             exclude_none=True,
         )

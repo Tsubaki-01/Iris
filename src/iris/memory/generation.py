@@ -99,7 +99,7 @@ def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int
         messages=[Msg.system(prompt), Msg.user(json.dumps(source, ensure_ascii=False))],
         max_tokens=max_tokens,
         temperature=0,
-        response_format={"type": "json_object"},
+        response_format="json_object",
     )
 
 

@@ -12,6 +12,8 @@ Example:
 # region imports
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 from ..config import ProviderConfig, get_config, is_config_initialized
@@ -66,6 +68,7 @@ def parse_model_route(model: str) -> ModelRoute:
 def create_provider_client(
     model: str | ModelRoute,
     *,
+    api_style: Literal["responses", "chat_completions"] = "responses",
     api_key: str | None = None,
     base_url: str | None = None,
     timeout: float | None = None,
@@ -75,6 +78,7 @@ def create_provider_client(
 
     Args:
         model (str | ModelRoute): 模型路由字符串或已解析的路由对象，格式为provider/model。
+        api_style: 构造时选定 Responses 或 Chat Completions，默认 Responses。
         api_key (str | None): 显式 API key，优先级最高。
         base_url (str | None): 自定义 provider base URL。
         timeout (float | None): 请求超时时间，单位秒。
@@ -92,9 +96,10 @@ def create_provider_client(
         'openai'
     """
     route = model if isinstance(model, ModelRoute) else parse_model_route(model)
-    provider_config = _resolve_provider_config(route.provider)
+    provider_config = _resolve_provider_config(route.provider, api_style=api_style)
     return ProviderClient(
         provider=route.provider,
+        api_style=api_style,
         litellm_provider=provider_config.litellm_provider,
         api_key=_resolve_api_key(route.provider, api_key),
         base_url=base_url or provider_config.base_url,
@@ -103,28 +108,36 @@ def create_provider_client(
     )
 
 
-def _resolve_provider_config(provider: str) -> ProviderConfig:
+def _resolve_provider_config(
+    provider: str, *, api_style: Literal["responses", "chat_completions"]
+) -> ProviderConfig:
     """从内置和用户声明的注册表中解析 provider 配置。"""
-    provider_config = _provider_registry().get(provider)
+    provider_config = _provider_registry(api_style=api_style).get(provider)
     if provider_config is None:
         raise IrisProviderError("未注册 provider", provider=provider)
     return provider_config
 
 
-def _provider_registry() -> dict[str, ProviderConfig]:
+def _provider_registry(
+    *, api_style: Literal["responses", "chat_completions"]
+) -> dict[str, ProviderConfig]:
     """返回当前可用 provider 注册表。
 
     内置服务商默认配置 + 用户自定义配置合并，支持自定义第三方服务商。"""
     registry = {
         provider: ProviderConfig(litellm_provider=provider) for provider in BUILTIN_PROVIDER_IDS
     }
+    registry["deepseek"] = ProviderConfig(
+        litellm_provider="openai" if api_style == "responses" else "deepseek",
+        base_url="https://api.deepseek.com",
+    )
     if not is_config_initialized():
         return registry
 
     for provider, provider_config in get_config().providers.items():
         if provider in BUILTIN_PROVIDER_IDS:
             registry[provider] = _merge_builtin_provider_config(
-                provider,
+                registry[provider],
                 provider_config,
             )
         elif provider_config.base_url:
@@ -133,22 +146,14 @@ def _provider_registry() -> dict[str, ProviderConfig]:
 
 
 def _merge_builtin_provider_config(
-    provider: str,
+    default: ProviderConfig,
     override: ProviderConfig,
 ) -> ProviderConfig:
     """合并内置 provider 默认配置与用户非 secret override。
 
-    如果用户显式配置了 litellm_provider，尊重用户配置。
-    如果用户没显式配置，只是 ProviderConfig 自带默认 "openai"，那内置 provider 继续用自己的 provider
+    只覆盖用户明确声明的字段，保留内置的原生传输与 endpoint 默认值。
     """
-    litellm_provider = (
-        override.litellm_provider if "litellm_provider" in override.model_fields_set else provider
-    )
-    return ProviderConfig(
-        litellm_provider=litellm_provider,
-        base_url=override.base_url,
-        headers=override.headers,
-    )
+    return default.model_copy(update=override.model_dump(exclude_unset=True))
 
 
 def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str:

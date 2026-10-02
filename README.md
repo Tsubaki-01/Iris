@@ -14,6 +14,10 @@ uv sync
 
 配置 provider API key 后，从仓库根目录启动示例 Agent：
 
+默认模型调用使用原生 Responses，示例使用 `deepseek/deepseek-flash`。
+在 Agent YAML 中设置 `model.api_style: chat_completions` 可显式选择 Chat Completions；默认值为
+`responses`。逻辑 DeepSeek 凭据保持不变，协议由 provider 构造时确定，请求失败不会切换协议。
+
 ```powershell
 uv run iris chat examples/chat/agent.yaml --session-id example
 ```
@@ -35,7 +39,7 @@ Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 
 ```yaml
 name: local-command-agent
-model: deepseek/deepseek-chat
+model: deepseek/deepseek-flash
 system: 根据任务使用文件和命令工具，先检查结果再继续。
 tools:
   builtin: [file.read, file.write, exec.command]
@@ -65,7 +69,7 @@ docker build --load -t iris-command:local .
 
 ```yaml
 name: docker-command-agent
-model: deepseek/deepseek-chat
+model: deepseek/deepseek-flash
 system: 命令运行在本地Linux容器，按工具说明使用共享项目文件。
 tools:
   builtin: [file.read, file.write, exec.command]

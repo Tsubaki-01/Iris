@@ -1,10 +1,10 @@
 """从静态目录与会话原始发现事实派生本步骤工具集合。"""
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..exceptions import IrisConfigError, IrisToolNotFoundError
 from ..lifecycle import SessionToolDiscovery
+from ..message import ToolChoice
 from ..tools import ToolRegistryView
 
 
@@ -14,7 +14,7 @@ class ToolContextSelection:
 
     names: tuple[str, ...]
     optional_names: tuple[str, ...]
-    tool_choice: str | dict[str, Any] | None
+    tool_choice: ToolChoice | None
 
 
 def select_tool_context(
@@ -22,7 +22,7 @@ def select_tool_context(
     discovery: SessionToolDiscovery | None,
     *,
     include_tools: bool,
-    tool_choice: str | dict[str, Any] | None,
+    tool_choice: ToolChoice | None,
 ) -> ToolContextSelection:
     """保持 base 过滤，按已提交 search/使用顺序选择完整 schema 候选。"""
     if not include_tools or tool_choice == "none":
@@ -30,7 +30,7 @@ def select_tool_context(
     available = {tool.name: tool for tool in view.available_tools}
     required = {tool.name for tool in view.active_tools}
     if isinstance(tool_choice, dict):
-        target = tool_choice["function"]["name"]
+        target = tool_choice["name"]
         try:
             canonical = view.get(target).name
         except IrisToolNotFoundError as exc:
@@ -38,7 +38,7 @@ def select_tool_context(
         if canonical not in available:
             raise IrisConfigError("tool_choice 指定的工具被 base view 排除", tool_name=target)
         required.add(canonical)
-        tool_choice = {**tool_choice, "function": {**tool_choice["function"], "name": canonical}}
+        tool_choice = {"name": canonical}
     discovered = discovery.discovered_at if discovery is not None else {}
     used = discovery.used_at if discovery is not None else {}
     latest = discovery.latest_search_names if discovery is not None else ()

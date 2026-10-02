@@ -38,7 +38,7 @@ def _request(window: SessionContextWindow) -> LLMRequest:
             ),
             Msg.user("question"),
         ],
-        tools=[{"type": "function", "function": {"name": "memory_search"}}],
+        tools=[{"name": "memory_search", "input_schema": {}}],
     )
 
 

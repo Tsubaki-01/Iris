@@ -141,6 +141,8 @@ checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable mo
 后续 run、HITL 和恢复复用该窗口；只有成功的 `CommitCompaction.context_window` 会替换它。
 取消、失败或 CAS 冲突均保留旧窗口。Checkpoint v4 通过 session revision 绑定窗口，不复制其正文。
 `RuntimeExecutionOptions` 不再接受 memory 查询、结果快照或字符预算，读取与选择由 runtime 装配负责。
+`request_options` 在此输入边界一次解析逻辑 `tool_choice`、`response_format` 和
+`provider_options`，拒绝协议包装与请求级 `api_style`；runtime 直接应用已经验证的覆盖值。
 
 ### 摘要状态与用量
 

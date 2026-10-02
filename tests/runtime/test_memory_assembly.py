@@ -134,11 +134,13 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
         model: str | ModelRoute,
         *,
         api_key: str | None = None,
+        api_style: str = "responses",
         base_url: str | None = None,
         timeout: float | None = None,
         headers: dict[str, str] | None = None,
     ) -> CompletionProvider:
         assert not injected_provider
+        assert api_style == "responses"
         return provider
 
     def construct(
