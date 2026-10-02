@@ -162,7 +162,7 @@ Checkpoint v4 stores the current batch's visible names in `engine_cursor.visible
 committed with its assistant calls. WAITING, partial progress, and recovery retain that set without
 rerunning source collection or schema selection. Permissions still refresh before execution.
 Completing the batch clears the set for selection at the next main step. See
-[runtime](../runtime/README.en.md#deferred-tool-schemas) for budgets, first-candidate protection,
+[runtime](../runtime/README.en.md#deferred-tool-definitions) for budgets, first-candidate protection,
 and forced tools.
 
 ## Session history branches

@@ -1,4 +1,4 @@
-"""原生 Responses 流式事件与终态解析契约。"""
+"""Responses 流式事件与终态解析契约。"""
 
 from __future__ import annotations
 

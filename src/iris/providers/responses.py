@@ -1,4 +1,4 @@
-"""原生 Responses 消息投影、响应解析与本地计量输入。"""
+"""Responses 协议适配：请求编码、LiteLLM 调用、响应解析与本地计量。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.llm import ResponseFormat
-from ._encoding import chat_tool_choice, chat_tools, function_schema
+from ._tool_encoding import chat_tool_choice, chat_tools, function_schema
 
 
 class ResponsesMapper:
@@ -227,7 +227,7 @@ def responses_text_format(response_format: ResponseFormat) -> dict[str, Any]:
 
 
 class ResponsesAdapter:
-    """固定的原生 Responses 编码、调用和计量适配。"""
+    """固定的 Responses 编码、LiteLLM 调用和计量适配。"""
 
     def encode_request(self, request: LLMRequest, *, transport: str) -> dict[str, Any]:
         """生成协议参数；拒绝尚未接入的原生传输。"""

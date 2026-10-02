@@ -2,7 +2,7 @@
 
 # `iris.tools`
 
-`iris.tools` 是 Iris 的工具内核，负责把 Python 函数或 `BaseTool` 子类包装成模型可见的工具 schema，并在执行时统一处理参数校验、权限、结果归一化、超长输出落盘、middleware 和熔断。
+`iris.tools` 是 Iris 的工具内核，负责把 Python 函数或 `BaseTool` 子类包装成模型可见的逻辑工具定义，并在执行时统一处理参数校验、权限、结果归一化、超长输出落盘、middleware 和熔断。
 
 本文只覆盖 `src/iris/tools` 当前代码中的公共 API。常用导入路径为：
 
@@ -613,15 +613,15 @@ registry.register(ToolSearchTool(registry.view()))
 工具，在排名和 top-k 之前应用 deny/group/allow 与本次组过滤。搜索名称不能扩大宿主的组范围。
 
 返回 JSON 文本和 `data["tools"]` 候选摘要，每项包含 `name`、最多 240 字符的 `description`
-及 `group`；无匹配时列表为空。完整 schema 不放进搜索正文。成功系统搜索结果提交为工具消息后，
+及 `group`；无匹配时列表为空。完整参数 JSON Schema 不放进搜索正文。成功系统搜索结果提交为工具消息后，
 其 `metadata.extra.context_revealed_tools` 保存按排名排列的 canonical names；executor 不接受
 其它工具写入同名字段作为披露事实。该名单来自成功搜索本体，after middleware 重建正文不会
 丢失；最终错误或 on_error 的替代成功结果不产生披露。
 
 低层搜索不修改 registry。完整 runtime 开启 `context_policy.deferred_tools: true` 后自动注册
-该工具，只在搜索结果提交到当前 session 历史后，才为下一主模型请求选择候选完整 schema。
-模型应等下一请求实际披露 schema 后再调用，不能在同一批搜索调用中使用新发现工具。
-预算、强制工具与批次恢复规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
+该工具，只在搜索结果提交到当前 session 历史后，才为下一主模型请求选择候选工具定义及完整参数 JSON Schema。
+模型应等下一请求实际披露工具定义后再调用，不能在同一批搜索调用中使用新发现工具。
+预算、强制工具与批次恢复规则见 [runtime 说明](../runtime/README.md#按需工具定义)。
 
 ## Schema 与装饰器
 

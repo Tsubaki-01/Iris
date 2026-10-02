@@ -247,8 +247,8 @@ class Msg(BaseModel):
     ) -> Msg:
         """创建返回给 LLM 的工具结果消息。
 
-        Anthropic API 要求将工具结果作为 user 角色消息，
-        并放在 `tool_result` 内容块中。
+        Iris 内部以 user 角色承载 `ToolResultBlock`，保留真实工具调用结果。
+        Provider adapter 将其映射为所选 API 协议的工具回执。
         """
         block = ToolResultBlock(
             tool_use_id=tool_use_id,

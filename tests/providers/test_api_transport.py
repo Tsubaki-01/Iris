@@ -149,7 +149,7 @@ def _sse(api_style: str, model: str) -> bytes:
         ("deepseek", "deepseek-chat", "https://api.deepseek.com"),
     ],
 )
-async def test_protocol_http_and_sse(
+async def test_protocol_http_and_native_or_simulated_stream(
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
     api_style: str,

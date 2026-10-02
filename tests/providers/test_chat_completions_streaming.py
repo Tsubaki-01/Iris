@@ -1,4 +1,4 @@
-"""LiteLLM Chat streaming provider 边界测试。"""
+"""Chat Completions 流式事件与终态解析契约。"""
 
 from __future__ import annotations
 
@@ -552,7 +552,7 @@ async def test_chat_reasoning_stream_replays_current_reasoning(
     monkeypatch: pytest.MonkeyPatch, field: str
 ) -> None:
     import iris.providers.client as provider_client
-    from iris.providers.openai import OpenAIChatMapper
+    from iris.providers.chat_completions import ChatCompletionsMapper
 
     raw = _RawStream(
         _chunk(delta={field: "thought", "content": "answer"}), _chunk(finish_reason="stop")
@@ -569,5 +569,5 @@ async def test_chat_reasoning_stream_replays_current_reasoning(
     result = events[-1].response
     message = Msg.model_validate_json(result.to_msg().model_dump_json())
     message.metadata["reasoning"] = "current thought"
-    assert OpenAIChatMapper().format_messages([message])[0][field] == "current thought"
+    assert ChatCompletionsMapper().format_messages([message])[0][field] == "current thought"
     assert "thought" not in json.dumps(message.metadata["chat_completions"])

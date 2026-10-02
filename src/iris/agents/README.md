@@ -161,7 +161,7 @@ compaction 继续工作。同时传入 `context_source` 会在装配时报 `Iris
 两项均须为非负整数。只有工具作者声明为 `observation` 的成功结果可以参与裁剪。
 
 完整请求达到既有 80% 压力线时，runtime 先尝试精确重复正文折叠，再按优先级移除宿主明确
-标为可选的动态贡献及可撤下的 deferred schema，最后按历史顺序短化旧结果。
+标为可选的动态贡献及可撤下的 deferred 工具定义，最后按历史顺序短化旧结果。
 正文替换仅采用能减少完整请求 token 估算的候选；不足时继续原有 LLM compaction。每次实际工具调用
 照常执行，已提交原文保持不变。具体回读可用条件与保护规则见
 [runtime 说明](../runtime/README.md#历史投影与摘要构造)。
@@ -178,8 +178,8 @@ compaction 继续工作。同时传入 `context_source` 会在装配时报 `Iris
 `deferred_tools` 默认 `false`，保持原有 eager/deferred 可见性；设为 `true` 必须同时保持
 `enabled: true`。开启后自动注册 `tool_search`，Python 工具仍按作者的 `deferred` 声明，
 MCP 工具统一标记 deferred；MCP 仍在执行前完整连接和发现。已有 eager 工具、回读工具及
-`load_skill` 保持直接可见。成功搜索结果提交后，下一请求按预算披露候选的完整 schema；
-已选工具名与该批调用一起保存，具体规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
+`load_skill` 保持直接可见。成功搜索结果提交后，下一请求按预算披露候选的逻辑工具定义及完整参数 JSON Schema；
+已选工具名与该批调用一起保存，具体规则见 [runtime 说明](../runtime/README.md#按需工具定义)。
 
 ### `CompactionConfig`
 
@@ -277,7 +277,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 构建服务和自己的概览窗口，不继承父 Agent 的 service。数据库初始化错误直接沿装配入口报告。
 
 开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。静态
-`context.yaml` memory 与已有历史不受关闭影响；`include_tools=False` 仍控制当次工具 schema。
+`context.yaml` memory 与已有历史不受关闭影响；`include_tools=False` 仍控制当次请求是否包含工具定义。
 
 ### `ModelConfig`
 

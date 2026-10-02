@@ -1,7 +1,7 @@
 """工具参数 JSON Schema 生成。
 
-负责将 Python 代码（Pydantic 模型或普通函数签名）转换为各个 LLM Provider
-（如 OpenAI, Anthropic）所需的不同格式的工具定义 Schema。
+从 Pydantic 模型或函数签名生成工具参数 JSON Schema。
+Responses 和 Chat Completions 的工具协议包装由 providers 负责。
 
 Example:
     schema = schema_from_pydantic_model(MyModel)

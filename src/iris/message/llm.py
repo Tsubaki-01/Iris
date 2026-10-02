@@ -150,8 +150,7 @@ class LLMRequest(BaseModel):
     def non_system_messages(self) -> list[Msg]:
         """返回排除系统消息后的消息列表。
 
-        Anthropic 等 API 会把 system prompt 放到顶层字段，因此 adapter 需要
-        一个明确入口获取非 system 消息。
+        仅按 Iris 内部角色过滤；system 消息如何进入请求由协议 adapter 决定。
 
         Returns:
             list[Msg]: 保持原顺序的非 system 消息列表。
@@ -170,11 +169,11 @@ class LLMRequest(BaseModel):
 class LLMResponse(BaseModel):
     """Provider-neutral LLM 响应。
 
-    Adapter 将厂商 raw response 解析成此模型后，上层只需要处理统一字段。
-    厂商特有字段应放入 `metadata`，避免污染 `Msg` 或业务主流程。
+    Adapter 将协议响应解析成此模型后，上层只处理统一字段。
+    协议重放信息与 provider 扩展放入 `metadata`，由所属 adapter 解释。
 
     Attributes:
-        provider (str): 厂商名称，例如 `"openai"` 或 `"anthropic"`。
+        provider (str): 逻辑 provider 标识，例如 `"openai"` 或 `"anthropic"`。
         id (str): 厂商响应 ID。
         model (str): 实际返回响应的模型名称。
         content (list[ContentBlock]): 文本、工具调用等标准内容块。
@@ -183,7 +182,7 @@ class LLMResponse(BaseModel):
         output_tokens (int): 输出 token 数。
         total_tokens (int): token 总数。
         reasoning (str): 推理摘要或推理文本。
-        metadata (dict[str, Any]): 厂商特有或追踪相关元数据。
+        metadata (dict[str, Any]): 协议重放信息与 provider 扩展、追踪元数据。
 
     Example:
         >>> response = LLMResponse(provider="openai", content=[TextBlock(text="你好")])
@@ -205,8 +204,8 @@ class LLMResponse(BaseModel):
     def to_msg(self) -> Msg:
         """转换为 Iris 内部助手消息。
 
-        Provider 字段统一进入 `Msg.metadata`，这样 `Msg` 可以保持稳定，
-        不会随着 OpenAI、Anthropic 等厂商字段变化而扩张。
+        响应身份、用量与协议重放信息统一进入 `Msg.metadata`。
+        内容块保留正文与工具参数，业务层无需理解协议字段。
 
         Returns:
             Msg: 包含标准内容块和响应元数据的 assistant 消息。

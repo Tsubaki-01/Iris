@@ -93,14 +93,14 @@ class CancellationSignal(Protocol):
 
 
 class ToolDefinition(BaseModel):
-    """工具暴露给 registry 和 provider schema 的定义。
+    """工具注册、执行与模型可见投影使用的元数据和参数定义。
 
     统一了所有工具的对外元数据，在 LLM 发现和挂载时作为标准格式读取。
 
     Attributes:
         name (str): 暴露给 LLM 的工具名称。
         description (str): 提供给 LLM 的功能描述和参数说明。
-        input_schema (dict[str, Any]): OpenAPI 格式的 json schema，规范入参。
+        input_schema (dict[str, Any]): 工具参数的 JSON Schema，约束输入结构。
         capabilities (set[ToolCapability]): 安全隔离级别标识标签。
         group (str): 工具分类，通常用于批量注册或过滤。
         aliases (tuple[str, ...]): 可能的同义名称。

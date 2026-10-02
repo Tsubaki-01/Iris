@@ -142,9 +142,9 @@ def consume(event: ModelStreamEvent) -> str | None:
 
 本包不负责：
 
-- LiteLLM/OpenAI/Anthropic 消息格式映射；
+- Responses / Chat Completions 请求与响应映射；
 - provider raw stream 拉取、网络请求、重试或错误映射；
-- 工具 schema 生成与执行；
+- 工具参数 JSON Schema 生成与工具执行；
 - history 持久化或上下文预算管理。
 
 ## 维护与验证
@@ -154,7 +154,7 @@ def consume(event: ModelStreamEvent) -> str | None:
 | 消息构造与 conversation/request 装配 | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
 | 请求/响应字段与 `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
-| provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
+| provider wire mapping | `../providers/chat_completions.py`, `../providers/responses.py` | `tests/test_provider_client.py` |
 
 ```bash
 uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py

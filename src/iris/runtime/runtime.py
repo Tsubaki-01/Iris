@@ -1064,7 +1064,7 @@ class AgentRuntime:
     def _select_tools(
         self, snapshot: SessionContextSnapshot, options: RuntimeExecutionOptions
     ) -> ToolContextSelection:
-        """从当前配置和同一快照的发现事实选择完整 schema。"""
+        """从当前配置和同一快照的发现事实选择完整的逻辑工具定义。"""
         return select_tool_context(
             self.environment.tool_bridge.tool_view,
             snapshot.tool_discovery,
@@ -1082,7 +1082,7 @@ class AgentRuntime:
         context_window: SessionContextWindow,
         tool_selection: ToolContextSelection,
     ) -> tuple[LLMRequest, ContextBuildOutput]:
-        """按同一窗口组装完整消息、模型选项和实际工具schema。"""
+        """按同一窗口组装完整消息、模型选项和逻辑工具定义。"""
         context_input = self.environment.context_input.model_copy(
             update={"before_current_input": None}
         )

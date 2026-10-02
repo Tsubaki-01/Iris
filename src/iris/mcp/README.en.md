@@ -46,7 +46,7 @@ schemas for the next request. The default `false` retains eager visibility. This
 schemas only: all servers still connect, discover, and publish before execution. Connection lifetimes
 and required/optional preparation failures are unchanged. Runtime selects schemas per session and
 step without unloading connections or changing the catalog. See
-[deferred tools](../runtime/README.en.md#deferred-tool-schemas).
+[deferred tools](../runtime/README.en.md#deferred-tool-definitions).
 
 `resolve_server_config()` expands `${VAR}`, `${VAR:-default}`, and `${env:VAR}` exactly once.
 STDIO environment precedence is env_vars → envFile → env; the host environment stays unchanged.

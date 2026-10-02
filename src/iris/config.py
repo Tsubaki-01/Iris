@@ -38,8 +38,8 @@ class ProviderConfig(BaseModel):
     """单个 provider 的非 secret 运行配置。
 
     Attributes:
-        litellm_provider (str): 传给 LiteLLM 的 provider 名称。
-        base_url (str | None): OpenAI-compatible 中转站的 endpoint。
+        litellm_provider (str): LiteLLM 传输 provider 名称，独立于 API 协议选择。
+        base_url (str | None): Provider endpoint，可指向服务商或网关。
         headers (dict[str, str]): 透传给 provider 的额外 headers。
     """
 

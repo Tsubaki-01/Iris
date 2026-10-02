@@ -12,7 +12,7 @@ from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import AgentRunRequest, RunStopReason
 from iris.message import LLMRequest, Msg, ToolSpec
 from iris.providers import ProviderClient
-from iris.providers.openai import ChatCompletionsAdapter
+from iris.providers.chat_completions import ChatCompletionsAdapter
 from iris.providers.responses import ResponsesAdapter
 from iris.runtime._compaction_summary import (
     consume_summary_response,

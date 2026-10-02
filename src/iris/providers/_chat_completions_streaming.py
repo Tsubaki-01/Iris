@@ -1,6 +1,6 @@
-"""LiteLLM Chat Completion 流式响应归一化。
+"""LiteLLM Chat Completions 流式响应归一化。
 
-该内部模块直接拉取 raw chunks，并在 provider 边界内完成block聚合和终态构造。
+该内部模块拉取 LiteLLM 返回的 Chat Completions chunks，聚合内容块并构造 Iris 终态事件。
 
 Example:
     `ProviderClient.stream()` 使用本模块并只向调用方产出 `ModelStreamEvent`。
@@ -38,15 +38,14 @@ from ..message import (
     TextBlock,
     ToolUseBlock,
 )
+from ._stream_utils import close_raw_stream, safe_provider_error
+from .chat_completions import chat_reasoning_field
 
 # endregion
 # ==========================================
 #                 内部常量
 # ==========================================
 # region constants
-from ._stream_utils import close_raw_stream, safe_provider_error
-from .openai import chat_reasoning_field
-
 _AsMapping = Callable[[Any], Mapping[str, Any]]
 _ErrorMapper = Callable[[Exception], IrisProviderError]
 
@@ -65,8 +64,8 @@ class _BlockState:
     completed: bool = False
 
 
-class ModelStreamAccumulator:
-    """将 LiteLLM-shaped chunks 聚合为稳定模型流式事件。"""
+class ChatCompletionsStreamAccumulator:
+    """将 LiteLLM Chat Completions chunks 聚合为 Iris 模型流式事件。"""
 
     # ==========================================
     #                 状态初始化
@@ -113,7 +112,7 @@ class ModelStreamAccumulator:
         """消费一个 raw chunk 并返回对应的连续 typed events。
 
         Args:
-            raw_chunk: LiteLLM 返回的单个 Chat Completion chunk。
+            raw_chunk: LiteLLM 返回的单个 Chat Completions chunk。
 
         Returns:
             本 chunk 产生的零个或多个 provider-neutral events。
@@ -270,7 +269,7 @@ class ModelStreamAccumulator:
             setattr(self, attribute_name, value)
 
     def _choices(self, chunk: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        """读取且校验单choice Chat Completion stream。"""
+        """读取且校验单choice Chat Completions stream。"""
         raw_choices = chunk.get("choices", [])
         if raw_choices is None:
             return []
@@ -560,14 +559,14 @@ class ModelStreamAccumulator:
     # endregion
 
 
-async def _iter_litellm_events(
+async def _iter_chat_completions_events(
     raw_stream: AsyncIterator[Any],
     *,
     scope: ModelStreamScope,
     as_mapping: _AsMapping,
     error_mapper: _ErrorMapper,
 ) -> AsyncGenerator[ModelStreamEvent, None]:
-    """直接拉取LiteLLM raw stream并只产出typed events。
+    """消费 LiteLLM Chat Completions 流并产出 Iris 模型事件。
 
     Args:
         raw_stream: LiteLLM返回的raw async iterator。
@@ -578,7 +577,7 @@ async def _iter_litellm_events(
     Yields:
         连续的provider-neutral模型流式事件。
     """
-    accumulator = ModelStreamAccumulator(
+    accumulator = ChatCompletionsStreamAccumulator(
         scope=scope,
         as_mapping=as_mapping,
     )

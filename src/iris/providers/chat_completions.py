@@ -1,7 +1,7 @@
-"""OpenAI Chat 消息格式 helper。
+"""Chat Completions 协议适配。
 
-本模块只保留 LiteLLM Chat Completion active path 需要的 OpenAI Chat
-消息格式化与响应解析逻辑，不再提供公开 adapter API。
+将 Iris 逻辑请求编码为 Chat Completions 参数，通过 LiteLLM 调用，
+并统一解析响应、重放推理字段和投影本地 token 计量输入。
 """
 
 # region imports
@@ -25,23 +25,23 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.llm import ResponseFormat
-from ._encoding import chat_tool_choice, chat_tools
+from ._tool_encoding import chat_tool_choice, chat_tools
 
 # endregion
 
 
-class OpenAIChatMapper:
-    """OpenAI Chat 消息格式 helper。"""
+class ChatCompletionsMapper:
+    """在 Iris 消息与 Chat Completions 消息格式之间转换。"""
 
     def format_messages(self, messages: list[Msg]) -> list[dict[str, Any]]:
-        """转换消息列表为 OpenAI Chat messages 形状。"""
+        """转换消息列表为 Chat Completions messages 形状。"""
         result: list[dict[str, Any]] = []
         for msg in messages:
             result.extend(self._format_message(msg))
         return result
 
     def _format_message(self, msg: Msg) -> list[dict[str, Any]]:
-        """转换单条 Iris 消息为 OpenAI Chat message。"""
+        """转换单条 Iris 消息为 Chat Completions message。"""
         if msg.tool_results:
             return [self._format_tool_result(block) for block in msg.tool_results]
 
@@ -56,7 +56,7 @@ class OpenAIChatMapper:
         return [item]
 
     def _format_tool_result(self, block: ToolResultBlock) -> dict[str, Any]:
-        """转换工具结果块为 OpenAI Chat tool message。"""
+        """转换工具结果块为 Chat Completions tool message。"""
         return {
             "role": "tool",
             "tool_call_id": block.tool_use_id,
@@ -64,7 +64,7 @@ class OpenAIChatMapper:
         }
 
     def _format_tool_call(self, block: ToolUseBlock) -> dict[str, Any]:
-        """转换工具调用块为 OpenAI Chat function tool call。"""
+        """转换工具调用块为 Chat Completions function tool call。"""
         return {
             "id": block.id,
             "type": "function",
@@ -161,8 +161,10 @@ class ChatCompletionsAdapter:
     """固定的 Chat Completions 编码、调用和计量适配。"""
 
     def encode_request(self, request: LLMRequest, *, transport: str) -> dict[str, Any]:
-        """生成 Chat 请求参数，运输路由由 LiteLLM provider 决定。"""
-        kwargs: dict[str, Any] = {"messages": OpenAIChatMapper().format_messages(request.messages)}
+        """生成 Chat Completions 参数；传输 provider 路由由 client 交给 LiteLLM。"""
+        kwargs: dict[str, Any] = {
+            "messages": ChatCompletionsMapper().format_messages(request.messages)
+        }
         if request.tools:
             kwargs["tools"] = chat_tools(request.tools)
         if request.tool_choice is not None:
@@ -178,12 +180,12 @@ class ChatCompletionsAdapter:
         return kwargs
 
     async def invoke(self, kwargs: dict[str, Any]) -> Any:
-        """直接调用 Chat Completions，不尝试 Responses 回退。"""
+        """通过 LiteLLM 调用 Chat Completions，协议在 client 构造时已确定。"""
         return await litellm.acompletion(**kwargs)
 
     def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
         """解析完整 Chat 响应。"""
-        return OpenAIChatMapper().parse_response(data, provider=provider)
+        return ChatCompletionsMapper().parse_response(data, provider=provider)
 
     def token_count_projection(self, request: LLMRequest, *, transport: str) -> dict[str, Any]:
         """使用实际 Chat messages、工具和选择生成本地计量输入。"""

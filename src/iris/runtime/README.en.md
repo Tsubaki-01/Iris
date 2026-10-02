@@ -60,7 +60,7 @@ wait for newly generated memories; successful compaction adopts only the overvie
 
 `iris.providers.CompletionProvider` must implement both `complete()` and synchronous
 `estimate_input_tokens(request)`.
-The latter estimates the complete request after model options and tool schemas are applied. Custom
+The latter estimates the complete request after model options and tool definitions are applied. Custom
 providers and test doubles use the same contract. Compaction configuration is carried by
 `RuntimeEnvironment.agent_config.compaction`; no separate environment field is needed.
 
@@ -139,9 +139,9 @@ content needed for later exact recall through tool results or files.
 
 All contributions remain below the pressure threshold. Under pressure, runtime first tries exact
 duplicate body folding, then removes explicitly `required=False` contributions and optional deferred
-schemas, then shortens old tool bodies before existing LLM compaction. Required entries remain. Lower
+tool definitions, then shortens old tool bodies before existing LLM compaction. Required entries remain. Lower
 priorities are removed first; ties remove later entries first. Each change remeasures the complete
-request, including static context, history, the snapshot, model options, and tool schemas. The model
+request, including static context, history, the snapshot, model options, and tool definitions. The model
 does not decide from text semantics which host constraints may be dropped.
 
 Optional contributions are selected only once in the step's initial request. Candidate summary cuts,
@@ -150,7 +150,7 @@ space. The next step collects and selects again. Dynamic snapshots, optional sel
 compaction still work with `include_tools=false` or an effective `tool_choice` that disallows recall;
 tool-body reduction follows the recall conditions below.
 
-### Deferred tool schemas
+### Deferred tool definitions
 
 `context_policy.deferred_tools` is off by default. When enabled, shared assembly registers
 `tool_search` and marks MCP definitions deferred; Python tools keep their author's declaration.
@@ -162,16 +162,16 @@ The store incrementally maintains session discovery, successful use, latest-sear
 first-result protection as messages commit. [`_tool_context.py`](./_tool_context.py) consumes that
 projection without rescanning raw history on each step. Facts originate in committed results'
 `metadata.extra.context_revealed_tools`, not search text or summaries. Only committed successful search results reveal tools; later calls in the same
-batch cannot use newly discovered names. The next `before_model` selects their complete schemas
-without truncating parameter definitions. Candidates must still exist in the registry and satisfy
+batch cannot use newly discovered names. The next `before_model` selects their logical tool definitions
+with full parameter JSON Schema. Candidates must still exist in the registry and satisfy
 the static base view: deny wins, only the host's original allow can bypass group filters, and search
 never changes the shared allow set.
 
 Eager tools and explicit host base allow entries are required. After model configuration and
-request_options are merged, a function forced by effective `tool_choice` is also required, including
+request_options are merged, a tool forced by effective `tool_choice` is also required, including
 an unsearched deferred tool. Aliases resolve to canonical names. Missing or base-excluded targets
-raise `IrisConfigError` instead of producing a forced request without its target schema.
-`include_tools=false` or effective `tool_choice="none"` sends no tool schemas.
+raise `IrisConfigError` instead of producing a forced request without its target definition.
+`include_tools=false` or effective `tool_choice="none"` includes no tool definitions.
 
 Optional candidates prioritize the latest search's rank, then recent successful use, recent
 discovery, and canonical name. Until an assistant main response commits after a search batch, the
@@ -179,11 +179,11 @@ first candidate from every successful search in that batch is protected for the 
 use it. A subsequent main response, including a final text answer, consumes that protection;
 uncommitted responses and summaries do not. Other candidates are removed in reverse order after
 optional host contributions, remeasuring the complete request each time. Required and protected
-schemas that still exceed capacity follow existing compaction/capacity errors rather than being
+tool definitions that still exceed capacity follow existing compaction/capacity errors rather than being
 dropped to evade the budget.
 
-Priority selects membership; schemas retain registry order. After initial selection, the step reuses
-the same set during budget planning, summary retries, and post-compaction requests. Removing a schema
+Priority selects membership; tool definitions retain registry order. After initial selection, the step reuses
+the same set during budget planning, summary retries, and post-compaction requests. Removing a tool definition
 does not erase discovery facts: the next step can reselect it, and another search can raise its rank.
 Recall-dependent body reduction still requires callable `context_read` in the final request.
 
@@ -216,12 +216,12 @@ With the default `context_policy`, offloaded tool results receive
 `result:<message_index>:<block_index>` references before history projection. Indices refer to original
 history: suffix positions start at the persisted coverage boundary and prefix anchors retain their
 absolute positions. A summary does not renumber them. This copy-on-write view does not persist
-the retrieval notice in durable messages. Notices and `context_read/search` schemas both enter full
+the retrieval notice in durable messages. Notices and `context_read/search` tool definitions both enter full
 request estimation.
 
 [`_context_projection.py`](./_context_projection.py)'s `project_context_request()` runs when the
 complete request reaches the existing 80% trigger. It first folds exact duplicate tool bodies, then
-selects optional dynamic contributions and deferred schemas, then shortens older observation results in history order.
+selects optional dynamic contributions and deferred tool definitions, then shortens older observation results in history order.
 Body replacements are accepted only when the full `LLMRequest` token estimate decreases. Reduction
 stops below the trigger, avoiding a summary call when enough space has been
 reclaimed. Artifacts still handle individual large outputs; this projection also handles accumulated
@@ -242,9 +242,9 @@ medium-sized results across many calls.
   Notices and refs also count toward the request. Existing offload previews can be shortened, but
   representatives retained for actual duplicate folds are not shortened again.
 
-Reduction requires a visible `context_read` schema and an effective `tool_choice`, after combining
+Reduction requires a visible `context_read` tool definition and an effective `tool_choice`, after combining
 model configuration with per-run request_options, that permits calling it. It is skipped when
-`include_tools=false`, `tool_choice="none"`, the read schema is hidden, or a different function is
+`include_tools=false`, `tool_choice="none"`, the read tool is hidden, or a different tool is
 forced. Forcing `context_read` itself still permits reduction. Existing LLM compaction remains available.
 
 The main request, candidate summary cuts, and final post-compaction request share the same projection
@@ -475,18 +475,18 @@ summary and window, while subsequent requests without a service continue to omit
 All namespaces, status warnings, actual tool guidance, and wrappers share
 `floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`, with a default ratio
 of 2%. Cost is the provider's estimate difference between the same complete request with and without
-the overview. Existing system text, static memory, history, and tool schemas are not charged twice.
+the overview. Existing system text, static memory, history, and tool definitions are not charged twice.
 If full exceeds this allowance or a reducible system/request limit, selection tries all knowledge
 scope together. If that still exceeds the allowance, it reports a capacity error without dropping
 namespaces or adding a third fallback. Existing compaction handles ordinary history capacity.
 The dedicated full/base allowance difference uses matching, unpruned history. Post-compaction window
-adoption also puts the same selected snapshot and schemas in both requests, so released tool-body tokens cannot
+adoption also puts the same selected snapshot and tool definitions in both requests, so released tool-body tokens cannot
 change the measured overview cost. After window selection, the actual main request passes through
 projection, including newly adopted post-compaction windows, without
 reselecting dynamic contributions or tools.
 
 The internal `MeasuredRequest` carries an exact request with its complete input token estimate.
-Request assembly appends the dynamic snapshot once before measuring; changes to bodies, schemas,
+Request assembly appends the dynamic snapshot once before measuring; changes to bodies, tool definitions,
 or overview text produce a newly measured candidate. Unchanged projection, the compaction entry,
 and cut-point selection reuse the existing number, so a low-pressure main step measures once.
 Window adoption returns the selected unpruned request and its estimate directly to projection,
@@ -609,7 +609,7 @@ original-history preservation, and recall respectively.
 Dynamic collection and selection are covered by `tests/runtime/test_context_source.py`,
 `tests/runtime/test_context_selection.py`, and `tests/harness/test_context_source_integration.py`,
 including steps and recovery, budget ordering, and runner wiring.
-Deferred schemas are covered by `tests/runtime/test_deferred_selection.py` and
+Deferred tool definitions are covered by `tests/runtime/test_deferred_selection.py` and
 `tests/harness/test_deferred_tool_context.py`, including discovery ranking, forced tools, session
 isolation, and batch recovery.
 

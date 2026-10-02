@@ -108,7 +108,7 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 
 - `ModelConfig` accepts structured fields or the `provider/model` shorthand. `to_model_route()`
   returns a provider route; `to_llm_request_options()` returns only request-level fields. The active
-  provider is selected at construction through `model.api_style`: `responses` by default or explicit
+  API protocol is selected at construction through `model.api_style`: `responses` by default or explicit
   `chat_completions`. This field is excluded from request options and cannot be set through
   `provider_options`. Forced tool choice is `{name: read_file}`; response format is `text`,
   `json_object`, or `{name, schema, strict?}`. Protocol wrappers belong to providers.
@@ -169,7 +169,7 @@ Both settings require nonnegative integers. Only successful results declared `ob
 tool author are eligible.
 
 At the existing 80% full-request threshold, runtime first folds exact duplicate bodies, then removes
-explicitly optional host contributions by priority and removable deferred schemas, then shortens
+explicitly optional host contributions by priority and removable deferred tool definitions, then shortens
 older results in history order.
 Body replacements are accepted only when they reduce the complete request's token estimate;
 existing LLM compaction follows if needed. Every actual tool call still executes and raw
@@ -190,9 +190,9 @@ entries can be selected out. See the [context protocol and example](../context/R
 `enabled: true` and automatically registers `tool_search`. Python tools retain their author's
 `deferred` declaration; MCP tools become deferred, while MCP still connects and discovers its complete
 catalog before execution. Existing eager tools, context read tools, and `load_skill` stay directly
-visible. After a successful search result commits, the next request selects complete candidate schemas
-within its budget. The selected names are saved with that batch's calls; see
-[runtime](../runtime/README.en.md#deferred-tool-schemas) for the detailed rules.
+visible. After a successful search result commits, the next request selects candidate tool definitions
+with full parameter JSON Schema within its budget. The selected names are saved with that batch's calls; see
+[runtime](../runtime/README.en.md#deferred-tool-definitions) for the detailed rules.
 
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
 Enable it to connect the service, published overview, and both read tools:
@@ -228,7 +228,7 @@ Initialization failures propagate from assembly.
 
 The switch is fixed when constructing the Agent. Rebuild it and start a new session after changing
 the setting; hot switching is not supported. Static context memory and existing history remain.
-`include_tools=False` still controls whether a request sends tool schemas.
+`include_tools=False` still controls whether a request includes tool definitions.
 
 `build_tool_registry(config, *, memory_service=None, memory_config=None, command_binding=None)` registers Search/Fetch
 when given a resolved service, then declared builtins and Python extensions. Explicit memory writes

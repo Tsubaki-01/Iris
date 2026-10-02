@@ -3,7 +3,7 @@
 # `iris.tools`
 
 `iris.tools` is Iris's tool kernel. It adapts Python callables or `BaseTool` subclasses into
-model-visible schemas and centralizes input validation, permission checks, execution, result
+model-visible tool definitions and centralizes input validation, permission checks, execution, result
 normalization, large-output artifacts, middleware, and circuit breaking.
 
 ## Architecture
@@ -449,17 +449,17 @@ The lower-level registry search still defaults to 10. Base deny/group/allow and 
 apply before ranking and top-k; search results cannot expand the host's group scope.
 
 JSON text and `data["tools"]` contain candidate summaries with `name`, `description` capped at 240
-characters, and `group`. No matches return an empty list; full schemas stay out of search text.
+characters, and `group`. No matches return an empty list; full parameter JSON Schema stays out of search text.
 A successful system search saves ranked canonical names in the committed tool message's
 `metadata.extra.context_revealed_tools`. Executor does not accept this field from other tools as a
 disclosure fact. Names come from the successful search body and survive an after-middleware text
 replacement; final errors and successful on_error substitutes do not create disclosure.
 
 Search alone does not mutate the registry. With `context_policy.deferred_tools: true`, runtime
-registers the tool automatically and selects complete candidate schemas for the next main model
-request only after the search result commits to that session's history. Newly found tools cannot
-be used in the same batch as their discovery call; the model waits for an actual schema in the next
-request. See [runtime](../runtime/README.en.md#deferred-tool-schemas) for budgets, forced tools,
+registers the tool automatically and selects candidate tool definitions with full parameter JSON Schema
+for the next main model request only after the search result commits to that session's history. Newly found tools cannot
+be used in the same batch as their discovery call; the model waits for the tool definition in the next
+request. See [runtime](../runtime/README.en.md#deferred-tool-definitions) for budgets, forced tools,
 and batch recovery.
 
 ## Public surface and boundaries

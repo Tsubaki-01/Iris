@@ -137,7 +137,7 @@ MCP 仍在执行前完整 prepare，按需 schema 不推迟连接或发现。
 checkpoint v4 的 `engine_cursor.visible_tool_names` 保存产生当前工具批次的可见名称，
 与 assistant calls 一起提交。WAITING、部分工具完成和恢复均保留该集合，不重跑 source
 或 schema 选材；工具权限仍在执行前刷新。批次完成后清空，下一个主步骤重新选择。
-预算、首项保护及 forced tool 规则见 [runtime 说明](../runtime/README.md#按需工具-schema)。
+预算、首项保护及 forced tool 规则见 [runtime 说明](../runtime/README.md#按需工具定义)。
 
 ## 会话历史分支
 

@@ -1,4 +1,4 @@
-"""两种协议共用的函数字段与本地 tokenizer 投影。"""
+"""工具协议编码：共用 function 字段，以及 Chat Completions 和 tokenizer 的包装。"""
 
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ def function_schema(tool: ToolSpec) -> dict[str, Any]:
 
 
 def chat_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
-    """生成 Chat 工具包装，同时供本地 tokenizer 使用。"""
+    """生成 Chat Completions 工具包装，同时供本地 tokenizer 使用。"""
     return [{"type": "function", "function": function_schema(tool)} for tool in tools]
 
 
 def chat_tool_choice(choice: ToolChoice | None) -> str | dict[str, Any] | None:
-    """生成 Chat 强制工具选择；命名策略保持原值。"""
+    """编码命名工具选择；auto、none、required 策略保持原值。"""
     if isinstance(choice, dict):
         return {"type": "function", "function": {"name": choice["name"]}}
     return choice

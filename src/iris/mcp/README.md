@@ -39,7 +39,7 @@ child 使用相同 YAML 配置和独立连接，admission 前准备，WAITING/�
 `tool_search` 发现，成功结果提交后再为下一请求选择完整 schema。默认 `false` 保持 eager。
 这只减少模型请求中的 schema：所有服务仍在执行前完整连接、发现和发布，连接生命周期与
 required/optional 准备失败语义不变。预算内的可见集合由 runtime 按 session/步骤选择，
-不会卸载连接或更改 MCP 目录。见 [按需工具说明](../runtime/README.md#按需工具-schema)。
+不会卸载连接或更改 MCP 目录。见 [按需工具说明](../runtime/README.md#按需工具定义)。
 
 `resolve_server_config()` 处理 `${VAR}`、`${VAR:-default}`、`${env:VAR}`，只展开一次。
 STDIO 环境优先级为 env_vars → envFile → env；不修改宿主环境。相对 cwd/envFile

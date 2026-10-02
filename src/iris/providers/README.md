@@ -47,7 +47,10 @@ flowchart LR
     LiteLLM --> Response["LLMResponse / ModelStreamEvent"]
 ```
 
-`ResponsesMapper`、`OpenAIChatMapper` 和两个 adapter 都是内部实现，不从包顶层导出。
+`responses.py` 与 `chat_completions.py` 按 API 协议命名，分别负责请求编码、LiteLLM 调用、
+响应解析、历史重放和计量投影。对应的流式模块处理各自协议事件；`_tool_encoding.py` 共享
+工具格式编码，`_stream_utils.py` 共享资源关闭、错误投影和首个事件前的失败终态。
+`ResponsesMapper`、`ChatCompletionsMapper` 和两个 adapter 都是内部实现，不从包顶层导出。
 
 ## 公开接口
 
@@ -68,7 +71,7 @@ flowchart LR
 `providers[name].base_url` 或 Agent `model.base_url`；timeout 使用 `model.timeout` 或
 显式 client 参数，日志通过 Python `logging` 配置。全局不再声明无效的 `base_url/timeout/debug`。
 `ProviderConfig` 只声明 `litellm_provider`、`base_url` 和 `headers`。协议配置的唯一 YAML 入口为
-Agent `model.api_style`，默认 `responses`，可选 `chat_completions`；SDK 使用
+Agent `model.api_style`，默认 `responses`，可选 `chat_completions`；Iris Python SDK 使用
 `create_provider_client(..., api_style="chat_completions")` 或 `ProviderClient(api_style=...)`。
 `api_style` 不进入 `LLMRequest`，也不能放进 `provider_options` 或 run 请求覆盖。
 
@@ -130,7 +133,7 @@ Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
 - 只透传当前实现支持的请求选项；
 - 返回 provider-neutral `LLMResponse`。
 
-Provider response raw boundary 只接受 `Mapping` 或当前 SDK/Pydantic v2 的
+Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2 的
 `model_dump()` 对象形态；不再调用 Pydantic v1 `.dict()` 兼容接口。
 
 `response_format` 使用 `text`、`json_object` 或 `{name, schema, strict?}`；Chat 编码为
@@ -189,7 +192,7 @@ async for event in client.stream(request):
 - 其他 provider 异常 → `IrisProviderError`；
 - raw stream chunk/order/tool JSON 协议错误 → safe `response.failed`，code 为
   `PROVIDER_STREAM_PROTOCOL_ERROR`；
-- 原生终态前 EOF → safe `response.failed`，code 为 `PROVIDER_STREAM_INTERRUPTED`；
+- 协议终态前 EOF → safe `response.failed`，code 为 `PROVIDER_STREAM_INTERRUPTED`；
 - 缺少 API key → `IrisConfigError`；
 - 无效 route string → `IrisValidationError`。
 
@@ -206,12 +209,12 @@ Iris 统一通过 LiteLLM 调用两种协议；OpenAI SDK 是 LiteLLM 的传递�
 
 | 修改内容 | 主要位置 | 对应测试 |
 | --- | --- | --- |
-| 公共调用选项、响应与异常映射 | `client.py`, `responses.py`, `openai.py` | `tests/test_provider_client.py` |
-| raw stream聚合、终态与cleanup | `_streaming.py`, `_chat_streaming.py` | `tests/providers/test_streaming.py`, `test_chat_streaming.py` |
+| 公共调用选项、响应与异常映射 | `client.py`, `responses.py`, `chat_completions.py` | `tests/test_provider_client.py` |
+| 协议流聚合、终态与资源关闭 | `_responses_streaming.py`, `_chat_completions_streaming.py`, `_stream_utils.py` | `tests/providers/test_responses_streaming.py`, `test_chat_completions_streaming.py` |
 | Responses 映射与原生重放 | `responses.py` | `tests/providers/test_responses_mapping.py` |
 | provider 注册、路由、密钥与 HTTP 目标 | `factory.py`, `../config.py` | `tests/providers/test_responses_routing.py`, `test_api_transport.py` |
 
 ```bash
-uv run pytest tests/providers/test_streaming.py tests/test_provider_client.py
+uv run pytest tests/providers tests/test_provider_client.py tests/harness/test_protocol_adapters.py
 uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```

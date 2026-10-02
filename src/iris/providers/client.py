@@ -1,6 +1,6 @@
 """Provider 双协议调用客户端。
 
-`ProviderClient` 是 Iris provider-neutral 请求与 LiteLLM Responses / Chat
+`ProviderClient` 是 Iris provider-neutral 请求与 LiteLLM Responses / Chat Completions
 之间的边界。它保留 Iris 自己的 `LLMRequest`、`LLMResponse` 和异常类型，
 不把 LiteLLM 对象向上传递。
 
@@ -31,9 +31,10 @@ from ..exceptions import (
 )
 from ..message.llm import LLMRequest, LLMResponse
 from ..message.streaming import ModelStreamEvent, ModelStreamScope
-from ._chat_streaming import _iter_litellm_events as _iter_chat_events
-from ._streaming import _iter_responses_events, failed_before_start
-from .openai import ChatCompletionsAdapter
+from ._chat_completions_streaming import _iter_chat_completions_events
+from ._responses_streaming import _iter_responses_events
+from ._stream_utils import failed_before_start
+from .chat_completions import ChatCompletionsAdapter
 from .responses import ResponsesAdapter
 
 # endregion
@@ -46,8 +47,8 @@ class ProviderClient(BaseModel):
     并把响应和异常映射回 Iris 边界。
 
     Attributes:
-        provider (str): Provider 名称，例如 `"openai"` 或 `"anthropic"`。
-        litellm_provider (str | None): 实际传输 provider；Responses 当前只接入 openai。
+        provider (str): 用于配置和凭据查找的逻辑 provider 名称，例如 `"openai"` 或 `"anthropic"`。
+        litellm_provider (str | None): LiteLLM 传输 provider；与 api_style 协议选择分开。
         api_style (str): 构造时选定的 responses 或 chat_completions。
         api_key (str): Provider API key。
         base_url (str | None): 自定义 provider base URL。
@@ -80,13 +81,13 @@ class ProviderClient(BaseModel):
             self._stream_iterator = _iter_responses_events
         else:
             self._adapter = ChatCompletionsAdapter()
-            self._stream_iterator = _iter_chat_events
+            self._stream_iterator = _iter_chat_completions_events
 
     def estimate_input_tokens(self, request: LLMRequest) -> int:
         """从所选协议的实际输入投影本地计量输入，不发起生成请求。
 
         Args:
-            request: 已应用模型选项和工具 schema 的最终请求。
+            request: 已应用模型选项和逻辑工具定义的最终请求。
 
         Returns:
             输入 token 估算值，包含 response_format 的序列化文本。
@@ -123,7 +124,7 @@ class ProviderClient(BaseModel):
             LLMResponse: 解析后的 provider-neutral 响应。
 
         Raises:
-            IrisProviderError: 请求风格不支持或原生响应未完成时抛出。
+            IrisProviderError: 协议或传输不支持，或响应未完成时抛出。
             IrisAPIConnectionError: 连接或超时时抛出。
             IrisAuthenticationError: Provider 返回认证错误时抛出。
             IrisRateLimitExceededError: Provider 返回限流错误时抛出。
@@ -151,7 +152,7 @@ class ProviderClient(BaseModel):
             request: `stream=True`的provider-neutral模型请求。
 
         Yields:
-            不包含 SDK raw 对象的连续模型流式事件。
+            不包含 LiteLLM 原始对象的连续模型流式事件。
 
         Raises:
             IrisProviderError: 请求未启用stream或使用不支持的传输路线。
@@ -176,7 +177,6 @@ class ProviderClient(BaseModel):
             yield failed_before_start(
                 scope=scope,
                 error=self._map_provider_error(exc),
-                as_mapping=self._as_mapping,
             )
             return
 
@@ -223,11 +223,11 @@ class ProviderClient(BaseModel):
         return f"{provider}/{model}"
 
     def _parse_response(self, response: Any) -> LLMResponse:
-        """将原生完整响应转换为 Iris 标准响应。"""
+        """将所选协议的完整响应转换为 Iris 标准响应。"""
         return self._adapter.parse_response(self._as_mapping(response), provider=self.provider)
 
     def _map_provider_error(self, exc: Exception) -> IrisProviderError:
-        """将 SDK 异常映射为 Iris provider 异常。"""
+        """将 LiteLLM 调用异常映射为 Iris provider 异常。"""
         if isinstance(exc, IrisProviderError):
             return exc
         status_code = self._status_code_from_exception(exc)
@@ -267,7 +267,7 @@ class ProviderClient(BaseModel):
         )
 
     def _status_code_from_exception(self, exc: Exception) -> int | None:
-        """从 SDK 异常或其 response 中提取 HTTP status。"""
+        """从 LiteLLM 调用异常或其 response 中提取 HTTP status。"""
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int):
             return status_code
@@ -276,7 +276,7 @@ class ProviderClient(BaseModel):
         return response_status if isinstance(response_status, int) else None
 
     def _as_mapping(self, value: Any) -> Mapping[str, Any]:
-        """将 dict、Pydantic/SDK 对象转换为只读 Mapping 形状。"""
+        """在响应边界将 dict 或 LiteLLM/Pydantic 对象转换为 Mapping。"""
         if isinstance(value, Mapping):
             return value
         if hasattr(value, "model_dump"):

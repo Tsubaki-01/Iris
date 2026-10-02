@@ -530,9 +530,9 @@ def test_protocol_token_estimate_covers_forced_tool_and_structured_format(
 
 @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
 def test_chat_complete_replays_only_chat_reasoning_provenance(field: str) -> None:
-    from iris.providers.openai import OpenAIChatMapper
+    from iris.providers.chat_completions import ChatCompletionsMapper
 
-    mapper = OpenAIChatMapper()
+    mapper = ChatCompletionsMapper()
     response = mapper.parse_response(
         {
             "choices": [

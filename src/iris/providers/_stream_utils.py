@@ -1,9 +1,10 @@
-"""两种 provider stream 共用的资源关闭和公开失败映射。"""
+"""两种协议共用的流关闭、失败投影与首事件前失败构造。"""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 from ..exceptions import (
@@ -13,7 +14,7 @@ from ..exceptions import (
     IrisProviderStreamProtocolError,
     IrisRateLimitExceededError,
 )
-from ..message import ProviderStreamError
+from ..message import ModelResponseFailed, ModelStreamScope, ProviderStreamError
 
 _logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ async def close_raw_stream(raw_stream: AsyncIterator[Any]) -> None:
 
 
 def safe_provider_error(error: IrisProviderError) -> ProviderStreamError:
-    """保留原生失败原因，沿用网络异常的公开错误文案。"""
+    """将两种协议的失败原因与网络异常投影为统一公开错误。"""
     if isinstance(error, IrisProviderStreamInterruptedError):
         message = "provider stream在合法终态前结束"
     elif isinstance(error, IrisProviderStreamProtocolError):
@@ -43,4 +44,17 @@ def safe_provider_error(error: IrisProviderError) -> ProviderStreamError:
         code=error.runtime_code,
         message=message,
         retryable=isinstance(error, (IrisAPIConnectionError, IrisRateLimitExceededError)),
+    )
+
+
+def failed_before_start(
+    *, scope: ModelStreamScope, error: IrisProviderError
+) -> ModelResponseFailed:
+    """在尚未收到协议事件时构造两种协议共用的失败终态。"""
+    return ModelResponseFailed(
+        scope=scope,
+        sequence=1,
+        occurred_at=datetime.now(UTC),
+        error=safe_provider_error(error),
+        semantic_output_emitted=False,
     )

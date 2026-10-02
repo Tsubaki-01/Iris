@@ -36,14 +36,14 @@ def project_context_request(
     """对已装配并计量的请求依次折叠重复、选择可选材料、短化旧观察。
 
     Args:
-        measured: 已包含实际 context、动态快照、消息与工具 schema 的请求及计量。
+        measured: 已包含实际 context、动态快照、消息与逻辑工具定义的请求及计量。
         source_indices: 本步骤原模型历史对象 identity 到原始消息下标的映射。
         config: 已校验的上下文保留策略。
         trigger_tokens: 既有 compaction 的压力线。
         estimate_input_tokens: 当前 provider 的完整请求计量器。
         snapshot: 本步骤已采集的完整快照或已冻结的选择。
         select_optional: 仅首次装配允许选择；后续候选沿用冻结材料。
-        optional_tool_names: 可撤下 schema 的优先顺序，最优先项排在前。
+        optional_tool_names: 可撤下工具定义的优先顺序，最优先项排在前。
 
     Returns:
         写时复制的已计量请求与本步骤选定快照；不修改原历史。

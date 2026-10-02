@@ -46,7 +46,11 @@ flowchart LR
     LiteLLM --> Response["LLMResponse / ModelStreamEvent"]
 ```
 
-Mappers and adapters are internal and are not exported from `iris.providers`.
+`responses.py` and `chat_completions.py` are named after their API protocols. Each owns request
+encoding, LiteLLM calls, response parsing, history replay, and measurement projection. Their streaming
+modules handle protocol events; `_tool_encoding.py` shares tool encoding, while `_stream_utils.py`
+shares cleanup, error projection, and failures before the first event. Mappers and adapters are
+internal and are not exported from `iris.providers`.
 
 ## Public API
 
@@ -62,7 +66,7 @@ Global `Config` contains only `api_key`, `provider_api_keys`, and `providers`. S
 client argument, and configure logs through Python `logging`. Global `base_url/timeout/debug`
 fields are no longer declared.
 `ProviderConfig` declares only `litellm_provider`, `base_url`, and `headers`. Agent `model.api_style`
-is the sole YAML protocol setting: `responses` by default, or `chat_completions`. The SDK equivalent
+is the sole YAML protocol setting: `responses` by default, or `chat_completions`. The Iris Python SDK equivalent
 is `create_provider_client(..., api_style="chat_completions")`. This setting does not enter
 `LLMRequest`, `provider_options`, or per-run request overrides.
 
@@ -128,7 +132,7 @@ error and EOF without a valid terminal fail without committing partial tool inte
 is retained for existing runtime settlement. Cached/reasoning details are not added again, and raw
 iterators close in `finally`; Responses also closes its HTTP response while LiteLLM owns the client pool.
 
-The provider-response raw boundary accepts `Mapping` values or the current SDK/Pydantic v2
+The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
 `model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.
 
 `estimate_input_tokens(request)` projects the selected adapter's effective request into the local
@@ -168,7 +172,7 @@ while durable history retains actual tool results; that behavior is not implemen
 - other provider failures become `IrisProviderError`.
 - raw stream protocol/order/tool-JSON failures become a safe failed terminal with
   `PROVIDER_STREAM_PROTOCOL_ERROR`.
-- EOF before a native terminal becomes a safe failed terminal with `PROVIDER_STREAM_INTERRUPTED`.
+- EOF before a protocol terminal becomes a safe failed terminal with `PROVIDER_STREAM_INTERRUPTED`.
 - missing keys become `IrisConfigError`; invalid routes become `IrisValidationError`.
 
 `complete()` rejects `stream=True`; `stream()` rejects `stream=False`. The logical request boundary
@@ -185,12 +189,12 @@ SDK path or global model registration changes.
 
 | Change | Main location | Tests |
 | --- | --- | --- |
-| Common options, response, and errors | `client.py`, `responses.py`, `openai.py` | `tests/test_provider_client.py` |
-| Raw stream aggregation, terminal, and cleanup | `_streaming.py`, `_chat_streaming.py` | `tests/providers/test_streaming.py`, `test_chat_streaming.py` |
+| Common options, response, and errors | `client.py`, `responses.py`, `chat_completions.py` | `tests/test_provider_client.py` |
+| Raw stream aggregation, terminal, and cleanup | `_responses_streaming.py`, `_chat_completions_streaming.py`, `_stream_utils.py` | `tests/providers/test_responses_streaming.py`, `test_chat_completions_streaming.py` |
 | Responses mapping and replay | `responses.py` | `tests/providers/test_responses_mapping.py` |
 | Registry, routing, credentials, and HTTP target | `factory.py`, `../config.py` | `tests/providers/test_responses_routing.py`, `test_api_transport.py` |
 
 ```bash
-uv run pytest tests/providers/test_streaming.py tests/test_provider_client.py
+uv run pytest tests/providers tests/test_provider_client.py tests/harness/test_protocol_adapters.py
 uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```

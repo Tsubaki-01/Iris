@@ -11,7 +11,7 @@ run、不选择 store，也不拥有 cancellation/recovery 的公开编排。
 `AgentRuntime.execute()`。
 
 runtime 始终使用同一逻辑请求、工具定义与流式事件契约；provider 构造时默认选择 Responses，
-也可显式选择 Chat Completions。工具 schema、强制选择和请求计量的协议投影由 adapter 负责。
+也可显式选择 Chat Completions。工具定义、强制选择和请求计量的协议投影由 adapter 负责。
 只有完整成功响应可以提交 assistant 或执行工具；失败、未完成和终态前断流走失败结算。
 runtime 只携带本次未结算的主模型用量，
 由 harness 的既有 FinishRun 路径原子累加；摘要用量仍独立归入 compaction，不重复记账。
@@ -116,10 +116,10 @@ source 会在装配时报 `IrisConfigError`。
 history，也不进入摘要原料。需要后续精确回读的内容应先由宿主通过工具结果或文件保存。
 
 低于压力线时保留全部贡献。达到压力线后，先尝试精确重复正文折叠，再依次移除宿主显式
-标为 `required=False` 的贡献，再撤下可选 deferred schema，最后短化旧工具正文；仍不足时
+标为 `required=False` 的贡献，再撤下可选 deferred 工具定义，最后短化旧工具正文；仍不足时
 进入原有 LLM compaction。
 required 条目保持，priority 较低者先移除，相同 priority 时后返回者先移除。每次变动重算
-完整请求，包含静态上下文、历史、动态消息、模型选项与工具 schema。模型不能按正文语义
+完整请求，包含静态上下文、历史、动态消息、模型选项与工具定义。模型不能按正文语义
 自行决定删除哪些宿主约束。
 
 可选条目只在本步骤初次请求选材一次；候选摘要切点、摘要重试和成功压缩后的最终请求共用
@@ -127,7 +127,7 @@ required 条目保持，priority 较低者先移除，相同 priority 时后返�
 或 effective `tool_choice` 不允许回读，动态快照、optional 选材和 LLM compaction 仍然工作；
 工具正文裁剪则遵循下节的回读条件。
 
-### 按需工具 schema
+### 按需工具定义
 
 `context_policy.deferred_tools` 默认关闭。开启后 shared assembly 自动注册 `tool_search`，
 将 MCP 目录标记 deferred；Python 工具保留作者的声明。MCP 仍完整 prepare，原有 eager
@@ -138,13 +138,13 @@ store 随消息提交增量维护 session 的发现、成功使用、最新搜�
 [`_tool_context.py`](./_tool_context.py) 直接消费该投影，不在每一步重扫原文。
 事实来自已提交结果中的 `metadata.extra.context_revealed_tools`，不解析搜索正文或摘要。只有成功且已提交的
 搜索结果产生披露；同批次的后续工具调用也不能使用刚搜到的名称。下一次 `before_model`
-才选择其完整 schema，不截断参数定义。候选必须仍存在于当前 registry 且符合静态 base
+才选择其逻辑工具定义及完整参数 JSON Schema，不截断参数定义。候选必须仍存在于当前 registry 且符合静态 base
 view；deny 优先，只有宿主原始 allow 可越过组过滤，搜索不会改变共享 `allow`。
 
 eager 工具和 host base allow 为必需集合。模型配置与 request_options 合并后的 effective
-`tool_choice` 若强制某个 function，该工具也必需，即使原本 deferred 或尚未搜索。别名解析为
+`tool_choice` 若强制某个工具，该工具也必需，即使原本 deferred 或尚未搜索。别名解析为
 canonical name；目标不存在或被 base view 排除时报告 `IrisConfigError`，不发送缺少目标
-schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"` 不发送工具 schema。
+工具定义的强制请求。`include_tools=false` 或 effective `tool_choice="none"` 不发送工具定义。
 
 可选候选按最新一次搜索排名优先，再按最近成功使用、最近发现和 canonical name 排序。
 当前搜索批次之后尚无已提交 assistant 主响应时，保护该批次每次成功搜索的首项，保证
@@ -152,8 +152,8 @@ schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"
 其余候选在宿主 optional 贡献之后按逆序撤下，每次重算完整请求。必需项和受保护首项仍然
 过大时进入既有压缩/容量错误路径，不撤下它们以回避预算。
 
-优先级决定成员，最终 schema 保持 registry 顺序。首次选材后的 schema 集合在本步骤的
-预算规划、摘要重试与压缩后请求中保持；移除 schema 不删除历史发现事实，下一步骤可重选，
+优先级决定成员，最终工具定义保持 registry 顺序。首次选材后的工具集合在本步骤的
+预算规划、摘要重试与压缩后请求中保持；移除工具定义不删除历史发现事实，下一步骤可重选，
 再次搜索也可提升其顺序。回读型正文裁剪仍只在最终请求可调用 `context_read` 时执行。
 
 最终请求的 canonical names 作为 immutable `RuntimeCursor.visible_tool_names` 与 assistant
@@ -177,10 +177,10 @@ schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"
 
 默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
 回读引用，后缀按摘要覆盖数偏移，前缀锚点保留原始下标，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
-取回提示写回 durable message。引用和 `context_read/search` schema 一并进入完整请求计量。
+取回提示写回 durable message。引用和 `context_read/search` 工具定义一并进入完整请求计量。
 
 [`_context_projection.py`](./_context_projection.py) 的 `project_context_request()` 在完整请求
-达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献与 deferred schema，
+达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献与 deferred 工具定义，
 最后从旧到新短化 observation 结果；正文替换只有让完整 `LLMRequest` 的 token 估算实际下降才采用。
 低于 trigger 即停止，已足够时不调用摘要模型。单次大结果仍由 artifact
 处理；这里同时处理多轮中型输出累积造成的压力。
@@ -195,9 +195,9 @@ schema 的强制请求。`include_tools=false` 或 effective `tool_choice="none"
 - 旧结果预览默认 512 字符，分配给正文 head 384 / tail 128；说明和稳定 ref 额外计入请求。
   已 offload 的长预览也可短化，但实际保留的去重代表不会再被短化。
 
-正文裁剪要求最终 schema 中可见 `context_read`，且模型配置与本次 request_options 合并后的
+正文裁剪要求最终工具集合中可见 `context_read`，且模型配置与本次 request_options 合并后的
 effective `tool_choice` 允许调用它。`include_tools=false`、`tool_choice="none"`、隐藏回读
-schema 或强制另一具体 function 时跳过裁剪；强制 `context_read` 本身仍可裁剪。原有 LLM
+工具或强制另一具体工具时跳过裁剪；强制 `context_read` 本身仍可裁剪。原有 LLM
 compaction 不因此关闭。
 
 主请求、候选摘要切点和压缩后的最终请求使用同一个投影入口，每个候选重新确定可见正文
@@ -281,7 +281,7 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 
 `iris.providers.CompletionProvider` 必须同时实现 `complete()` 和同步
 `estimate_input_tokens(request)`；后者
-计量应用模型选项及工具 schema 后的完整请求。自定义 provider 与测试替身直接满足同一契约。
+计量应用模型选项及工具定义后的完整请求。自定义 provider 与测试替身直接满足同一契约。
 `RuntimeEnvironment.agent_config.compaction` 携带压缩配置，无需独立环境字段。
 摘要始终直接使用 `complete()`，不会向 host 发布摘要正文或摘要模型 stream 事件。
 
@@ -398,15 +398,15 @@ Service 存在时，普通新 run、工具循环、steer、HITL 与输入提交�
 `full` 包含核心事实与知识范围，`navigation` 仅包含知识范围。全部 namespace、状态警告、
 实际工具指引和包装共享 `floor(compaction.input_budget_tokens * memory.overview.system_budget_ratio)`
 额度，默认比例为 2%。Provider 对同一完整请求有无概览的估算差额就是开销；原有 system、
-静态 memory、历史和工具 schema 不重复计费。Full 超专用额度或可降级的 system/请求容量时，
+静态 memory、历史和工具定义不重复计费。Full 超专用额度或可降级的 system/请求容量时，
 整体尝试 navigation；知识范围仍超额则报告容量错误，不截断 namespace 或增加第三种降级。
 普通历史的整体容量继续由原有压缩流程处理。
 full/base 的专用额度差额使用同形、未裁剪的历史计算；压缩后采用新窗口时，两者也携带同一份
-已选动态快照与 schema，避免把历史正文释放量计入概览成本。选定窗口后，实际主请求再经过
+已选动态快照与工具定义，避免把历史正文释放量计入概览成本。选定窗口后，实际主请求再经过
 上述投影；成功压缩采用的新窗口也走同一路径，不重新选择动态贡献或工具集合。
 
 内部 `MeasuredRequest` 将精确请求与其完整输入 token 数一起传递。动态快照在请求装配时
-追加一次后计量；正文、schema 或概览发生变化时才计量新候选。未改变请求的投影、压缩入口
+追加一次后计量；正文、工具定义或概览发生变化时才计量新候选。未改变请求的投影、压缩入口
 和切点选择直接复用已有数字，低压力主步骤只计量一次。窗口采用返回选中的未裁剪请求及计量，
 后续投影直接消费它，不重建或重复估算；navigation 的完整请求仍超限时继续交给压缩处理。
 这是单个候选的结果传递，不建立跨请求缓存，也不把各工具的独立 token 数相加来代替整包估算。
@@ -508,7 +508,7 @@ activation/commit-port contracts。不存在 complete-run options/status/result�
 `tests/harness/test_context_pruning.py`，分别检查纯请求投影以及实际调用、原文保存和回读。
 动态采集与选材见 `tests/runtime/test_context_source.py`、`tests/runtime/test_context_selection.py`
 及 `tests/harness/test_context_source_integration.py`，覆盖步骤与恢复、预算顺序和真实 runner 接线。
-按需 schema 见 `tests/runtime/test_deferred_selection.py` 与
+按需工具定义见 `tests/runtime/test_deferred_selection.py` 与
 `tests/harness/test_deferred_tool_context.py`，覆盖发现排序、强制工具、session 隔离和批次恢复。
 
 ```bash

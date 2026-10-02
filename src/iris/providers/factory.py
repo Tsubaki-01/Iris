@@ -151,7 +151,7 @@ def _merge_builtin_provider_config(
 ) -> ProviderConfig:
     """合并内置 provider 默认配置与用户非 secret override。
 
-    只覆盖用户明确声明的字段，保留内置的原生传输与 endpoint 默认值。
+    只覆盖用户明确声明的字段，保留当前协议对应的传输 provider 与 endpoint 默认值。
     """
     return default.model_copy(update=override.model_dump(exclude_unset=True))
 

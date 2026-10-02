@@ -1,6 +1,7 @@
-"""将原生 Responses typed events 投影为 Iris 模型流式事件。
+"""将 LiteLLM Responses 事件投影为 Iris 模型流式事件。
 
-增量只用于展示，最终 response.output 经共用 mapper 解析后才成为可提交响应。
+原生 SSE 和 LiteLLM 模拟流式使用同一事件契约。增量只用于展示，
+最终 response.output 经 mapper 解析后才成为可提交响应。
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ class _BlockState:
     completed: bool = False
 
 
-class ModelStreamAccumulator:
+class ResponsesStreamAccumulator:
     """消费 Responses 事件，保留完整终态与有序 Iris 展示事件。"""
 
     def __init__(self, *, scope: ModelStreamScope, as_mapping: _AsMapping) -> None:
@@ -66,7 +67,7 @@ class ModelStreamAccumulator:
         self._tool_items: dict[int, Mapping[str, Any]] = {}
 
     def feed(self, raw_event: Any) -> tuple[ModelStreamEvent, ...]:
-        """完整处理一个原生事件后才向调用方交付其展示事件。"""
+        """完整处理一个 Responses 事件后才向调用方交付其展示事件。"""
         if self.terminal_emitted:
             raise IrisProviderStreamProtocolError("provider terminal 后仍收到 event")
         sequence_before = self._sequence
@@ -160,7 +161,7 @@ class ModelStreamAccumulator:
         return tuple(events)
 
     def finish(self) -> tuple[ModelStreamEvent, ...]:
-        """EOF 不能替代原生 response.completed。"""
+        """EOF 不能替代 Responses 的 response.completed 终态。"""
         if not self.terminal_emitted:
             raise IrisProviderStreamInterruptedError("Responses stream 在原生终态前结束")
         return ()
@@ -318,8 +319,8 @@ async def _iter_responses_events(
     as_mapping: _AsMapping,
     error_mapper: _ErrorMapper,
 ) -> AsyncGenerator[ModelStreamEvent, None]:
-    """拉取原生 Responses 事件；唯一终态后停止拉取并关闭底层流。"""
-    accumulator = ModelStreamAccumulator(scope=scope, as_mapping=as_mapping)
+    """拉取 LiteLLM Responses 事件；唯一终态后停止拉取并关闭底层流。"""
+    accumulator = ResponsesStreamAccumulator(scope=scope, as_mapping=as_mapping)
     try:
         try:
             async for raw_event in raw_stream:
@@ -337,13 +338,3 @@ async def _iter_responses_events(
                 yield event
     finally:
         await close_raw_stream(raw_stream)
-
-
-def failed_before_start(
-    *,
-    scope: ModelStreamScope,
-    error: IrisProviderError,
-    as_mapping: _AsMapping,
-) -> ModelResponseFailed:
-    """构造首个事件之前网络调用失败的终态。"""
-    return ModelStreamAccumulator(scope=scope, as_mapping=as_mapping).fail(error)

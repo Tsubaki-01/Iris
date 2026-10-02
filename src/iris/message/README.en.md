@@ -84,12 +84,12 @@ strict=False)`. `ToolChoice` accepts `auto`, `none`, `required`, or `{"name": "l
 `ProviderOptions` accepts call options such as `reasoning_effort` and `num_retries`, but rejects
 `api_style`: protocol selection belongs to model or `ProviderClient` construction.
 
-Responses contain provider/model identity, content blocks, finish reason, token usage, reasoning,
+`LLMResponse` contains provider/model identity, content blocks, finish reason, token usage, reasoning,
 and metadata. `to_msg()` creates an assistant message and copies provider, model, finish reason,
 and usage into message metadata. Parsing a raw provider response is `ProviderClient`'s job, not an
 `LLMResponse` method.
 
-Responses status, item order/IDs, phase, and complete reasoning items live in dedicated metadata.
+Responses API status, item order/IDs, phase, and complete reasoning items live in dedicated metadata.
 Typed content remains the only source of message text and tool arguments when rebuilding input.
 A completed response maps to `stop` without calls or `tool_calls` with calls.
 
@@ -124,7 +124,7 @@ Direct model validation failures raise Pydantic `ValidationError`; `Msg.from_dic
 boundary, but this package does not wrap them itself.
 
 The package does not pull raw provider streams, make network calls, map provider errors,
-generate/execute tool schemas, persist history, or manage context budgets.
+generate tool parameter JSON Schema, execute tools, persist history, or manage context budgets.
 
 ## Maintenance
 
@@ -133,7 +133,7 @@ generate/execute tool schemas, persist history, or manage context budgets.
 | Message construction and conversation/request assembly | `message.py`, `../runtime/assembler.py` | `tests/runtime/test_assembler.py` |
 | Request/response models and `to_msg()` | `llm.py` | `tests/test_provider_client.py` |
 | Provider-neutral streaming schema | `streaming.py` | `tests/message/test_streaming_models.py` |
-| Provider wire mapping | `../providers/openai.py` | `tests/test_provider_client.py` |
+| Provider wire mapping | `../providers/chat_completions.py`, `../providers/responses.py` | `tests/test_provider_client.py` |
 
 ```bash
 uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py

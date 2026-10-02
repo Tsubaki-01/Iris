@@ -1,6 +1,6 @@
 """工具注册表与只读视图。
 
-提供统一的接口管理、检索和过滤工具实例，并在执行上下文中导出对应的 schema 模型。
+提供统一的接口管理、检索和过滤工具实例，并导出模型可见的逻辑 `ToolSpec`。
 
 Example:
     registry = ToolRegistry()
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 class ToolRegistry:
-    """保存工具实例并导出活动 schema。
+    """保存工具实例并导出活动工具的逻辑定义。
 
     负责集中式状态管理，防止工具名称或别名在运行态冲突。主要通过
     只读的 `ToolRegistryView` 对实际执行层暴露。

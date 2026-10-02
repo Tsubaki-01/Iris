@@ -24,7 +24,7 @@ def select_tool_context(
     include_tools: bool,
     tool_choice: ToolChoice | None,
 ) -> ToolContextSelection:
-    """保持 base 过滤，按已提交 search/使用顺序选择完整 schema 候选。"""
+    """保持 base 过滤，按已提交 search/使用顺序选择包含完整参数 schema 的逻辑工具定义。"""
     if not include_tools or tool_choice == "none":
         return ToolContextSelection((), (), None)
     available = {tool.name: tool for tool in view.available_tools}
