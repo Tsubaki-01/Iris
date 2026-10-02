@@ -11,6 +11,8 @@ from typing import cast
 from ..exceptions import IrisRunStateError
 from ..lifecycle.history import ForkPoint, ForkPointCursor, ForkPointPage
 from ..lifecycle.models import RunPhase, RunRecord, RunStopReason, SessionContextWindow
+from ..message import ImageBlock
+from ..message.message import data_text
 
 
 def validate_context_window_initialization(
@@ -53,11 +55,18 @@ def run_message_slice_bounds(
 
 def project_fork_point(run: RunRecord) -> ForkPoint:
     """将已通过来源筛选的 terminal run 投影为分支点。"""
+    text = data_text(run.request.input)
+    if not text.strip() and not isinstance(run.request.input, str):
+        text = "\n".join(
+            f"[image: {block.name or block.original.path.name}]"
+            for block in run.request.input
+            if isinstance(block, ImageBlock)
+        )
     return ForkPoint(
         run_id=run.run_id,
         session_id=run.session_id,
         agent_id=run.agent_id,
-        input=run.request.input,
+        input=text,
         stop_reason=cast(RunStopReason, run.stop_reason),
         created_at=run.created_at,
         finished_at=cast(datetime, run.finished_at),

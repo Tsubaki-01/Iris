@@ -12,6 +12,8 @@ import litellm
 from ..exceptions import IrisProviderError
 from ..message import (
     ContentBlock,
+    DataBlock,
+    ImageBlock,
     LLMRequest,
     LLMResponse,
     Msg,
@@ -21,6 +23,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.llm import ResponseFormat
+from ._images import image_data_url
 from ._tool_encoding import chat_tool_choice, chat_tools, function_schema
 
 
@@ -35,14 +38,14 @@ class ResponsesMapper:
             if message.role is Role.ASSISTANT and replay is not None:
                 items.extend(self._replay_assistant(message, replay["items"]))
                 continue
-            text_parts: list[dict[str, str]] = []
+            content_parts: list[dict[str, Any]] = []
             for block in message.blocks:
-                if isinstance(block, TextBlock):
-                    text_parts.append({"type": "input_text", "text": block.text})
+                if isinstance(block, TextBlock | ImageBlock):
+                    content_parts.append(self._data_part(block))
                     continue
-                if text_parts:
-                    items.append(self._message_item(message.role, text_parts))
-                    text_parts = []
+                if content_parts:
+                    items.append(self._message_item(message.role, content_parts))
+                    content_parts = []
                 if isinstance(block, ToolUseBlock):
                     items.append(self._tool_call(block))
                 elif isinstance(block, ToolResultBlock):
@@ -50,16 +53,19 @@ class ResponsesMapper:
                         {
                             "type": "function_call_output",
                             "call_id": block.tool_use_id,
-                            "output": [
-                                {"type": "input_text", "text": part.text}
-                                for part in block.content
-                                if isinstance(part, TextBlock)
-                            ],
+                            "output": [self._data_part(part) for part in block.content],
                         }
                     )
-            if text_parts:
-                items.append(self._message_item(message.role, text_parts))
+            if content_parts:
+                items.append(self._message_item(message.role, content_parts))
         return items
+
+    @staticmethod
+    def _data_part(block: DataBlock) -> dict[str, Any]:
+        """用户与工具结果共用有序数据块编码，只读取已准备的模型副本。"""
+        if isinstance(block, TextBlock):
+            return {"type": "input_text", "text": block.text}
+        return {"type": "input_image", "image_url": image_data_url(block), "detail": "high"}
 
     def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
         """解析完整终态；失败保留已知 usage，不交付可执行的部分工具调用。"""
@@ -164,7 +170,7 @@ class ResponsesMapper:
         return items
 
     @staticmethod
-    def _message_item(role: Role, content: list[dict[str, str]]) -> dict[str, Any]:
+    def _message_item(role: Role, content: list[dict[str, Any]]) -> dict[str, Any]:
         return {"type": "message", "role": role.value, "content": content}
 
     @staticmethod
@@ -192,7 +198,7 @@ class ResponsesMapper:
             kind = item["type"]
             if kind == "message":
                 messages.append(
-                    {"role": item["role"], "content": "\n".join(p["text"] for p in item["content"])}
+                    {"role": item["role"], "content": self._count_content(item["content"])}
                 )
             elif kind == "function_call":
                 messages.append(
@@ -213,7 +219,7 @@ class ResponsesMapper:
                     {
                         "role": "tool",
                         "tool_call_id": item["call_id"],
-                        "content": "\n".join(part["text"] for part in item["output"]),
+                        "content": self._count_content(item["output"]),
                     }
                 )
             elif kind == "reasoning":
@@ -221,6 +227,21 @@ class ResponsesMapper:
                 if text:
                     messages.append({"role": "assistant", "content": text})
         return messages
+
+    @staticmethod
+    def _count_content(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """保留纯文字计量形状；图片交给 tokenizer 的 high 视觉估算分支。"""
+        if not any(part["type"] == "input_image" for part in parts):
+            return "\n".join(part["text"] for part in parts)
+        return [
+            {
+                "type": "image_url",
+                "image_url": {"url": part["image_url"], "detail": part["detail"]},
+            }
+            if part["type"] == "input_image"
+            else {"type": "text", "text": part["text"]}
+            for part in parts
+        ]
 
 
 def responses_text_format(response_format: ResponseFormat) -> dict[str, Any]:

@@ -76,6 +76,13 @@ class ImageBlock(BaseModel):
 DataBlock = TextBlock | ImageBlock
 
 
+def data_text(content: str | Sequence[DataBlock]) -> str:
+    """为只接收文字的业务视图投影输入，不改写完整数据块。"""
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.text for block in content if isinstance(block, TextBlock))
+
+
 def image_block_from_saved(saved: SavedImage, *, name: str | None = None) -> ImageBlock:
     """将图片保存器交付的可信文件信息投影为消息块。"""
     original = ImageFileRef.model_construct(
@@ -268,9 +275,16 @@ class Msg(BaseModel):
         return cls(role=Role.SYSTEM, content=content, **kwargs)
 
     @classmethod
-    def user(cls, content: str, *, sender: str = "user", **kwargs: Any) -> Msg:
-        """创建用户消息。"""
-        return cls(role=Role.USER, content=content, sender=sender, **kwargs)
+    def user(
+        cls, content: str | Sequence[ContentBlock], *, sender: str = "user", **kwargs: Any
+    ) -> Msg:
+        """创建用户消息，保持数据块及内部工具结果的原始顺序。"""
+        return cls(
+            role=Role.USER,
+            content=content if isinstance(content, str) else list(content),
+            sender=sender,
+            **kwargs,
+        )
 
     @classmethod
     def assistant(

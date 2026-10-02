@@ -86,7 +86,7 @@ from ..lifecycle import (
     snapshot_run,
 )
 from ..memory import MemoryService
-from ..message import Msg
+from ..message import ImageBlock, Msg, image_block_from_saved
 from ..providers import CompletionProvider
 from ..runtime import (
     AgentRuntime,
@@ -110,7 +110,9 @@ from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..todo import TodoSnapshot
 from ..todo.document import read_todo
 from ..tools import CancellationSignal, PermissionPolicy, ToolResult
+from ..tools._paths import safe_path_segment
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
+from ..utils.images import save_image
 from ._command_lifecycle import (
     ChildCommandTarget,
     CommandLifecycle,
@@ -554,6 +556,32 @@ class AgentRunner:
     #              Run Lifecycle
     # ==========================================
     # region
+    async def import_image(
+        self, source: Path | bytes, *, session_id: str, name: str | None = None
+    ) -> ImageBlock:
+        """导入图片副本供后续输入使用，不创建 run 或占用 session admission。
+
+        Args:
+            source: 图片 bytes 或本地路径；相对路径以 runner workspace 解析。
+            session_id: 图片副本所属的会话。
+            name: 可选的图片显示名称。
+
+        Returns:
+            引用已保存原图和模型版文件的图片块。
+
+        Raises:
+            IrisRunStateError: session 身份为空。
+            IrisImageError: 图片读取、处理或保存失败。
+        """
+        normalized = session_id.strip()
+        if not normalized:
+            raise IrisRunStateError("session_id 不能为空")
+        workspace = self.runtime.environment.workspace_root
+        resolved = workspace / source if isinstance(source, Path) else source
+        cache_dir = workspace / ".iris" / "image-cache" / safe_path_segment(normalized)
+        saved = await asyncio.to_thread(save_image, resolved, cache_dir=cache_dir)
+        return image_block_from_saved(saved, name=name)
+
     async def start(
         self,
         request: AgentRunRequest,

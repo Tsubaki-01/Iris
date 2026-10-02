@@ -26,6 +26,27 @@ finally:
 reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
 
+在尚未关闭的 runner 上，图片输入先导入，再提交完整数据块；主模型需支持所选协议的视觉输入：
+
+```python
+from pathlib import Path
+from iris.message import TextBlock
+
+image = await runner.import_image(Path("invoice.png"), session_id="default", name="发票")
+result = await runner.start(
+    AgentRunRequest(input=[TextBlock(text="这张发票的金额是多少？"), image], session_id="default")
+)
+```
+
+`import_image(Path | bytes, *, session_id, name=None)` 将相对路径按 runner workspace 解析，
+在线程中完成图片处理并保存到 `.iris/image-cache/<session 编码>/`，返回 `ImageBlock`。
+导入不创建 run 或占用 session lane；来源文件后续改动不影响副本。纯图片 `[image]` 同样有效，
+空字符串、空列表和只有空白文字的列表不接受。`SessionManager.submit()` 的 idle、steer、
+follow-up 接受同一 `str | list[DataBlock]` 输入；先在锁外完成导入，入队只传已保存引用。
+start、HITL resume 和 recover 均使用 durable request/历史中的完整块，无需再次导入。
+`ContextBuildScope.run_input` 保持纯文字，纯图片的 `ForkPoint.input` 显示 `[image: 名称]`；
+Goal continuation 和 subagent prompt 仍为文字，不自动携带父图片。
+
 配置 MCP 时构造不连接；`aprepare()` 可显式预热，也会由首次执行入口自动调用。完整目录发布
 后才创建 run；required 准备失败会关闭资源且不创建 run，修正后需新建 runner。
 

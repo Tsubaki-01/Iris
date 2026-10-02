@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from ..command.models import CommandStopReceipt
 from ..hitl import HumanInteraction
 from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions, TokenUsage
-from ..message import Msg, ToolUseBlock
+from ..message import DataBlock, Msg, ToolUseBlock
 from ..tools import ToolResult
 
 
@@ -111,7 +111,7 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
     activation_id: str
     session_id: str
     kind: Literal["start", "resume", "recover"]
-    run_input: str
+    run_input: str | list[DataBlock]
     initial_session_message_count: int = Field(ge=0)
     cursor: RuntimeCursor
     options: RuntimeExecutionOptions

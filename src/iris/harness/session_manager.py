@@ -25,7 +25,14 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ..exceptions import IrisCommandCleanupError, IrisRunNotFoundError, IrisRunStateError
 from ..goal.models import GoalChanged
@@ -40,7 +47,8 @@ from ..lifecycle import (
     RunResult,
     RunSnapshot,
 )
-from ..message import Msg
+from ..lifecycle.models import normalize_run_input
+from ..message import DataBlock, Msg
 from ..runtime import SteeringInput
 from ._goal import _GoalControl
 from .runner import AgentRunner
@@ -62,6 +70,7 @@ _DEFAULT_MAX_PENDING_FOLLOW_UP = 64
 _DEFAULT_MAX_BUFFERED_SUBMISSION_EVENTS = 256
 _DEFAULT_MAX_TRACKED_DURABLE_RUNS = 64
 _DURABLE_REPLAY_BATCH_SIZE = 64
+_INPUT_ADAPTER = TypeAdapter(str | list[DataBlock])
 # steer 只在 runtime 安全边界失败时报 commit_failed；follow_up 只在 create admission 失败时报
 # start_failed。其余三种由 manager 侧的 target/session 状态变化产生。
 type SubmissionFailureReason = Literal[
@@ -182,14 +191,14 @@ class _PendingInput:
 
     Attributes:
         submission_id (str): 该次提交的 process-local 标识。
-        input (str): 已 strip 的用户输入。
+        input (str | list[DataBlock]): 已规范化的文字或图片输入。
         mode (SubmissionMode): 决定它进入哪一条 FIFO。
         run_id (str): steer 绑定 exact current run；follow-up 是预生成的 future run id。
         options (AgentRunOptions | None): 仅 follow-up 可携带，用于其未来的 run create。
     """
 
     submission_id: str
-    input: str
+    input: str | list[DataBlock]
     mode: SubmissionMode
     run_id: str
     options: AgentRunOptions | None = None
@@ -764,7 +773,7 @@ class SessionManager:
     # region
     async def submit(
         self,
-        input: str,
+        input: str | list[DataBlock],
         *,
         mode: SubmissionMode | Literal["auto"] | None = None,
         options: AgentRunOptions | None = None,
@@ -772,7 +781,7 @@ class SessionManager:
         """提交 idle input，或向 busy run admission 一条 steer/follow-up。
 
         Args:
-            input (str): 用户输入，不能为空白。
+            input (str | list[DataBlock]): 已导入的有序数据块或文字，至少包含有效文字或图片。
             mode (SubmissionMode | Literal["auto"] | None): ``auto`` 在锁内按当前状态
                 选择 idle submit 或 steer；其他模式保留显式 idle/busy 契约。
             options (AgentRunOptions | None): 新 run 选项；显式 steer 不接受，auto 的
@@ -787,9 +796,10 @@ class SessionManager:
                 current run admission 尚未完成，或 run 已请求取消而不再接收 steer 时。
         """
         # --- 1. 规范化输入并同步 facade 状态 ---
-        normalized_input = input.strip()
-        if not normalized_input:
-            raise IrisRunStateError("input 不能为空")
+        try:
+            normalized_input = normalize_run_input(_INPUT_ADAPTER.validate_python(input))
+        except ValueError as exc:
+            raise IrisRunStateError("input 必须包含有效文字或图片") from exc
         async with self._lock:
             self._require_open()
             await self._reconcile_locked()
@@ -1149,7 +1159,7 @@ class SessionManager:
     def _create_start_task_locked(
         self,
         *,
-        input: str,
+        input: str | list[DataBlock],
         run_id: str,
         options: AgentRunOptions | None,
         submission: _PendingInput | None,
@@ -1159,7 +1169,7 @@ class SessionManager:
         必须在持有 ``_lock`` 时调用：它直接改写 ``_current_task``。
 
         Args:
-            input (str): 已规范化的用户输入。
+            input (str | list[DataBlock]): 已在 submit 边界规范化的用户输入。
             run_id (str): 预生成的 run id。
             options (AgentRunOptions | None): run 级限额与 runtime 选项。
             submission (_PendingInput | None): 触发该 run 的 follow-up；idle submit 为 None。
@@ -1170,7 +1180,9 @@ class SessionManager:
         started = asyncio.Event()
         task = asyncio.create_task(
             self._runner._start_managed(
-                AgentRunRequest(input=input, session_id=self._session_id, run_id=run_id),
+                AgentRunRequest.model_construct(
+                    input=input, session_id=self._session_id, run_id=run_id
+                ),
                 options=options,
                 steering=self._steering,
                 durable_event_callback=self._relay_run_event,

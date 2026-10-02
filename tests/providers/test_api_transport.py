@@ -2,17 +2,30 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.openai.openai import OpenAIChatCompletion
+from PIL import Image
 
-from iris.message import LLMRequest, ModelResponseCompleted, Msg, TextBlock, ToolSpec, ToolUseBlock
+from iris.message import (
+    LLMRequest,
+    ModelResponseCompleted,
+    Msg,
+    TextBlock,
+    ToolSpec,
+    ToolUseBlock,
+    image_block_from_saved,
+)
 from iris.providers import create_provider_client
+from iris.utils.images import save_image
 
 
 def _responses_result(model: str) -> dict[str, Any]:
@@ -140,17 +153,20 @@ def _sse(api_style: str, model: str) -> bytes:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_images", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("api_style", ["responses", "chat_completions"])
 @pytest.mark.parametrize(
     ("provider", "model", "base"),
     [
         ("openai", "gpt-4o", "https://api.openai.com/v1"),
-        ("deepseek", "deepseek-chat", "https://api.deepseek.com"),
+        ("deepseek", "deepseek-flash", "https://api.deepseek.com"),
     ],
 )
 async def test_protocol_http_and_native_or_simulated_stream(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    with_images: bool,
     stream: bool,
     api_style: str,
     provider: str,
@@ -164,6 +180,11 @@ async def test_protocol_http_and_native_or_simulated_stream(
     monkeypatch.setattr(factory, "is_config_initialized", lambda: False)
 
     seen: list[httpx.Request] = []
+    picture = BytesIO()
+    with Image.new("RGB", (8, 6), color="red") as pixels:
+        pixels.save(picture, format="PNG")
+    image_bytes = picture.getvalue()
+    image = image_block_from_saved(save_image(image_bytes, cache_dir=tmp_path / "images"))
 
     def respond(request: httpx.Request) -> httpx.Response:
         seen.append(request)
@@ -194,10 +215,16 @@ async def test_protocol_http_and_native_or_simulated_stream(
             model=model,
             stream=stream,
             messages=[
-                Msg.user("start"),
+                Msg.user([TextBlock(text="start"), image] if with_images else "start"),
                 Msg.assistant("earlier answer"),
                 Msg.assistant([ToolUseBlock(id="call-before", name="lookup", input={})]),
-                Msg.tool_result(tool_use_id="call-before", content="tool result"),
+                Msg.tool_result(
+                    tool_use_id="call-before",
+                    name="lookup",
+                    content=[TextBlock(text="tool result"), image]
+                    if with_images
+                    else "tool result",
+                ),
             ],
             tools=[
                 ToolSpec(
@@ -245,16 +272,35 @@ async def test_protocol_http_and_native_or_simulated_stream(
             assert bool(body.get("stream")) is (provider == "openai")
         assert body["input"][1]["content"][0]["type"] == "input_text"
         assert body["input"][-1]["call_id"] == "call-before"
+        if with_images:
+            user_image = body["input"][0]["content"][1]
+            tool_image = body["input"][-1]["output"][1]
+            assert user_image == tool_image
+            assert user_image["type"] == "input_image" and user_image["detail"] == "high"
+            assert base64.b64decode(user_image["image_url"].split(",", 1)[1]) == image_bytes
         assert body["tools"][0]["name"] == "lookup"
         assert body["tool_choice"] == {"type": "function", "name": "lookup"}
         assert body["text"]["format"] == {"type": "json_schema", **request.response_format}
     else:
         assert "input" not in body and "store" not in body
-        assert body["messages"][-1] == {
-            "role": "tool",
-            "tool_call_id": "call-before",
-            "content": "tool result",
-        }
+        if with_images:
+            assert body["messages"][-2]["role"] == "tool"
+            assert body["messages"][-2]["tool_call_id"] == "call-before"
+            assert "tool result" in body["messages"][-2]["content"]
+            assert body["messages"][-1]["role"] == "user"
+            parts = body["messages"][-1]["content"]
+            assert "call-before" in json.dumps(parts)
+            user_image = body["messages"][0]["content"][1]
+            tool_image = next(part for part in parts if part["type"] == "image_url")
+            assert user_image == tool_image
+            assert user_image["image_url"]["detail"] == "high"
+            assert base64.b64decode(user_image["image_url"]["url"].split(",", 1)[1]) == image_bytes
+        else:
+            assert body["messages"][-1] == {
+                "role": "tool",
+                "tool_call_id": "call-before",
+                "content": "tool result",
+            }
         assert body["tools"][0]["function"]["name"] == "lookup"
         assert body["tool_choice"] == {"type": "function", "function": {"name": "lookup"}}
         assert body["response_format"] == {

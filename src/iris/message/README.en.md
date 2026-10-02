@@ -80,7 +80,9 @@ the complete body.
 [`iris.utils.images`](../utils/images.py) owns image processing and file saving.
 `image_block_from_saved()` projects its trusted saved-file result into an `ImageBlock`; this
 package owns references and JSON round trips. Original/model can share one file when no transform
-is needed. These data contracts do not yet provide SDK image import or provider image encoding.
+is needed. Import images through [`AgentRunner.import_image()`](../harness/README.en.md#quick-start)
+and pass ordered content to `Msg.user([TextBlock(...), image])`. Messages retain complete blocks
+without reading the image files; the selected provider adapter owns request encoding.
 
 ### `Conversation`
 
