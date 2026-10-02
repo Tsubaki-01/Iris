@@ -63,6 +63,9 @@ input is valid; empty strings/lists and whitespace-only text lists are rejected.
 follow-up `SessionManager.submit()` calls accept the same `str | list[DataBlock]` input. Import
 before submitting so the admission lock only handles saved references. Start, HITL resume, and
 recovery reuse complete blocks from the durable request/history without importing again.
+Closing the runner preserves image files. SQLite recovery and forks still depend on them, so backups
+must include `.iris/image-cache/`; the database alone is insufficient, and paths are not rewritten
+automatically when moving to another machine.
 `ContextBuildScope.run_input` remains text-only; image-only `ForkPoint.input` displays
 `[image: name]` labels. Goal continuation and subagent prompts remain text without implicit parent
 image forwarding.

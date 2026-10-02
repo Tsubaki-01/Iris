@@ -32,6 +32,19 @@ Agent 默认自动压缩长上下文：可用输入预算为 96,000 tokens（已
 
 Provider 与 lifecycle 示例见 [`examples/README.md`](examples/README.md)。
 
+## 图片输入
+
+Python SDK 支持静态 PNG、JPEG 和 WebP：先用 `runner.import_image(..., session_id=...)`
+保存图片，再以 `AgentRunRequest(input=[TextBlock(...), image], session_id=...)` 提交；纯图片
+使用 `input=[image]`。主模型须支持所选协议的视觉输入与工具调用，默认 Responses，也可显式
+选择 Chat Completions。可运行示例见 [`examples/image`](examples/image/README.md)。
+
+图片的 `original` 与 `model` 引用随会话持久化，普通模型调用读取 `model` 版。
+run 或 runner 结束保留缓存，fork 继续依赖源 session 图片目录；备份需同时带上数据库与
+`image-cache`。文字摘要只保存已表达的视觉结论和图片引用，需要细节时通过 `file.read`
+对应的 `read_file` 回读。图片预算是近似值，实际 usage 以服务端返回为准。
+`iris chat` 当前没有发图或图片渲染界面。
+
 ## 本地命令与可选 Docker 沙箱
 
 普通文件、Python 扩展和 MCP 工具在宿主执行。只有显式声明的 `exec.command` 使用所选

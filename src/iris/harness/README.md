@@ -44,6 +44,8 @@ result = await runner.start(
 空字符串、空列表和只有空白文字的列表不接受。`SessionManager.submit()` 的 idle、steer、
 follow-up 接受同一 `str | list[DataBlock]` 输入；先在锁外完成导入，入队只传已保存引用。
 start、HITL resume 和 recover 均使用 durable request/历史中的完整块，无需再次导入。
+关闭 runner 不清理图片缓存；SQLite 重启恢复与 fork 继续依赖这些文件，备份时须同时保留
+`.iris/image-cache/`，仅复制数据库不足以恢复图片，也不会自动改写跨机器路径。
 `ContextBuildScope.run_input` 保持纯文字，纯图片的 `ForkPoint.input` 显示 `[image: 名称]`；
 Goal continuation 和 subagent prompt 仍为文字，不自动携带父图片。
 

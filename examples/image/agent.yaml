@@ -1,0 +1,25 @@
+name: iris-image-example
+
+model:
+  provider: deepseek
+  name: deepseek-flash
+  api_style: responses
+  temperature: 0
+  max_tokens: 2048
+  timeout: 60
+
+system: |
+  你是看图助手。根据实际可见的图片回答，分清直接观察和推测。
+  需要查看历史图片细节时，用 read_file 读取图片引用中的 model 路径。
+  无法看清的文字或细节应明确说明，不编造。
+
+tools:
+  builtin:
+    - file.read
+
+permissions:
+  workspace: .
+
+session:
+  backend: sqlite
+  path: .iris/image.db
