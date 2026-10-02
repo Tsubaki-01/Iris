@@ -15,10 +15,12 @@ from iris.tools import (
     PermissionEffect,
     ReadFileRecord,
     ReadFileState,
+    ToolCall,
     ToolDefinition,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -60,15 +62,10 @@ class ContextCaptureMiddleware(ToolMiddleware):
     def __init__(self) -> None:
         self.seen: list[tuple[str, str]] = []
 
-    async def before_call(
-        self,
-        tool: BaseTool,
-        params: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> None:
-        del tool
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
         await asyncio.sleep(0)
-        self.seen.append((str(params["value"]), context.call_id))
+        self.seen.append((str(call.arguments["value"]), call.tool_use_id))
+        return await call_next()
 
 
 class CountingPermissionPolicy:
@@ -290,29 +287,30 @@ async def test_parallel_context_copies_only_isolated_metadata(
     signal = Signal()
     seen: list[ToolExecutionContext] = []
 
-    class CaptureContext(ToolMiddleware):
+    class CaptureContext(CountingValidationTool):
         """在并发路径中修改各调用独有的 metadata。"""
 
-        async def before_call(
-            self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
-        ) -> None:
+        async def arun(
+            self, params: BaseModel | dict[str, Any], context: ToolExecutionContext
+        ) -> ToolResult:
             context.metadata["nested"]["calls"].append(context.call_id)
             seen.append(context)
             await asyncio.sleep(0)
-
-    def echo(value: str) -> str:
-        return value
+            return await super().arun(params, context)
 
     registry = ToolRegistry()
-    registry.register_function(echo)
+    registry.register(CaptureContext())
     context = ToolExecutionContext(
         workspace_root=tmp_path,
         metadata={"nested": {"calls": []}},
         read_state=state,
         cancellation=signal,
     )
-    results = await ToolExecutor(registry, middleware=[CaptureContext()]).execute_many(
-        [ToolUseBlock(id=str(i), name="echo", input={"value": str(i)}) for i in range(3)],
+    results = await ToolExecutor(registry).execute_many(
+        [
+            ToolUseBlock(id=str(i), name="counting_validation", input={"value": str(i)})
+            for i in range(3)
+        ],
         context,
     )
 

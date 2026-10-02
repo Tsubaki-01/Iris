@@ -56,14 +56,14 @@ async def run_command(
     try:
         outcome = await binding.service.execute(scope, request)
     except IrisToolOutcomeUnknownError as error:
-        context.command_stop_slot.receipt = error.stop_receipt
+        context.command_stop_slot.record(receipt=error.stop_receipt)
         raise
     except IrisCommandCleanupError as error:
         if error.command_outcome is not None:
-            context.command_stop_slot.cleanup_error = error
+            context.command_stop_slot.record(cleanup_error=error)
             return _known_result(error.command_outcome, context, tool_name)
         if error.context.get("started") is False:
-            context.command_stop_slot.cleanup_error = error
+            context.command_stop_slot.record(cleanup_error=error)
             return _unavailable(error, binding, context, tool_name)
         raise
     except IrisCommandError as error:
@@ -77,7 +77,7 @@ def _known_result(
     outcome: CommandOutcome, context: ToolExecutionContext, tool_name: str
 ) -> ToolResult:
     """状态和采集事实置首，stderr 置尾，供统一 artifact 层产生头尾预览。"""
-    context.command_stop_slot.receipt = outcome.stop_receipt
+    context.command_stop_slot.record(status=outcome.status, receipt=outcome.stop_receipt)
     descriptions = {
         CommandStatus.EXITED: f"前台命令已退出，退出码 {outcome.exit_code}",
         CommandStatus.TIMED_OUT: "命令业务期限已到，本次命令已停止",

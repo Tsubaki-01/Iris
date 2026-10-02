@@ -28,14 +28,15 @@ from iris.exceptions import (
 )
 from iris.message import TextBlock, ToolUseBlock
 from iris.tools import (
-    BaseTool,
     DefaultPermissionPolicy,
     ExecCommandTool,
     RunPythonTool,
+    ToolCall,
     ToolCapability,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
     ToolTimeoutOwner,
@@ -266,10 +267,13 @@ async def test_exec_cleanup_failure_keeps_known_fact_and_excluded_error(
     class SwallowError(ToolMiddleware):
         """若控制异常误入错误 middleware，就会被转换成普通成功。"""
 
-        async def on_error(
-            self, tool: BaseTool, error: Exception, context: ToolExecutionContext
-        ) -> ToolResult | None:
-            return ToolResult(tool_use_id="", tool_name="", content=[TextBlock(text="swallowed")])
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            try:
+                return await call_next()
+            except Exception:
+                return ToolResult(
+                    tool_use_id="", tool_name="", content=[TextBlock(text="swallowed")]
+                )
 
     executor, _tool = executor_for(FakeCommandService(error), middleware=[SwallowError()])
     context = ToolExecutionContext(workspace_root=tmp_path)
@@ -294,9 +298,8 @@ async def test_middleware_replacement_cannot_erase_command_stop_slot(tmp_path: P
     class ReplaceResult(ToolMiddleware):
         """用全新结果替换命令输出。"""
 
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            await call_next()
             return ToolResult(tool_use_id="", tool_name="", content=[TextBlock(text="replacement")])
 
     receipt = CommandStopReceipt("service", "stop")
@@ -417,7 +420,7 @@ async def test_backend_and_artifact_truncation_preserve_status_and_final_diagnos
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["before", "after", "on_error"])
+@pytest.mark.parametrize("stage", ["before", "after", "recovery"])
 async def test_cleanup_control_error_from_middleware_is_not_rewritten(
     tmp_path: Path, stage: str
 ) -> None:
@@ -426,26 +429,19 @@ async def test_cleanup_control_error_from_middleware_is_not_rewritten(
     class CleanupMiddleware(ToolMiddleware):
         """在当前阶段报告未完成资源清理。"""
 
-        async def before_call(
-            self, tool: BaseTool, params: dict[str, Any], context: ToolExecutionContext
-        ) -> None:
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
             if stage == "before":
                 raise error
-
-        async def after_call(
-            self, tool: BaseTool, result: ToolResult, context: ToolExecutionContext
-        ) -> ToolResult:
+            try:
+                result = await call_next()
+            except IrisCommandError:
+                raise error from None
             if stage == "after":
                 raise error
             return result
 
-        async def on_error(
-            self, tool: BaseTool, exception: Exception, context: ToolExecutionContext
-        ) -> ToolResult | None:
-            raise error
-
     service = FakeCommandService(
-        IrisCommandError("body failure") if stage == "on_error" else outcome()
+        IrisCommandError("body failure") if stage == "recovery" else outcome()
     )
     executor, _tool = executor_for(service, middleware=[CleanupMiddleware()])
     with pytest.raises(IrisCommandCleanupError) as caught:

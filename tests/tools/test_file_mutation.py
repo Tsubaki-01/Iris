@@ -190,7 +190,7 @@ class _Cancellation:
 async def test_waiting_mutation_cancels_without_writing_or_unknown(
     tmp_path: Path, name: str
 ) -> None:
-    """锁等待者收到业务取消后，持锁检查返回明确未写入的普通工具错误。"""
+    """低层锁等待者交回取消，真实文件与读取状态证明第二次修改未发生。"""
     target = tmp_path / "notes.txt"
     target.write_text("before", encoding="utf-8")
     context_a, context_b = _context(tmp_path, target), _context(tmp_path, target)
@@ -229,8 +229,7 @@ async def test_waiting_mutation_cancels_without_writing_or_unknown(
     finally:
         release.set()
     await task_a
-    result = await task_b
-    assert result.error is not None and result.error.code == "FILE_OPERATION_CANCELLED"
-    assert "file_change" not in result.data
+    with pytest.raises(IrisCancellationRequestedError):
+        await task_b
     assert target.read_text(encoding="utf-8") == "first-completed-content"
     assert context_b.read_state.get(target).size_bytes == len("before")

@@ -24,7 +24,7 @@ DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/me
 
 `ToolExecutor` 的专用 Sub Agent 入口保留 raw 参数解析、fresh permission refresh 与最终
 identity/artifact 归一化；linked continuation 跳过 outer permission。ChildWaiting 直接返回，
-不进入 middleware、breaker、parent claim 或普通 timeout。普通工具仍在 after_call 后归一化
+不进入 middleware、breaker、parent claim 或普通 timeout。普通工具在包装链返回后归一化
 最终正文并落盘。ACTIVE/WAITING 共用最终归一化与 `ARTIFACT_ERROR` 投影。
 Controller 的 lifecycle/persistence/recovery 异常原样传播。
 
@@ -243,7 +243,7 @@ JSON 参数与完整正文均相同，runtime 才可能折叠较早正文。大�
 
 `THREAD` 只通过 `asyncio.to_thread()` 选择执行位置；`CallableTool.arun()` 不独立消费
 `context.cancellation`。直接调用 `arun()` 时，调用者负责取消自己的 task；通过 executor
-执行时，由 executor 统一将 signal 转为 body task 的取消。
+执行时，由 executor 统一将 signal 转为当前包装调用的取消，并等待下游收口。
 
 `preset_kwargs` 会在执行前注入函数调用，但不会暴露在 schema 中；调用方若传入同名参数会得到校验错误。
 
@@ -299,7 +299,7 @@ executor = ToolExecutor(
 
 公共方法：
 
-- `execute_one(tool_use, context)`: 执行单个 `ToolUseBlock`，始终返回 `ToolResult`，常见错误码包括 `NOT_FOUND`、`VALIDATION_ERROR`、`PERMISSION_ERROR`、`EXECUTION_ERROR`、`MIDDLEWARE_ERROR`、`CIRCUIT_OPEN`。
+- `execute_one(tool_use, context)`: 执行单个 `ToolUseBlock`，成功与普通错误返回 `ToolResult`；取消、未知结果等控制异常向调用方传播。常见错误码包括 `NOT_FOUND`、`VALIDATION_ERROR`、`PERMISSION_ERROR`、`EXECUTION_ERROR`、`MIDDLEWARE_ERROR`、`CIRCUIT_OPEN`。
 - `execute_many(tool_uses, context)`: 连续只读且并发安全的调用会并发执行；遇到写入或非并发安全工具时按顺序执行。
 - `prepare_many(tool_uses, context)`: 无副作用预检完整批次，返回 `ToolBatchPlan` 与
   `PreparedToolCall`；需要人工介入时保存统一的 `HumanInteractionRequest(tool_call, prompt)`，
@@ -312,27 +312,30 @@ executor = ToolExecutor(
 `arguments`。Runtime 在同一 tool batch 内复用该 plan；`execute_prepared()` 只刷新 permission，
 不会再次 lookup、降级为 dict 或重复 schema 校验。刷新后按 `preflight_result` / `DENY`、human
 protocol guard、精确 approve 的优先级授权；通过后依次检查 circuit breaker、cancellation、
-effect guard、cancellation，随后才进入 middleware `before_call` → body 前取消检查 → `tool.arun()` →
-middleware after hooks → artifact → breaker 记录。guard 失败时不会进入任何工具 effect；claim 后取消会
+effect guard、cancellation，随后才进入 `wrap_tool_call` 包装链 → body 前取消检查 → `tool.arun()` →
+包装链返回 → 最终 identity/artifact 处理。breaker 只按真实 body 结果记录一次，不把包装器短路、
+后置失败或 artifact 错误计入工具失败。guard 失败时不会进入任何工具 effect；claim 后取消会
 作为独立控制流向 runtime 传播。历史 approve 不能覆盖当前 `DENY`。直接使用低层 executor 时
 guard 可选；lifecycle 路径通过 `ToolBridge` 强制提供 guard。
 
 并发 context copy 只深拷贝需要隔离的 `metadata`，直接共享类型化 `ReadFileState` 和
-`cancellation` live object，不复制共享对象及其记录；
+`cancellation` live object，不复制共享对象及其记录。每条新调用有独立的命令事实与控制槽；
+同一调用的 context 投影保持槽 identity，不把上一调用的停止状态带进下一调用。
 `ToolExecutionContext` 在 public raw 输入边界解析 read state，后续 file service 直接消费该
 对象，不再重复做类型判断。signal 不会进入 `model_dump()` 或 checkpoint。协作式取消使用 `iris.exceptions` 中的
 `IrisCancellationRequestedError`；`CallableTool` 会将它原样传播，而不是归一化为普通工具错误。
 
-`ToolExecutor` 是 signal 到普通 `arun()` body task 取消与 drain 的唯一 owner，覆盖 async
-callable、自定义异步 `BaseTool` 和 THREAD callable。没有 signal 时直接 await body；有 signal
-时先检查 body 是否完成，再检查取消请求。已完成的结果优先；executor 因 signal 取消 body 后，
-若 body 捕获 `CancelledError` 并正常返回，仍保留其 `ToolResult`。若外部 `Task.cancel()`、timeout
-或 runtime sibling cancellation 到达，则先 drain body 并保留正常返回的确定结果；Runtime 按序
-提交后再传播取消或结算超时，不把收回结果解释为取消失效。body 真正取消或结果未知时保留
-原控制流，工具自身的普通异常仍走既有错误归一化。
+`ToolExecutor` 统一监控包含 middleware 和 `arun()` 的整条调用，覆盖 async callable、
+自定义异步 `BaseTool` 和 THREAD callable；body 启动前再次检查 signal。收到 signal、外部
+`Task.cancel()`、timeout 或 runtime sibling cancellation 时，向当前调用转发首次取消并
+等待下游收口，重复取消不再次打断清理。body 已完成，或捕获 `CancelledError` 后正常返回时，
+其 `ToolResult` 仍是已知事实；Runtime 按序提交后再传播取消或结算超时，不把收回结果解释为
+取消失效。body 真正取消或结果未知时保留原控制流，工具自身的普通异常仍走既有错误归一化。
 
-这条取消桥只覆盖 body。`before_call` 返回后若已有请求，body 不启动；取得 body 结果后的
-`after_call`、artifact 和 breaker 处理继续完成。慢 middleware、压住 `CancelledError` 的协程及
+包装器进入下游前若已有取消请求，body 不启动。body 已知后的包装器取消或清理失败不会重跑
+工具：有 Runtime owner 时保留结果并交接调用级控制，Runtime 按顺序提交后再结算；低层直接
+Executor 调用没有延迟提交 owner 时，控制异常仍抛给调用者。有限 artifact IO 仍先收回实际结果。
+慢 middleware、压住 `CancelledError` 的协程及
 INLINE 阻塞仍可能延迟退出。自定义 THREAD callable 取消只结束 async waiter，worker 可继续运行；未结算 claim
 仍按 `OUTCOME_UNKNOWN` 处理，包括只读调用，晚到返回不能改写 durable 结果。
 
@@ -591,19 +594,46 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 不同 ID 在大小写不敏感的文件系统上保持不同路径，目录归属检查仍在落盘处执行。恢复和 fork
 沿用已保存的不可变路径，不复制或重写 payload。
 
-Executor 在全部 `after_call` 完成后执行一次 artifact 处理，因此 hook 扩展后的最终正文也受
-`max_result_chars` 约束；hook 收到的是工具完整结果。
+Executor 在包装链返回后执行一次 artifact 处理，因此 middleware 扩展后的最终正文也受
+`max_result_chars` 约束；`call_next()` 返回的是下游完整结果。
 
 ### Middleware
 
-`ToolMiddleware` 提供三个精确的 async 生命周期钩子：
+`ToolMiddleware` 是抽象基类，子类必须实现唯一方法
+`async wrap_tool_call(call: ToolCall, call_next: ToolNext) -> ToolResult`。
+通过 `ToolExecutor(..., middleware=[...])` 注入；第一个注册项最外层，A、B 的执行顺序是
+A 前 → B 前 → body → B 后 → A 后。
 
-- `await before_call(tool, params, context) -> None`
-- `await after_call(tool, result, context) -> ToolResult`
-- `await on_error(tool, error, context) -> ToolResult | None`
+`ToolCall` 是冻结调用视图，提供 `tool_use_id`、`tool_name`、`arguments`、`agent_id`、
+`session_id`、可空的 `run_id`/`activation_id` 和 `workspace_root`，不暴露可写 context 或
+`BaseTool` 实例。参数是独立快照，修改快照不会改变实际工具输入。
 
-自定义 middleware 继承 `ToolMiddleware` 并覆盖所需 async hook；executor 不探测 partial object、
-同步返回值或旧 hook。Middleware 抛错会变成 `MIDDLEWARE_ERROR`。
+`call_next()` 不接收参数，最多调用一次；不调用可返回缓存等替代结果，但权限和 claim 已先执行。
+保存的 continuation 在本层返回后失效；已启动的下游必须先收回，不能遗留后台 body。
+下游结果只读，改写必须返回新 `ToolResult`：
+
+```python
+from iris.message import TextBlock
+from iris.tools import ToolCall, ToolExecutor, ToolMiddleware, ToolNext, ToolResult
+
+
+class LabelResult(ToolMiddleware):
+    """在下游结果后添加来源说明。"""
+
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+        """返回新结果，保留原对象。"""
+        result = await call_next()
+        return result.model_copy(
+            update={"content": [*result.content, TextBlock(text=f"来源：{call.tool_name}")]}
+        )
+
+
+executor = ToolExecutor(registry, middleware=[LabelResult()])
+```
+
+包装器可捕获下游普通异常并返回替代结果。进入下游前的普通错误产生 `MIDDLEWARE_ERROR`；
+下游已经返回后再抛普通错误，则记录日志并保留下游结果，不重放。取消、unknown 和清理控制
+不能被包装器合成的成功覆盖。结果 identity、披露和停止事实由框架保存，不从替代结果推断。
 
 ### CircuitBreaker
 
@@ -654,7 +684,7 @@ registry.register(ToolSearchTool(registry.view()))
 及 `group`；无匹配时列表为空。完整参数 JSON Schema 不放进搜索正文。成功系统搜索结果提交为工具消息后，
 其 `metadata.extra.context_revealed_tools` 保存按排名排列的 canonical names；executor 不接受
 其它工具写入同名字段作为披露事实。该名单来自成功搜索本体，after middleware 重建正文不会
-丢失；最终错误或 on_error 的替代成功结果不产生披露。
+丢失；最终错误或对失败 body 合成的替代成功结果不产生披露。
 
 低层搜索不修改 registry。完整 runtime 开启 `context_policy.deferred_tools: true` 后自动注册
 该工具，只在搜索结果提交到当前 session 历史后，才为下一主模型请求选择候选工具定义及完整参数 JSON Schema。
@@ -691,7 +721,8 @@ GrepSearchInput, ListFilesInput, PermissionDecision, PermissionEffect,
 PermissionPolicy, PreparedToolCall,
 ReadFileInput, ReadFileRecord, ReadFileState, ToolArtifact,
 ToolArtifactStore, ToolCapability, ToolDefinition, ToolErrorInfo,
-ToolBatchPlan, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolTimeoutOwner, ToolExecutor, ToolMiddleware,
+ToolBatchPlan, ToolCall, ToolEffectGuard, ToolExecutionContext, ToolExecutionMode, ToolTimeoutOwner,
+ToolExecutor, ToolMiddleware, ToolNext,
 ToolRegistry, ToolRegistryView, ToolResult, ToolSearchInput,
 ToolSearchTool, WorkspaceFileService, WorkspacePolicy, WriteFileInput,
 WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool,

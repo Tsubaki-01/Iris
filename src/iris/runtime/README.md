@@ -358,7 +358,10 @@ schema validation。body 可以乱序结束，但 result message、cursor、
 session history、checkpoint 和 committed event 只按原始 ordinal 的连续前缀推进。多个
 `TOOL_CALL_CLAIMED` telemetry event 的先后顺序不是契约。
 
-control interruption 只提交首个异常/空洞之前的已知 `ToolResult`；后序内存结果不会跳洞。
+control interruption 只提交首个未知 body 空洞之前的已知 `ToolResult`；后序内存结果不会跳洞。
+每个调用有独立的控制槽，包装器在 body 已知后的取消先保留结果，由 Runtime 提交后再兑现。
+并发窗口也会因正常返回但携带控制/清理错误而停止并排空 siblings；首个完成批次的最小 ordinal
+决定停止原因，窗口自己取消 sibling 不会改成 SDK 取消。有待处理控制时不接收批末 steer。
 任何未提交的 durable claim 都会让取消、deadline 或程序中断最终 fail closed 为
 `OUTCOME_UNKNOWN`，包括只读调用。父 task 或基础设施退出前，runtime 会 cancel 并 drain
 自己创建的 children。
@@ -370,8 +373,8 @@ outcome，而不是普通工具错误。
 后处理和提交路径。外层取消、timeout 或 sibling cancellation 到达时也先 drain，按 ordinal
 提交已收回的确定结果；随后传播外层取消或结算期限，不把延后返回误判为正常成功。
 `asyncio.timeout().expired()` 保留单次 timeout 事实；无确定结果时仍沿用 unknown 语义。
-`before_call` / `after_call` 不由这条 body 取消桥中断；
-慢 middleware、压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟退出。
+`wrap_tool_call` 的后置部分被取消时，已知下游结果仍完成必要最终化并提交；
+压住 `CancelledError` 的协程及 INLINE 阻塞仍可能延迟退出。
 
 并发文件读取共享同一个 `ReadFileState` identity；worker 只返回不可变 observation，由 event
 loop 合并。窗口 settle 后的 checkpoint snapshot 包含合并记录，后续串行 write barrier 可以
@@ -390,8 +393,10 @@ retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当�
 
 命令工具声明 `ToolTimeoutOwner.TOOL`，自行持有单命令期限和进程收尾。Runtime 传入原始
 tool timeout，不再套普通工具超时；run 总期限仍由外层 owner 管理。当前调用的停止收据与
-清理错误保存在共享 `CommandStopSlot`，终止/unknown 出口通过进程内字段交给 harness；
-已知结果先提交再传播清理错误。模型接受结果继续运行时释放该槽，收据不进入历史或 checkpoint。
+清理错误保存在共享 `CommandStopSlot`，终止/unknown 出口通过进程内字段交给 harness。
+已知结果先提交，`RuntimeActivationResult.cleanup_error` 与原取消、期限或失败 outcome 一起交接，
+让 harness 保留该结算意图；原始 SDK task 取消仍重抛，未消费的命令槽供 harness 收尾。
+模型接受结果继续运行时释放该槽，控制与收据不进入历史或 checkpoint。
 
 ## Memory 概览窗口与自主读取
 

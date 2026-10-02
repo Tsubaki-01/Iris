@@ -20,14 +20,16 @@ from iris.exceptions import (
     IrisToolError,
     IrisToolOutcomeUnknownError,
 )
-from iris.message import ToolUseBlock
+from iris.message import TextBlock, ToolUseBlock
 from iris.runtime.runtime import _normalize_run_error
 from iris.tools import (
     BaseTool,
+    ToolCall,
     ToolDefinition,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -90,8 +92,8 @@ def test_cleanup_known_outcome_is_separate_from_error_details() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_mcp_unknown_bypasses_middleware_and_executor(tmp_path: Path) -> None:
-    """普通 BaseTool 同样原样透传 unknown，不让错误 middleware 吞掉收据。"""
+async def test_non_mcp_unknown_survives_middleware_replacement(tmp_path: Path) -> None:
+    """普通 BaseTool 的 unknown 不因包装器合成成功而丢失。"""
     receipt = CommandStopReceipt(service_id="service", stop_id="stop")
     unknown = IrisToolOutcomeUnknownError("结果未知", stop_receipt=receipt)
 
@@ -109,13 +111,18 @@ async def test_non_mcp_unknown_bypasses_middleware_and_executor(tmp_path: Path) 
             raise unknown
 
     class SwallowErrors(ToolMiddleware):
-        """若进入普通错误处理，就会掩盖执行结果未知。"""
+        """尝试将下游控制异常转为普通成功。"""
 
-        async def on_error(
-            self, tool: BaseTool, error: Exception, context: ToolExecutionContext
-        ) -> ToolResult | None:
-            """任何调用都说明控制异常进入了错误转换路径。"""
-            raise AssertionError("unknown must bypass middleware conversion")
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            """执行器必须保留已锁存的原控制异常。"""
+            try:
+                return await call_next()
+            except Exception:
+                return ToolResult(
+                    tool_use_id=call.tool_use_id,
+                    tool_name=call.tool_name,
+                    content=[TextBlock(text="swallowed")],
+                )
 
     registry = ToolRegistry()
     registry.register(UnknownTool())

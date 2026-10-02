@@ -966,7 +966,9 @@ async def test_execute_stop_policy_never_starts_later_safe_call(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_execute_parallel_file_reads_share_one_read_state(tmp_path: Path) -> None:
+async def test_execute_parallel_file_reads_share_one_read_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first_path = tmp_path / "first.txt"
     second_path = tmp_path / "second.txt"
     first_path.write_text("first", encoding="utf-8")
@@ -974,22 +976,24 @@ async def test_execute_parallel_file_reads_share_one_read_state(tmp_path: Path) 
     registry = ToolRegistry()
     register_file_tools(registry=registry)
 
-    class ReadStateObserver(ToolMiddleware):
-        def __init__(self) -> None:
-            self.identities: list[int] = []
+    identities: list[int] = []
 
-        async def before_call(
-            self,
-            tool: BaseTool,
-            params: dict[str, Any],
+    def observe_tool(tool: BaseTool) -> None:
+        """在真实文件工具 body 观察共享状态，不通过扩展公开可写 context。"""
+        original = tool.arun
+
+        async def observe(
+            params: BaseModel | dict[str, Any],
             context: ToolExecutionContext,
-        ) -> None:
-            del params
-            if tool.definition.group == "file":
-                assert context.read_state is not None
-                self.identities.append(id(context.read_state))
+        ) -> ToolResult:
+            assert context.read_state is not None
+            identities.append(id(context.read_state))
+            return await original(params, context)
 
-    observer = ReadStateObserver()
+        monkeypatch.setattr(tool, "arun", observe)
+
+    observe_tool(registry.get("read_file"))
+    observe_tool(registry.get("write_file"))
     calls = [
         ToolUseBlock(id="read-1", name="read_file", input={"file_path": "first.txt"}),
         ToolUseBlock(id="read-2", name="read_file", input={"file_path": "second.txt"}),
@@ -1004,7 +1008,6 @@ async def test_execute_parallel_file_reads_share_one_read_state(tmp_path: Path) 
         provider=provider,
         tmp_path=tmp_path,
         registry=registry,
-        middleware=[observer],
         permission_policy=DefaultPermissionPolicy(write_mode="allow"),
     )
     activation = start_activation()
@@ -1018,7 +1021,8 @@ async def test_execute_parallel_file_reads_share_one_read_state(tmp_path: Path) 
 
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert first_path.read_text(encoding="utf-8") == "updated"
-    assert len(set(observer.identities)) == 1
+    assert len(identities) == 3
+    assert len(set(identities)) == 1
     committed_call_ids = [commit.tool_call.tool_call_id for commit in commits.tool_commits]
     assert committed_call_ids == ["read-1", "read-2", "write-1"]
     expected_paths = {str(first_path.resolve()), str(second_path.resolve())}

@@ -1,40 +1,37 @@
-"""工具 middleware 扩展点。"""
+"""工具调用的单次包装扩展点。"""
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from .base import BaseTool, ToolExecutionContext, ToolResult
+from .base import ToolResult
 
 
-class ToolMiddleware:
-    """工具执行生命周期 middleware 基类。
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    """只读调用视图；arguments 是与真实执行参数隔离的独立快照。"""
 
-    所有 async 钩子默认不改变执行流程；自定义 middleware 直接继承并覆盖所需钩子。
-    """
+    tool_use_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_id: str
+    session_id: str
+    run_id: str | None
+    activation_id: str | None
+    workspace_root: Path
 
-    async def before_call(
-        self,
-        tool: BaseTool,
-        params: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> None:
-        """工具调用前执行。"""
 
-    async def after_call(
-        self,
-        tool: BaseTool,
-        result: ToolResult,
-        context: ToolExecutionContext,
-    ) -> ToolResult:
-        """工具执行后处理结果。"""
-        return result
+type ToolNext = Callable[[], Awaitable[ToolResult]]
 
-    async def on_error(
-        self,
-        tool: BaseTool,
-        error: Exception,
-        context: ToolExecutionContext,
-    ) -> ToolResult | None:
-        """工具执行错误时可返回替代结果。"""
-        return None
+
+class ToolMiddleware(ABC):
+    """包装一次工具调用；首个注册项最外层，下游最多执行一次。"""
+
+    @abstractmethod
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+        """返回替代结果或调用一次下游；下游结果只读，修改须返回新结果。"""
+        raise NotImplementedError

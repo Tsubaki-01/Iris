@@ -20,12 +20,11 @@ from typing import Any, Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
+from ..command.models import CommandStopSlot
 from ..exceptions import (
     IrisCancellationRequestedError,
-    IrisCommandCleanupError,
     IrisToolExecutionError,
     IrisToolNotFoundError,
-    IrisToolOutcomeUnknownError,
     IrisToolValidationError,
 )
 from ..hitl.models import (
@@ -36,7 +35,9 @@ from ..hitl.models import (
     make_call_fingerprint,
 )
 from ..message import ToolUseBlock
+from ._execution_control import ToolExecutionControlSlot
 from ._io import run_tool_io
+from ._middleware_chain import CONTROL_ERRORS, drain_operation, run_middleware_chain
 from ._read_state import ReadFileState
 from .artifacts import artifact_store_for, truncate_tool_result
 from .base import (
@@ -47,7 +48,7 @@ from .base import (
     ToolTimeoutOwner,
 )
 from .circuit import CircuitBreaker
-from .middleware import ToolMiddleware
+from .middleware import ToolCall, ToolMiddleware, ToolNext
 from .permissions import (
     DefaultPermissionPolicy,
     PermissionDecision,
@@ -94,6 +95,16 @@ class ToolBatchPlan:
     @property
     def first_human_gate(self) -> PreparedToolCall | None:
         return next((call for call in self.calls if call.human_request is not None), None)
+
+
+@dataclass(slots=True)
+class _ToolExecutionFacts:
+    """包装器不能改写的真实 body 事实与最后有效下游结果。"""
+
+    body_entered: bool = False
+    body_result: ToolResult | None = None
+    last_result: ToolResult | None = None
+    revealed_tools: tuple[str, ...] | None = None
 
 
 # endregion
@@ -200,7 +211,10 @@ class ToolExecutor:
             if batch:
                 results.extend(await self._execute_read_batch(batch, context))
                 batch = []
-            results.append(await self._execute_current(prepared, context))
+            call_context = _copy_context_for_parallel_call(context)
+            results.append(await self._execute_current(prepared, call_context))
+            if context.read_state is None:
+                context.read_state = call_context.read_state
         if batch:
             results.extend(await self._execute_read_batch(batch, context))
         return results
@@ -524,7 +538,6 @@ class ToolExecutor:
         tool_use = prepared.tool_use
         tool = cast(BaseTool, prepared.tool)
         validated_input = cast(BaseModel | dict[str, Any], prepared.validated_input)
-        arguments = prepared.arguments
         context.call_id = tool_use.id
         context.tool_name = tool_use.name
         if self.circuit_breaker is not None:
@@ -544,53 +557,73 @@ class ToolExecutor:
             effect_guard.before_effect(prepared)
         if context.cancellation is not None:
             context.cancellation.raise_if_requested()
-        revealed_tools: tuple[str, ...] | None = None
+        facts = _ToolExecutionFacts()
+        control = ToolExecutionControlSlot()
+
+        def remember_result(result: ToolResult) -> None:
+            """只有真实 body 已知，包装器的下游结果才可用于延迟控制提交。"""
+            if facts.body_result is not None:
+                facts.last_result = result
+
+        async def leaf() -> ToolResult:
+            """保留 body 原异常给包装器，同时独立记录真实成功或失败。"""
+            try:
+                result = await self._run_tool_body(tool, validated_input, context, facts)
+            except CONTROL_ERRORS as error:
+                control.record(error)
+                raise
+            except Exception as error:
+                facts.body_result = self._execution_error_result(tool_use, tool, error)
+                facts.last_result = facts.body_result
+                self._record_breaker_result(tool.name, facts.body_result)
+                raise
+            facts.body_result = result
+            facts.last_result = result
+            if isinstance(tool, ToolSearchTool) and not result.is_error:
+                facts.revealed_tools = tuple(result.metadata["context_revealed_tools"])
+            self._record_breaker_result(tool.name, result)
+            return result
+
+        async def operation() -> ToolResult:
+            """空链直接执行 body，否则组合一次调用的包装层。"""
+            if not self.middleware:
+                return await leaf()
+            call = ToolCall(
+                tool_use_id=tool_use.id,
+                tool_name=tool_use.name,
+                arguments=deepcopy(prepared.arguments),
+                agent_id=context.agent_id,
+                session_id=context.session_id,
+                run_id=context.metadata.get("run_id"),
+                activation_id=context.metadata.get("activation_id"),
+                workspace_root=context.workspace_root,
+            )
+            return await run_middleware_chain(
+                self.middleware,
+                call,
+                leaf,
+                control=control,
+                remember_result=remember_result,
+                middleware_error=lambda error: self._error_result(
+                    tool_use, "MIDDLEWARE_ERROR", str(error)
+                ),
+            )
+
         try:
-            middleware_error = await self._run_before_call(tool, arguments, context)
-            if middleware_error is not None:
-                result = middleware_error
-            else:
-                try:
-                    result = await self._run_tool_body(tool, validated_input, context)
-                    if isinstance(tool, ToolSearchTool) and not result.is_error:
-                        revealed_tools = tuple(result.metadata["context_revealed_tools"])
-                except (
-                    IrisCancellationRequestedError,
-                    IrisToolOutcomeUnknownError,
-                    IrisCommandCleanupError,
-                ):
-                    raise
-                except Exception as exc:
-                    handled = await self._run_on_error(tool, exc, context)
-                    if handled is None:
-                        raise
-                    result = handled
-                normalized = result.model_copy(
-                    update={
-                        "tool_use_id": result.tool_use_id or tool_use.id,
-                        "tool_name": result.tool_name or tool_use.name,
-                    }
-                )
-                result = await self._run_after_call(tool, normalized, context)
-        except (
-            IrisCancellationRequestedError,
-            IrisToolOutcomeUnknownError,
-            IrisCommandCleanupError,
-        ):
-            raise
-        except (IrisToolValidationError, ValidationError) as exc:
-            result = self._error_result(tool_use, "VALIDATION_ERROR", str(exc))
-        except IrisToolExecutionError as exc:
-            allow_structured = tool.definition.group == "file" or exc.message.startswith(
-                "ARTIFACT_ERROR:"
-            )
-            code, message = _tool_error_code_and_message(
-                exc.message,
-                allow_structured=allow_structured,
-            )
-            result = self._error_result(tool_use, code, message)
-        except Exception as exc:
-            result = self._error_result(tool_use, "EXECUTION_ERROR", str(exc))
+            result = await self._run_call_operation(operation, context, control)
+        except CONTROL_ERRORS as error:
+            control.record(error)
+            if facts.last_result is None or context.execution_control is None:
+                raise control.control.error from None
+            result = facts.last_result
+        except Exception as error:
+            result = self._execution_error_result(tool_use, tool, error)
+
+        if control.control is not None:
+            if facts.last_result is None or context.execution_control is None:
+                raise control.control.error
+            context.execution_control.record(control.control.error)
+            result = facts.last_result
 
         # 所有 effect 后的结果在同一出口保存；落盘失败只返回错误，不重复尝试写入。
         result = await self._finalize_result(
@@ -598,47 +631,68 @@ class ToolExecutor:
             tool=tool,
             result=result,
             context=context,
-            revealed_tools=revealed_tools,
+            revealed_tools=facts.revealed_tools,
         )
-        self._record_breaker_result(tool.name, result)
         return result
+
+    def _execution_error_result(
+        self, tool_use: ToolUseBlock, tool: BaseTool, error: Exception
+    ) -> ToolResult:
+        """只在执行 owner 将未恢复的普通异常投影为工具错误。"""
+        if isinstance(error, (IrisToolValidationError, ValidationError)):
+            return self._error_result(tool_use, "VALIDATION_ERROR", str(error))
+        if isinstance(error, IrisToolExecutionError):
+            code, message = _tool_error_code_and_message(
+                error.message,
+                allow_structured=(
+                    tool.definition.group == "file" or error.message.startswith("ARTIFACT_ERROR:")
+                ),
+            )
+            return self._error_result(tool_use, code, message)
+        return self._error_result(tool_use, "EXECUTION_ERROR", str(error))
+
+    async def _run_call_operation(
+        self,
+        operation: ToolNext,
+        context: ToolExecutionContext,
+        control: ToolExecutionControlSlot,
+    ) -> ToolResult:
+        """监控整个包装生命周期；claim 后仅 signal 改变也能中断后置等待。"""
+        task = asyncio.create_task(operation())
+        cancellation = context.cancellation
+        cancellation_sent = False
+        try:
+            while not task.done():
+                if cancellation is not None and cancellation.requested:
+                    control.record(IrisCancellationRequestedError("工具调用响应 activation 取消"))
+                    if not cancellation_sent:
+                        task.cancel()
+                        cancellation_sent = True
+                await asyncio.wait(
+                    {task},
+                    timeout=0.01 if cancellation is not None and not cancellation_sent else None,
+                )
+        except asyncio.CancelledError as error:
+            control.record(error)
+            if not task.done() and not cancellation_sent:
+                task.cancel()
+            await drain_operation(task)
+        if cancellation is not None and cancellation.requested:
+            control.record(IrisCancellationRequestedError("工具调用响应 activation 取消"))
+        return task.result()
 
     async def _run_tool_body(
         self,
         tool: BaseTool,
         validated_input: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
+        facts: _ToolExecutionFacts,
     ) -> ToolResult:
-        """统一响应 body 取消，并在返回或传播外层中断前等待其清理。"""
-        cancellation = context.cancellation
-        if cancellation is None:
-            return await tool.arun(validated_input, context)
-        # before_call 可能让出控制权，body 启动前读取此刻的取消状态。
-        cancellation.raise_if_requested()
-        body = asyncio.create_task(tool.arun(validated_input, context))
-        cancellation_sent = False
-        try:
-            while True:
-                done, _ = await asyncio.wait({body}, timeout=None if cancellation_sent else 0.01)
-                if done:
-                    if cancellation_sent and body.cancelled():
-                        raise IrisCancellationRequestedError("工具 body 响应 activation 取消")
-                    return body.result()
-                if cancellation.requested:
-                    body.cancel()
-                    cancellation_sent = True
-        except asyncio.CancelledError:
-            if not body.done() and not cancellation_sent:
-                body.cancel()
-                cancellation_sent = True
-            while not body.done():
-                try:
-                    await asyncio.wait({body})
-                except asyncio.CancelledError:
-                    continue
-            if not body.cancelled():
-                return body.result()
-            raise
+        """body 启动前检查最新信号；整条调用的取消及排空由外层唯一拥有。"""
+        if context.cancellation is not None:
+            context.cancellation.raise_if_requested()
+        facts.body_entered = True
+        return await tool.arun(validated_input, context)
 
     def _normalize_result_identity_and_artifact(
         self,
@@ -649,7 +703,7 @@ class ToolExecutor:
         context: ToolExecutionContext,
         revealed_tools: tuple[str, ...] | None,
     ) -> ToolResult:
-        """填充缺失 identity，并对最终交付正文执行 ordinary artifact 归一化。"""
+        """绑定当前 identity，并对最终交付正文执行 ordinary artifact 归一化。"""
         metadata = {
             key: value
             for key, value in result.metadata.items()
@@ -668,8 +722,8 @@ class ToolExecutor:
         metadata["context_tool_name"] = tool.definition.name
         normalized = result.model_copy(
             update={
-                "tool_use_id": result.tool_use_id or tool_use.id,
-                "tool_name": result.tool_name or tool_use.name,
+                "tool_use_id": tool_use.id,
+                "tool_name": tool_use.name,
                 "metadata": metadata,
             }
         )
@@ -775,85 +829,6 @@ class ToolExecutor:
         except Exception:
             return False
 
-    async def _run_before_call(
-        self,
-        tool: BaseTool,
-        params: dict[str, Any],
-        context: ToolExecutionContext,
-    ) -> ToolResult | None:
-        """运行 before_call middleware。"""
-        for middleware in self.middleware:
-            try:
-                await middleware.before_call(tool, params, context)
-            except (
-                IrisCancellationRequestedError,
-                IrisToolOutcomeUnknownError,
-                IrisCommandCleanupError,
-            ):
-                raise
-            except Exception as exc:
-                return self._error_result(
-                    _tool_use_from_context(context),
-                    "MIDDLEWARE_ERROR",
-                    str(exc),
-                )
-        return None
-
-    async def _run_after_call(
-        self,
-        tool: BaseTool,
-        result: ToolResult,
-        context: ToolExecutionContext,
-    ) -> ToolResult:
-        """运行 after_call middleware。"""
-        current = result
-        for middleware in self.middleware:
-            try:
-                current = await middleware.after_call(tool, current, context)
-            except (
-                IrisCancellationRequestedError,
-                IrisToolOutcomeUnknownError,
-                IrisCommandCleanupError,
-            ):
-                raise
-            except Exception as exc:
-                return self._error_result(
-                    _tool_use_from_context(context),
-                    "MIDDLEWARE_ERROR",
-                    str(exc),
-                )
-        return current
-
-    async def _run_on_error(
-        self,
-        tool: BaseTool,
-        error: Exception,
-        context: ToolExecutionContext,
-    ) -> ToolResult | None:
-        """运行 on_error middleware。"""
-        for middleware in self.middleware:
-            try:
-                replacement = await middleware.on_error(tool, error, context)
-            except (
-                IrisCancellationRequestedError,
-                IrisToolOutcomeUnknownError,
-                IrisCommandCleanupError,
-            ):
-                raise
-            except Exception as exc:
-                return self._error_result(
-                    _tool_use_from_context(context),
-                    "MIDDLEWARE_ERROR",
-                    str(exc),
-                    details={
-                        "original_error": str(error),
-                        "middleware_error": str(exc),
-                    },
-                )
-            if replacement is not None:
-                return replacement
-        return None
-
     def _record_breaker_result(self, tool_name: str, result: ToolResult) -> None:
         """将执行结果写入熔断器。"""
         if self.circuit_breaker is not None:
@@ -886,16 +861,17 @@ def _tool_error_code_and_message(
     return match.group(1), match.group(2)
 
 
-def _tool_use_from_context(context: ToolExecutionContext) -> ToolUseBlock:
-    """用上下文构造错误结果所需的工具调用占位。"""
-    return ToolUseBlock(id=context.call_id, name=context.tool_name, input={})
-
-
 def _copy_context_for_parallel_call(
     context: ToolExecutionContext,
 ) -> ToolExecutionContext:
-    """只复制各调用独有的 metadata，共享读取状态和取消信号。"""
-    return context.model_copy(update={"metadata": deepcopy(context.metadata)})
+    """新低层调用获得独立命令槽；共享读取状态与取消，不借用 Runtime owner。"""
+    return context.model_copy(
+        update={
+            "metadata": deepcopy(context.metadata),
+            "command_stop_slot": CommandStopSlot(),
+            "execution_control": None,
+        }
+    )
 
 
 def _human_interaction_request(

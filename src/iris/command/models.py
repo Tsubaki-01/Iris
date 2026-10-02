@@ -84,6 +84,22 @@ class CommandStopSlot:
 
     receipt: CommandStopReceipt | None = None
     cleanup_error: IrisCommandCleanupError | None = None
+    status: CommandStatus | None = None
+
+    def record(
+        self,
+        *,
+        status: CommandStatus | None = None,
+        receipt: CommandStopReceipt | None = None,
+        cleanup_error: IrisCommandCleanupError | None = None,
+    ) -> None:
+        """归并当前命令事实；后续空值不清除尚未消费的收据或清理失败。"""
+        if status is not None:
+            self.status = status
+        if receipt is not None and self.receipt is None:
+            self.receipt = receipt
+        if cleanup_error is not None and self.cleanup_error is None:
+            self.cleanup_error = cleanup_error
 
 
 @dataclass(frozen=True, slots=True)

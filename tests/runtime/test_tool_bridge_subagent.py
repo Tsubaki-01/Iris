@@ -10,7 +10,15 @@ from iris.exceptions import IrisRunPersistenceError
 from iris.hitl.models import HumanInteraction
 from iris.message import TextBlock, ToolUseBlock
 from iris.runtime import ToolBridge
-from iris.tools import CircuitBreaker, ToolExecutor, ToolMiddleware, ToolRegistry, ToolResult
+from iris.tools import (
+    CircuitBreaker,
+    ToolCall,
+    ToolExecutor,
+    ToolMiddleware,
+    ToolNext,
+    ToolRegistry,
+    ToolResult,
+)
 from iris.tools.permissions import DefaultPermissionPolicy, PermissionDecision, PermissionEffect
 from iris.tools.subagent import (
     ChildWaiting,
@@ -53,7 +61,7 @@ class CountingPolicy(DefaultPermissionPolicy):
 class ForbiddenHooks(ToolMiddleware):
     """专用路径不能进入普通 middleware。"""
 
-    async def before_call(self, *args: object) -> None:
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
         raise AssertionError("subagent entered middleware")
 
 

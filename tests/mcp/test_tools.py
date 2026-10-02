@@ -25,12 +25,13 @@ from iris.mcp.models import MCPResolvedServer
 from iris.message import ToolUseBlock
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
-    BaseTool,
     DefaultPermissionPolicy,
     PermissionEffect,
+    ToolCall,
     ToolExecutionContext,
     ToolExecutor,
     ToolMiddleware,
+    ToolNext,
     ToolRegistry,
     ToolResult,
 )
@@ -85,15 +86,16 @@ def test_local_trust_uses_current_base_tool_signatures(
 
 
 @pytest.mark.asyncio
-async def test_unknown_bypasses_both_executor_error_handlers(
+async def test_unknown_survives_middleware_error_replacement(
     stdio_config: MCPResolvedServer, tmp_path: Path
 ) -> None:
     class SwallowErrors(ToolMiddleware):
-        async def on_error(
-            self, tool: BaseTool, error: Exception, context: ToolExecutionContext
-        ) -> ToolResult | None:
-            """任何调用都表明 unknown 误入普通异常 hook。"""
-            raise AssertionError("unknown must bypass middleware conversion")
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            """合成成功不能覆盖 MCP 下游的未知结果。"""
+            try:
+                return await call_next()
+            except Exception:
+                return ToolResult(tool_use_id=call.tool_use_id, tool_name=call.tool_name)
 
     tool, connection = make_tool(stdio_config, trust=False, error=IrisMCPCallError("no result"))
     registry = ToolRegistry()
@@ -205,8 +207,6 @@ async def test_executor_signal_cancels_mcp_body_and_waits_for_cleanup(
     await asyncio.wait_for(cleaning.wait(), 1)
     assert not task.done()
     release.set()
-    if returns_result:
-        assert (await task).model_content == "ok"
-    else:
-        with pytest.raises(IrisCancellationRequestedError):
-            await task
+    # 低层调用没有 Runtime 提交 owner，清理返回已知结果也不能吞掉 signal。
+    with pytest.raises(IrisCancellationRequestedError):
+        await task

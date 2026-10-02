@@ -15,7 +15,7 @@ docker = CommandConfig.model_validate({"mode": "docker"})
 
 停止分为两个完成点：同步 `stop(scope)` 立即登记并调度操作；工具 body 只等待 `wait_stopped()` 的物理停止证明，外层结算等待 `wait_drained()` 确认旧调用收尾。`CommandStopReceipt` 仅标识一次已证实的停止，不包含 Future 或资源句柄，不持久化。消费旧收据不得再次停止之后重启的环境。
 
-`CommandStopSlot` 是当前调用因果链的可写共享状态，保留 receipt 与尚未完成的 cleanup_error。context 投影保留槽的 identity，避免工具结果被 middleware 替换后丢失清理证明；它不是模型输入或历史数据。
+`CommandStopSlot` 是当前调用因果链的可写共享状态，保留原始 status、receipt 与尚未完成的 cleanup_error。命令事实通过同一 `record()` 入口交接，后续成功不会用空值擦除尚未消费的停止或清理事实。同一次调用的 context 投影保留槽的 identity，新工具调用使用独立槽，避免串行污染或并行共享。工具结果被 Middleware 改写不会改变这些事实；它们不是模型输入或历史数据。
 
 `CommandBinding` 绑定配置、共享服务与 `CommandEnvironment`。root 装配一次，child 借用同一绑定和调用槽，不单独关闭服务。Agent 配置与权限示例见 [agents](../agents/README.md)，工具参数与结果见 [tools](../tools/README.md)。
 

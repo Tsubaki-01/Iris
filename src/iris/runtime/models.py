@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from ..command.models import CommandStopReceipt
+from ..exceptions import IrisCommandCleanupError
 from ..hitl import HumanInteraction
 from ..lifecycle.models import RunErrorInfo, RuntimeExecutionOptions, TokenUsage
 from ..message import DataBlock, Msg, ToolUseBlock
@@ -140,6 +141,8 @@ class RuntimeActivationInput(_FrozenRuntimeModel):
 class RuntimeActivationResult(_FrozenRuntimeModel):
     """Inner engine 返回给 lifecycle owner 的 activation 事实。"""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     outcome: RuntimeActivationOutcome
     cursor: RuntimeCursor
     assistant_message: Msg | None = None
@@ -148,6 +151,7 @@ class RuntimeActivationResult(_FrozenRuntimeModel):
     model_failure_usage: TokenUsage | None = None
     stop_receipt: CommandStopReceipt | None = Field(default=None, exclude=True)
     stop_call_id: str | None = Field(default=None, exclude=True)
+    cleanup_error: IrisCommandCleanupError | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
     def _validate_outcome(self) -> RuntimeActivationResult:
