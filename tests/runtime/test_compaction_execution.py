@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,7 +25,7 @@ from iris.context import (
 )
 from iris.exceptions import IrisProviderError
 from iris.lifecycle import RuntimeExecutionOptions, SessionCompaction, TokenUsage
-from iris.message import LLMRequest, LLMResponse, Msg, TextBlock
+from iris.message import ImageBlock, ImageFileRef, LLMRequest, LLMResponse, Msg, TextBlock
 from iris.providers import ProviderClient
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import AgentRuntime, RuntimeActivationOutcome, SteeringInput
@@ -154,6 +155,76 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
         assert port.messages[-1].text == "当前任务"
         assert port.compaction is None
         assert port.model_commits == []
+
+
+@pytest.mark.asyncio
+async def test_protected_images_over_budget_do_not_commit_failed_compaction(tmp_path: Path) -> None:
+    """缩短旧文字仍放不下保护图片时失败，不能去图制造通过或发布覆盖边界。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=2000, height=2000)
+    initial = ImageBlock(original=ref, model=ref, name="initial")
+    steer = ImageBlock(original=ref, model=ref, name="steer")
+
+    class ImagePressureProvider(_ThresholdProvider):
+        """图片本身超过主请求容量，摘要模型只计纯文字。"""
+
+        def estimate_input_tokens(self, request: LLMRequest) -> int:
+            self.estimates.append(request)
+            if request.provider_options.get("num_retries") == 0:
+                return 100
+            images = [
+                block
+                for message in request.messages
+                for block in message.blocks
+                if isinstance(block, ImageBlock)
+            ]
+            old_text = (
+                15000 if any(message.text == "old work" for message in request.messages) else 0
+            )
+            return old_text + len(images) * 40000
+
+    provider = ImagePressureProvider(95000, 80000)
+    raw = [
+        Msg.user("BCI", sender="context", metadata={"context_kind": "before_current_input"}),
+        Msg.user([initial]),
+        Msg.assistant("old work", metadata={"reasoning": "secret-replay"}),
+        Msg.user([steer]),
+        Msg.assistant("work to summarize"),
+    ]
+    before = [message.model_dump_json() for message in raw]
+    activation = start_activation().model_copy(update={"run_input": [initial]})
+    activation = activation.model_copy(
+        update={"cursor": activation.cursor.model_copy(update={"position": "before_model"})}
+    )
+    port = FakeRuntimeCommitPort(activation, messages=raw)
+
+    result = await _runtime(provider).execute(
+        activation, commits=port, cancellation=MutableCancellationSignal()
+    )
+
+    assert result.error is not None and result.error.code == "CONTEXT_COMPACTION_FAILED"
+    assert port.compaction is None and port.compaction_commits == []
+    assert port.model_commits == [] and len(port.compaction_usages) == 1
+    assert len(provider.requests) == 1
+    assert all(
+        isinstance(block, TextBlock)
+        for message in provider.requests[0].messages
+        for block in message.blocks
+    )
+    assert "secret-replay" not in provider.requests[0].model_dump_json()
+    candidates = [
+        request
+        for request in provider.estimates
+        if any(message.text.startswith("<summary>") for message in request.messages)
+    ]
+    assert candidates
+    for request in candidates:
+        assert [
+            block
+            for message in request.messages
+            for block in message.blocks
+            if isinstance(block, ImageBlock)
+        ] == [initial, steer]
+    assert [message.model_dump_json() for message in port.messages] == before
 
 
 @pytest.mark.asyncio

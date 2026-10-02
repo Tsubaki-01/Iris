@@ -5,18 +5,33 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeRuntimeCommitPort, MutableCancellationSignal, build_runtime, start_activation
+from fakes import (
+    FakeProvider,
+    FakeRuntimeCommitPort,
+    MutableCancellationSignal,
+    build_runtime,
+    start_activation,
+)
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.harness._context_access import ContextAccess
 from iris.lifecycle import RuntimeExecutionOptions, SessionContextWindow
 from iris.memory import MemoryService, SQLiteMemoryStore
-from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolResultBlock, ToolUseBlock
+from iris.message import (
+    ImageBlock,
+    ImageFileRef,
+    LLMRequest,
+    LLMResponse,
+    Msg,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from iris.runtime import RuntimeActivationOutcome
 from iris.runtime._tool_context import select_tool_context
 from iris.store import InMemoryLifecycleStore
-from iris.tools import ToolRegistry
+from iris.tools import ToolRegistry, ToolResult
 from iris.tools.context_access import ContextReadTool
 
 
@@ -70,6 +85,61 @@ def _registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(ContextReadTool(ContextAccess(InMemoryLifecycleStore())))
     return registry
+
+
+@pytest.mark.asyncio
+async def test_images_remain_visible_across_ordinary_tool_steps(tmp_path: Path) -> None:
+    """主请求不会按看图次数移走图片，用户图和已提交工具图持续随历史发送。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref)
+    provider = FakeProvider(
+        [
+            LLMResponse(
+                provider="test",
+                finish_reason="tool_calls",
+                content=[ToolUseBlock(id=call_id, name="capture")],
+            )
+            for call_id in ("first", "second")
+        ]
+        + [LLMResponse(provider="test", finish_reason="stop", content=[TextBlock(text="done")])]
+    )
+
+    def capture() -> ToolResult:
+        """返回已有图片引用，不执行文件副作用。"""
+        return ToolResult(tool_use_id="", tool_name="capture", content=[image])
+
+    registry = ToolRegistry()
+    registry.register_function(capture)
+    runtime = build_runtime(
+        agent_config=AgentConfig(name="images", model="openai/test", system="rules"),
+        context_input=ContextBuildInput(
+            system=ContextSection(slots=[ContextSlot(name="rules", content="rules")])
+        ),
+        provider=provider,
+        tool_registry=registry,
+    )
+    activation = start_activation().model_copy(update={"run_input": [image]})
+    port = FakeRuntimeCommitPort(activation)
+    result = await runtime.execute(
+        activation, commits=port, cancellation=MutableCancellationSignal()
+    )
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert len(provider.requests) == 3 and port.compaction_commits == []
+    for index, request in enumerate(provider.requests):
+        assert [
+            block
+            for message in request.messages
+            for block in message.blocks
+            if isinstance(block, ImageBlock)
+        ] == [image]
+        assert [
+            part
+            for message in request.messages
+            for block in message.tool_results
+            for part in block.content
+            if isinstance(part, ImageBlock)
+        ] == [image] * index
+    assert len(port.tool_commits) == 2
 
 
 @pytest.mark.asyncio

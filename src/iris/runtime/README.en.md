@@ -214,6 +214,13 @@ batch and its results together. Recent retention is a soft target: an oversized 
 while retaining smaller recent groups, or leaving an empty suffix. Completed steps within the current
 run are eligible too.
 
+Images follow their messages rather than disappearing after one model call. The current run's input,
+latest steer, and retained tail keep their original `ImageBlock` values; covered anchors are restored
+once. Complete tool groups, typed assistant content, and attached metadata are retained or removed
+together, without runtime interpreting protocol replay fields. If retained images still exceed the
+budget, compaction fails through the existing path, preserving history and the last coverage boundary
+rather than dropping or degrading images.
+
 With the default `context_policy`, offloaded tool results receive
 `result:<message_index>:<block_index>` references before history projection. Indices refer to original
 history: suffix positions start at the persisted coverage boundary and prefix anchors retain their
@@ -241,9 +248,13 @@ medium-sized results across many calls.
   explicit representative and original-result refs. Changed results, artifact previews, and paths
   are not equality evidence, and comparison does not read large files. Every tool call still executes
   and every call/result remains present.
+  Results containing `ImageBlock` never participate in text deduplication, even when their text or
+  image paths match.
 - Older-result previews default to 512 body characters: a 384-character head and 128-character tail.
   Notices and refs also count toward the request. Existing offload previews can be shortened, but
-  representatives retained for actual duplicate folds are not shortened again.
+  representatives retained for actual duplicate folds are not shortened again. Shortening replaces
+  only text while preserving images and their relative order; complete candidate measurements still
+  include visual cost.
 
 Reduction requires a visible `context_read` tool definition and an effective `tool_choice`, after combining
 model configuration with per-run request_options, that permits calling it. It is skipped when
@@ -262,9 +273,16 @@ Without a summary the suffix remains the whole history. Fork still copies and re
 cutoff prefix once, initializes discovery from that prefix, and excludes later parent discoveries
 and the parent's execution checkpoint.
 
-`_compaction_summary.py` serializes every text block, call argument, result `.text`, and required error/artifact
-reference in order. Large blocks carry character coverage markers separately from execution status.
+`_compaction_summary.py` first replaces top-level and tool-result images in a summary copy with text
+references containing the name, original/model paths, MIME types, dimensions, and message/result
+position. Original image blocks remain unchanged. It then serializes text blocks, call arguments,
+result text, and required error/artifact references in order. Large blocks carry character coverage
+markers separately from execution status.
 Each batch is measured with the current working summary; unprocessed fragments are never dropped.
+Summary requests contain text only, without reading image files or carrying data URLs, base64, or
+protocol replay metadata from the original messages. Image markers establish existence and location,
+not visual details. Summaries retain conclusions already expressed in text without inventing missing
+image details, so the summary model does not need vision support.
 Record headers include original `message:<index>` and `result:<message_index>:<block_index>` refs;
 summary instructions ask the model to preserve refs needed later. Reads use the harness-provided
 context access port, without runtime reading the lifecycle database or rerunning historical tools.

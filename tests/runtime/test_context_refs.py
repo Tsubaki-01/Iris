@@ -1,9 +1,12 @@
 """模型回读引用使用原始位置，不随摘要插入而移动。"""
 
+from pathlib import Path
+
+import pytest
 from fakes import history_snapshot
 
 from iris.lifecycle import SessionCompaction
-from iris.message import Msg, TextBlock, ToolResultBlock
+from iris.message import ImageBlock, ImageFileRef, Msg, TextBlock, ToolResultBlock, ToolUseBlock
 from iris.runtime._compaction_summary import serialize_history
 from iris.runtime._context_refs import with_context_refs
 from iris.runtime.compaction import project_history
@@ -79,3 +82,57 @@ def test_empty_tail_ref_projection_keeps_prefix_only_history() -> None:
     assert rendered.raw_tail == ()
     assert rendered.protected_prefix_messages == ((1, messages[1]),)
     assert project_history(rendered, compaction)[1:] == [messages[1]]
+
+
+@pytest.mark.parametrize("covered", [4, 6])
+def test_image_refs_keep_absolute_blocks_with_repeated_sparse_compaction(
+    tmp_path: Path, covered: int
+) -> None:
+    """图片不会改变原 block 编号，重复压缩后稀疏锚点与多结果引用仍准确。"""
+    ref = ImageFileRef(path=tmp_path / "plot.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref)
+
+    def results(first: str, second: str) -> Msg:
+        return Msg(
+            role="user",
+            content=[
+                image,
+                TextBlock(text="note"),
+                *(
+                    ToolResultBlock(
+                        tool_use_id=call_id,
+                        content=[image, TextBlock(text=call_id)],
+                        metadata={"artifact": {"path": "/raw.json"}},
+                    )
+                    for call_id in (first, second)
+                ),
+            ],
+        )
+
+    messages = [
+        Msg.assistant("old"),
+        Msg.user("BCI", sender="context", metadata={"context_kind": "before_current_input"}),
+        Msg.user([image]),
+        Msg.assistant([ToolUseBlock(id="a", name="read"), ToolUseBlock(id="b", name="read")]),
+        results("a", "b"),
+        Msg.user([image]),
+        Msg.assistant([ToolUseBlock(id="c", name="read"), ToolUseBlock(id="d", name="read")]),
+        results("c", "d"),
+    ]
+    before = [message.model_dump_json() for message in messages]
+    compaction = SessionCompaction(summary="summary", covered_message_count=covered)
+    projected = project_history(
+        with_context_refs(history_snapshot(messages, initial_count=1, compaction=compaction)),
+        compaction,
+    )
+    last = projected[-1]
+    assert last.blocks[0] is image
+    assert last.tool_results[0].content[0] is image
+    assert last.tool_results[1].content[0] is image
+    assert "result:7:2" in last.tool_results[0].text and "result:7:3" in last.tool_results[1].text
+    assert projected[2].blocks[0] is image
+    records = serialize_history(messages[covered:], covered)
+    final_records = [record for record in records if "message=7 " in record.header]
+    assert "message:7" in final_records[0].text
+    assert "result:7:2" in final_records[2].text and "result:7:3" in final_records[3].text
+    assert [message.model_dump_json() for message in messages] == before

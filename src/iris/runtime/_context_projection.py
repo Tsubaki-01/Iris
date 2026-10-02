@@ -3,11 +3,12 @@
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from ..agents import ContextPolicyConfig
 from ..context import ContextSnapshot
 from ..context.source import render_context_snapshot
-from ..message import LLMRequest, TextBlock, ToolResultBlock
+from ..message import DataBlock, ImageBlock, LLMRequest, TextBlock, ToolResultBlock
 from ._request_measurement import MeasuredRequest, measure_request
 from .compaction import _history_group_ends
 
@@ -184,6 +185,7 @@ def _closed_observations(
                     key = (
                         None
                         if "artifact" in block.metadata
+                        or any(isinstance(part, ImageBlock) for part in block.content)
                         else (
                             metadata["context_tool_name"],
                             json.dumps(
@@ -215,8 +217,15 @@ def _replace_contents(
     for (message_index, block_index), content in replacements.items():
         message = messages[message_index]
         blocks = message.blocks
-        blocks[block_index] = blocks[block_index].model_copy(
-            update={"content": [TextBlock(text=content)]}
-        )
+        result = cast(ToolResultBlock, blocks[block_index])
+        parts: list[DataBlock] = []
+        text_replaced = False
+        for part in result.content:
+            if isinstance(part, ImageBlock):
+                parts.append(part)
+            elif not text_replaced:
+                parts.append(TextBlock(text=content))
+                text_replaced = True
+        blocks[block_index] = result.model_copy(update={"content": parts})
         messages[message_index] = message.model_copy(update={"content": blocks})
     return request.model_copy(update={"messages": messages})

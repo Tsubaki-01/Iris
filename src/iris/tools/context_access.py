@@ -30,6 +30,7 @@ class ContextReadInput(BaseModel):
         default="text",
         description=(
             "回读历史原文通常使用text：获取当时保存的完整最终模型文本。"
+            "图片返回名称及original/model引用，可用已注册的read_file读取model路径查看。"
             "raw仅用于已有artifact的result引用，读取原生文件（如MCP原始JSON）；"
             "普通内联结果和message引用不支持raw。"
         ),
@@ -38,7 +39,7 @@ class ContextReadInput(BaseModel):
 
 
 class ContextSearchInput(BaseModel):
-    """在当前会话的已保存正文与预览内查找子串。"""
+    """在当前会话的已保存正文、预览和图片引用内查找子串。"""
 
     query: str = Field(pattern=r"\S")
     after: int = Field(default=0, ge=0)
@@ -102,6 +103,7 @@ class ContextReadTool(BaseTool):
             description=(
                 "分页读取当前会话的 message:<index> 或 result:<message_index>:<block_index>；"
                 "默认text读取当时保存的完整最终文本，包括内联或外置结果；"
+                "图片显示名称及original/model引用，查看图片可用已注册的read_file读取model路径；"
                 "raw仅适用于已有artifact的result引用。不会重新执行工具。"
             ),
             input_schema=schema_from_pydantic_model(ContextReadInput),
@@ -152,8 +154,8 @@ class ContextSearchTool(BaseTool):
         self.definition = ToolDefinition(
             name="context_search",
             description=(
-                "在当前会话已提交正文和工具预览中以 Unicode casefold 子串搜索；"
-                "不搜索 artifact 完整正文。每次最多扫描200条消息，"
+                "在当前会话已提交正文、工具预览和图片名称/引用中以 Unicode casefold 子串搜索；"
+                "不打开图片、不做OCR、不搜索 artifact 完整正文。每次最多扫描200条消息，"
                 "无命中且has_more为true时继续next_after；用context_read展开命中。"
             ),
             input_schema=schema_from_pydantic_model(ContextSearchInput),

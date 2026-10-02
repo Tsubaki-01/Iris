@@ -176,6 +176,11 @@ canonical name；目标不存在或被 base view 排除时报告 `IrisConfigErro
 切点保持 assistant 的整批 tool calls/results 完整，近期原文是软目标，大组放不下时可以仅留
 较小的最近组，或将 suffix 留空。当前 run 已完成的工具步骤也可压缩。
 
+图片跟随所属消息保留，不因模型看过一次而移出。当前 run 的初始输入、最新 steer 与保留尾部
+继续携带原 `ImageBlock`；已覆盖锚点只恢复一次。工具整组与 assistant 的 typed 正文及附着
+metadata 一起保留或退出，runtime 不解释协议重放字段。剩余图片使请求仍超预算时，沿既有
+压缩失败路径保留原文和上次覆盖边界，不通过去图或降质满足容量。
+
 默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
 回读引用，后缀按摘要覆盖数偏移，前缀锚点保留原始下标，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
 取回提示写回 durable message；提示作为独立 `TextBlock` 追加，原有数据块顺序保持不变。
@@ -194,8 +199,10 @@ canonical name；目标不存在或被 base view 排除时报告 `IrisConfigErro
 - 精确判等使用已保存的规范工具名、key 排序后的 JSON 参数及完整内联文字投影。保留最新代表和
   近期保护组；较早副本换成明确的代表 ref 与本次原文 ref。不同结果、artifact 预览或文件路径
   不作为相等证据，也不为判等读取大文件。每次工具调用照常执行，所有 call/result 均保留。
+  含 `ImageBlock` 的结果不参与文字判重，即使文字或图片路径相同。
 - 旧结果预览默认 512 字符，分配给正文 head 384 / tail 128；说明和稳定 ref 额外计入请求。
-  已 offload 的长预览也可短化，但实际保留的去重代表不会再被短化。
+  已 offload 的长预览也可短化，但实际保留的去重代表不会再被短化。短化只合并替换文字，
+  图片及其相对顺序保持，候选完整请求的重新计量仍包含视觉成本。
 
 正文裁剪要求最终工具集合中可见 `context_read`，且模型配置与本次 request_options 合并后的
 effective `tool_choice` 允许调用它。`include_tools=false`、`tool_choice="none"`、隐藏回读
@@ -211,9 +218,14 @@ compaction 不因此关闭。
 公开完整历史和回读接口保持原义。无摘要时后缀仍是完整历史；Fork 仍一次复制并返回完整
 截止前缀，再从该前缀初始化发现投影，不继承 parent 截点后的发现或执行 checkpoint。
 
-`_compaction_summary.py` 把全部文本块、调用参数、工具结果的 `.text` 及必要 error/artifact 引用按顺序
+`_compaction_summary.py` 先在摘要副本中将顶层与工具结果内的图片替换为引用文字，包含名称、
+original/model 的路径、MIME、尺寸及所属 message/result 位置；原始图片块不被修改。
+随后把全部文本块、调用参数、工具结果文字及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
 当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。
+摘要请求只有文字，不读取图片文件、不携带 data URL、base64 或原消息的协议 replay metadata。
+图片标记只证明图片存在且可以定位；摘要保留已经表达的视觉结论，不补写未描述的图片细节，
+因此摘要模型无需具备视觉能力。
 记录 header 包含原始 `message:<index>` / `result:<message_index>:<block_index>`，摘要指令要求
 保留后续仍需使用的精确引用；回读通过 harness 提供的 context access port 访问保存材料，
 不让 runtime 直接读取生命周期数据库或重新执行历史工具。
