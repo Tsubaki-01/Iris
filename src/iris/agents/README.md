@@ -126,9 +126,57 @@ model: openai/gpt-4o-mini
 - `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
 - `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单的 SDK 读取与每步动态投影；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
+- `hooks`: 有序 `HookConfig` 序列，默认空，声明四种事件的 Python 或命令处理器。
+- `middleware`: `MiddlewareConfig`，默认 `tools: []`，仅声明普通工具的包装链工厂。
 - `permissions`: `PermissionsConfig`，默认 `workspace: .`、`writes: confirm`、`execute: confirm`。
 - `command`: `CommandConfig`，默认 native 与 120 秒命令期限；不自动注册命令工具。
 - `session`: `SessionConfig`，默认 `backend: none`。
+
+### Hooks 与工具 Middleware
+
+```yaml
+hooks:
+  - name: check-command
+    event: tool.before
+    tools: [exec_command]
+    timeout_seconds: 10
+    handler:
+      type: command
+      command: python scripts/check.py
+  - name: feedback
+    event: tool.after
+    handler:
+      type: python
+      factory: my_extensions:create_feedback
+      options:
+        text: 请说明验证结果。
+middleware:
+  tools:
+    - factory: my_extensions:create_logging
+      options: {}
+```
+
+`event` 只接受 `run.started`、`run.finished`、`tool.before` 和 `tool.after`。
+`tools` 仅用于工具事件，必须是非空列表，省略时匹配全部普通工具；它匹配实际调用名，
+例如 `tools.builtin: [exec.command]` 对应 `tools: [exec_command]`，不做别名转换。
+`name` 用于定位处理器，重复名称不会覆盖或去重。`timeout_seconds` 默认为 10，必须为正有限值。
+
+`handler.type` 为 `python` 时只允许 `factory` 和 `options`；为 `command` 时只允许
+`command`。Python 引用采用可导入的 `module:attribute`，唯一构造协议是同步
+`factory(**options)`：Hook 工厂返回异步 callable，Middleware 工厂返回 `ToolMiddleware`
+实例。`options` 原样交由工厂解释，不建立另一份 Iris 配置。命令脚本相对当前 workspace 执行，
+使用已有 Native/Docker 环境；事件 JSON 经 UTF-8 stdin 传入，stdout 按事件返回一个 JSON object。
+
+加载 YAML 只校验结构，不导入扩展。`AgentRunner.from_config*()` 和
+`RuntimeFactory.from_config*()` 在资源准备前构造工厂对象；导入、构造或返回对象类型错误为
+`IrisConfigError`。不会提前运行 handler，错误的同步回调在真正调用时按 Hook 失败处理。
+每次装配保留一份实例，同 Agent 的 session 复用；调用临时状态应放局部变量。
+
+四个构造入口都接受 `hooks=` 和 `tool_middlewares=`，追加在 YAML 列表后，不覆盖、不去重。
+child 使用自己的 YAML，父级 SDK 项不会隐式继承。完整工厂、SDK、命令协议及运行时边界见
+[Hooks 使用说明](../hooks/README.md)；工具包装契约见 [工具说明](../tools/README.md)。
+配置模型 `HookConfig`、`PythonHookHandlerConfig`、`CommandHookHandlerConfig`、
+`HookHandlerConfig`、`ToolMiddlewareConfig` 和 `MiddlewareConfig` 均从 `iris.agents` 导出。
 
 ### `AgentContextConfig`
 

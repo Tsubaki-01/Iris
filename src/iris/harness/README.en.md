@@ -147,6 +147,29 @@ replacing outcomes. Non-live cancellation persists its request before any requir
 
 ## Run Hooks
 
+Both `AgentRunner.from_config()` and `from_config_path()` accept `hooks=` (a sequence of
+`HookRegistration`) and `tool_middlewares=` (constructed `ToolMiddleware` instances), each empty
+by default. YAML `hooks` / `middleware.tools` come first and SDK items follow, without name-based
+replacement or deduplication. One assembly creates one set of instances; parent SDK additions do
+not flow into children. See [Hooks](../hooks/README.md) for configuration and command protocols,
+and [Tools](../tools/README.en.md) for the wrapping contract.
+
+```python
+from iris.hooks import HookEvent, HookRegistration
+
+
+async def report_finished(event: HookEvent) -> None:
+    print(event.event, event.run_id)
+
+
+runner = AgentRunner.from_config_path(
+    "agent.yaml",
+    hooks=[HookRegistration(
+        event="run.finished", name="report-finished", handler=report_finished
+    )],
+)
+```
+
 The environment's `HookDispatcher` serves both tool execution and harness. `run.started` runs
 after preparation, Run admission, and active-task registration, before the first model call.
 Ordinary, Goal, and child starts share that boundary. Preparation failure or rejected Goal admission

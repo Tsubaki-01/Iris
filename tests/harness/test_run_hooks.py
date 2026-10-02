@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iris.command import CommandStopSlot
 from iris.exceptions import (
@@ -32,7 +33,7 @@ from iris.lifecycle import (
     RunPhase,
     RunStopReason,
 )
-from iris.message import DataBlock, ImageBlock, ImageFileRef, TextBlock, ToolUseBlock
+from iris.message import DataBlock, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime
 from iris.store import InMemoryLifecycleStore
 from iris.tools import AskQuestionTool, CancellationSignal, ToolRegistry
@@ -61,14 +62,10 @@ def _runner(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_image", [False, True])
+@pytest.mark.parametrize("input_kind", ["string", "mixed", "image-only"])
 async def test_started_precedes_model_and_finished_follows_unique_commit(
-    tmp_path: Path, with_image: bool
+    tmp_path: Path, input_kind: str
 ) -> None:
-    ref = ImageFileRef(path=tmp_path / "image.png", mime_type="image/png", width=1, height=1)
-    content: str | list[DataBlock] = (
-        [TextBlock(text="input"), ImageBlock(original=ref, model=ref)] if with_image else "input"
-    )
     provider = StaticProvider(text_response())
     observed: list[HookEvent] = []
     observations: list[bool] = []
@@ -98,10 +95,18 @@ async def test_started_precedes_model_and_finished_follows_unique_commit(
         HookRegistration(event="run.finished", name="finish", handler=record),
         provider=provider,
     )
+    content: str | list[DataBlock] = "input"
+    if input_kind != "string":
+        source = tmp_path / "原图.png"
+        with Image.new("RGB", (8, 5), "red") as image:
+            image.save(source)
+        imported = await runner.import_image(source, session_id="default", name="原图.png")
+        content = [imported] if input_kind == "image-only" else [TextBlock(text="input"), imported]
     result = await runner.start(AgentRunRequest(input=content, run_id="run"))
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert [event.event for event in observed] == ["run.started", "run.finished"]
     assert observations == [True] * 6
+    assert provider.requests[0].messages[1].content == content
     assert await runner.recover("run", expected_activation_id="unused") == result
     assert len(observed) == 2
 

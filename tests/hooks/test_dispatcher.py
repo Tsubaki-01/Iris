@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -27,7 +28,7 @@ from iris.hooks import (
 from iris.hooks._dispatch_types import CommandHookRegistration, HookControl, HookInvocationOutcome
 from iris.hooks.dispatcher import HookDispatcher
 from iris.lifecycle import RunLimits, RunPhase, RunResult, RunSnapshot, RunStopReason, RunUsage
-from iris.message import TextBlock
+from iris.message import ImageBlock, ImageFileRef, TextBlock
 from iris.tools import ToolResult
 
 
@@ -81,22 +82,28 @@ def _finished(reason: RunStopReason = RunStopReason.COMPLETED) -> RunFinishedEve
 
 
 @pytest.mark.asyncio
-async def test_ordered_exact_matching_and_independent_snapshots() -> None:
+async def test_ordered_exact_matching_and_independent_snapshots(tmp_path: Path) -> None:
     seen: list[str] = []
+    ref = ImageFileRef(path=tmp_path / "image.png", mime_type="image/png", width=40, height=20)
+    image = ImageBlock(original=ref, model=ref, name="工具图片")
 
     async def first(event: ToolAfterEvent) -> ToolAfterResult:
         seen.append("first")
         event.arguments["nested"].append(2)
         event.result.content[0].text = "changed"
+        event.result.content[1].model.path = tmp_path / "changed.png"
+        event.result.content[1].name = "changed"
         return ToolAfterResult(feedback="first feedback")
 
     async def last(event: ToolAfterEvent) -> ToolAfterResult:
         assert event.arguments == {"nested": [1]}
         assert event.result.model_content == "body"
+        assert event.result.content[1] == image
         seen.append("last")
         return ToolAfterResult(feedback="last feedback")
 
     event = _after()
+    event.result.content.append(image)
     dispatcher = HookDispatcher(
         [
             HookRegistration(event="tool.after", name="first", handler=first),
@@ -113,6 +120,7 @@ async def test_ordered_exact_matching_and_independent_snapshots() -> None:
     assert seen == ["first", "last"]
     assert outcome.feedback == ("first feedback", "last feedback")
     assert event.arguments == {"nested": [1]} and event.result.model_content == "body"
+    assert image.model.path == tmp_path / "image.png" and image.name == "工具图片"
 
 
 @pytest.mark.asyncio

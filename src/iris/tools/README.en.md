@@ -421,7 +421,7 @@ cannot replace the text produced by middleware. Results within the limit need no
 `ToolResult.hook_feedback` is an empty tuple by default. Each feedback paragraph follows the original
 body or `Error[code]: message`, marked with `[Hook feedback]`, inside the same `ToolResultBlock`.
 It does not change the message role or overwrite the original `content`, `data`, or structured error.
-This result projection is available independently; Agent YAML Hook wiring is provided separately.
+Images remain alongside the feedback. See the tool Hooks section below for Agent YAML wiring.
 Feedback shares the final text budget, and the saved full text contains every paragraph. Truncated
 previews clear the structured `hook_feedback` after folding retained feedback into the preview, so
 `model_content` and `to_msg()` do not append it again. Results within the limit retain the tuple.
@@ -542,11 +542,23 @@ continuation becomes `MIDDLEWARE_ERROR`; a post failure after a downstream resul
 and preserves that result without replay. Synthesized success cannot erase cancellation, unknown
 outcomes, or cleanup control. The framework owns result identity, disclosure, and stop facts.
 
+Full Agents declare factories under YAML `middleware.tools`, or pass `tool_middlewares=[...]` to
+`AgentRunner.from_config/from_config_path` and `RuntimeFactory.from_config/from_config_path`.
+YAML instances precede SDK instances; children use their own configuration without inheriting
+parent SDK additions.
+
 Tool Hooks use the Agent's shared internal dependencies through
 `ToolExecutor(..., hook_dispatcher=dispatcher, command_binding=binding)`. Python-only handlers do
 not require a command binding; command scripts and stop-receipt draining use the existing binding.
-`RuntimeEnvironment` wires both dependencies into its executor. Hooks YAML and public SDK assembly
-arguments are not yet exposed; see [iris.hooks](../hooks/README.md) for events and script results.
+`RuntimeEnvironment` wires both dependencies into its executor. Full Agents use YAML `hooks` or
+`hooks=[HookRegistration(...)]` on the same four SDK construction methods. YAML entries precede
+SDK additions; one assembly creates one dispatcher and instance list. See
+[iris.hooks](../hooks/README.md) for events and script results.
+
+Standalone `ToolExecutor` calls support Python tool handlers with optional run/activation identity.
+Without a harness they do not provide config-driven script Run scopes or consume deferred controls
+silently. Middleware wraps tools only, without Run/model wrappers, retries, or argument transforms;
+Hooks neither replace tool results nor issue Run continuation commands.
 
 The order is permission refresh, breaker/cancellation checks, durable effect claim, `tool.before`,
 Middleware/body, then eligible `tool.after`. Before rejection or ordinary handler failure produces

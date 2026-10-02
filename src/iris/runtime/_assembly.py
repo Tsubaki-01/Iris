@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import platform
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -37,18 +38,19 @@ from ..skill import (
     SkillScope,
     discover_skills,
 )
-from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor
+from ..tools import DefaultPermissionPolicy, PermissionPolicy, ToolExecutor, ToolMiddleware
 from ..tools.context_access import ContextAccessPort, ContextReadTool, ContextSearchTool
 from ..tools.discovery import ToolSearchTool
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
+from ._extensions import build_extensions
 from .environment import RuntimeEnvironment, RuntimeExecutionScope
 from .runtime import AgentRuntime
 from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
     from ..goal.service import GoalService
-    from ..hooks.dispatcher import HookDispatcher
+    from ..hooks import HookRegistration
     from ..memory import MemoryService
 # endregion
 
@@ -172,7 +174,8 @@ def assemble_runtime(
     context_access: ContextAccessPort | None = None,
     context_source: ContextSource | None = None,
     goal_service: GoalService | None = None,
-    hook_dispatcher: HookDispatcher | None = None,
+    hooks: Sequence[HookRegistration] = (),
+    tool_middlewares: Sequence[ToolMiddleware] = (),
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
     if config.goal.enabled:
@@ -188,6 +191,14 @@ def assemble_runtime(
         raise IrisConfigError(
             "启用 context_policy 需要注入 context_access；完整运行请使用 AgentRunner"
         )
+    # 工厂只构造扩展对象；在 provider、memory、MCP 持有资源前统一失败。
+    hook_dispatcher, middlewares = build_extensions(
+        config,
+        hooks=hooks,
+        tool_middlewares=tool_middlewares,
+        command_binding=boundary.command_binding,
+        workspace_root=boundary.workspace_root,
+    )
     base_dir = _base_dir(config_path)
     if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
         config = config.model_copy(
@@ -281,6 +292,7 @@ def assemble_runtime(
     tool_executor = ToolExecutor(
         tool_registry,
         permission_policy=boundary.permission_policy,
+        middleware=middlewares,
     )
     tool_bridge = ToolBridge(
         tool_view=tool_view,

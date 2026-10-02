@@ -110,6 +110,28 @@ timer 和失败清理 pending 不随临时 child runner 关闭；它们通过 ex
 
 ## Run Hooks
 
+`AgentRunner.from_config()` 与 `from_config_path()` 都接收 `hooks=` 与 `tool_middlewares=`：
+前者是 `HookRegistration` 序列，后者是已构造的 `ToolMiddleware` 实例序列，默认均为空。
+配置 `hooks` / `middleware.tools` 在前、SDK 项追加在后，不按名称覆盖或去重。
+同次装配只创建一份实例；父 SDK 项不自动传给 child。完整配置与命令协议见
+[Hooks](../hooks/README.md)，工具包装契约见 [Tools](../tools/README.md)。
+
+```python
+from iris.hooks import HookEvent, HookRegistration
+
+
+async def report_finished(event: HookEvent) -> None:
+    print(event.event, event.run_id)
+
+
+runner = AgentRunner.from_config_path(
+    "agent.yaml",
+    hooks=[HookRegistration(
+        event="run.finished", name="report-finished", handler=report_finished
+    )],
+)
+```
+
 环境中的同一 `HookDispatcher` 同时供工具执行器与 harness 使用。`run.started` 在资源准备、
 Run 准入和 active task 注册后、首模型调用前运行；普通、Goal 和 child 开始共用这个位置。
 准备失败或 Goal 未获准时不派发，WAITING、resume 和 recover 不重发 started。

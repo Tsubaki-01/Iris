@@ -9,14 +9,19 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from iris.command import CommandBinding, CommandConfig, CommandEnvironment, CommandMode
 from iris.command.native import NativeCommandService
-from iris.hooks import ToolAfterEvent, ToolBeforeEvent
+from iris.hooks import RunStartedEvent, ToolAfterEvent, ToolBeforeEvent, event_to_dict
 from iris.hooks._dispatch_types import CommandHookRegistration
 from iris.hooks.command import CommandHookAdapter
 from iris.hooks.dispatcher import HookDispatcher
+from iris.message import TextBlock, image_block_from_saved
 from iris.tools import ToolResult
+from iris.utils.images import save_image
+
+from .test_models import _run
 
 
 def _binding(service: NativeCommandService) -> CommandBinding:
@@ -59,15 +64,41 @@ def _after(workspace: Path) -> ToolAfterEvent:
 
 
 @pytest.mark.asyncio
-async def test_native_hook_receives_utf8_event_and_returns_typed_feedback(tmp_path: Path) -> None:
-    """中文事件、EOF、工作目录和独立期限经过真实 shell 与 Python 进程。"""
+@pytest.mark.parametrize("event_name", ["run.started", "tool.after"])
+async def test_native_hook_receives_utf8_event_and_returns_typed_feedback(
+    tmp_path: Path, event_name: str
+) -> None:
+    """图片输入及结果经过真实 stdin，脚本能读取两份图片引用并按事件返回。"""
+    source = tmp_path / "原图.png"
+    with Image.new("RGB", (8, 5), "red") as image:
+        image.save(source)
+    imported = image_block_from_saved(
+        save_image(source, cache_dir=tmp_path / "cache"), name="原图.png"
+    )
+    content = [TextBlock(text="中文"), imported]
+    event = _after(tmp_path)
+    event.result.content = content
+    if event_name == "run.started":
+        event = RunStartedEvent(
+            agent_id="agent",
+            session_id="session",
+            run_id="run",
+            workspace=str(tmp_path),
+            run=_run(),
+            input=content,
+        )
     (tmp_path / "check.py").write_text(
         "import json, pathlib, sys, time\n"
         "event = json.loads(sys.stdin.buffer.read())\n"
+        "started = event['event'] == 'run.started'\n"
+        "content = event['input'] if started else event['result']['content']\n"
+        "for kind in ('original', 'model'):\n"
+        "    data = pathlib.Path(content[1][kind]['path']).read_bytes()\n"
+        "    pathlib.Path('received-' + kind + '.png').write_bytes(data)\n"
         "pathlib.Path('received.json').write_text(json.dumps(event), encoding='utf-8')\n"
         "time.sleep(0.04)\n"
         "print('diagnostic only', file=sys.stderr)\n"
-        "print(json.dumps({'feedback': '已检查：' + event['arguments']['value']}))\n",
+        "print(json.dumps({} if started else {'feedback': '已检查：' + content[0]['text']}))\n",
         encoding="utf-8",
     )
     service = NativeCommandService(tmp_path)
@@ -75,17 +106,17 @@ async def test_native_hook_receives_utf8_event_and_returns_typed_feedback(tmp_pa
         dispatcher = HookDispatcher(
             [
                 CommandHookRegistration(
-                    "tool.after", "check", _adapter(_binding(service), tmp_path, "check.py")
+                    event.event, "check", _adapter(_binding(service), tmp_path, "check.py")
                 ),
             ]
         )
-        outcome = await dispatcher.dispatch(_after(tmp_path))
+        outcome = await dispatcher.dispatch(event)
         assert outcome.control is None and outcome.rejection is None
-        assert outcome.feedback == ("已检查：中文",)
+        assert outcome.feedback == (() if event_name == "run.started" else ("已检查：中文",))
         received = json.loads((tmp_path / "received.json").read_text(encoding="utf-8"))
-        assert received["event"] == "tool.after"
-        assert received["call_id"] == "tool-call"
-        assert received["result"]["tool_name"] == "exec_command"
+        assert received == event_to_dict(event)
+        assert (tmp_path / "received-original.png").read_bytes() == source.read_bytes()
+        assert (tmp_path / "received-model.png").read_bytes() == imported.model.path.read_bytes()
     finally:
         await service.aclose()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import cast
 
 from iris.cli.chat import (
     ChatOptions,
@@ -11,6 +12,7 @@ from iris.cli.chat import (
 )
 from iris.exceptions import IrisProviderError, IrisRunStateError
 from iris.harness import AgentRunner, RunEvent
+from iris.harness._hooks import HookLifecycle
 from iris.hitl import (
     HumanInteraction,
     HumanInteractionRequest,
@@ -71,6 +73,10 @@ class ErrorRunner:
     """在 manager create admission 前抛出领域错误。"""
 
     _goal_service: None = None
+
+    def __init__(self) -> None:
+        """使用与真实 Runner 相同的完成订阅 owner。"""
+        self._hook_lifecycle = HookLifecycle(cast(AgentRunner, self))
 
     async def aclose(self) -> None:
         """该替身没有自有资源。"""

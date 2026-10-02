@@ -26,6 +26,7 @@ from ...providers import ModelRoute, parse_model_route
 from ...todo.config import TodoConfig
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
+from .hooks import HookConfig, MiddlewareConfig
 from .mcp import AgentMCPConfig
 
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -246,6 +247,8 @@ class AgentConfig(BaseModel):
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
         tools (ToolsConfig): 工具配置。
+        hooks (tuple[HookConfig, ...]): 按声明顺序执行的四事件处理器。
+        middleware (MiddlewareConfig): 普通工具调用的包装链配置。
         permissions (PermissionsConfig): 权限配置。
         command (CommandConfig): root 命令环境配置，不自动注册工具。
         session (SessionConfig): 会话配置。
@@ -263,6 +266,8 @@ class AgentConfig(BaseModel):
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    hooks: tuple[HookConfig, ...] = ()
+    middleware: MiddlewareConfig = Field(default_factory=MiddlewareConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     command: CommandConfig = Field(default_factory=CommandConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)

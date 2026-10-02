@@ -6,6 +6,7 @@ from types import MappingProxyType
 
 import pytest
 from fakes import MutableCancellationSignal
+from PIL import Image
 
 from iris.exceptions import IrisRunPersistenceError
 from iris.harness import AgentRunner
@@ -13,7 +14,7 @@ from iris.hitl.models import HumanInteraction
 from iris.hooks import HookEvent, HookRegistration, ToolAfterEvent, ToolAfterResult, ToolBeforeEvent
 from iris.hooks.dispatcher import HookDispatcher
 from iris.lifecycle import AgentRunRequest, RunStopReason
-from iris.message import TextBlock, ToolUseBlock
+from iris.message import ImageBlock, TextBlock, ToolUseBlock
 from iris.runtime import AgentRuntime, ToolBridge
 from iris.runtime.environment import RuntimeExecutionScope
 from iris.store import InMemoryLifecycleStore
@@ -242,10 +243,12 @@ async def test_parent_delegation_skips_hooks_and_child_tool_uses_own_dispatcher(
     child_events: list[tuple[str, str, str]] = []
     bodies: list[str] = []
 
-    def inspect_child() -> str:
+    def inspect_child() -> ToolResult:
         """普通 child 工具必须经过真实执行器。"""
         bodies.append("child body")
-        return "child body"
+        return ToolResult(
+            tool_use_id="", tool_name="inspect_child", content=[TextBlock(text="child body"), image]
+        )
 
     registry = ToolRegistry()
     registry.register_function(inspect_child, description="查看 child 内容")
@@ -264,6 +267,11 @@ async def test_parent_delegation_skips_hooks_and_child_tool_uses_own_dispatcher(
         ),
         store=InMemoryLifecycleStore(),
     )
+
+    source = tmp_path / "child.png"
+    with Image.new("RGB", (40, 20), "blue") as picture:
+        picture.save(source)
+    image = await child_runner.import_image(source, session_id="child-session")
 
     class ChildPort(RecordingPort):
         """只连接专用委派入口与真实 child Runner，不替代 child 工具执行。"""
@@ -305,13 +313,14 @@ async def test_parent_delegation_skips_hooks_and_child_tool_uses_own_dispatcher(
     record = child_runner.store.load_tool_call("child-run", "child-call")
     assert record is not None and record.result is not None
     assert record.result.hook_feedback == ("child feedback",)
+    assert [block for block in record.result.content if isinstance(block, ImageBlock)] == [image]
     delivered = [
         block for message in child_provider.requests[1].messages for block in message.tool_results
     ]
     assert (
-        len(delivered) == 1
-        and delivered[0].content == "child body\n[Hook feedback]\nchild feedback"
+        len(delivered) == 1 and delivered[0].text == "child body\n[Hook feedback]\nchild feedback"
     )
+    assert delivered[0].content == record.result.model_blocks
 
 
 def test_linked_prepare_still_rejects_raw_invalid_input(tmp_path: Path) -> None:

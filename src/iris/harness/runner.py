@@ -130,6 +130,8 @@ from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
 if TYPE_CHECKING:
+    from ..hooks import HookRegistration
+    from ..tools import ToolMiddleware
     from .streaming import CommandCleanupFailed, LiveFact, LivePublisher
 
 # endregion
@@ -452,6 +454,8 @@ class AgentRunner:
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         context_source: ContextSource | None = None,
+        hooks: Sequence[HookRegistration] = (),
+        tool_middlewares: Sequence[ToolMiddleware] = (),
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
         observer_event_timeout_s: float = 30.0,
@@ -469,6 +473,8 @@ class AgentRunner:
             child_provider_factory=child_provider_factory,
             memory_service=memory_service,
             context_source=context_source,
+            hooks=hooks,
+            tool_middlewares=tool_middlewares,
             store=store,
             observers=observers,
             observer_event_timeout_s=observer_event_timeout_s,
@@ -488,6 +494,8 @@ class AgentRunner:
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         context_source: ContextSource | None = None,
+        hooks: Sequence[HookRegistration] = (),
+        tool_middlewares: Sequence[ToolMiddleware] = (),
         store: LifecycleStore | None = None,
         observers: Sequence[RunEventObserver] = (),
         observer_event_timeout_s: float = 30.0,
@@ -538,6 +546,8 @@ class AgentRunner:
             subagent=subagent,
             context_access=ContextAccess(resolved_store),
             context_source=context_source,
+            hooks=hooks,
+            tool_middlewares=tool_middlewares,
             goal_service=goal_service,
         )
         runner = cls(

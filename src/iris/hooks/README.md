@@ -1,8 +1,93 @@
-# Hooks 核心
+# Hooks
 
 `iris.hooks` 定义四种事件、Python 处理器注册和工具反馈结果。`HookDispatcher` 按固定顺序派发事件，区分普通处理器失败与调用取消，并把已取得的反馈和控制事实交回执行 owner。
 
-当前已实现核心模型、独立派发器、Native/Docker 命令适配器、真实工具执行中的 before/after，以及 logical run 的 started/finished。`RuntimeEnvironment` 将同一个派发器交给工具执行器与 harness。`AgentConfig` 尚未开放 `hooks` YAML；公共 SDK 装配入口由后续阶段接入。
+通过 `AgentConfig.hooks` 配置 Python 或 Native/Docker 命令处理器；`middleware.tools` 配置普通工具包装链。`AgentRunner` 和 `RuntimeFactory` 的 `from_config()` / `from_config_path()` 都接受 `hooks=` 与 `tool_middlewares=`，固定追加在 YAML 项之后。同一次装配只构造一份处理器和 Middleware 实例，`RuntimeEnvironment`、工具执行器与 harness 复用同一派发器。
+
+## 从配置开始
+
+在可导入的 `my_extensions.py` 中定义同步工厂。工厂只构造对象；Hook 返回异步 callable，Middleware 返回实现唯一 `wrap_tool_call()` 方法的实例：
+
+```python
+import logging
+
+from iris.hooks import HookEvent, HookHandler, ToolAfterResult
+from iris.tools import ToolCall, ToolMiddleware, ToolNext, ToolResult
+
+
+def create_feedback(*, text: str) -> HookHandler:
+    async def feedback(event: HookEvent) -> ToolAfterResult:
+        return ToolAfterResult(feedback=text)
+
+    return feedback
+
+
+class LoggingMiddleware(ToolMiddleware):
+    async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+        result = await call_next()
+        logging.getLogger(__name__).info("工具 %s，错误=%s", call.tool_name, result.is_error)
+        return result
+
+
+def create_logging() -> ToolMiddleware:
+    return LoggingMiddleware()
+```
+
+在 `agent.yaml` 声明扩展，模块需要可被运行 Iris 的 Python 环境导入：
+
+```yaml
+name: local-agent
+model: openai/gpt-4o-mini
+system: 你是一个本地助手。
+tools:
+  builtin: [exec.command]
+permissions:
+  workspace: .
+  execute: allow
+hooks:
+  - name: feedback
+    event: tool.after
+    tools: [exec_command]
+    timeout_seconds: 10
+    handler:
+      type: python
+      factory: my_extensions:create_feedback
+      options:
+        text: 请说明验证结果。
+middleware:
+  tools:
+    - factory: my_extensions:create_logging
+      options: {}
+```
+
+YAML 只在加载边界校验结构。装配时按唯一 `factory(**options)` 协议调用一次，不预跑 handler，不探测旧签名；`options` 由用户工厂解释。导入、构造或返回对象类型错误为 `IrisConfigError`。同 Agent 的 session 复用实例；不同工具可以并发执行，临时调用状态应放局部变量。没有扩展声明时不创建派发器。
+
+SDK 可以继续追加处理器与 Middleware，默认参数都是空不可变序列：
+
+```python
+from iris.harness import AgentRunRequest, AgentRunner
+from iris.hooks import HookEvent, HookRegistration
+
+
+async def observe_finish(event: HookEvent) -> None:
+    print(event.event, event.run_id)
+
+
+runner = AgentRunner.from_config_path(
+    "agent.yaml",
+    hooks=[HookRegistration(event="run.finished", name="print-finish", handler=observe_finish)],
+    tool_middlewares=[],
+)
+try:
+    result = await runner.start(AgentRunRequest(input="请执行 echo hello", session_id="default"))
+    print(result.assistant_message)
+finally:
+    await runner.aclose()
+```
+
+上述真实模型示例需要对应 provider 配置。`RuntimeFactory` 也可装配 Run 处理器后交给 `AgentRunner(runtime)`，但直接 `AgentRuntime.execute()` 只派发工具事件。child 只使用自己的 YAML，父级 SDK 追加项不会隐式继承；父侧 `subagent` 委派不进入普通工具链。独立 `ToolExecutor` 可以注入 Python 工具处理器，run ID 可空；没有 harness/命令 binding 时不支持配置式脚本 Run 作用域，也不能接收无人消费的延迟控制。
+
+Middleware 首个注册项最外层，`call_next()` 零参、至多调用一次；`call` 和返回的下游结果只读，要改结果应返回新 `ToolResult`。短路结果不会触发 `tool.after`，参数不能改写，不能重试真实 body。完整边界见 [工具说明](../tools/README.md)。Hooks 尽力执行，不补发，也不是资源释放或可靠投递保证。
 
 ## 独立派发示例
 
@@ -64,6 +149,12 @@ asyncio.run(main())
 
 所有事件还包含 agent/session/run/activation 身份、host workspace 和 UTC 时间。低层独立工具事件允许 run/activation 身份为空。事件是 frozen dataclass；每个处理器收到原事件的独立深快照，修改嵌套字段不会影响执行数据或后续处理器。输入仍以只读使用。
 
+`run.started.input` 保留字符串、图文混排或纯图片输入，与已接纳请求的块顺序一致。
+`tool.after.result.content` 是 Middleware 返回的完整文字/图片块列表；需要文字视图时读取
+`model_content`，需要完整模型内容时读取 `model_blocks`。图片包含 `original`、`model` 文件引用
+与可选 `name`，事件 JSON 保留这些字段，不内嵌图片 bytes 或 provider 的 base64 编码。
+Hook 反馈仍只能返回文字，并在正文末尾追加；结构化错误替换正文文字时也保留图片。
+
 结果模型在公开构造边界约束非空文本，禁止额外字段。Python 返回 `{}`、错误事件的结果模型或其他值属于协议错误。命令 adapter 将脚本的空 JSON 对象转换为 `None`，Python 处理器不使用该约定。
 
 ## 命令 Hook
@@ -87,6 +178,12 @@ sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 
 命令直接采用 Hook 的期限，不与 `command.timeout_seconds` 取最小值，也不额外套 Python timeout。外层 Run 或工具期限仍能取消调用。Python 扩展在宿主执行；Docker 模式的命令脚本与依赖需要已存在于该环境，不自动安装。
 
+事件里的 `workspace` 和图片路径始终使用宿主坐标。Native 脚本可以直接读取图片引用；Docker
+脚本读取 workspace 内图片时，先求图片路径相对事件 `workspace` 的路径，再拼到容器
+`/workspace`。在 Windows 宿主上可使用 `PureWindowsPath` 解析事件路径，在 POSIX 宿主上使用
+`PurePosixPath`；不要用容器本地 `Path` 直接解析 Windows 路径。工作区之外的路径仍取决于
+已有容器挂载，不由 Hook 额外复制或挂载。
+
 适配器先处理控制事实，再决定是否解析 JSON。服务即使消费了 `CancelledError` 并返回成功，也不能清除当前 task/Run 的取消。`EXITED + 0` 同时带 stop receipt 表示该调用参与了环境停止；没有直接取消来源时按环境中断交回，合法 JSON 也不能使其继续执行后续处理器。普通超时或非零退出若带 receipt，先等待原停止操作排空，再报告普通处理器失败；清理失败或等待期间取消则保留收据交回 owner。unknown/cleanup 使用独立控制字段与唯一命令槽，不写入 JSON 或模型反馈。
 
 ## 顺序、错误和取消
@@ -96,6 +193,10 @@ sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 工具执行器在权限刷新、熔断检查及 durable claim 后派发 before，拒绝时跳过 Middleware、body 和 after。拒绝结果保持 `is_error=True`，这两个 Hook 错误码不触发 `ToolErrorPolicy.STOP`。after 只跟随实际 body 的已知结果；Middleware 短路、前检失败、body 取消或未收口的命令不触发 after。body 的普通失败被 Middleware 恢复后，after 仍可看到真实的 `body_status="error"`。
 
 反馈与工具原结果一起完成一次 artifact 处理，再由 Runtime 原子提交结果、消息和 checkpoint。后置处理被取消或清理失败时，先保存可提交的已知结果及已有反馈，再交接控制；未知脚本结果不能把已知工具 body 改记为 unknown。恢复直接复用已提交内容，不补发工具 Hook。父侧 subagent 委派使用专用路径，child 自己的普通工具使用自身派发器。
+
+图片不占工具文字截断额度；截断保留图片顺序，外置正文保存图片引用和完整反馈。
+压缩仅在摘要输入副本中将图片转为文字引用，持久化工具结果保留原图片块，仍可通过
+`context_read` 回读引用，再由 `file.read` 读取模型版图片。
 
 Python 处理器必须可等待，默认期限为 10 秒。派发器使用协作式 `asyncio.timeout`，处理器吞掉超时取消后返回的迟到结果也会被丢弃。同步回调不会自动搬到线程。命令注册使用独立私有类型，其期限由命令后端拥有，不再套 Python 超时。
 

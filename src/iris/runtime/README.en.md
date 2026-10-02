@@ -4,8 +4,21 @@
 
 `RuntimeEnvironment.hook_dispatcher` holds the current Agent's optional process-local dispatcher;
 it is never checkpointed. Environment construction connects the same dispatcher and command binding
-to its tool executor. Internal `assemble_runtime` accepts this dependency; public Factory/Runner
-configuration and Run event integration are not enabled yet.
+to its tool executor. Both `RuntimeFactory.from_config()` and `from_config_path()` accept
+`hooks: Sequence[HookRegistration] = ()` and `tool_middlewares: Sequence[ToolMiddleware] = ()`.
+They share one internal assembly path with Runner. YAML `hooks` / `middleware.tools` come first,
+followed by SDK items. Each factory runs once per assembly; that Agent reuses its instances across
+sessions and Runs. Children assemble their own configuration without inheriting parent SDK items.
+
+Factories synchronously return an async handler or `ToolMiddleware` through `factory(**options)`.
+They run before provider, memory, and MCP resource construction; import or construction failures
+raise `IrisConfigError`. The command binding is still lazy at that point. Existing environment owners
+retain command/MCP preparation and failure cleanup. Empty Hook configuration creates no dispatcher.
+See [Hooks](../hooks/README.md) for YAML, Python SDK, and command JSON examples.
+
+Factory retains `run.started` / `run.finished` handlers for a later
+`AgentRunner(runtime=..., store=...)`. Direct `AgentRuntime.execute()` dispatches only tool events;
+it does not create logical-run events.
 
 Ordinary tools dispatch `tool.before` after permission refresh and durable claim, then eligible
 `tool.after` handlers after a known body result. Feedback commits through the existing `ToolResult`,
@@ -16,6 +29,8 @@ cancellation, deadlines, and resource cleanup retain their rules. After controls
 serial and parallel execution first commit the allowed known prefix. The tool layer drains unknown
 additional actions without changing a known body into an unknown one after successful cleanup.
 The parent's dedicated subagent path continues to bypass tool Hooks.
+Handlers for one event run in order, without globally serializing separate tool calls. See
+[tool extensions](../tools/README.en.md) for the single-use `wrap_tool_call(call, call_next)` contract.
 
 `iris.runtime` is the low-level inner engine for Agent lifecycle. Starting from a durable
 `RuntimeCursor`, it uses a caller-provided `RuntimeCommitPort` to advance provider and tool work

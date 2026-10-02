@@ -14,7 +14,7 @@ from pydantic import ValidationError
 import iris.harness.runner as runner_module
 from iris.context import ContextBuildScope, ContextSnapshot
 from iris.exceptions import IrisImageError, IrisRunStateError
-from iris.harness import AgentRunner, SessionHistory, SessionManager, SubmissionEvent
+from iris.harness import AgentRunner, SessionEvent, SessionHistory, SessionManager, SubmissionEvent
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import AgentRunRequest, LifecycleStore, RunEvent, RunEventKind, RunStopReason
 from iris.message import DataBlock, ImageBlock, LLMRequest, LLMResponse, TextBlock, ToolUseBlock
@@ -32,7 +32,6 @@ from .fakes import (
     tool_response,
 )
 from .test_runner_subagent import ChildProviders, _parent_provider, _write_configs
-from .test_session_manager import _wait_until
 
 
 def _png(color: str = "red") -> bytes:
@@ -182,6 +181,21 @@ async def test_manager_idle_steer_and_follow_up_keep_imported_blocks(tmp_path: P
     following: list[DataBlock] = [second]
     manager = SessionManager(runner, "managed")
     stream = manager.events()
+    events: list[SessionEvent] = []
+
+    async def wait_for_terminal(run_id: str) -> None:
+        """等待实际终态通知，允许工具结果 IO 线程完成调度。"""
+        async with asyncio.timeout(2):
+            while True:
+                event = await anext(stream)
+                events.append(event)
+                if (
+                    isinstance(event, RunEvent)
+                    and event.run_id == run_id
+                    and event.kind is RunEventKind.RUN_TERMINAL
+                ):
+                    return
+
     idle = await manager.submit(initial)
     await asyncio.wait_for(provider.started.wait(), timeout=1)
     steer = await manager.submit(steering, mode="steer")
@@ -192,14 +206,13 @@ async def test_manager_idle_steer_and_follow_up_keep_imported_blocks(tmp_path: P
     assert store.load_session("managed").messages[0].content == initial
 
     provider.release.set()
-    await _wait_until(lambda: store.load_result(follow_up.run_id) is not None)
-    await _wait_until(lambda: manager._current_run_id is None)
+    await wait_for_terminal(follow_up.run_id)
     later = await manager.submit("再比较两张图片")
     assert later.state == "delivered"
     assert store.load_run(later.run_id).request.input == "再比较两张图片"
-    await _wait_until(lambda: store.load_result(later.run_id) is not None)
+    await wait_for_terminal(later.run_id)
     await manager.close()
-    events = [event async for event in stream]
+    events.extend([event async for event in stream])
     delivered = [
         event.submission_id
         for event in events

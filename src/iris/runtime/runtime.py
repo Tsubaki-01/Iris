@@ -486,8 +486,10 @@ class AgentRuntime:
                         cursor,
                         prepared,
                         error.message,
-                        stop_receipt=error.stop_receipt
-                        or self._stop_receipt(activation.run_id, prepared.tool_use.id),
+                        stop_receipt=error.stop_receipt,
+                        stop_slot=self.environment.command_stop_slots.get(
+                            (activation.run_id, prepared.tool_use.id)
+                        ),
                     )
                 except IrisCancellationRequestedError:
                     if guard.claim_for(prepared.tool_use.id) is not None:
@@ -495,8 +497,8 @@ class AgentRuntime:
                             cursor,
                             prepared,
                             "工具 claim 后收到取消",
-                            stop_receipt=self._stop_receipt(
-                                activation.run_id, prepared.tool_use.id
+                            stop_slot=self.environment.command_stop_slots.get(
+                                (activation.run_id, prepared.tool_use.id)
                             ),
                         )
                     return RuntimeActivationResult(
@@ -510,8 +512,8 @@ class AgentRuntime:
                             cursor,
                             prepared,
                             "工具 claim 后执行超时",
-                            stop_receipt=self._stop_receipt(
-                                activation.run_id, prepared.tool_use.id
+                            stop_slot=self.environment.command_stop_slots.get(
+                                (activation.run_id, prepared.tool_use.id)
                             ),
                         )
                     if _deadline_expired(commits):
@@ -2240,14 +2242,21 @@ def _unknown_tool_outcome(
     message: str,
     *,
     stop_receipt: CommandStopReceipt | None = None,
+    stop_slot: CommandStopSlot | None = None,
 ) -> RuntimeActivationResult:
     """构造 claim 已存在但缺少 durable result 的 unknown fact。"""
+    cleanup_error = None if stop_slot is None else stop_slot.cleanup_error
+    if stop_slot is not None:
+        stop_receipt = stop_receipt or stop_slot.receipt
     return RuntimeActivationResult(
         outcome=RuntimeActivationOutcome.OUTCOME_UNKNOWN,
         cursor=cursor,
         assistant_message=cursor.assistant_message,
         stop_receipt=stop_receipt,
-        stop_call_id=prepared.tool_use.id if stop_receipt is not None else None,
+        stop_call_id=prepared.tool_use.id
+        if stop_receipt is not None or cleanup_error is not None
+        else None,
+        cleanup_error=cleanup_error,
         error=RunErrorInfo(
             code="TOOL_OUTCOME_UNKNOWN",
             message=message,

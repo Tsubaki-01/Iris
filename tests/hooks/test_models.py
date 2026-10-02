@@ -48,9 +48,16 @@ def _run(terminal: bool = False) -> RunSnapshot:
 
 @pytest.mark.parametrize("with_image", [False, True])
 def test_four_events_serialize_real_models(with_image: bool) -> None:
-    ref = ImageFileRef(path=Path.cwd() / "image.png", mime_type="image/png", width=1, height=1)
-    content: str | list[DataBlock] = (
-        [TextBlock(text="hello"), ImageBlock(original=ref, model=ref)] if with_image else "hello"
+    original = ImageFileRef(
+        path=Path.cwd() / "original.png", mime_type="image/png", width=2048, height=1024
+    )
+    model = ImageFileRef(
+        path=Path.cwd() / "model.png", mime_type="image/png", width=1024, height=512
+    )
+    image = ImageBlock(original=original, model=model, name="图片.png")
+    content: str | list[DataBlock] = [TextBlock(text="hello"), image] if with_image else "hello"
+    tool_content: list[DataBlock] = (
+        [TextBlock(text="done"), image] if with_image else [TextBlock(text="done")]
     )
     common = dict(
         agent_id="agent",
@@ -68,9 +75,7 @@ def test_four_events_serialize_real_models(with_image: bool) -> None:
             call_id="call",
             tool_name="exec_command",
             arguments={"x": 1},
-            result=ToolResult(
-                tool_use_id="call", tool_name="exec_command", content=[TextBlock(text="done")]
-            ),
+            result=ToolResult(tool_use_id="call", tool_name="exec_command", content=tool_content),
             body_status="success",
         ),
     ]
@@ -87,7 +92,9 @@ def test_four_events_serialize_real_models(with_image: bool) -> None:
     )
     assert payloads[1]["result"]["run"]["stop_reason"] == "completed"
     assert payloads[2]["tool_name"] == "exec_command"
-    assert payloads[3]["result"]["content"][0]["text"] == "done"
+    assert payloads[3]["result"]["content"] == [
+        block.model_dump(mode="json") for block in tool_content
+    ]
     assert all(event.occurred_at.tzinfo is UTC for event in events)
     with pytest.raises(FrozenInstanceError):
         events[0].agent_id = "changed"

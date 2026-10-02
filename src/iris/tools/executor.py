@@ -105,7 +105,6 @@ class ToolBatchPlan:
 class _ToolExecutionFacts:
     """包装器不能改写的真实 body 事实与最后有效下游结果。"""
 
-    body_entered: bool = False
     body_result: ToolResult | None = None
     last_result: ToolResult | None = None
     revealed_tools: tuple[str, ...] | None = None
@@ -579,7 +578,7 @@ class ToolExecutor:
         async def leaf() -> ToolResult:
             """保留 body 原异常给包装器，同时独立记录真实成功或失败。"""
             try:
-                result = await self._run_tool_body(tool, validated_input, context, facts)
+                result = await self._run_tool_body(tool, validated_input, context)
             except CONTROL_ERRORS as error:
                 control.record(error)
                 raise
@@ -766,12 +765,10 @@ class ToolExecutor:
         tool: BaseTool,
         validated_input: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
-        facts: _ToolExecutionFacts,
     ) -> ToolResult:
         """body 启动前检查最新信号；整条调用的取消及排空由外层唯一拥有。"""
         if context.cancellation is not None:
             context.cancellation.raise_if_requested()
-        facts.body_entered = True
         return await tool.arun(validated_input, context)
 
     def _normalize_result_identity_and_artifact(

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 from pydantic import BaseModel
 
 from iris.command.config import CommandConfig
@@ -22,7 +24,9 @@ from iris.exceptions import (
 )
 from iris.hooks import HookRegistration, ToolAfterEvent, ToolAfterResult, ToolBeforeResult
 from iris.hooks.dispatcher import HookDispatcher
-from iris.message import TextBlock, ToolUseBlock
+from iris.message import ImageBlock, Msg, TextBlock, ToolUseBlock
+from iris.providers.chat_completions import ChatCompletionsMapper
+from iris.providers.responses import ResponsesMapper
 from iris.tools import (
     BaseTool,
     CircuitBreaker,
@@ -38,6 +42,7 @@ from iris.tools import (
     ToolRegistry,
     ToolResult,
     ToolSearchTool,
+    import_tool_image,
 )
 from iris.tools._execution_control import ToolExecutionControlSlot
 
@@ -138,15 +143,28 @@ async def test_before_runs_after_refresh_and_claim_then_skips_body(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_after_real_feedback_overrides_middleware_and_keeps_body(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_image", [False, True])
+async def test_after_real_feedback_overrides_middleware_and_keeps_body(
+    tmp_path: Path, with_image: bool
+) -> None:
+    source = tmp_path / "image.png"
+    with Image.new("RGB", (40, 20), "red") as picture:
+        picture.save(source)
+    context = _context(tmp_path)
+    image = import_tool_image(source, context, name="工具图片")
+    content = [TextBlock(text="body"), image] if with_image else [TextBlock(text="body")]
+
     async def body(context: ToolExecutionContext) -> ToolResult:
-        return _result()
+        return _result().model_copy(update={"content": content})
 
     async def wrapper(call: ToolCall, call_next: ToolNext) -> ToolResult:
-        return (await call_next()).model_copy(update={"hook_feedback": ("forged",)})
+        result = await call_next()
+        assert result.content == content
+        return result.model_copy(update={"hook_feedback": ("forged",)})
 
     async def after(event: ToolAfterEvent) -> ToolAfterResult:
         assert event.body_status == "success" and event.result.model_content == "body"
+        assert event.result.content == content
         return ToolAfterResult(feedback="real")
 
     result = await _execute(
@@ -155,10 +173,30 @@ async def test_after_real_feedback_overrides_middleware_and_keeps_body(tmp_path:
             HookDispatcher([HookRegistration(event="tool.after", name="after", handler=after)]),
             middleware=[_Wrapper(wrapper)],
         ),
-        _context(tmp_path),
+        context,
     )
     assert result.hook_feedback == ("real",)
     assert result.to_msg().tool_results[0].text == "body\n[Hook feedback]\nreal"
+    assert result.content == content
+    messages = [Msg.assistant([ToolUseBlock(id="call", name="body")]), result.to_msg()]
+    chat = ChatCompletionsMapper().format_messages(messages)
+    responses = ResponsesMapper().format_messages(messages)
+    assert chat[1]["content"].count("[Hook feedback]\nreal") == 1
+    output = responses[1]["output"]
+    if with_image:
+        assert [block for block in result.model_blocks if isinstance(block, ImageBlock)] == [image]
+        url = "data:image/png;base64," + base64.b64encode(image.model.path.read_bytes()).decode()
+        assert chat[2]["content"][-1]["image_url"]["url"] == url
+        assert output == [
+            {"type": "input_text", "text": "body"},
+            {"type": "input_image", "image_url": url, "detail": "high"},
+            {"type": "input_text", "text": "[Hook feedback]\nreal"},
+        ]
+    else:
+        assert output == [
+            {"type": "input_text", "text": "body"},
+            {"type": "input_text", "text": "[Hook feedback]\nreal"},
+        ]
 
 
 @pytest.mark.asyncio
