@@ -145,6 +145,43 @@ independent, with the more restrictive combined permission policy. Live cancella
 and waits for its original task; the creating scope closes resources. Closure failures are logged without
 replacing outcomes. Non-live cancellation persists its request before any required preparation.
 
+## Run Hooks
+
+The environment's `HookDispatcher` serves both tool execution and harness. `run.started` runs
+after preparation, Run admission, and active-task registration, before the first model call.
+Ordinary, Goal, and child starts share that boundary. Preparation failure or rejected Goal admission
+does not dispatch it; WAITING, resume, and recover do not repeat it. Started handlers run under
+the existing cancellation and absolute deadline. Command unknown outcomes, cleanup failures, and
+SDK task cancellation retain their original meanings without fabricated tool claims or checkpoints.
+
+Only a new terminal commit dispatches `run.finished`, including outcome-ready recovery finalization.
+Python handlers apply to every terminal reason; command handlers apply only to COMPLETED.
+Ordinary failures are logged without changing the durable result. Finished runs after command
+settlement removes its pending entry, uses its own timeout after the Run deadline is removed, and
+does not wait for slow observers. Reading historical results does not replay it; it is neither a
+resource-release mechanism nor a delivery guarantee.
+
+When applicable finished handlers exist, root registers their task before the terminal becomes
+visible. Direct SDK admission for that session temporarily raises `IrisRunStateError`.
+`SessionManager.submit(mode=None/auto)` waits outside the admission lock and then retries admission
+with its original arguments, without reserving a place. Explicit steer rejects terminal Runs;
+follow-ups retain FIFO order and completion actively wakes the queue. Goal retains its managed-task
+wait and also observes shared completion and admission errors. Without applicable finished handlers,
+the existing concurrency between observers and later Runs is preserved.
+
+Cancelling an ordinary submit waiter or detaching a Manager with default close does not cancel
+finished. Cancelling the actual start/resume/recover driver, or `close(cancel_run=True)`, interrupts
+finished and drains its current command before returning. Postterminal cleanup failure reports
+`IrisCommandCleanupError` and blocks new Runs under root, while existing cancel/resume/recover and
+resource closure remain available. It does not create retryable pending settlement or finish again;
+the host waits for existing drivers, closes root, and rebuilds.
+
+Live and rebuilt children borrow root's completion owner while using their own Agent's handlers.
+Child admission also checks root errors after preparation and immediately before its store commit.
+Closing a temporary child does not destroy shared tasks. Root `aclose()` waits for actual finished
+tasks, including those started by background deadlines after the original child closed, before
+closing the shared command service.
+
 ## Current-session context reads
 
 `context_policy.enabled` defaults to `true`. `AgentRunner.from_config*()` constructs internal

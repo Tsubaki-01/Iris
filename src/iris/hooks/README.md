@@ -2,7 +2,7 @@
 
 `iris.hooks` 定义四种事件、Python 处理器注册和工具反馈结果。`HookDispatcher` 按固定顺序派发事件，区分普通处理器失败与调用取消，并把已取得的反馈和控制事实交回执行 owner。
 
-当前已实现核心模型、独立派发器、Native/Docker 命令适配器，以及真实工具执行中的 before/after。`RuntimeEnvironment` 将同一个派发器交给工具执行器。`AgentConfig` 尚未开放 `hooks` YAML；logical run 的自动触发和公共 SDK 装配入口尚未接通。
+当前已实现核心模型、独立派发器、Native/Docker 命令适配器、真实工具执行中的 before/after，以及 logical run 的 started/finished。`RuntimeEnvironment` 将同一个派发器交给工具执行器与 harness。`AgentConfig` 尚未开放 `hooks` YAML；公共 SDK 装配入口由后续阶段接入。
 
 ## 独立派发示例
 
@@ -102,6 +102,18 @@ Python 处理器必须可等待，默认期限为 10 秒。派发器使用协作
 执行 owner 可以通过私有 `cancellation` 参数传入 Run 信号。派发器中断当前处理器并等待必要清理；重复取消不反复打断收口。控制返回保留之前取得的反馈，不继续执行后续处理器。`run.finished` 的 owner 应传 `cancellation=None`，避免使用已终态 Run 的旧信号；非 `COMPLETED` 的结束事件只运行 Python 处理器。
 
 [`_dispatch_types.py`](_dispatch_types.py) 定义仅在进程内使用的交接类型。`HookControl.origin/error` 保留原控制来源，`unknown_error` 独立保存收口过程中发现的真实结果未知，`stop_slot` 引用唯一命令事实槽。后续执行 owner 必须同时消费这些事实，再按执行阶段确定结算方式；它们不进入事件 JSON、工具 metadata 或 checkpoint。
+
+## Run 生命周期与完成等待
+
+`run.started` 在普通、Goal 或 child 的新 Run 已获准、deadline/signal/active task 已建立之后执行，早于首个模型请求。未获准或准备失败不会派发；resume、recover 不补发。普通处理器失败记录后继续；真实 unknown、取消或清理失败由 harness 映射到既有结算路径，不构造虚假工具结果或 engine cursor。
+
+`run.finished` 只由实际提交新终态的 producer 触发，包括 recovery FINALIZE。所有停止原因都可运行 Python 处理器，命令仅在 `COMPLETED` 时运行；读取旧终态不会重放。完成事件没有旧 Run 的取消信号或 deadline，处理器仍使用自己的期限。
+
+root 的 [`HookLifecycle`](../harness/_hooks.py) 在同步终态提交前登记实际 owner task，在原 command settlement 移除后发布结果启动处理器。child 和为后台 deadline 重建的 child 借用同一 owner，但使用各自的处理器列表。正常收口的 owner 结束后释放自己的登记与 RunResult 引用；资源失败的有限 owner 在 root 准入锁定期间保留，使外层 SDK 取消仍能取得该 Run 的清理错误。完成通知用于唤醒等待者；没有适用 finished 处理器时不登记，也不改变原 observer 并发行为。
+
+终态事实可以先被观察到，而同 session 的新 Run 仍须等完成通知。直接 SDK 新准入会报告尚未完成；SessionManager 普通 submit 在准入锁外等待，显式 follow-up 保持原 FIFO。取消普通等待者不取消 owner。实际 SDK 驱动者在终态后被取消时，会明确取消 owner、排空当前脚本，再传播调用者取消；`close(cancel_run=True)` 也会取消适用 owner，包括关闭过程中刚产生的新 finished 任务。默认 detach 保持 owner 运行，root close 仍能找到并等待后台任务。
+
+finished 脚本 unknown/cleanup 只处理附加动作：有停止收据则等待原操作排空，无收据则停止对应命令 scope 并等待排空；不再次提交终态、不改 RunResult，也不重跑脚本。资源未收口时报告 `IrisCommandCleanupError`，并锁存 root 的新 Run 准入错误、唤醒所有 session。已有 cancel/resume/recover 和资源关闭仍可使用；错误不会自动解除，宿主关闭资源后重建 root。资源错误优先于同时发生的 SDK 取消，并保留取消异常链。
 
 ## 维护与验证
 

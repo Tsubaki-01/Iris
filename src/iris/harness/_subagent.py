@@ -144,6 +144,7 @@ class HarnessSubagentController:
                 raise IrisRunNotFoundError(
                     "parent tool call 不存在", tool_call_id=parent_call.parent_tool_call_id
                 )
+            runner._hook_lifecycle.check_admission(child_create.request.session_id)
             link = self.store.admit_child_run(
                 AdmitChildRun(
                     parent_run_id=parent.run_id,
@@ -224,6 +225,7 @@ class HarnessSubagentController:
         )
         runner = AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
         runner._command_lifecycle = cast("CommandLifecycle", self.command_lifecycle)
+        runner._hook_lifecycle = runner._command_lifecycle.root._hook_lifecycle
         runner._command_target = ChildCommandTarget(self, route)
         if runner._subagent_controller is not None:
             runner._subagent_controller.command_lifecycle = self.command_lifecycle

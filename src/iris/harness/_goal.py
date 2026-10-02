@@ -327,6 +327,10 @@ class _GoalControl:
             if self._current().goal_id == goal_id:
                 self._track_operation(self._retry_resume(expected))
             return
+        error = self.runner._hook_lifecycle.admission_error
+        if error is not None:
+            self.fail(error)
+            return
         goal = self.service.get_current(manager._session_id)
         if (
             not self.driver.can_continue(goal)
@@ -338,6 +342,8 @@ class _GoalControl:
             return
         if any(not task.done() for task in manager._managed_tasks):
             # 用户输入仍沿用既有 terminal 准入；自动轮等旧完整调用退出再接手。
+            return
+        if self.runner._hook_lifecycle.has_pending(manager._session_id):
             return
         if self._intent_task is not None and not self._intent_task.done():
             return
@@ -385,6 +391,7 @@ class _GoalControl:
                     or manager._current_run_id is not None
                     or manager._pending.peek_follow_up() is not None
                     or self.service.store.load_session_lane(manager._session_id) is not None
+                    or self.runner._hook_lifecycle.has_pending(manager._session_id)
                 ):
                     return None
                 assert goal is not None and execution is not None

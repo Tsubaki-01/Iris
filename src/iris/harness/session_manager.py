@@ -21,7 +21,7 @@ import logging
 import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Iterable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -739,9 +739,11 @@ class SessionManager:
         self._interrupt_task: asyncio.Task[RunResult] | None = None
         self._managed_tasks: set[asyncio.Task[RunResult]] = set()
         self._closed = False
+        self._admission_wakeup = asyncio.Event()
         self._close_complete = False
         self._close_task: asyncio.Task[None] | None = None
         self._close_run_id: str | None = None
+        self._close_finished = False
         self._close_owned_tasks: tuple[asyncio.Task[RunResult], ...] = ()
         self._event_consumer_started = False
         self._steering = _SessionSteeringPort(self)
@@ -764,6 +766,8 @@ class SessionManager:
         self.goal: GoalSession | None = (
             self._goal_control.api if self._goal_control is not None else None
         )
+        self._finished_callback = self._on_finished
+        self._runner._hook_lifecycle.subscribe(self._session_id, self._finished_callback)
 
     # endregion
 
@@ -800,91 +804,114 @@ class SessionManager:
             normalized_input = normalize_run_input(_INPUT_ADAPTER.validate_python(input))
         except ValueError as exc:
             raise IrisRunStateError("input 必须包含有效文字或图片") from exc
-        async with self._lock:
-            self._require_open()
-            await self._reconcile_locked()
-            if mode == "auto":
-                mode = None if self._current_run_id is None else "steer"
-                if mode == "steer":
-                    options = None
-
-            # --- 2. idle：直接创建并等待 run admission ---
-            if self._current_run_id is None:
-                if mode is not None:
-                    raise IrisRunStateError("idle submit 的 mode 必须为 None")
-                if self._goal_control is not None:
-                    self._goal_control.cancel_candidate()
-                submission_id = self._new_submission_id()
-                run_id = self._new_run_id()
-                if self._event_buffer is not None and not self._event_buffer.try_register_run(
-                    run_id, after_sequence=0
+        while True:
+            async with self._lock:
+                self._require_open()
+                error = self._runner._hook_lifecycle.admission_error
+                if error is not None:
+                    raise error
+                await self._reconcile_locked()
+                if mode in (None, "auto") and self._runner._hook_lifecycle.has_pending(
+                    self._session_id
                 ):
-                    raise IrisRunStateError("durable run tracker 容量已满")
-                self._current_run_id = run_id
-                task, started = self._create_start_task_locked(
-                    input=normalized_input,
-                    run_id=run_id,
-                    options=options,
-                    submission=None,
-                )
-                try:
-                    await self._wait_for_admission(task, started)
-                except Exception:
-                    # create 失败时必须回退 facade 的 current 占位，否则 session 永远停在 busy。
-                    if self._current_task is task and self._current_run_id == run_id:
-                        self._current_task = None
-                        self._current_run_id = None
-                    if self._event_buffer is not None:
-                        self._event_buffer.discard_run(run_id)
-                    raise
-                return SubmitReceipt(
-                    submission_id=submission_id,
-                    run_id=run_id,
-                    mode=None,
-                    state="delivered",
-                )
+                    self._admission_wakeup.clear()
+                else:
+                    return await self._submit_locked(normalized_input, mode=mode, options=options)
+            # 不预留名额，也不占 admission lock；醒来后按原 mode/options 重新竞争。
+            await self._admission_wakeup.wait()
 
-            # --- 3. busy：校验 mode 与 target run 可接收性 ---
-            # busy 语义差异很大（改写当前 run 还是排下一个 run），不提供默认值。
-            if mode not in ("steer", "follow_up"):
-                raise IrisRunStateError("busy submit 必须显式提供 steer 或 follow_up mode")
-            if mode == "steer" and options is not None:
-                raise IrisRunStateError("steer mode 不接受 options")
-            try:
-                current = self._runner.get_run(self._current_run_id)
-            except IrisRunNotFoundError as exc:
-                raise IrisRunStateError("current run admission 尚未完成") from exc
-            # 已请求取消的 run 不会再到达安全边界，顺带清空其存量 steer 而不是让它们悬挂。
-            if mode == "steer" and current.cancellation_requested_at is not None:
-                self._fail_items(
-                    self._pending.drain_steers_for_run(current.run_id),
-                    reason="target_cancelling",
-                )
-                raise IrisRunStateError("cancelling run 不接受新的 steer input")
-            if not self._pending.can_accept(mode):
-                raise IrisRunStateError(f"{mode} input 队列容量已满")
-            if (
-                self._event_buffer is not None
-                and not self._event_buffer.can_reserve_submission_lifecycle()
+    async def _submit_locked(
+        self,
+        normalized_input: str | list[DataBlock],
+        *,
+        mode: SubmissionMode | Literal["auto"] | None,
+        options: AgentRunOptions | None,
+    ) -> SubmitReceipt:
+        """在已同步状态的锁内接纳输入，信任 public submit 已规范化的正文。"""
+        if mode == "auto":
+            mode = None if self._current_run_id is None else "steer"
+            if mode == "steer":
+                options = None
+
+        # --- 2. idle：直接创建并等待 run admission ---
+        if self._current_run_id is None:
+            if mode is not None:
+                raise IrisRunStateError("idle submit 的 mode 必须为 None")
+            if self._goal_control is not None:
+                self._goal_control.cancel_candidate()
+            submission_id = self._new_submission_id()
+            run_id = self._new_run_id()
+            if self._event_buffer is not None and not self._event_buffer.try_register_run(
+                run_id, after_sequence=0
             ):
-                raise IrisRunStateError("submission event buffer 容量已满")
-
-            # --- 4. 入队并返回 pending receipt ---
-            item = _PendingInput(
-                submission_id=self._new_submission_id(),
+                raise IrisRunStateError("durable run tracker 容量已满")
+            self._current_run_id = run_id
+            task, started = self._create_start_task_locked(
                 input=normalized_input,
-                mode=mode,
-                run_id=current.run_id if mode == "steer" else self._new_run_id(),
+                run_id=run_id,
                 options=options,
+                submission=None,
             )
-            self._pending.enqueue(item)
-            self._emit_submission_event(item, "pending")
+            try:
+                await self._wait_for_admission(task, started)
+            except Exception:
+                # create 失败时必须回退 facade 的 current 占位，否则 session 永远停在 busy。
+                if self._current_task is task and self._current_run_id == run_id:
+                    self._current_task = None
+                    self._current_run_id = None
+                if self._event_buffer is not None:
+                    self._event_buffer.discard_run(run_id)
+                raise
             return SubmitReceipt(
-                submission_id=item.submission_id,
-                run_id=item.run_id,
-                mode=item.mode,
-                state="pending",
+                submission_id=submission_id,
+                run_id=run_id,
+                mode=None,
+                state="delivered",
             )
+
+        # --- 3. busy：校验 mode 与 target run 可接收性 ---
+        # busy 语义差异很大（改写当前 run 还是排下一个 run），不提供默认值。
+        if mode not in ("steer", "follow_up"):
+            raise IrisRunStateError("busy submit 必须显式提供 steer 或 follow_up mode")
+        if mode == "steer" and options is not None:
+            raise IrisRunStateError("steer mode 不接受 options")
+        try:
+            current = self._runner.get_run(self._current_run_id)
+        except IrisRunNotFoundError as exc:
+            raise IrisRunStateError("current run admission 尚未完成") from exc
+        if mode == "steer" and current.phase is RunPhase.TERMINAL:
+            raise IrisRunStateError("terminal run 不接受新的 steer input")
+        # 已请求取消的 run 不会再到达安全边界，顺带清空其存量 steer 而不是让它们悬挂。
+        if mode == "steer" and current.cancellation_requested_at is not None:
+            self._fail_items(
+                self._pending.drain_steers_for_run(current.run_id),
+                reason="target_cancelling",
+            )
+            raise IrisRunStateError("cancelling run 不接受新的 steer input")
+        if not self._pending.can_accept(mode):
+            raise IrisRunStateError(f"{mode} input 队列容量已满")
+        if (
+            self._event_buffer is not None
+            and not self._event_buffer.can_reserve_submission_lifecycle()
+        ):
+            raise IrisRunStateError("submission event buffer 容量已满")
+
+        # --- 4. 入队并返回 pending receipt ---
+        item = _PendingInput(
+            submission_id=self._new_submission_id(),
+            input=normalized_input,
+            mode=mode,
+            run_id=current.run_id if mode == "steer" else self._new_run_id(),
+            options=options,
+        )
+        self._pending.enqueue(item)
+        self._emit_submission_event(item, "pending")
+        return SubmitReceipt(
+            submission_id=item.submission_id,
+            run_id=item.run_id,
+            mode=item.mode,
+            state="pending",
+        )
 
     async def resume(
         self,
@@ -1085,6 +1112,8 @@ class SessionManager:
                 return
             if not self._closed:
                 self._closed = True
+                self._admission_wakeup.set()
+                self._runner._hook_lifecycle.unsubscribe(self._session_id, self._finished_callback)
                 if self._goal_control is not None:
                     self._goal_control.close_locked()
                 run_id = self._current_run_id
@@ -1110,6 +1139,7 @@ class SessionManager:
                 for pending_run_id in tuple(self._memory_handoffs):
                     self._release_memory_handoff(pending_run_id)
                 if cancel_run:
+                    self._close_finished = True
                     self._close_run_id = run_id
                     self._close_owned_tasks = tuple(self._managed_tasks)
             if self._close_task is None or self._close_task.done():
@@ -1126,20 +1156,28 @@ class SessionManager:
         """关闭失败保留原 run 与任务引用；重试只补尚未完成的收尾。"""
         if self._goal_control is not None:
             await self._goal_control.wait_closed()
-        run_id = self._close_run_id
-        if run_id is not None:
-            before = self._runner.get_run(run_id)
-            await self._runner.cancel(run_id, reason=reason)
-            for event in self._runner.list_events(run_id, before.last_event_sequence):
-                self._relay_run_event(event)
-        # 旧 terminal 的投递任务不再占当前 lane，但仍由 manager 负责关闭时排空。
-        await asyncio.gather(*self._close_owned_tasks, return_exceptions=True)
+        with (
+            self._runner._hook_lifecycle.cancelling_session(self._session_id)
+            if self._close_finished
+            else nullcontext()
+        ):
+            if self._close_finished:
+                await self._runner._hook_lifecycle.cancel_session(self._session_id)
+            run_id = self._close_run_id
+            if run_id is not None:
+                before = self._runner.get_run(run_id)
+                await self._runner.cancel(run_id, reason=reason)
+                for event in self._runner.list_events(run_id, before.last_event_sequence):
+                    self._relay_run_event(event)
+            # 原 managed task 和关闭期间新登记的 finished 均在同一取消区间收口。
+            await asyncio.gather(*self._close_owned_tasks, return_exceptions=True)
         async with self._lock:
             self._current_run_id = None
             self._current_task = None
             self._interrupt_task = None
             self._close_owned_tasks = ()
             self._close_run_id = None
+            self._close_finished = False
             self._close_complete = True
 
     # endregion
@@ -1337,7 +1375,8 @@ class SessionManager:
                     self._event_buffer.discard_run(run_id)
                 return
             if snapshot.phase is RunPhase.TERMINAL:
-                await self._handle_terminal_locked(run_id)
+                if not await self._handle_terminal_locked(run_id):
+                    return
                 continue
             # waiting 或 active 都保留 current owner；只清理已结束的 task 引用。
             task = self._current_task
@@ -1345,15 +1384,17 @@ class SessionManager:
                 self._current_task = None
             return
 
-    async def _handle_terminal_locked(self, run_id: str) -> None:
+    async def _handle_terminal_locked(self, run_id: str) -> bool:
         """结算 terminal run：清空其 steer 并启动下一条 follow-up。"""
         if self._current_run_id != run_id:
-            return
+            return False
         if self._goal_control is not None and not self._closed:
             self._goal_control.reconcile_locked()
         if self._event_buffer is not None:
             self._event_buffer.mark_run_settled(run_id)
         self._fail_items(self._pending.drain_steers_for_run(run_id), reason="target_terminal")
+        if self._runner._hook_lifecycle.has_pending(self._session_id):
+            return False
         self._current_run_id = None
         self._current_task = None
         self._interrupt_task = None
@@ -1361,6 +1402,7 @@ class SessionManager:
             await self._start_next_follow_up_locked()
             if self._goal_control is not None:
                 self._goal_control.schedule_locked()
+        return True
 
     async def _start_next_follow_up_locked(self) -> None:
         """取出并启动至多一条 follow-up，等待其 create admission 有结论。
@@ -1370,6 +1412,15 @@ class SessionManager:
         item = self._pending.peek_follow_up()
         if item is None:
             return
+        if self._runner._hook_lifecycle.has_pending(self._session_id):
+            return
+        error = self._runner._hook_lifecycle.admission_error
+        if error is not None:
+            pending = self._pending.drain_follow_ups()
+            for item in pending:
+                self._release_memory_handoff(item.run_id)
+            self._fail_items(pending, reason="start_failed")
+            raise error
         if self._event_buffer is not None and not self._event_buffer.try_register_run(
             item.run_id, after_sequence=0
         ):
@@ -1470,6 +1521,11 @@ class SessionManager:
         for helper in (admission.waiter, admission.finalizer):
             if helper is not None and helper is not current and not helper.done():
                 helper.cancel()
+
+    def _on_finished(self) -> None:
+        """共享结束 owner 完成后唤醒普通 submit，并主动推进 FIFO/Goal。"""
+        self._admission_wakeup.set()
+        self._schedule_tracker_reconcile()
 
     def _schedule_tracker_reconcile(self) -> None:
         """合并 tracker 释放通知，异步继续被容量阻塞的 follow-up。"""
