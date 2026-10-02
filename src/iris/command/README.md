@@ -13,6 +13,9 @@ docker = CommandConfig.model_validate({"mode": "docker"})
 
 `CommandService.execute(scope, request)` 接收已解析的宿主 cwd、最终命令期限和 typed payload：`ShellCommand(command)` 或 `PythonCode(code)`，返回前台执行事实。两种载荷共用同一服务的停止与排空，不创建独立 Python 环境。服务不拥有工具权限、生命周期历史或模型调用。
 
+`CommandRequest.stdin` 默认为 `None`，表示从空设备读取；传入 `bytes` 时作为一次性完整输入，
+读取固定末尾即得到 EOF，`b""` 也立即 EOF。输入不自动补换行或解码，不提供交互式写入、TTY 或 stdin writer task。
+
 停止分为两个完成点：同步 `stop(scope)` 立即登记并调度操作；工具 body 只等待 `wait_stopped()` 的物理停止证明，外层结算等待 `wait_drained()` 确认旧调用收尾。`CommandStopReceipt` 仅标识一次已证实的停止，不包含 Future 或资源句柄，不持久化。消费旧收据不得再次停止之后重启的环境。
 
 `CommandStopSlot` 是当前调用因果链的可写共享状态，保留原始 status、receipt 与尚未完成的 cleanup_error。命令事实通过同一 `record()` 入口交接，后续成功不会用空值擦除尚未消费的停止或清理事实。同一次调用的 context 投影保留槽的 identity，新工具调用使用独立槽，避免串行污染或并行共享。工具结果被 Middleware 改写不会改变这些事实；它们不是模型输入或历史数据。
@@ -48,9 +51,12 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Windows 使用系统目录中的 `cmd.exe`，POSIX 使用 `/bin/sh`。每次命令创建新 shell，继承宿主环境和 PATH，无交互 stdin、无 TTY，不保留上次的 `cd` 或环境变量修改。Windows 进程隐藏窗口，host 必须使用支持 subprocess 的事件循环；库不更改全局 event loop policy。
+Windows 使用系统目录中的 `cmd.exe /d /s /c`，禁用可能提前消费 stdin 的宿主 AutoRun；POSIX 使用 `/bin/sh`。每次命令创建新 shell，继承宿主环境和 PATH，无交互 stdin、无 TTY，不保留上次的 `cd` 或环境变量修改。Windows 进程隐藏窗口，host 必须使用支持 subprocess 的事件循环；库不更改全局 event loop policy。
 
 Python 载荷使用 `PythonCode("print(1 + 2)")`。Native 直接启动 `sys.executable`，不经过 shell；代码写入调用专属的系统临时文件，正常结束后删除。每次新进程，依赖来自运行 Iris 的同一 Python 环境；变量不延续，工作区文件保留。cwd 是项目模块的默认导入位置，回溯使用 `<iris-python>` 与原代码行；不承诺真实脚本 `__file__`。输出使用 UTF-8 和非缓冲模式，末尾表达式不会自动显示，应使用 `print`。
+
+Native 将非 `None` 的 stdin 写入二进制临时文件并回到文件开头，由子进程直接读取；
+spawn 成功或失败都会关闭父端句柄，超时、取消与输出排空仍由原命令调用负责。
 
 Native **不是 OS 级隔离沙箱**。直接服务调用接收已解析的宿主目录，不代替工具层的 workspace 和权限裁决。普通退出保留实际退出码，包括 124/137；期限终止使用独立的 `timed_out` 状态。stdout/stderr 各保留最多 512 KiB，各自一半头部、一半最新尾部；未超额时内容完整。持续排空超额数据，以 UTF-8 replacement 解码。前台退出后管道最多再排空 1 秒，后台继承管道时标记可能截断并返回。
 
@@ -79,6 +85,11 @@ service = DockerCommandService(workspace, DockerConfig(), workspace_writable=Tru
 session、调用、停止收据或排空；harness 和工具继续只依赖既有 `CommandService`。
 
 标准库助手在自己的命令组外管理 `/bin/sh -c` 或镜像内的 Python 进程；单命令超时只终止该组，其他命令和服务继续。Python 源码在启动前上传到容器 `/tmp`，因此只读 workspace 挂载仍能执行不写工作区的代码。两后端使用同源 Python 启动器，不要求镜像安装 Iris，也不自动安装用户代码依赖。
+
+非 `None` 的 stdin 使用每调用独立的 `/tmp/iris-stdin-*.bin`，可与 Python 源码合并成同一次
+archive 上传。helper 参数只传文件路径，Docker exec 本身仍为 `stdin=False`；helper 以 `rb`
+句柄启动子进程并在 spawn 后关闭父句柄，正常和超时收尾删除输入与源码。容器停止后不会为
+删除临时输入重启；未派发或强停留下的文件随最终容器删除回收。
 
 前台结果以独立的 reason/returncode 回传，用户退出 124/137 不会被猜成超时。输出规则与 Native 相同；读取结果后的临时文件删除失败不改写已知退出结果。容器停止后不会为了删除本次临时源码而自动重启，残留随服务最终删除容器一起清理。
 

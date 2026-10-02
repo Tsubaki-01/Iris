@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import sys
 import zipfile
 from collections.abc import AsyncIterator
@@ -56,6 +57,123 @@ async def _python(
         CommandScope(f"run-{session}", session),
         CommandRequest(uuid4().hex, PythonCode(code), cwd, timeout),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("python", [False, True])
+@pytest.mark.parametrize(
+    "stdin",
+    [None, b"", ("中文无换行" * 2000).encode() + b"\x00\xff"],
+    ids=["none", "empty", "binary"],
+)
+async def test_real_stdin_bytes_reach_eof_and_temporary_input_is_removed(
+    docker_service: DockerCommandService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    python: bool,
+    stdin: bytes | None,
+) -> None:
+    """真实 shell/Python 读到完整二进制与 EOF，正常结束删除输入文件。"""
+    paths: list[str | None] = []
+    launch = docker_service._launch
+
+    async def record_input(call: Any, result_path: str) -> Any:
+        execution = await launch(call, result_path)
+        paths.append(call.stdin_path)
+        return execution
+
+    monkeypatch.setattr(docker_service, "_launch", record_input)
+    code = "import sys; print(sys.stdin.buffer.read().hex())"
+    payload = PythonCode(code) if python else ShellCommand(shlex.join(["python", "-c", code]))
+    result = await docker_service.execute(
+        CommandScope("stdin", "a"),
+        CommandRequest("stdin", payload, tmp_path, 5, stdin=stdin),
+    )
+    assert result.status is CommandStatus.EXITED and result.exit_code == 0, result.stderr
+    assert bytes.fromhex(result.stdout.strip()) == (stdin or b"")
+    assert not result.output_truncated
+    if stdin is None:
+        assert paths == [None]
+    else:
+        assert paths[0] is not None
+        observed = await _python(
+            docker_service,
+            tmp_path,
+            f"from pathlib import Path; print(Path({paths[0]!r}).exists())",
+        )
+        assert observed.exit_code == 0 and observed.stdout.strip() == "False"
+
+
+@pytest.mark.asyncio
+async def test_real_stdin_timeout_removes_input_and_keeps_container_usable(
+    docker_service: DockerCommandService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """helper 超时回收输入后，原容器仍可继续执行。"""
+    paths: list[str | None] = []
+    launch = docker_service._launch
+
+    async def record_input(call: Any, result_path: str) -> Any:
+        execution = await launch(call, result_path)
+        paths.append(call.stdin_path)
+        return execution
+
+    monkeypatch.setattr(docker_service, "_launch", record_input)
+    result = await docker_service.execute(
+        CommandScope("timeout", "a"),
+        CommandRequest(
+            "timeout",
+            PythonCode(
+                "import sys, time; print(sys.stdin.buffer.read().hex(), flush=True); time.sleep(30)"
+            ),
+            tmp_path,
+            0.3,
+            stdin=b"read before timeout",
+        ),
+    )
+    assert result.status is CommandStatus.TIMED_OUT
+    assert bytes.fromhex(result.stdout.strip()) == b"read before timeout"
+    observed = await _python(
+        docker_service, tmp_path, f"from pathlib import Path; print(Path({paths[0]!r}).exists())"
+    )
+    assert observed.exit_code == 0 and observed.stdout.strip() == "False"
+
+
+@pytest.mark.asyncio
+async def test_real_stdin_cancellation_drains_without_restarting_container(
+    docker_service: DockerCommandService, tmp_path: Path
+) -> None:
+    """命令读完输入后取消，等待共享停止收据且不会为删除输入自动重启。"""
+    stdin = "取消前完整读取".encode() + b"\x00\xff"
+    task = asyncio.create_task(
+        docker_service.execute(
+            CommandScope("cancel", "a"),
+            CommandRequest(
+                "cancel",
+                PythonCode(
+                    "import sys, time; from pathlib import Path; "
+                    "Path('stdin-read.bin').write_bytes(sys.stdin.buffer.read()); time.sleep(30)"
+                ),
+                tmp_path,
+                30,
+                stdin=stdin,
+            ),
+        )
+    )
+    try:
+        async with asyncio.timeout(10):
+            while not (tmp_path / "stdin-read.bin").exists():
+                await asyncio.sleep(0.02)
+        assert (tmp_path / "stdin-read.bin").read_bytes() == stdin
+        task.cancel()
+        result = await asyncio.wait_for(task, 15)
+        assert result.status is CommandStatus.CANCELLED
+        assert result.stop_receipt is not None
+        await docker_service.wait_drained(result.stop_receipt)
+        assert not (await docker_service._sandbox.container.show())["State"]["Running"]
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
