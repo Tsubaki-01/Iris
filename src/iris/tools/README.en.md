@@ -418,6 +418,15 @@ Plain text uses one `.txt` file, with `ToolArtifact.text_path == path`. When a n
 exists, its `path` is preserved and a separate `.model.txt` file supplies `text_path`; the raw payload
 cannot replace the text produced by middleware. Results within the limit need no additional text file.
 
+`ToolResult.hook_feedback` is an empty tuple by default. Each feedback paragraph follows the original
+body or `Error[code]: message`, marked with `[Hook feedback]`, inside the same `ToolResultBlock`.
+It does not change the message role or overwrite the original `content`, `data`, or structured error.
+This result projection is available independently; Agent YAML Hook wiring is provided separately.
+Feedback shares the final text budget, and the saved full text contains every paragraph. Truncated
+previews clear the structured `hook_feedback` after folding retained feedback into the preview, so
+`model_content` and `to_msg()` do not append it again. Results within the limit retain the tuple.
+
+`model_blocks` appends feedback text blocks after the complete body, including images.
 Truncation preserves every image and its order; images do not consume the text character budget.
 For mixed results, `text_path` starts with each image's name, MIME, original/model paths and dimensions,
 then a blank line and the complete model text. Text-only files retain their existing layout. Image

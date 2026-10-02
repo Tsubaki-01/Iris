@@ -2,6 +2,10 @@
 
 # `iris.runtime`
 
+`RuntimeEnvironment.hook_dispatcher` holds the current Agent's optional process-local dispatcher;
+it is never checkpointed. This stage provides the Hooks core and result feedback projection.
+Tool and Run event integration and YAML configuration are not enabled yet.
+
 `iris.runtime` is the low-level inner engine for Agent lifecycle. Starting from a durable
 `RuntimeCursor`, it uses a caller-provided `RuntimeCommitPort` to advance provider and tool work
 until completion, waiting, budget exhaustion, cancellation, deadline, failure, or unknown outcome.

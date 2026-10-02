@@ -237,7 +237,7 @@ def truncate_tool_result(
     """
     error = result.error if result.is_error else None
     prefix_chars = len(f"Error[{error.code}]: ") if error else 0
-    body = error.message if error else result.model_content
+    body = result.model_content[prefix_chars:]
     available = max(0, max_chars - len(suffix) - prefix_chars)
     message = _preview_text(body, min(preview_chars, available), preview_mode) + suffix
     content: list[DataBlock] = []
@@ -254,6 +254,7 @@ def truncate_tool_result(
         update={
             "content": content,
             "error": error.model_copy(update={"message": message}) if error else result.error,
+            "hook_feedback": (),
         }
     )
 

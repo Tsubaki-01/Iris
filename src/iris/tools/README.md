@@ -199,7 +199,11 @@ Extract 不传服务端 timeout，使用 basic 默认值。
   opt-in 的 `THREAD`；它不进入 provider schema。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`preview_mode`、`context_retention`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`、`tool_timeout_seconds`，以及不参与序列化的共享 `cancellation` signal 与 `command_stop_slot`。
-- `ToolResult`: 统一工具结果，包含有序 `list[DataBlock]` 正文 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_blocks` 返回完整模型正文，`model_content` 从同一投影中提取纯文字。`to_msg()` 保留完整块列表，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
+- `ToolResult`: 统一工具结果，包含有序 `list[DataBlock]` 正文 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`、`hook_feedback`；`model_blocks` 返回完整模型正文并在末尾追加反馈文字块，`model_content` 从同一投影中提取纯文字。`to_msg()` 保留完整块列表，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
+
+`hook_feedback` 默认为空元组；有反馈时在工具原正文或 `Error[code]: message` 后按顺序追加
+`[Hook feedback]` 段落。反馈仍在同一个 `ToolResultBlock` 内，不改变消息角色，也不覆盖原
+`content`、`data` 或结构化错误。当前已提供结果投影能力，Agent YAML 的 Hooks 接线另行提供。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
 
@@ -567,6 +571,8 @@ schema 与 `QuestionPrompt` 转换，`arun()` 会拒绝绕过 runtime 直接执�
 after middleware 后的完整 `model_content`。普通文本只写一份 `.txt`，`text_path == path`；已有
 MCP JSON 等 artifact 时保留原 `path`，另写 `.model.txt` 并通过 `text_path` 引用，不能用原生
 payload 代替 middleware 最终输出。未截短结果不额外保存文本。
+反馈计入相同的最终正文额度，全文包含全部反馈；截短后预览已包含保留的反馈文本，
+结构化 `hook_feedback` 清空，避免 `model_content` 与 `to_msg()` 再次追加。未超限时保留原反馈元组。
 
 混合结果截断时保留所有图片及其顺序，图片不占文字字符额度。有图片的 `text_path` 首部
 保存每张图的名称、MIME、original/model 路径与尺寸，空行之后是完整模型文字；没有图片时
