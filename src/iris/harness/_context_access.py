@@ -66,7 +66,7 @@ class ContextAccess:
                     "该结果没有原生 artifact", code="CONTEXT_REPRESENTATION_UNAVAILABLE"
                 )
             if path is None:
-                text = block.content
+                text = block.text
             else:
                 try:
                     resolved = WorkspacePolicy().resolve_path(
@@ -145,10 +145,9 @@ def _message_text(message: Msg) -> str:
                 f"{block.name} call_id={block.id}\n"
                 f"{json.dumps(block.input, ensure_ascii=False, sort_keys=True)}"
             )
-        else:
+        elif isinstance(block, ToolResultBlock):
             lines.append(
-                f"{block.name} call_id={block.tool_use_id} is_error={block.is_error}\n"
-                f"{block.content}"
+                f"{block.name} call_id={block.tool_use_id} is_error={block.is_error}\n{block.text}"
             )
     return "\n".join(lines)
 
@@ -157,10 +156,10 @@ def _search_texts(index: int, message: Msg) -> list[tuple[str, str, str]]:
     texts: list[tuple[str, str, str]] = []
     for block_index, block in enumerate(message.blocks):
         if isinstance(block, ToolResultBlock):
-            texts.append((f"result:{index}:{block_index}", block.name, block.content))
+            texts.append((f"result:{index}:{block_index}", block.name, block.text))
         elif isinstance(block, TextBlock):
             texts.append((f"message:{index}", "", block.text))
-        else:
+        elif isinstance(block, ToolUseBlock):
             texts.append(
                 (
                     f"message:{index}",

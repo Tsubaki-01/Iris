@@ -185,9 +185,15 @@ Extract 不传服务端 timeout，使用 basic 默认值。
   opt-in 的 `THREAD`；它不进入 provider schema。
 - `ToolDefinition`: 工具元数据，字段包括 `name`、`description`、`input_schema`、`capabilities`、`group`、`aliases`、`deferred`、`max_result_chars`、`preview_chars`、`preview_mode`、`context_retention`、`metadata`。
 - `ToolExecutionContext`: 单次调用上下文，包含 `call_id`、`tool_name`、`workspace_root`、`session_id`、`agent_id`、`permission_mode`、`metadata`、`read_state`、`tool_timeout_seconds`，以及不参与序列化的共享 `cancellation` signal 与 `command_stop_slot`。
-- `ToolResult`: 统一工具结果，包含 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_content` 返回可回灌模型的文本，`to_msg()` 将可信结果直接投影为历史消息，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
+- `ToolResult`: 统一工具结果，包含有序 `list[DataBlock]` 正文 `content`、`is_error`、`error`、`data`、`artifact`、`stats`、`metadata`；`model_blocks` 返回完整模型正文，`model_content` 从同一投影中提取纯文字。`to_msg()` 保留完整块列表，元数据只归一化一次。Runtime 提交和终态工具闭合共用这条投影路径。
 - `ToolErrorInfo`: 结构化错误，包含 `code`、`message`、`retryable`、`details`。
 - `ToolArtifact`: 超长结果或文件类产物引用，包含 `path`、`mime_type`、`size_bytes`、`preview` 和可空的 `text_path`。`path` 指向原生产物，`text_path` 指向最终截短前的完整模型文本。
+
+`DataBlock` 为 `TextBlock | ImageBlock`，定义于 [`iris.message`](../message/README.md)。
+成功结果和没有 `error` 对象的错误结果保持原块顺序；`is_error=True` 且存在 `error` 时，
+`model_blocks` 用一个 `Error[code]: message` 文字块替换原文字，再按原顺序保留图片。
+原始 `content` 不被改写。`model_content` 只用于文字消费，不能代替完整图片正文；
+`artifact` 和 `data` 也不是模型图片通道。
 
 ### 历史结果的保留声明
 

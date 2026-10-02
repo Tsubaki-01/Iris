@@ -172,6 +172,25 @@ def test_plain_assistant_matches_sdk_easy_input_schema() -> None:
     assert "id" not in item
 
 
+def test_tool_text_blocks_preserve_order_and_call_id() -> None:
+    result = Msg.tool_result(
+        tool_use_id="call-2", content=[TextBlock(text="first"), TextBlock(text="second")]
+    )
+    mapper = ResponsesMapper()
+    items = mapper.format_messages([result])
+    assert items == [
+        {
+            "type": "function_call_output",
+            "call_id": "call-2",
+            "output": [
+                {"type": "input_text", "text": "first"},
+                {"type": "input_text", "text": "second"},
+            ],
+        }
+    ]
+    assert mapper.token_count_messages(items)[0]["content"] == "first\nsecond"
+
+
 def test_native_assistant_replay_matches_sdk_output_schema() -> None:
     """原生回放保留 SDK 必需的 status 与 annotations。"""
     from openai.types.responses.response_output_message import ResponseOutputMessage

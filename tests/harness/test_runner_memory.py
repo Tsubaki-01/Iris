@@ -212,7 +212,7 @@ async def test_disabled_memory_omits_saved_overview_but_keeps_static_memory_and_
     assert request.messages[1].sender == "context"
     assert "固定记忆" in request.messages[1].text
     assert any(
-        "此前的普通工具结果" in block.content
+        "此前的普通工具结果" in block.text
         for message in request.messages
         for block in message.tool_results
     )

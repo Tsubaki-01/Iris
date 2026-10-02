@@ -111,6 +111,7 @@ parent。`message:<index>` 和 `result:<message_index>:<block_index>` 都使用�
 位置，压缩后的摘要不改变编号。Fork 继承前缀位置和原 artifact 引用，文件不复制。
 
 小结果从 lifecycle 原文读取，大结果通过已提交 artifact 取回最终文本或原生 MCP JSON；
+工具结果的内联读取与 Search 使用 `.text` 文字投影，多个文本块按换行连接后分页。
 读取不会重跑工具。Search 仅查已提交正文与预览，不扫描完整 artifact 文件。具体分页参数、
 错误与范围见 [tools 说明](../tools/README.md#当前会话上下文回读)。读取服务位于 harness，
 runtime 只接收窄接口，不取得 store ownership。
@@ -522,7 +523,8 @@ BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的�
 root run 首条消息提交前登记来源，以 lifecycle `source_id` 和 run ID 定位；压缩提示、
 WAITING/终态退出和关闭保存尚未捕获的原文后缀。WAITING 不封口，完成、失败、取消及无需
 runtime 的恢复终态都保留真实 outcome。BCI、system/reasoning 不作为材料；Search/Fetch
-读回只保留条目引用，工具调用及结果保留稳定来源。重复提示通过持久水位避免重复经历。
+读回只保留条目引用，工具调用及结果保留稳定来源；结果正文和记忆条目 JSON 均从 `.text`
+文字投影取得。重复提示通过持久水位避免重复经历。
 自动 Episode 的顶层 `source_id` 保存 run ID，metadata 保存 lifecycle `source_id` 与会话边界。
 
 Capture 每页至多 128 条消息，逐页提交并让出事件循环，只有到达完整终态计数才封源。

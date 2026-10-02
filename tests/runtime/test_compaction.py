@@ -32,7 +32,7 @@ def _estimate(request: LLMRequest) -> int:
             elif isinstance(block, ToolUseBlock):
                 count += len(block.id) + len(block.name) + len(json.dumps(block.input))
             elif isinstance(block, ToolResultBlock):
-                count += len(block.tool_use_id) + len(block.content)
+                count += len(block.tool_use_id) + len(block.text)
     count += len(json.dumps([tool.model_dump() for tool in request.tools])) if request.tools else 0
     count += len(json.dumps(request.response_format)) if request.response_format else 0
     return count

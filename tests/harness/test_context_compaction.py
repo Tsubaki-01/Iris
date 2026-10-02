@@ -70,7 +70,7 @@ class CompactionProvider(StaticProvider):
                 if isinstance(block, TextBlock):
                     size += len(block.text)
                 elif isinstance(block, ToolResultBlock):
-                    size += len(block.content)
+                    size += len(block.text)
                 elif isinstance(block, ToolUseBlock):
                     size += len(block.id) + len(block.name)
         return size + (20 if request.tools else 0)
@@ -233,7 +233,7 @@ async def test_long_session_and_current_run_tool_steps_keep_raw_history_and_anch
     assert sum(message.text == "比较两份资料" for message in session.messages) == 1
     assert sum("本轮有效环境" in message.text for message in session.messages) == 1
     assert sum(message.text == "旧" * 900 for message in session.messages) == 1
-    assert [block.content for message in session.messages for block in message.tool_results] == [
+    assert [block.text for message in session.messages for block in message.tool_results] == [
         "1" * 900,
         "2" * 900,
     ]

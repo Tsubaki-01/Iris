@@ -20,16 +20,14 @@ class _PressureProvider(StaticProvider):
     def estimate_input_tokens(self, request: LLMRequest) -> int:
         """整包包装也计入成本；预览不再计为完整长正文。"""
         full_bodies = sum(
-            _BODY in result.content
-            for message in request.messages
-            for result in message.tool_results
+            _BODY in result.text for message in request.messages for result in message.tool_results
         )
         return len(request.model_dump_json()) // 100 + full_bodies * 10000
 
 
 def _results(messages: list[Msg]) -> list[str]:
     """按模型看到的原顺序提取工具正文。"""
-    return [result.content for message in messages for result in message.tool_results]
+    return [result.text for message in messages for result in message.tool_results]
 
 
 @pytest.mark.asyncio

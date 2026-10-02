@@ -10,7 +10,7 @@ from iris.exceptions import (
     IrisProviderError,
     IrisRateLimitExceededError,
 )
-from iris.message import LLMRequest, Msg, ToolUseBlock
+from iris.message import LLMRequest, Msg, TextBlock, ToolUseBlock
 from iris.providers import ProviderClient
 from iris.providers.responses import ResponsesMapper
 
@@ -553,6 +553,47 @@ def test_chat_complete_replays_only_chat_reasoning_provenance(field: str) -> Non
     )
     assert "reasoning" not in mapper.format_messages([other])[0]
     assert "reasoning_content" not in mapper.format_messages([other])[0]
+
+
+@pytest.mark.parametrize("api_style", ["responses", "chat_completions"])
+def test_tool_text_blocks_use_same_content_for_sending_and_counting(
+    monkeypatch: pytest.MonkeyPatch, api_style: str
+) -> None:
+    from iris.providers.chat_completions import ChatCompletionsAdapter
+    from iris.providers.responses import ResponsesAdapter
+
+    request = LLMRequest(
+        model="gpt-4o",
+        messages=[
+            Msg.tool_result(
+                tool_use_id="call-1", content=[TextBlock(text="first"), TextBlock(text="second")]
+            )
+        ],
+    )
+    adapter = ResponsesAdapter() if api_style == "responses" else ChatCompletionsAdapter()
+    encoded = adapter.encode_request(request, transport="openai")
+    if api_style == "responses":
+        assert encoded["input"][0]["output"] == [
+            {"type": "input_text", "text": "first"},
+            {"type": "input_text", "text": "second"},
+        ]
+    else:
+        assert encoded["messages"] == [
+            {"role": "tool", "tool_call_id": "call-1", "content": "first\nsecond"}
+        ]
+
+    counted: dict[str, Any] = {}
+
+    def count(**kwargs: Any) -> int:
+        counted.update(kwargs)
+        return 7
+
+    monkeypatch.setattr("iris.providers.client.litellm.token_counter", count)
+    client = ProviderClient(provider="openai", api_key="test", api_style=api_style)
+    assert client.estimate_input_tokens(request) == 7
+    assert counted["messages"] == [
+        {"role": "tool", "tool_call_id": "call-1", "content": "first\nsecond"}
+    ]
 
 
 @pytest.mark.asyncio

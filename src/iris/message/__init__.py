@@ -23,11 +23,15 @@ from .llm import (
 from .message import (
     ContentBlock,
     Conversation,
+    DataBlock,
+    ImageBlock,
+    ImageFileRef,
     Msg,
     Role,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    image_block_from_saved,
 )
 from .streaming import (
     ModelBlockCompleted,
@@ -52,6 +56,9 @@ from .streaming import (
 __all__ = [
     "ContentBlock",
     "Conversation",
+    "DataBlock",
+    "ImageBlock",
+    "ImageFileRef",
     "JsonSchemaFormat",
     "LLMRequest",
     "LLMResponse",
@@ -80,4 +87,5 @@ __all__ = [
     "ToolResultBlock",
     "ToolSpec",
     "ToolUseBlock",
+    "image_block_from_saved",
 ]

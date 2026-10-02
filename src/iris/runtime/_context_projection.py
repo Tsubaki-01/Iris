@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from ..agents import ContextPolicyConfig
 from ..context import ContextSnapshot
 from ..context.source import render_context_snapshot
-from ..message import LLMRequest, ToolResultBlock
+from ..message import LLMRequest, TextBlock, ToolResultBlock
 from ._request_measurement import MeasuredRequest, measure_request
 from .compaction import _history_group_ends
 
@@ -71,7 +71,7 @@ def project_context_request(
             f"本次调用成功。重复正文见 {representative.ref}；"
             f"可用 context_read 读取本次原文 {item.ref}。"
         )
-        if len(text) < len(item.block.content):
+        if len(text) < len(item.block.text):
             replacements[item.position] = text
             representatives.add(representative.position)
     if replacements:
@@ -128,7 +128,7 @@ def project_context_request(
     for item in older:
         if item.position in replacements or item.position in representatives:
             continue
-        content = item.block.content
+        content = item.block.text
         if len(content) <= preview_chars:
             continue
         head = preview_chars * 3 // 4
@@ -192,7 +192,7 @@ def _closed_observations(
                                 sort_keys=True,
                                 separators=(",", ":"),
                             ),
-                            block.content,
+                            block.text,
                         )
                     )
                     observations.append(
@@ -215,6 +215,8 @@ def _replace_contents(
     for (message_index, block_index), content in replacements.items():
         message = messages[message_index]
         blocks = message.blocks
-        blocks[block_index] = blocks[block_index].model_copy(update={"content": content})
+        blocks[block_index] = blocks[block_index].model_copy(
+            update={"content": [TextBlock(text=content)]}
+        )
         messages[message_index] = message.model_copy(update={"content": blocks})
     return request.model_copy(update={"messages": messages})

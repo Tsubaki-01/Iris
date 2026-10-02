@@ -3,7 +3,7 @@
 from dataclasses import replace
 
 from ..lifecycle import SessionContextSnapshot
-from ..message import Msg, ToolResultBlock
+from ..message import Msg, TextBlock, ToolResultBlock
 
 
 def with_context_refs(snapshot: SessionContextSnapshot) -> SessionContextSnapshot:
@@ -30,10 +30,12 @@ def _with_message_refs(message: Msg, message_index: int) -> Msg:
             ref = f"result:{message_index}:{block_index}"
             blocks[block_index] = block.model_copy(
                 update={
-                    "content": (
-                        f"{block.content}\n[历史原文：{ref}；"
-                        "使用 context_read 分页读取 text 或 raw。]"
-                    )
+                    "content": [
+                        *block.content,
+                        TextBlock(
+                            text=f"[历史原文：{ref}；使用 context_read 分页读取 text 或 raw。]"
+                        ),
+                    ]
                 }
             )
             changed = True

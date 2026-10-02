@@ -177,7 +177,8 @@ canonical name；目标不存在或被 base view 排除时报告 `IrisConfigErro
 
 默认启用的 `context_policy` 在投影前给已外置工具结果附加 `result:<message_index>:<block_index>`
 回读引用，后缀按摘要覆盖数偏移，前缀锚点保留原始下标，summary 插入后不会重新编号。该视图使用 copy-on-write，不把
-取回提示写回 durable message。引用和 `context_read/search` 工具定义一并进入完整请求计量。
+取回提示写回 durable message；提示作为独立 `TextBlock` 追加，原有数据块顺序保持不变。
+引用和 `context_read/search` 工具定义一并进入完整请求计量。
 
 [`_context_projection.py`](./_context_projection.py) 的 `project_context_request()` 在完整请求
 达到既有 80% trigger 时，先折叠精确重复工具正文，再选择可选动态贡献与 deferred 工具定义，
@@ -189,7 +190,7 @@ canonical name；目标不存在或被 base view 排除时报告 `IrisConfigErro
   错误、未闭合调用、keep 结果、用户和 assistant 文字、summary 与任务锚点不被短化。
 - 默认保留最近两个已闭合工具批次；一批是 assistant 的完整 calls 与对应 results，普通消息
   不算工具批次。该保护只用于确定性裁剪，不增加 LLM 摘要的硬保留条件。
-- 精确判等使用已保存的规范工具名、key 排序后的 JSON 参数及完整内联正文。保留最新代表和
+- 精确判等使用已保存的规范工具名、key 排序后的 JSON 参数及完整内联文字投影。保留最新代表和
   近期保护组；较早副本换成明确的代表 ref 与本次原文 ref。不同结果、artifact 预览或文件路径
   不作为相等证据，也不为判等读取大文件。每次工具调用照常执行，所有 call/result 均保留。
 - 旧结果预览默认 512 字符，分配给正文 head 384 / tail 128；说明和稳定 ref 额外计入请求。
@@ -209,7 +210,7 @@ compaction 不因此关闭。
 公开完整历史和回读接口保持原义。无摘要时后缀仍是完整历史；Fork 仍一次复制并返回完整
 截止前缀，再从该前缀初始化发现投影，不继承 parent 截点后的发现或执行 checkpoint。
 
-`_compaction_summary.py` 把全部文本块、调用参数、工具结果及必要 error/artifact 引用按顺序
+`_compaction_summary.py` 把全部文本块、调用参数、工具结果的 `.text` 及必要 error/artifact 引用按顺序
 序列化；大块按字符覆盖范围分片，调用是否完成与结果文字是否读完分别标识。每一批都用
 当前工作摘要重新计算完整输入，不丢弃尚未处理的片段。
 记录 header 包含原始 `message:<index>` / `result:<message_index>:<block_index>`，摘要指令要求

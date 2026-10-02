@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from iris.message import Msg, Role, TextBlock
+from iris.message import ImageBlock, ImageFileRef, Msg, Role, TextBlock
 from iris.tools import ToolArtifact, ToolErrorInfo, ToolResult
 
 
@@ -34,7 +34,9 @@ def test_tool_result_projection_preserves_output_and_metadata(failed: bool) -> N
     assert block.tool_use_id == "call-1"
     assert block.name == "read_file"
     assert block.is_error is failed
-    assert block.content == ("Error[READ_FAILED]: 读取失败" if failed else "第一行\n第二行")
+    assert block.text == ("Error[READ_FAILED]: 读取失败" if failed else "第一行\n第二行")
+    assert block.content == result.model_blocks
+    assert result.model_content == block.text
     assert block.metadata == {
         "tool_name": "read_file",
         "artifact": result.artifact.model_dump(),
@@ -72,7 +74,36 @@ def test_edit_patch_stays_in_complete_result_and_out_of_model_message() -> None:
     message = result.to_msg()
 
     assert restored.data == {"file_change": file_change}
-    assert message.tool_results[0].content == "EDITED: src/示例.py"
+    assert message.tool_results[0].text == "EDITED: src/示例.py"
     assert message.tool_results[0].metadata == {"tool_name": "edit_file"}
     assert "file_change" not in message.model_dump_json()
     assert "patch" not in message.model_dump_json()
+
+
+@pytest.mark.parametrize("error_mode", ["success", "unstructured", "structured"])
+def test_model_projection_keeps_images_and_one_authoritative_error(error_mode: str) -> None:
+    ref = ImageFileRef(path=Path.cwd() / "image.png", mime_type="image/png", width=10, height=20)
+    first = ImageBlock(original=ref, model=ref, name="first")
+    second = ImageBlock(original=ref, model=ref, name="second")
+    content = [TextBlock(text="old error"), first, TextBlock(text="details"), second]
+    result = ToolResult(
+        tool_use_id="call-1",
+        tool_name="inspect",
+        content=content,
+        is_error=error_mode != "success",
+        error=ToolErrorInfo(code="FAILED", message="authoritative")
+        if error_mode == "structured"
+        else None,
+    )
+    expected = (
+        [TextBlock(text="Error[FAILED]: authoritative"), first, second]
+        if error_mode == "structured"
+        else content
+    )
+    assert result.model_blocks == expected
+    assert result.content == content
+    message = result.to_msg()
+    assert message.tool_results[0].content == expected
+    assert message.tool_results[0].text == result.model_content
+    assert Msg.model_validate_json(message.model_dump_json()) == message
+    assert ToolResult.model_validate_json(result.model_dump_json()) == result

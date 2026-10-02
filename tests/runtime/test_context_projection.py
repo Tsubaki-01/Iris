@@ -44,7 +44,7 @@ def _estimate(request: LLMRequest) -> int:
     """计量整包选项、schema 和消息文本。"""
     return len(json.dumps([tool.model_dump() for tool in request.tools])) + sum(
         len(
-            block.content
+            block.text
             if isinstance(block, ToolResultBlock)
             else block.text
             if isinstance(block, TextBlock)
@@ -89,9 +89,9 @@ def test_exact_duplicates_keep_real_pairs_recent_batches_and_raw() -> None:
     before = [message.model_dump() for message in raw]
     projected = _project(raw)
     results = [block for message in projected.messages for block in message.tool_results]
-    assert "重复正文见 result:5:0" in results[0].content
-    assert "本次原文 result:1:0" in results[0].content
-    assert [block.content for block in results[1:]] == [body, body]
+    assert "重复正文见 result:5:0" in results[0].text
+    assert "本次原文 result:1:0" in results[0].text
+    assert [block.text for block in results[1:]] == [body, body]
     assert sum(len(message.tool_calls) for message in projected.messages) == 3
     assert len(results) == 3
     assert [message.model_dump() for message in raw] == before
@@ -107,8 +107,8 @@ def test_aliases_use_saved_canonical_name_and_json_key_order() -> None:
         ],
         recent=0,
     )
-    assert "重复正文见 result:3:0" in projected.messages[2].tool_results[0].content
-    assert projected.messages[4].tool_results[0].content == body
+    assert "重复正文见 result:3:0" in projected.messages[2].tool_results[0].text
+    assert projected.messages[4].tool_results[0].text == body
 
 
 @pytest.mark.parametrize("kind", ["changed", "artifact", "keep", "error", "open"])
@@ -128,7 +128,7 @@ def test_nonduplicates_and_protected_results_do_not_fold(kind: str) -> None:
     raw = [*first, *last]
     projected = _project(raw, recent=0, preview=10000)
     assert all(
-        "重复正文见" not in block.content
+        "重复正文见" not in block.text
         for message in projected.messages
         for block in message.tool_results
     )
@@ -143,10 +143,10 @@ def test_unique_old_results_shorten_but_actual_duplicate_representative_stays() 
     raw = [*_batch(duplicate), *_batch(duplicate), *_batch(unique)]
     projected = _project(raw, recent=0, preview=8)
     results = [block for message in projected.messages for block in message.tool_results]
-    assert "重复正文见" in results[0].content
-    assert results[1].content == duplicate
-    assert "原文：result:5:0" in results[2].content
-    assert "预览：HEADmi" in results[2].content and results[2].content.endswith("IL")
+    assert "重复正文见" in results[0].text
+    assert results[1].text == duplicate
+    assert "原文：result:5:0" in results[2].text
+    assert "预览：HEADmi" in results[2].text and results[2].text.endswith("IL")
 
 
 @pytest.mark.parametrize("tool_type", [ExecCommandTool, RunPythonTool])
@@ -167,7 +167,7 @@ def test_command_tool_preview_remains_intact_under_history_pressure(
         *_batch(body, name=tool.name, retention=tool.definition.context_retention),
     ]
     projected = _project(raw, recent=0, preview=4, trigger=1)
-    assert [block.content for message in projected.messages for block in message.tool_results] == [
+    assert [block.text for message in projected.messages for block in message.tool_results] == [
         body,
         body,
     ]
@@ -215,12 +215,12 @@ def test_each_compaction_candidate_recomputes_representatives_at_original_indice
         )[0].request
 
     earlier = candidate(2)
-    assert "重复正文见 result:5:0" in earlier.messages[2].tool_results[0].content
-    assert earlier.messages[4].tool_results[0].content == body
+    assert "重复正文见 result:5:0" in earlier.messages[2].tool_results[0].text
+    assert earlier.messages[4].tool_results[0].text == body
     later = candidate(4)
-    assert "原文：result:5:0" in later.messages[2].tool_results[0].content
-    assert "重复正文见" not in later.messages[2].tool_results[0].content
-    assert raw[5].tool_results[0].content == body
+    assert "原文：result:5:0" in later.messages[2].tool_results[0].text
+    assert "重复正文见" not in later.messages[2].tool_results[0].text
+    assert raw[5].tool_results[0].text == body
 
 
 def test_recent_window_counts_complete_parallel_batches_not_individual_results() -> None:
@@ -238,6 +238,6 @@ def test_recent_window_counts_complete_parallel_batches_not_individual_results()
     ]
     raw = [*_batch(body), *parallel, Msg.user("new instructions"), *_batch("fresh" * 300)]
     projected = _project(raw)
-    assert "重复正文见" in projected.messages[2].tool_results[0].content
-    assert projected.messages[4].tool_results[0].content == body
-    assert projected.messages[5].tool_results[0].content == body
+    assert "重复正文见" in projected.messages[2].tool_results[0].text
+    assert projected.messages[4].tool_results[0].text == body
+    assert projected.messages[5].tool_results[0].text == body

@@ -1793,7 +1793,7 @@ def test_claim_and_commit_tool_result_cover_effect_fence(
     assert stored_result.data == {"file_change": file_change}
     session = lifecycle_store.load_session("session-1")
     assert session.revision == 2
-    assert session.messages[-1].tool_results[0].content == "EDITED: src/示例.py"
+    assert session.messages[-1].tool_results[0].text == "EDITED: src/示例.py"
     assert "file_change" not in session.messages[-1].model_dump_json()
     _assert_session_projection(lifecycle_store, "run-1")
 

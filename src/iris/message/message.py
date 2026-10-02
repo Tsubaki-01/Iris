@@ -17,6 +17,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 # endregion
 
 if TYPE_CHECKING:
+    from ..utils.images import SavedImage
     from .llm import LLMRequest
 
 # region definitions
@@ -53,6 +55,48 @@ class TextBlock(BaseModel):
     text: str
 
 
+class ImageFileRef(BaseModel):
+    """已保存图片的绝对路径、实际编码格式和像素尺寸。"""
+
+    path: Path
+    mime_type: str
+    width: int
+    height: int
+
+
+class ImageBlock(BaseModel):
+    """图片的原始副本与模型副本引用，不携带请求编码。"""
+
+    type: Literal["image"] = "image"
+    original: ImageFileRef
+    model: ImageFileRef
+    name: str | None = None
+
+
+DataBlock = TextBlock | ImageBlock
+
+
+def image_block_from_saved(saved: SavedImage, *, name: str | None = None) -> ImageBlock:
+    """将图片保存器交付的可信文件信息投影为消息块。"""
+    original = ImageFileRef.model_construct(
+        path=saved.original.path,
+        mime_type=saved.original.mime_type,
+        width=saved.original.width,
+        height=saved.original.height,
+    )
+    model = (
+        original
+        if saved.model is saved.original
+        else ImageFileRef.model_construct(
+            path=saved.model.path,
+            mime_type=saved.model.mime_type,
+            width=saved.model.width,
+            height=saved.model.height,
+        )
+    )
+    return ImageBlock.model_construct(original=original, model=model, name=name)
+
+
 class ToolUseBlock(BaseModel):
     """由 LLM 发起的工具调用请求。
 
@@ -73,7 +117,7 @@ class ToolResultBlock(BaseModel):
 
     Attributes:
         tool_use_id: 对应 `ToolUseBlock` 的 `id`。
-        content: 工具执行产生的文本输出。
+        content: 工具执行产生的有序文字/图片数据块。
         is_error: 工具执行是否失败。
         name: 工具名称。
         metadata: 额外元数据。
@@ -81,7 +125,7 @@ class ToolResultBlock(BaseModel):
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str = ""
+    content: list[DataBlock] = Field(default_factory=list)
     is_error: bool = False
     name: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -94,6 +138,11 @@ class ToolResultBlock(BaseModel):
         "trace_id",
         "extra",
     }
+
+    @property
+    def text(self) -> str:
+        """汇总工具正文中的文字；图片仍保留在 content 中。"""
+        return "\n".join(block.text for block in self.content if isinstance(block, TextBlock))
 
     @field_validator("metadata", mode="before")
     @classmethod
@@ -120,7 +169,7 @@ class ToolResultBlock(BaseModel):
 
 
 # agent 支持的所有内容块联合类型。
-ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock
+ContentBlock = DataBlock | ToolUseBlock | ToolResultBlock
 
 
 # endregion
@@ -239,7 +288,7 @@ class Msg(BaseModel):
         cls,
         *,
         tool_use_id: str,
-        content: str = "",
+        content: str | list[DataBlock] = "",
         is_error: bool = False,
         name: str = "",
         metadata: dict[str, Any] | None = None,
@@ -249,10 +298,11 @@ class Msg(BaseModel):
 
         Iris 内部以 user 角色承载 `ToolResultBlock`，保留真实工具调用结果。
         Provider adapter 将其映射为所选 API 协议的工具回执。
+        字符串当场包装成文字块；内部历史始终保存数据块列表。
         """
         block = ToolResultBlock(
             tool_use_id=tool_use_id,
-            content=content,
+            content=[TextBlock(text=content)] if isinstance(content, str) else content,
             is_error=is_error,
             name=name,
             metadata=metadata or {},
@@ -424,6 +474,8 @@ def _content_block_from_dict(data: dict[str, Any]) -> ContentBlock:
     block_type = data.get("type")
     if block_type == "text":
         return TextBlock.model_validate(data)
+    if block_type == "image":
+        return ImageBlock.model_validate(data)
     if block_type == "tool_use":
         return ToolUseBlock.model_validate(data)
     if block_type == "tool_result":
