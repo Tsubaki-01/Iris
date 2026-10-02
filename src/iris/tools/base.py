@@ -354,6 +354,7 @@ class ToolResult(BaseModel):
         artifact (ToolArtifact | None): 二进制类文件与图像等产物指针。
         stats (dict[str, Any]): 运行时性能耗时和统计信息。
         metadata (dict[str, Any]): 与框架其他组件（如 Trace）的挂载点。
+        hook_feedback (tuple[str, ...]): 按处理顺序追加到同一模型正文的 Hook 反馈。
 
     Example:
         res = ToolResult(tool_use_id="123", tool_name="ls", content=[...])
@@ -368,16 +369,20 @@ class ToolResult(BaseModel):
     artifact: ToolArtifact | None = None
     stats: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    hook_feedback: tuple[str, ...] = ()
 
     @property
     def model_blocks(self) -> list[DataBlock]:
-        """完整模型内容投影；结构化错误替换文字，保留图片的相对顺序。"""
+        """完整模型内容投影；保留图片、替换错误文字，最后追加 Hook 反馈。"""
         if self.is_error and self.error is not None:
-            return [
+            blocks: list[DataBlock] = [
                 TextBlock(text=f"Error[{self.error.code}]: {self.error.message}"),
                 *(block for block in self.content if isinstance(block, ImageBlock)),
             ]
-        return list(self.content)
+        else:
+            blocks = list(self.content)
+        blocks.extend(TextBlock(text=f"[Hook feedback]\n{text}") for text in self.hook_feedback)
+        return blocks
 
     @property
     def model_content(self) -> str:

@@ -81,7 +81,10 @@ def test_edit_patch_stays_in_complete_result_and_out_of_model_message() -> None:
 
 
 @pytest.mark.parametrize("error_mode", ["success", "unstructured", "structured"])
-def test_model_projection_keeps_images_and_one_authoritative_error(error_mode: str) -> None:
+@pytest.mark.parametrize("feedback", [(), ("inspect image", "compare colors")])
+def test_model_projection_keeps_images_and_one_authoritative_error(
+    error_mode: str, feedback: tuple[str, ...]
+) -> None:
     ref = ImageFileRef(path=Path.cwd() / "image.png", mime_type="image/png", width=10, height=20)
     first = ImageBlock(original=ref, model=ref, name="first")
     second = ImageBlock(original=ref, model=ref, name="second")
@@ -94,12 +97,14 @@ def test_model_projection_keeps_images_and_one_authoritative_error(error_mode: s
         error=ToolErrorInfo(code="FAILED", message="authoritative")
         if error_mode == "structured"
         else None,
+        hook_feedback=feedback,
     )
     expected = (
         [TextBlock(text="Error[FAILED]: authoritative"), first, second]
         if error_mode == "structured"
         else content
     )
+    expected = [*expected, *(TextBlock(text=f"[Hook feedback]\n{text}") for text in feedback)]
     assert result.model_blocks == expected
     assert result.content == content
     message = result.to_msg()

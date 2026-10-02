@@ -36,6 +36,7 @@ from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
     from ..goal.service import GoalService
+    from ..hooks.dispatcher import HookDispatcher
     from ..mcp.manager import MCPManager
     from ..mcp.models import MCPCatalogSnapshot
 
@@ -123,6 +124,7 @@ class RuntimeEnvironment:
         command_stop_slots (dict): root/child 共享的当前调用停止事实槽。
         memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
         context_source (ContextSource | None): 宿主每步采集接口，不缓存快照。
+        hook_dispatcher (HookDispatcher | None): 当前 Agent 的可选进程内 Hook 派发依赖。
     """
 
     agent_config: AgentConfig
@@ -144,6 +146,7 @@ class RuntimeEnvironment:
     command_stop_slots: dict[tuple[str, str], CommandStopSlot] = field(default_factory=dict)
     memory_capture_port: RuntimeMemoryCapturePort | None = None
     context_source: ContextSource | None = None
+    hook_dispatcher: HookDispatcher | None = None
 
     def __post_init__(self) -> None:
         """归一化 workspace，并将同一个停止事实映射交给工具桥接。"""
