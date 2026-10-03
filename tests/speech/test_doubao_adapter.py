@@ -15,7 +15,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from iris.exceptions import IrisSpeechError
 from iris.speech import SpeechClient, TranscriptionEvent
-from iris.speech.adapters import doubao
+from iris.speech.adapters import _transport, doubao
 from iris.speech.adapters.doubao import DoubaoASRAdapter
 
 from .fakes import FakeConnect, FakeWebSocket, Frame
@@ -69,7 +69,7 @@ async def test_handshake_and_real_last_audio_frame(
     socket = FakeWebSocket()
     finish_with(socket, response("完成", final=True))
     connect = FakeConnect(socket)
-    monkeypatch.setattr(doubao, "connect", connect)
+    monkeypatch.setattr(_transport, "connect", connect)
     speech = client()
     assert connect.calls == []
     events = [event async for event in speech.stream(audio(*chunks))]
@@ -114,7 +114,7 @@ async def test_handshake_and_real_last_audio_frame(
 async def test_partial_revisions_arrive_before_source_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     socket = FakeWebSocket()
     connect = FakeConnect(socket)
-    monkeypatch.setattr(doubao, "connect", connect)
+    monkeypatch.setattr(_transport, "connect", connect)
     release_audio = asyncio.Event()
     source_waiting = asyncio.Event()
 
@@ -162,7 +162,7 @@ async def test_final_uses_last_known_text(
 ) -> None:
     socket = FakeWebSocket()
     finish_with(socket, *frames)
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     events = [event async for event in client().stream(audio(b"ab"))]
     assert events[-1] == TranscriptionEvent(expected, True)
     assert sum(event.is_final for event in events) == 1
@@ -175,7 +175,7 @@ async def test_receive_failure_cancels_waiting_audio_source(
     monkeypatch: pytest.MonkeyPatch, incoming: Frame | Exception, after_audio: bool
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     source_waiting = asyncio.Event()
     source_closed = asyncio.Event()
 
@@ -209,7 +209,7 @@ async def test_final_deadline_starts_after_last_send_completes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     monkeypatch.setattr(doubao, "_FINAL_TIMEOUT", 0.005)
     sending_last = asyncio.Event()
     release_send = asyncio.Event()
@@ -240,7 +240,7 @@ async def test_terminal_during_last_send_waits_for_send_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     sending_last = asyncio.Event()
     release_send = asyncio.Event()
 
@@ -270,7 +270,7 @@ async def test_source_error_is_not_misclassified_as_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     failure = OSError("microphone failed")
 
     async def source() -> AsyncGenerator[bytes, None]:
@@ -293,7 +293,7 @@ async def test_send_failure_unblocks_receiver(
     monkeypatch: pytest.MonkeyPatch, failed_packet: int
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     failure = OSError("send failed")
 
     async def on_send(frame: Frame) -> None:
@@ -317,7 +317,7 @@ async def test_connection_failure_is_normalized(
 ) -> None:
     socket = FakeWebSocket()
     socket.open_error = failure
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     with pytest.raises(IrisSpeechError) as caught:
         async for _event in client().stream(audio(b"ab")):
             pass
@@ -330,7 +330,7 @@ async def test_cancel_or_break_finishes_tasks_and_connection(
     monkeypatch: pytest.MonkeyPatch, cancel: bool
 ) -> None:
     socket = FakeWebSocket()
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     waiting = asyncio.Event()
     stopped = asyncio.Event()
 
@@ -367,7 +367,7 @@ async def test_cancel_or_break_finishes_tasks_and_connection(
 async def test_close_without_terminal_is_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     socket = FakeWebSocket()
     finish_with(socket, response("未完成"), ConnectionClosedOK(None, None))
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
     events = []
     with pytest.raises(IrisSpeechError):
         async for event in client().stream(audio(b"ab")):
@@ -380,7 +380,7 @@ async def test_close_without_terminal_is_failure(monkeypatch: pytest.MonkeyPatch
 async def test_premature_terminal_does_not_wait_for_audio(monkeypatch: pytest.MonkeyPatch) -> None:
     socket = FakeWebSocket()
     socket.incoming.put_nowait(response("提前结束", final=True))
-    monkeypatch.setattr(doubao, "connect", FakeConnect(socket))
+    monkeypatch.setattr(_transport, "connect", FakeConnect(socket))
 
     async def source() -> AsyncGenerator[bytes, None]:
         yield b"ab"
@@ -401,7 +401,7 @@ async def test_final_deadline_is_absolute_and_client_can_be_reused(
 ) -> None:
     first, second = FakeWebSocket(), FakeWebSocket()
     connect = FakeConnect(first, second)
-    monkeypatch.setattr(doubao, "connect", connect)
+    monkeypatch.setattr(_transport, "connect", connect)
     monkeypatch.setattr(doubao, "_FINAL_TIMEOUT", 0.03)
     finish_with(first, response("旧预览"))
     finish_with(second, response(final=True))

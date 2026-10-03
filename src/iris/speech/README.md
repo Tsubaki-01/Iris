@@ -60,6 +60,37 @@ adapter = DoubaoASRAdapter(
 Demo 的音频序列化标志与旧版文字协议存在差异，实际账号仍需联调确认；
 SDK 不通过失败后改协议或重放音频来自动兼容。
 
+## 阿里 Fun-ASR 流式识别
+
+同一个 transcribe 函数可以改用阿里 adapter。`.env` 配置
+`IRIS_PROVIDER_API_KEYS__DASHSCOPE_FUNASR`；初始化 Iris 配置后构造：
+
+```python
+from iris import get_config
+from iris.speech.adapters.dashscope_funasr import DashScopeFunASRAdapter
+
+adapter = DashScopeFunASRAdapter(
+    endpoint="wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference",
+    model="fun-asr-realtime",
+    api_key=get_config().provider_api_keys["dashscope_funasr"],
+)
+```
+
+将 `{WorkspaceId}` 替换为实际业务空间，并使用账号地域对应的完整地址。
+本 adapter 支持 Fun-ASR-Realtime task 协议，不能直接用 Paraformer 或 Qwen Realtime 模型替代。
+跨服务商切换除了 endpoint/key，也要选择相应 adapter 和 model；宿主的录音与事件消费不变。
+
+adapter 等 task-started 后发送原始 PCM，录音自然结束后发送 finish-task，
+继续等待 task-finished。按 sentence_id 覆盖当前句，多个非空句子用换行连接；
+sentence_end 只确认当前句。最终文字只包含已确认句子，未确认预览不自动升级为最终结果。
+
+固定启用应用层 heartbeat，支持持续输入静音；服务的心跳结果不进入转录文字。
+这不替代正常提供音频，也不意味着自动重连。连接、task-started 与发送 finish-task 后的
+整任务终态分别使用 10 秒期限，后者不会随 partial 重置。
+实际模型在半句停止时的末句确认行为仍需用真实账号联调；协议依据见
+[客户端事件](https://help.aliyun.com/zh/model-studio/fun-asr-client-events)和
+[服务端事件](https://help.aliyun.com/zh/model-studio/fun-asr-server-events)。
+
 ## 音频与结果
 
 - 输入为 16 kHz、16-bit signed little-endian、单声道 raw PCM。
