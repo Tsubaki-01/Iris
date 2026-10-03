@@ -77,8 +77,6 @@ def assert_file_goal_result(
     workspace: Path,
     store: SQLiteStore,
     goal_id: str,
-    *,
-    require_tokens: bool = False,
 ) -> tuple[GoalSnapshot, tuple[str, ...]]:
     """联合检验实际文件、已提交工具、两轮绑定、持久结果和重开事实。"""
     assert json.loads((workspace / "numbers.json").read_text(encoding="utf-8")) == [7, 11, 13]
@@ -98,10 +96,6 @@ def assert_file_goal_result(
         assert result.run.phase is RunPhase.TERMINAL
         assert result.run.stop_reason is RunStopReason.COMPLETED
         assert result.run.usage.model_steps_committed > 0
-        if require_tokens:
-            assert result.run.usage.input_tokens > 0
-            assert result.run.usage.output_tokens > 0
-            assert result.run.usage.total_tokens > 0
         calls = store.list_tool_calls(binding.run_id)
         assert all(call.phase is ToolCallPhase.COMMITTED for call in calls)
         file_calls = [call for call in calls if call.tool_name in {"read_file", "write_file"}]

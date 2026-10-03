@@ -93,21 +93,13 @@ YAML 文件所在目录解析。`.iris` 中的本地结果已被仓库忽略。
 
 ## 验证与复现
 
-离线测试覆盖命令行批量失败、退出码和文件续读；真实测试默认跳过，显式开启后不会模拟
-Tavily、聊天模型或 HTTP transport：
+仓库仅保留使用模拟 HTTP transport 的离线测试，覆盖命令行批量失败、退出码、文件续读和
+Web 工具行为，无需真实 API key：
 
 ```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
 uv run pytest -q -p no:cacheprovider --basetemp="$PWD\tmp\pytest-web-offline" tests/examples/test_web_examples.py tests/tools/test_web_tools.py
-uv run pytest -v -s -p no:cacheprovider --basetemp="$PWD\tmp\pytest-web-live" tests/examples/test_web_live.py --run-live-web --web-env-file .env.local --junitxml=tmp/web-live.xml
 ```
 
-真实测试覆盖默认搜索、数量与域名筛选、四种时间范围、空结果、批量全文、不同 query 的摘录、
-部分/全部失败、artifact 逐页完整还原，以及真实模型搜索后读取并引用来源、SQLite 重读结果与历史。
-工具结果和 Agent 运行证据保存在指定 `--basetemp` 的各测试目录中；相同目录下次运行会由 pytest
-清理，需留存时使用不同目录。
-
-时间范围测试确认 API 接受参数并正常返回；当前工具输出不包含可靠发布日期，不能独立验证
-每条结果的严格日期。服务响应、索引和模型决策会变化，真实测试可能暴露供应商行为变化。
-限流、超时、异常 JSON 等不能稳定复现的分支由现有离线测试覆盖。
-
-本次执行记录见 [真实 API 验证报告](LIVE_VALIDATION.md)。
+需要手动验证真实服务时，可运行上面的示例命令。历史执行记录见
+[真实 API 验证报告](LIVE_VALIDATION.md)。
