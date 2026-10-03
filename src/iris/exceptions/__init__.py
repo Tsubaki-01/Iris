@@ -49,6 +49,7 @@ from .skill import (
     IrisSkillNotFoundError,
     IrisSkillPathError,
 )
+from .speech import IrisSpeechError
 from .template import IrisTemplateError, IrisTemplateNotFoundError
 from .todo import IrisTodoError
 from .tools import (
@@ -85,6 +86,7 @@ __all__ = [
     "HITLConflictError",
     "HITLCheckpointInvalidError",
     "IrisProviderError",
+    "IrisSpeechError",
     "IrisProviderStreamError",
     "IrisProviderStreamInterruptedError",
     "IrisProviderStreamProtocolError",
