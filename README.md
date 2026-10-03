@@ -191,3 +191,11 @@ root run 的已提交经历先保存为 Episode，flush 提炼为带证据的 Ob
 不自动迁移或删除已有数据。
 
 配置、显式概览生成和 SDK 用法见 [`iris.memory`](src/iris/memory/README.md)。
+
+## 可选 Decision
+
+[`iris.decision`](src/iris/decision/README.md) 提供独立 Choice/Boolean/Score SDK，首个后端为 Jev。
+在 Agent YAML 通过 `decision.path` 引用独立配置，分别启用 `tools.discovery` 和 `memory.recall`。
+前者一次批量 Choice 发现 deferred 工具；后者从满足显式必要词组的全部允许记忆中一次 Score
+直接召回。两者默认关闭，eager 工具、Skill 和子 Agent 仍直接调用。配置方式与 SDK 用法见
+[`iris.decision` 使用说明](src/iris/decision/README.md)。

@@ -60,3 +60,30 @@ def test_required_phrases_intersect_the_whole_or_query_and_keep_repeated_tokens(
 def test_snippet_uses_lexical_matches_instead_of_substring_prefixes() -> None:
     text = "needlework " + "🙂" * 400 + " NEEDLE " + "🙂" * 400
     assert make_snippet(text, {"needle"}) == (text[262:562], False)
+
+
+@pytest.mark.parametrize(
+    ("text", "phrases", "expected"),
+    [
+        ("red blue; go go", ["RED BLUE", "go go"], True),
+        ("red blue; go now", ["red blue", "go go"], False),
+        ("red blue green", ["red blue", "blue green"], True),
+        ("go go before red blue", ["red blue", "go go"], True),
+        ("anything", [], True),
+    ],
+)
+def test_required_phrases_are_an_intersection_of_contiguous_token_windows(
+    text: str, phrases: list[str], expected: bool
+) -> None:
+    from iris.memory._query import matches_required_phrases
+
+    assert matches_required_phrases(text, phrases) is expected
+
+
+def test_required_phrase_matching_keeps_all_tokens() -> None:
+    from iris.memory._query import matches_required_phrases
+
+    terms = [f"term{i}" for i in range(150)]
+    phrase = " ".join(terms)
+    assert matches_required_phrases(f"prefix {phrase} suffix", [phrase])
+    assert not matches_required_phrases(" ".join(terms[:-1]), [phrase])

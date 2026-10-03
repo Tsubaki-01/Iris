@@ -1,5 +1,6 @@
 """Root、CLI 与 child 共用 memory 配置装配链。"""
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,12 +8,13 @@ import pytest
 from fakes import FakeProvider
 
 from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
+from iris.decision import DecisionRequest, DecisionResponse
 from iris.exceptions import IrisConfigError, IrisMemoryError, IrisToolValidationError
 from iris.harness import AgentRunner
 from iris.memory import MemoryConfig, MemoryService, MemoryWriteInput, SQLiteMemoryStore
 from iris.providers import CompletionProvider, ModelRoute
 from iris.runtime import RuntimeFactory
-from iris.tools import ToolExecutionContext
+from iris.tools import ToolCapability, ToolExecutionContext
 
 
 def _config(
@@ -41,9 +43,70 @@ def test_memory_disabled_creates_no_service_or_tools(tmp_path: Path) -> None:
     assert not (tmp_path / ".iris").exists()
 
 
-def test_yaml_memory_uses_effective_workspace_and_shared_tool_service(
-    tmp_path: Path
+class RecallEvaluator:
+    """装配测试只需要 evaluate 协议，不接收关闭职责。"""
+
+    async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
+        raise AssertionError("装配不得调用模型")
+
+
+@pytest.mark.asyncio
+async def test_memory_only_decision_is_bound_to_search_not_shared_service(tmp_path: Path) -> None:
+    from iris.agents import AgentDecisionConfig
+    from iris.memory import MemorySearchQuery
+
+    path = tmp_path / "decision.yaml"
+    path.write_text("memory: {recall: true}\n", encoding="utf-8")
+    config = _config(tmp_path, memory={"enabled": True})
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "shared.db"))
+    evaluator = RecallEvaluator()
+    enhanced = AgentRunner.from_config(
+        config.model_copy(update={"decision": AgentDecisionConfig(path=path)}),
+        provider=FakeProvider([]),
+        memory_service=service,
+        decision_client=evaluator,
+    )
+    local = AgentRunner.from_config(config, provider=FakeProvider([]), memory_service=service)
+    enhanced_registry = enhanced.runtime.environment.tool_bridge.tool_view.registry
+    local_search = local.runtime.environment.tool_bridge.tool_view.registry.get("memory_search")
+    search = enhanced_registry.get("memory_search")
+    assert enhanced.runtime.environment.decision_client is evaluator
+    assert local.runtime.environment.decision_client is None
+    assert enhanced.runtime.environment.memory_service is local.runtime.environment.memory_service
+    assert search.definition.capabilities == {ToolCapability.READ, ToolCapability.NETWORK}
+    assert local_search.definition.capabilities == {ToolCapability.READ}
+    assert enhanced_registry.get("memory_fetch").definition.capabilities == {ToolCapability.READ}
+    assert search.input_model is local_search.input_model is MemorySearchQuery
+    assert search.definition.input_schema == local_search.definition.input_schema
+    assert search.definition.description == local_search.definition.description
+    await enhanced.aclose()
+    # 关闭增强 Agent 后，另一个 Agent 仍能直接使用共用服务。
+    result = await local_search.arun(
+        MemorySearchQuery(query="unmatched"), ToolExecutionContext(workspace_root=tmp_path)
+    )
+    assert json.loads(result.content[0].text)["items"] == []
+    await local.aclose()
+
+
+def test_memory_recall_requires_enabled_memory_before_client_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from iris.agents import AgentDecisionConfig
+    from iris.decision import factory
+
+    path = tmp_path / "decision.yaml"
+    path.write_text("memory: {recall: true}\n", encoding="utf-8")
+
+    def no_keys() -> None:
+        raise AssertionError("依赖冲突应先于 key 读取")
+
+    monkeypatch.setattr(factory, "get_config", no_keys)
+    config = _config(tmp_path).model_copy(update={"decision": AgentDecisionConfig(path=path)})
+    with pytest.raises(IrisConfigError, match="memory.enabled"):
+        AgentRunner.from_config(config, provider=FakeProvider([]))
+
+
+def test_yaml_memory_uses_effective_workspace_and_shared_tool_service(tmp_path: Path) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text(
         "name: memory-agent\nmodel: openai/test\nsystem: instructions\n"
@@ -210,7 +273,7 @@ def test_memory_declaration_requires_service_and_preserves_real_name_conflicts(
         """用户自定义同名函数。"""
         return query
 
-    monkeypatch.setattr(tools_module, "_import_ref", lambda ref: memory_search)
+    monkeypatch.setattr(tools_module, "import_ref", lambda ref: memory_search)
     with pytest.raises(IrisToolValidationError):
         build_tool_registry(
             ToolsConfig(python={"functions": ["custom:memory_search"]}),
@@ -298,7 +361,8 @@ def test_cli_uses_the_shared_memory_assembly(
     environment = captured[0].runtime.environment
     assert environment.memory_service is not None
     assert [tool.name for tool in environment.tool_bridge.tool_view.active_tools] == [
-        "memory_search", "memory_fetch"
+        "memory_search",
+        "memory_fetch",
     ]
     assert (tmp_path / ".iris" / "memory" / "memory.db").exists()
 
@@ -312,8 +376,7 @@ def test_child_uses_own_memory_config_and_effective_workspace(
     child_path.write_text(
         "name: child\nmodel: openai/test\nsystem: child\n"
         "context_policy:\n  enabled: false\n"
-        "permissions:\n  workspace: .\n"
-        + ("memory:\n  enabled: true\n" if child_enabled else ""),
+        "permissions:\n  workspace: .\n" + ("memory:\n  enabled: true\n" if child_enabled else ""),
         encoding="utf-8",
     )
     catalog = tmp_path / "catalog.yaml"

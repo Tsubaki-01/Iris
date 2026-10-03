@@ -17,7 +17,7 @@ from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool
 `SubagentTool.execute_subagent()` 通过窄 port 返回 `ToolResult | ChildWaiting`；
 直接 `arun()` 抛 `IrisToolExecutionError`。普通 `BaseTool.arun()` 的返回契约不变。
 
-默认策略对具体内置 `SubagentTool`、`WebSearchTool`、`WebFetchTool` 返回 ALLOW，
+默认策略对具体内置 `SubagentTool`、`WebSearchTool`、`WebFetchTool`、`ToolSearchTool`、`MemorySearchTool` 返回 ALLOW，
 其他 AGENT/NETWORK 工具仍要求人工确认。
 内部 `MostRestrictivePermissionPolicy` 对真实 child 工具分别调用父子策略，按
 DENY > REQUIRE_HUMAN > ALLOW 取原始决策；同级保留 parent 的 reason/metadata。

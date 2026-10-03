@@ -43,9 +43,10 @@ def test_models_reject_removed_scope_instead_of_defaulting_to_project(
         model(**data, scope={"workspace_id": "workspace", "agent_id": "agent"})
 
 
-def test_search_query_defaults_and_empty_query_are_explicit() -> None:
-    """搜索的唯一输入不携带宿主作用域；空文本由搜索返回空结果。"""
-    query = MemorySearchQuery(query="")
+def test_search_query_trims_text_and_keeps_defaults() -> None:
+    """搜索的唯一输入不携带宿主作用域；文本去除首尾空白后必须非空。"""
+    query = MemorySearchQuery(query=" fact ")
+    assert query.query == "fact"
     assert query.required_terms == []
     assert query.categories == []
     assert query.kinds == []
@@ -72,6 +73,11 @@ def test_search_rejects_required_phrases_without_indexable_terms(phrase: str) ->
     [
         {},
         {"query": None},
+        {"query": ""},
+        {"query": " \n\t "},
+        {"query": "fact", "required_terms": None},
+        {"query": "fact", "categories": None},
+        {"query": "fact", "kinds": None},
         {"query": "fact", "limit": 0},
         {"query": "fact", "limit": 101},
         {"query": "fact", "categories": ["invalid"]},

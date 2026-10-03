@@ -60,7 +60,7 @@ current = service.get_item(item.id, ["project"])
 resolver. Disabled memory returns `None` without resolving memory paths or creating files. When
 enabled, it returns the injected object unchanged or builds a SQLite service if none was supplied.
 An injected service keeps its store, mirror, provider/model, and IO mode. Configured memory root and
-database paths must resolve inside the caller-supplied workspace. SQLite FTS5 is the only text-search path: initialization
+database paths must resolve inside the caller-supplied workspace. Default local search uses SQLite FTS5: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
 New databases use schema version 5; older versions are rejected at initialization without migration,
 version overwrite, or deletion. Configured SQLite services use `MemoryIOExecutionMode.THREAD`;
@@ -355,7 +355,8 @@ query = MemorySearchQuery(
 response = await service.asearch(query, ["project"])
 ```
 
-`query` is required. `required_terms` defaults to empty, adding no required body phrases.
+`query` is required and must remain nonempty after trimming surrounding whitespace.
+`required_terms` defaults to empty, adding no required body phrases.
 Categories and kinds default to empty, meaning no filter for that dimension.
 The result limit defaults to 8 and accepts `1..100`. Unknown fields are rejected, and namespace is
 not part of model input. Storage filters allowed namespaces, categories/kinds, and active status
@@ -368,7 +369,7 @@ Indexing, queries, and raw-text positions use the same lexer: lowercase ASCII le
 adjacent bigrams for Chinese runs, and a single character only for an isolated Chinese character.
 Punctuation and underscores separate tokens. Query terms are deduplicated in first-occurrence order
 and quoted as literal OR terms. Neither input text nor query terms are truncated; indexing retains
-all terms and frequencies. Empty text, zero terms, no matches, or an empty read range returns
+all terms and frequencies. A nonempty query with zero terms, no matches, or an empty read range returns
 `MemorySearchResponse((), False)`, never recent items.
 
 The model or SDK can supply `required_terms` explicitly. The same item's body must match the ordinary
@@ -398,9 +399,47 @@ Identical text under different IDs remains separate.
 Snippet placement still follows the first ordinary-query hit. A required phrase may lie outside the
 snippet; Fetch can supply the remaining body when needed.
 
+### Optional direct semantic recall
+
+Keep the Agent's `memory.enabled: true` and enable `memory.recall: true` in its separate Decision
+file. This feature does not require tool discovery. See [Decision SDK and configuration](../decision/README.md)
+for the file reference and credentials. The switch changes only the `memory_search` retrieval backend:
+both modes expose the same five input fields, description, and `items/has_more/hint` output.
+Ordinary SDK `service.search/asearch` calls continue to use local lexical search.
+
+At each call, enhanced Search obtains the allowed namespaces and performs one
+`alist_items(namespaces, limit=None, categories=..., kinds=...)` read of all matching ACTIVE formal
+memories. It then applies `required_terms` with the same ordered, adjacent token-phrase semantics
+above. It never infers hard conditions from query or narrows candidates by query text, BM25, or output
+limit. [_query.py](_query.py) owns phrase matching; [recall.py](recall.py) owns scoring and selection.
+An empty filtered set skips the evaluation; a single candidate still needs a score.
+
+One Decision request sends a state containing only `query` and an ordered `memories` array of body
+strings. Each body receives one four-level Score: 0 means irrelevant or explicitly inapplicable;
+1 means background only; 2 means partial usable evidence; 3 means direct answering evidence with
+visible applicability conditions satisfied. Only the service's `score >= 2.0` qualifies. Results sort
+stably by descending score, preserving database updated_at/id descending order for ties, then take
+limit hits. `has_more` means the qualifying count exceeds limit; repeating a request does not advance
+a page. The threshold is a current business rule, not a confidence threshold or a verified quality guarantee.
+
+The request excludes local IDs, namespaces, classifications, timestamps, metadata, required_terms,
+and limit. Bodies are not repeated in each question. Selected hits return the full original body in
+`snippet` with `is_complete=true`, even without lexical overlap with query. Ordinary result character
+budgets and artifacts still apply. Scores and probabilities stay out of the result body. A successful
+actual evaluation adds `metadata["decision"]` with `feature="memory.recall"`, provider, actual model,
+question count, and token usage. Capacity and service failures become `IrisMemoryError`; there is no
+silent truncation, batching, lexical fallback, or empty-success replacement. Outer cancellation propagates.
+
+SDK callers may borrow an evaluate-only object through `MemorySearchTool(..., decision_client=evaluator)`
+or `register_memory_tools(..., memory_decision_client=evaluator)`. Search neither creates nor closes
+the client and never stores its mode on the shared `MemoryService`. Fetch and write tools do not
+receive it, so two Agents may share a service while selecting different search modes. The environment
+closes Agent-owned connections; the host owns injected clients. Only enhanced Search declares
+`READ+NETWORK`, following the built-in default allowance and ordinary custom permission decisions.
 ## Memory tools
 
-Enabled Agents automatically register the two `READ` tools in Search, Fetch order. Do not declare
+Enabled Agents automatically register tools in Search, Fetch order. Both default to `READ`; a Search
+using Decision recall is `READ+NETWORK`, while Fetch stays `READ`. Do not declare
 `memory.search` or `memory.fetch` in `tools.builtin`: registry assembly rejects those names with
 `IrisConfigError` and points to `memory.enabled`. The former `memory.backend` field is rejected at
 configuration parsing. `include_tools=False` still omits schemas from that request, with overview
@@ -465,8 +504,8 @@ FTS contains all item states, while Search and Fetch only return active records.
 `store.list_items(..., include_deleted=True)` can inspect soft-deleted records.
 Item/index writes are transactional; `rebuild_index()` can rebuild from the authoritative table.
 Public store `list_items()`, `list_events()`, and `list_observations()` calls reject limits outside
-`1..100` with `IrisMemoryError` instead of silently clamping them. Only `list_items(limit=None)`
-requests a complete mirror projection.
+`1..100` with `IrisMemoryError` instead of silently clamping them. `list_items(limit=None)` requests
+a complete active read for mirror projections and direct semantic recall.
 
 ## Current limitations
 

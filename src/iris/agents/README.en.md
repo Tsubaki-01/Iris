@@ -10,8 +10,10 @@ session. `iris.runtime` consumes the resulting configuration.
 
 `AgentConfig.decision` accepts optional `AgentDecisionConfig(path)` (exported from `iris.agents`).
 The path is relative to the agent YAML and names a separate Decision configuration. Its
-`tools.discovery` switch enables one batched Choice for deferred tool discovery, disabled by
-default. Shared assembly validates dependencies and borrows or creates the evaluator; YAML loading
+`tools.discovery` switch enables one batched Choice for deferred tool discovery; `memory.recall`
+enables one batched Score for direct memory recall. Both default to false and work independently.
+`build_tool_registry(memory_decision_client=...)` passes the evaluator only to Search, leaving the
+shared service, Fetch and write tools unchanged. Shared assembly validates dependencies and borrows or creates the evaluator; YAML loading
 does not connect. See [Decision configuration](../decision/README.md).
 
 `todo.enabled` defaults to false. Enabling it provides SDK access to per-session Markdown Todo

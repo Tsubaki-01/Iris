@@ -214,6 +214,8 @@ def assemble_runtime(
     )
     if decision_config.tools.discovery and not config.context_policy.deferred_tools:
         raise IrisConfigError("Decision tools.discovery 要求 context_policy.deferred_tools=true")
+    if decision_config.memory.recall and not config.memory.enabled:
+        raise IrisConfigError("Decision memory.recall 要求 memory.enabled=true")
     if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
         config = config.model_copy(
             update={
@@ -246,10 +248,27 @@ def assemble_runtime(
         overview_model=config.model.name,
     )
     context_input = _build_context_input(config, base_dir=base_dir)
+    context_input, skill_registry = _prepare_skills(
+        context_input,
+        config=config,
+        workspace_root=workspace_root,
+    )
+    mcp_config = None
+    if config.mcp is not None:
+        from ..mcp.config import load_mcp_config
+
+        mcp_config = load_mcp_config(
+            _resolve_relative_to_base(config.mcp.path, base_dir=base_dir),
+            overrides=config.mcp.overrides,
+        )
+    decision_client, owned_decision_client = build_decision_client(
+        decision_config, decision_client=decision_client
+    )
     tool_registry = build_tool_registry(
         config.tools,
         memory_service=memory_service,
         memory_config=config.memory,
+        memory_decision_client=decision_client if decision_config.memory.recall else None,
         command_binding=boundary.command_binding,
     )
     if config.context_policy.enabled:
@@ -265,11 +284,6 @@ def assemble_runtime(
         except IrisToolValidationError as exc:
             raise IrisConfigError("get_goal/report_goal 与现有工具名称或别名冲突") from exc
         context_source = GoalContextSource(goal_service, host_source=context_source)
-    context_input, skill_registry = _prepare_skills(
-        context_input,
-        config=config,
-        workspace_root=workspace_root,
-    )
     if skill_registry is not None:
         try:
             tool_registry.register(LoadSkillTool(skill_registry))
@@ -284,23 +298,16 @@ def assemble_runtime(
         except IrisToolValidationError as exc:
             raise IrisConfigError("subagent 与现有工具名称或别名冲突", tool="subagent") from exc
     mcp_manager = None
-    if config.mcp is not None:
-        from ..mcp.config import load_mcp_config
+    if mcp_config is not None:
         from ..mcp.manager import MCPManager
 
         mcp_manager = MCPManager(
-            load_mcp_config(
-                _resolve_relative_to_base(config.mcp.path, base_dir=base_dir),
-                overrides=config.mcp.overrides,
-            ),
+            mcp_config,
             registry=tool_registry,
             workspace_root=workspace_root,
             defer_tools=config.context_policy.deferred_tools,
         )
     tool_view = tool_registry.view()
-    decision_client, owned_decision_client = build_decision_client(
-        decision_config, decision_client=decision_client
-    )
     if config.context_policy.deferred_tools:
         try:
             tool_registry.register(

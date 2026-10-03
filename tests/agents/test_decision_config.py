@@ -68,3 +68,19 @@ def test_invalid_decision_file_fails_at_config_boundary(tmp_path: Path, content:
 def test_missing_decision_file_is_config_error(tmp_path: Path) -> None:
     with pytest.raises(IrisConfigError):
         load_decision_config(tmp_path / "missing.yaml")
+
+
+@pytest.mark.parametrize(
+    "tools,memory", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_any_implemented_point_enables_client(tools: bool, memory: bool) -> None:
+    config = DecisionConfig.model_validate(
+        {"tools": {"discovery": tools}, "memory": {"recall": memory}}
+    )
+    assert config.enabled is (tools or memory)
+
+
+@pytest.mark.parametrize("memory", [{"recall": "true"}, {"search": True}])
+def test_memory_switch_rejects_unknown_or_coerced_fields(memory: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        DecisionConfig.model_validate({"memory": memory})

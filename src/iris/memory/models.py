@@ -14,9 +14,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path, PureWindowsPath
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic.json_schema import SkipJsonSchema
 
 from ._query import tokenize_text
@@ -296,7 +303,7 @@ class MemorySearchQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    query: str
+    query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     required_terms: list[str] = Field(default_factory=list)
     categories: list[MemoryCategory] = Field(default_factory=list)
     kinds: list[MemoryItemKind] = Field(default_factory=list)

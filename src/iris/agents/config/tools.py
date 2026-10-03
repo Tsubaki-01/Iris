@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from ...command.service import CommandBinding
 from ...config import get_config
+from ...decision import DecisionEvaluator
 from ...exceptions import IrisConfigError
 from ...memory import (
     MEMORY_TOOL_CLASSES,
@@ -63,6 +64,7 @@ def build_tool_registry(
     *,
     memory_service: MemoryService | None = None,
     memory_config: MemoryConfig | None = None,
+    memory_decision_client: DecisionEvaluator | None = None,
     command_binding: CommandBinding | None = None,
 ) -> ToolRegistry:
     """根据 Agent 工具配置构建工具注册表。
@@ -71,6 +73,7 @@ def build_tool_registry(
         config (ToolsConfig): 已校验的工具配置。
         memory_service: 来源工厂已解析的服务，存在时自动绑定双读工具及文件读取范围。
         memory_config: 绑定工具的读取范围和单个写入 namespace。
+        memory_decision_client: 仅由 Search 借用的可选判断能力，服务和其他工具不保存它。
         command_binding: root 已装配的命令服务与环境；显式 exec.command/exec.python 消费。
 
     Returns:
@@ -85,6 +88,7 @@ def build_tool_registry(
         list(config.builtin),
         memory_service=memory_service,
         memory_config=memory_config or MemoryConfig(),
+        memory_decision_client=memory_decision_client,
         command_binding=command_binding,
     )
     for ref in config.python.functions:
@@ -107,13 +111,22 @@ def _register_builtin_tools(
     *,
     memory_service: MemoryService | None,
     memory_config: MemoryConfig,
+    memory_decision_client: DecisionEvaluator | None,
     command_binding: CommandBinding | None,
 ) -> None:
     """先绑定有效记忆服务的双读工具，再注册 YAML 声明的其它内置工具。"""
     memory_policy = default_memory_access_policy_factory(memory_config)
     if memory_service is not None:
-        for tool_cls in (MemorySearchTool, MemoryFetchTool):
-            registry.register(tool_cls(service=memory_service, access_policy_factory=memory_policy))
+        registry.register(
+            MemorySearchTool(
+                service=memory_service,
+                access_policy_factory=memory_policy,
+                decision_client=memory_decision_client,
+            )
+        )
+        registry.register(
+            MemoryFetchTool(service=memory_service, access_policy_factory=memory_policy)
+        )
     file_service = WorkspaceFileService(
         memory_view=(
             memory_service.file_access(memory_config.read_namespaces)

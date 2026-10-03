@@ -3,8 +3,9 @@
 # `iris.runtime`
 
 `RuntimeFactory.from_config()` / `from_config_path()` 与 Runner 共用 `decision_client=` 注入入口。
-shared assembly 按独立 Decision 配置决定启用接点；全关闭不读 key，开启 deferred 工具发现
-才向 `ToolSearchTool` 注入 evaluator。Hook 工厂先完成，客户端首次 evaluate 才创建 HTTP 资源。
+shared assembly 按独立 Decision 配置决定启用接点；任一开启就准备一个 evaluator，全关闭不读 key。
+`tools.discovery` 向 `ToolSearchTool` 注入，`memory.recall` 仅向 `MemorySearchTool` 注入，不改变
+共享 MemoryService。Hook 工厂先完成，客户端首次 evaluate 才创建 HTTP 资源。
 `RuntimeEnvironment.decision_client` 是业务借用对象，`owned_decision_client` 仅记录自建对象；
 环境关闭时在 MCP/command 清理之后关闭自建客户端，即使前面的关闭失败也执行。child 各自
 构造、关闭自己的客户端，借用 SDK 对象不关闭。见 [Decision](../decision/README.md)。

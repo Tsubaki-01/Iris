@@ -1,7 +1,7 @@
 """公开的独立 Decision 模型、判断协议与 Jev 客户端。"""
 
 from .client import DecisionEvaluator
-from .config import DecisionConfig, DecisionToolsConfig, load_decision_config
+from .config import DecisionConfig, DecisionMemoryConfig, DecisionToolsConfig, load_decision_config
 from .factory import build_decision_client
 from .jev import JevClient
 from .models import (
@@ -26,6 +26,7 @@ __all__ = [
     "DecisionAnswer",
     "DecisionConfig",
     "DecisionEvaluator",
+    "DecisionMemoryConfig",
     "DecisionQuestion",
     "DecisionRequest",
     "DecisionResponse",

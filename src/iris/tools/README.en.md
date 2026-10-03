@@ -14,8 +14,9 @@ must be nonblank. `SubagentTool.execute_subagent()` returns `ToolResult | ChildW
 a narrow port. Direct `arun()` raises `IrisToolExecutionError`; ordinary `BaseTool.arun()` retains
 its terminal `ToolResult` contract.
 
-The default policy allows only the concrete builtin `SubagentTool`; other AGENT tools still need
-human approval. Internal `MostRestrictivePermissionPolicy` evaluates both policies against each
+The default policy allows the concrete builtins `SubagentTool`, `WebSearchTool`, `WebFetchTool`,
+`ToolSearchTool`, and `MemorySearchTool`; other AGENT/NETWORK tools still need human approval.
+Internal `MostRestrictivePermissionPolicy` evaluates both policies against each
 actual child tool and selects the original decision by DENY > REQUIRE_HUMAN > ALLOW. Ties retain
 the parent's reason/metadata.
 

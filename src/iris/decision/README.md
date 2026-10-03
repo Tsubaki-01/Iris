@@ -67,7 +67,7 @@ asyncio.run(main())
 所有权移交；借用 evaluator 的业务不负责关闭连接。网络、HTTP、期限和解析失败统一抛出
 `IrisDecisionError`，沿 provider source / `DECISION_ERROR`；外层取消原样传播。凭据只用于请求头。
 
-## Agent 配置与工具发现
+## Agent 配置与接点
 
 在 `agent.yaml` 引用独立配置；路径相对 Agent YAML 解析。直接传入 `AgentConfig` 时以
 `config_path` 所在目录为基准，未提供则使用当前目录。
@@ -79,6 +79,8 @@ decision:
 context_policy:
   enabled: true
   deferred_tools: true
+memory:
+  enabled: true
 ```
 
 ```yaml
@@ -88,14 +90,23 @@ model: jev-1.13.0
 timeout_seconds: 5
 tools:
   discovery: true
+memory:
+  recall: true
 ```
 
 省略 `decision` 或关闭全部接点时不构造客户端、不要求 key。开启工具发现必须同时启用
-deferred tools；未知配置字段或依赖冲突在装配时报告 `IrisConfigError`。配置固定于构造期。
+deferred tools；开启记忆召回要求 `memory.enabled=true`。两开关独立，只开启记忆也会构造
+客户端。未知配置字段或依赖冲突在装配时报告 `IrisConfigError`。配置固定于构造期。
 
 `tool_search` 的两种后端共用 `queries` / `include_groups` 输入。每个意图至多选一项；本地
 逐意图取词法 top-1，增强模式将全部允许的 deferred 候选一次批量 Choice，eager 工具仍直接
 调用。出站只包含 queries 与候选 name/description，失败不回退。详见 [工具说明](../tools/README.md)。
+
+`memory_search` 的两种后端共用 `query`、`required_terms`、`categories`、`kinds`、`limit`。
+增强模式读取全部允许 ACTIVE 条目，在本地匹配显式必要词组后一次批量 Score，不按 query
+先做词法搜索或 top-k。出站只有 query 与完整正文数组；评分达到 2 后稳定降序，最后应用
+limit，返回全文。`has_more` 表示达标结果数超过 limit，不提供分页。见 [记忆说明](../memory/README.md)。
+evaluator 只注入本 Agent 的 Search 工具，两个 Agent 共用 MemoryService 时仍可各选模式。
 
 `AgentRunner.from_config/from_config_path` 和 `RuntimeFactory.from_config/from_config_path`
 都接收 `decision_client=`。注入对象只需实现 `evaluate`，不读取 TypeSafe key，也不由 Iris 关闭。

@@ -18,6 +18,14 @@ class DecisionToolsConfig(BaseModel):
     discovery: bool = Field(default=False, strict=True)
 
 
+class DecisionMemoryConfig(BaseModel):
+    """直接记忆召回接点，不影响共享 MemoryService。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    recall: bool = Field(default=False, strict=True)
+
+
 class DecisionConfig(BaseModel):
     """服务参数与按接点独立启用的构造期配置。"""
 
@@ -31,11 +39,12 @@ class DecisionConfig(BaseModel):
         default=JEV_DEFAULT_TIMEOUT_SECONDS, gt=0, allow_inf_nan=False, strict=True
     )
     tools: DecisionToolsConfig = Field(default_factory=DecisionToolsConfig)
+    memory: DecisionMemoryConfig = Field(default_factory=DecisionMemoryConfig)
 
     @property
     def enabled(self) -> bool:
         """任一已实现接点开启时才需要 evaluator。"""
-        return self.tools.discovery
+        return self.tools.discovery or self.memory.recall
 
 
 def load_decision_config(path: str | Path) -> DecisionConfig:
@@ -47,4 +56,4 @@ def load_decision_config(path: str | Path) -> DecisionConfig:
         raise IrisConfigError("Decision 配置文件读取或解析失败", path=str(path)) from exc
 
 
-__all__ = ["DecisionConfig", "DecisionToolsConfig", "load_decision_config"]
+__all__ = ["DecisionConfig", "DecisionMemoryConfig", "DecisionToolsConfig", "load_decision_config"]

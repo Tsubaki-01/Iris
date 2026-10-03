@@ -125,7 +125,7 @@ model: openai/gpt-4o-mini
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
 - `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单的 SDK 读取与每步动态投影；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
-- `decision`: 可选 `AgentDecisionConfig(path)`，引用相对 Agent YAML 的独立配置。`tools.discovery` 为 deferred 工具启用一次批量 Choice；默认关闭。结构加载不联网，shared assembly 校验依赖并借用或构造客户端。见 [Decision 配置](../decision/README.md)。
+- `decision`: 可选 `AgentDecisionConfig(path)`，引用相对 Agent YAML 的独立配置。`tools.discovery` 为 deferred 工具启用一次批量 Choice，`memory.recall` 为记忆直接召回启用一次批量 Score；两开关独立且默认关闭。结构加载不联网，shared assembly 校验依赖并借用或构造客户端。见 [Decision 配置](../decision/README.md)。
 - `tools`: `ToolsConfig`，声明 builtin/Python 工具，默认声明为空；框架自动注册的工具由对应功能开关控制。
 - `hooks`: 有序 `HookConfig` 序列，默认空，声明四种事件的 Python 或命令处理器。
 - `middleware`: `MiddlewareConfig`，默认 `tools: []`，仅声明普通工具的包装链工厂。
@@ -488,7 +488,9 @@ Docker child 的 `writes: deny` 只限制原生文件工具，不保证命令只
 读取 UTF-8 YAML 文件并返回 `AgentConfig`。配置缺失、YAML 格式错误、字段类型错误、
 未知字段、不可读路径都会包装为 `IrisConfigError`。
 
-### `build_tool_registry(config, *, memory_service=None, memory_config=None, command_binding=None)`
+### `build_tool_registry(config, *, memory_service=None, memory_config=None, memory_decision_client=None, command_binding=None)`
+
+`memory_decision_client` 仅透传给 `MemorySearchTool`，不写入共享 service，不改变 Fetch/写工具。
 
 根据 `ToolsConfig` 构建 `ToolRegistry`：
 

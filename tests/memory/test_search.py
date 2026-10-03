@@ -84,7 +84,7 @@ def test_search_returns_only_the_six_hit_fields(tmp_path: Path) -> None:
     }
 
 
-@pytest.mark.parametrize("query", ["", " \n\t ", '"！？_ -', "🙂 русский", "missing"])
+@pytest.mark.parametrize("query", ['"！？_ -', "🙂 русский", "missing"])
 def test_search_with_no_terms_or_hits_returns_an_empty_response(tmp_path: Path, query: str) -> None:
     store = SQLiteMemoryStore(tmp_path / "empty.db")
     _add(store, "stored fact")
@@ -139,7 +139,11 @@ def test_required_phrase_uses_index_order_and_language_boundaries(
     tmp_path: Path, phrase: str, matching: str, nonmatching: str
 ) -> None:
     """硬词组匹配的是索引词序列，不是无序词集合或任意子串。"""
+    from iris.memory._query import matches_required_phrases
+
     store = SQLiteMemoryStore(tmp_path / "phrase.db")
+    assert matches_required_phrases(f"needle {matching}", [phrase])
+    assert not matches_required_phrases(f"needle {nonmatching}", [phrase])
     expected = _add(store, f"needle {matching}")
     _add(store, f"needle {nonmatching}")
     response = store.search(MemorySearchQuery(query="needle", required_terms=[phrase]), ["project"])

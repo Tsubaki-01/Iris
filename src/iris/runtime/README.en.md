@@ -3,8 +3,9 @@
 # `iris.runtime`
 
 Both RuntimeFactory entry points and Runner accept `decision_client=` through shared assembly.
-The separate Decision configuration selects enabled consumers; disabled consumers require no key.
-Only enabled deferred discovery receives the evaluator. Hook factories run before resource creation;
+The separate Decision configuration prepares one evaluator when either `tools.discovery` or
+`memory.recall` is enabled; all-disabled requires no key. Only the corresponding ToolSearchTool or
+MemorySearchTool receives it; the shared MemoryService remains independent. Hook factories run before resource creation;
 the owned Jev client creates HTTP resources on its first evaluate. `RuntimeEnvironment.decision_client`
 is borrowed by consumers; `owned_decision_client` is set only for assembly-owned instances and closed
 after MCP/command cleanup, even when earlier cleanup fails. Children construct and close independent

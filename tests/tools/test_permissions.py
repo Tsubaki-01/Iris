@@ -185,18 +185,30 @@ async def test_web_call_refreshes_parent_policy_before_execution(tmp_path: Path)
     assert len(parent.calls) >= 2
 
 
-def test_default_allows_concrete_decision_search_not_other_network_tools(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["tool_search", "memory_search"])
+def test_default_allows_concrete_decision_search_not_other_network_tools(
+    tmp_path: Path, name: str
+) -> None:
     """内置搜索可联网，普通同名工具保持原有权限。"""
     from iris.decision import DecisionRequest, DecisionResponse
+    from iris.memory import MemoryAccessPolicy, MemorySearchTool, MemoryService, SQLiteMemoryStore
     from iris.tools import ToolRegistry, ToolSearchTool
 
     class Port:
         async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
             raise AssertionError("权限检查不执行远程调用")
 
-    search = ToolSearchTool(ToolRegistry().view(), decision_client=Port())
+    search = (
+        ToolSearchTool(ToolRegistry().view(), decision_client=Port())
+        if name == "tool_search"
+        else MemorySearchTool(
+            service=MemoryService(SQLiteMemoryStore(tmp_path / "memory.db")),
+            access_policy_factory=lambda _: MemoryAccessPolicy(),
+            decision_client=Port(),
+        )
+    )
     ordinary = CallableTool(
-        lambda: "ok", name="tool_search", description="other", capabilities={ToolCapability.NETWORK}
+        lambda: "ok", name=name, description="other", capabilities={ToolCapability.NETWORK}
     )
     policy = DefaultPermissionPolicy()
     context = ToolExecutionContext(workspace_root=tmp_path)
@@ -207,11 +219,19 @@ def test_default_allows_concrete_decision_search_not_other_network_tools(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("check_at", ["preflight", "refresh"])
+@pytest.mark.parametrize("name", ["tool_search", "memory_search"])
 async def test_custom_policy_denial_prevents_decision_search_call(
-    tmp_path: Path, check_at: str
+    tmp_path: Path, check_at: str, name: str
 ) -> None:
     """自定义策略的预检和执行前刷新均能阻止 Decision 请求。"""
     from iris.decision import DecisionRequest, DecisionResponse
+    from iris.memory import (
+        MemoryAccessPolicy,
+        MemorySearchTool,
+        MemoryService,
+        MemoryWriteInput,
+        SQLiteMemoryStore,
+    )
     from iris.message import ToolUseBlock
     from iris.tools import ToolExecutor, ToolRegistry, ToolSearchTool
 
@@ -221,14 +241,27 @@ async def test_custom_policy_denial_prevents_decision_search_call(
 
     registry = ToolRegistry()
     registry.register_function(lambda: "ok", name="docs", description="docs", deferred=True)
-    registry.register(ToolSearchTool(registry.view(), decision_client=Port()))
+    if name == "tool_search":
+        registry.register(ToolSearchTool(registry.view(), decision_client=Port()))
+        arguments = {"queries": ["docs"]}
+    else:
+        service = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
+        service.remember(MemoryWriteInput(text="docs", reason="test"))
+        registry.register(
+            MemorySearchTool(
+                service=service,
+                access_policy_factory=lambda _: MemoryAccessPolicy(),
+                decision_client=Port(),
+            )
+        )
+        arguments = {"query": "docs"}
     policy = FixedPolicy(
         "custom", PermissionEffect.DENY if check_at == "preflight" else PermissionEffect.ALLOW
     )
     executor = ToolExecutor(registry, permission_policy=policy)
     context = ToolExecutionContext(workspace_root=tmp_path)
     prepared = executor.prepare_many(
-        [ToolUseBlock(id="search", name="tool_search", input={"queries": ["docs"]})], context
+        [ToolUseBlock(id="search", name=name, input=arguments)], context
     ).calls[0]
     if check_at == "refresh":
         assert prepared.preflight_result is None

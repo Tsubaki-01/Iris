@@ -10,6 +10,7 @@ import pytest
 
 from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
 from iris.command.service import CommandBinding
+from iris.decision import DecisionEvaluator
 from iris.exceptions import (
     IrisRunObservationTimeoutError,
     IrisRunPersistenceError,
@@ -1513,12 +1514,14 @@ def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
         *,
         memory_service: MemoryService | None = None,
         memory_config: MemoryConfig | None = None,
+        memory_decision_client: DecisionEvaluator | None = None,
         command_binding: CommandBinding | None = None,
     ) -> ToolRegistry:
         registry = build_tool_registry(
             config,
             memory_service=memory_service,
             memory_config=memory_config,
+            memory_decision_client=memory_decision_client,
             command_binding=command_binding,
         )
         if "human.ask" in config.builtin:

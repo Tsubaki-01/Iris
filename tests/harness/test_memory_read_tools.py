@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from iris.agents import AgentConfig
+from iris.decision import (
+    DecisionRequest,
+    DecisionResponse,
+    DecisionUsage,
+    ScoreAnswer,
+    ScoreQuestion,
+)
 from iris.exceptions import IrisMemoryError
 from iris.harness import AgentRunner
 from iris.lifecycle import AgentRunOptions, AgentRunRequest, RunStopReason, RuntimeExecutionOptions
@@ -29,12 +37,17 @@ from .fakes import StaticProvider, text_response, tool_response
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("decision_recall", [False, True], ids=["local", "decision"])
 @pytest.mark.parametrize(
     ("strategy", "include_tools"),
     [("none", True), ("search", True), ("fetch", True), ("none", False)],
 )
 async def test_model_controls_search_fetch_and_results_remain_normal_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strategy: str, include_tools: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    include_tools: bool,
+    decision_recall: bool,
 ) -> None:
     """无隐式查询；可直接用片段回答，或在修改后Fetch数据库当前完整记录。"""
     overview_provider = StaticProvider(
@@ -66,6 +79,30 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         return original_search(query, namespaces)
 
     monkeypatch.setattr(memory_store, "search", search)
+    decision_requests: list[DecisionRequest] = []
+
+    class ScoringEvaluator:
+        """记录一次批量评分，返回可直接回答部署问题的记忆。"""
+
+        async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
+            """复用消费者的评分档位，不参与文本检索。"""
+            decision_requests.append(request)
+            return DecisionResponse(
+                provider="typesafe",
+                model="jev-test",
+                answers={
+                    key: ScoreAnswer(
+                        score=3.0,
+                        probabilities={3: 1.0},
+                        levels=cast(ScoreQuestion, question).levels,
+                        confidence=1.0,
+                    )
+                    for key, question in request.questions.items()
+                },
+                usage=DecisionUsage(input_tokens=17, output_tokens=2),
+            )
+
+    query_text = "Which release is running?" if decision_recall else "deploytoken"
     responses = []
     if strategy != "none":
         responses.append(
@@ -74,7 +111,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
                     id="search-memory",
                     name="memory_search",
                     input={
-                        "query": "deploytoken",
+                        "query": query_text,
                         "required_terms": ["当前部署版本"],
                         "categories": ["reference"],
                         "kinds": ["note"],
@@ -111,6 +148,11 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
 
     provider = ChoosingProvider(*responses)
     lifecycle_store = SQLiteStore(tmp_path / "lifecycle.db")
+    decision_config = {}
+    if decision_recall:
+        path = tmp_path / "decision.yaml"
+        path.write_text("memory:\n  recall: true\n", encoding="utf-8")
+        decision_config = {"decision": {"path": str(path)}}
     config = AgentConfig.model_validate(
         {
             "name": "reader",
@@ -118,10 +160,15 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
             "system": "回答项目问题。",
             "permissions": {"workspace": str(tmp_path)},
             "memory": {"enabled": True},
+            **decision_config,
         }
     )
     runner = AgentRunner.from_config(
-        config, provider=provider, memory_service=service, store=lifecycle_store
+        config,
+        provider=provider,
+        memory_service=service,
+        store=lifecycle_store,
+        decision_client=ScoringEvaluator() if decision_recall else None,
     )
     options = AgentRunOptions(runtime=RuntimeExecutionOptions(include_tools=include_tools))
     first = await runner.start(
@@ -133,6 +180,19 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     )
     for name in ("memory_search", "memory_fetch"):
         assert (name in provider.requests[0].messages[0].text) is include_tools
+    if include_tools:
+        schema = next(
+            tool.input_schema for tool in provider.requests[0].tools if tool.name == "memory_search"
+        )
+        assert set(schema["properties"]) == {
+            "query",
+            "required_terms",
+            "categories",
+            "kinds",
+            "limit",
+        }
+        assert schema["required"] == ["query"]
+        assert schema["additionalProperties"] is False
     expected_names = [] if strategy == "none" else ["memory_search"]
     if strategy == "fetch":
         expected_names.append("memory_fetch")
@@ -140,15 +200,28 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
     results = [result for message in session.messages for result in message.tool_results]
     assert [result.name for result in results] == expected_names
     assert all(not result.is_error for result in results)
-    assert len(queries) == int(strategy != "none")
+    expected_searches = int(strategy != "none")
+    assert len(queries) == (0 if decision_recall else expected_searches)
+    assert len(decision_requests) == (expected_searches if decision_recall else 0)
     if queries:
         query, namespaces = queries[0]
         assert query.query == "deploytoken" and namespaces == ("project",)
         assert query.required_terms == ["当前部署版本"]
+    if strategy != "none":
         hit = json.loads(results[0].text)["items"][0]
         assert hit["item_id"] == item.id and hit["is_complete"]
         assert hit["snippet"] == item.text
         assert provider.requests[1].messages[-1].tool_results[0].content == results[0].content
+        if decision_recall:
+            assert decision_requests[0].state == {"query": query_text, "memories": [item.text]}
+            assert results[0].metadata["extra"]["decision"] == {
+                "feature": "memory.recall",
+                "provider": "typesafe",
+                "model": "jev-test",
+                "question_count": 1,
+                "input_tokens": 17,
+                "output_tokens": 2,
+            }
     if strategy == "fetch":
         current = service.get_item(item.id, ["project"])
         fetched = json.loads(results[1].text)
@@ -164,12 +237,14 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         AgentRunRequest(input="继续讨论部署", run_id="next-round"), options=options
     )
     assert second.run.stop_reason is RunStopReason.COMPLETED, second.error
-    assert len(queries) == int(strategy != "none")
+    assert len(queries) == (0 if decision_recall else expected_searches)
+    assert len(decision_requests) == (expected_searches if decision_recall else 0)
     replayed = [
         result for message in provider.requests[-1].messages for result in message.tool_results
     ]
     assert replayed == results
     assert len(overview_provider.requests) == 1
+    await runner.aclose()
 
 
 @pytest.mark.asyncio

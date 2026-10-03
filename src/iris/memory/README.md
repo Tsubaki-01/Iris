@@ -23,7 +23,7 @@ memory:
 
 ## 运行要求与快速开始
 
-本包随 Iris 安装，使用标准库 SQLite 和 FTS5。FTS5 是唯一文本检索路径；初始化或查询错误
+本包随 Iris 安装，使用标准库 SQLite 和 FTS5。默认本地搜索使用 FTS5；初始化或查询错误
 报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 5，旧版库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
@@ -305,7 +305,7 @@ query = MemorySearchQuery(
 response = await service.asearch(query, ["project"])
 ```
 
-`query` 必填；`required_terms` 默认空，表示不额外要求正文词组；categories/kinds 默认空，表示
+`query` 必填，去除首尾空白后必须非空；`required_terms` 默认空，表示不额外要求正文词组；categories/kinds 默认空，表示
 不限制该维度；limit 默认为 8，范围 `1..100`。
 未知字段报错，模型输入中没有 namespace。store 先按允许 namespace、category/kind 和 active
 状态过滤，再按 BM25 升序、updated_at/id 降序取 `limit + 1`，只返回前 limit 条并计算
@@ -314,7 +314,7 @@ Item 均可搜索，Episode、Observation、deleted/superseded 不进入结果�
 
 索引、查询和原文定位共用词法：ASCII 字母数字连续串小写化，连续中文取相邻双字，仅孤立
 汉字保留单字；标点和下划线分隔词项。查询词项按首次出现顺序去重，以字面量 OR 检索，
-不截断 query、不设置词项预算；索引保留完整词项频次。空文本、零词项、无命中或空范围
+不截断 query、不设置词项预算；索引保留完整词项频次。非空但零词项、无命中或空范围
 返回 `MemorySearchResponse((), False)`，不会返回最近条目。
 
 `required_terms` 由模型或 SDK 显式指定，同一条正文必须同时匹配普通 query 的 OR 组与每个
@@ -339,9 +339,42 @@ Unicode 字符时全文返回；超过时取首个匹配词起点 h，用
 `is_complete` 仅说明正文是否完整，不代表命中已经核实。不同 ID 的相同正文分别保留。
 片段位置仍由普通 query 的首个命中词确定，必要词组可能在片段之外；需要其他正文时可 Fetch。
 
+### 可选直接语义召回
+
+Agent 的 `memory.enabled: true` 保持读取服务启用，再通过独立 Decision 文件开启
+`memory.recall: true`。此接点不要求开启工具发现；配置引用和凭据见
+[Decision SDK 与配置](../decision/README.md)。开关只改变 `memory_search` 的检索后端，
+模型仍使用同一五字段输入、工具描述和 `items/has_more/hint` 输出。普通 SDK
+`service.search/asearch` 继续使用本地词法检索。
+
+增强 Search 在调用时取得允许 namespace，执行一次
+`alist_items(namespaces, limit=None, categories=..., kinds=...)`，读取范围内全部 ACTIVE 正式记忆。
+`required_terms` 再按上述相同词法执行有序相邻词组过滤；不从 query 自动推导硬条件，
+也不按 query、BM25 或输出 limit 提前缩小候选。词组过滤逻辑在 [_query.py](_query.py)，
+评分及结果选择在 [recall.py](recall.py)。空集跳过调用；只有一条候选也要评分。
+
+一次 Decision 请求的 state 只包含 `query` 和按顺序排列的 `memories` 正文字符串数组。
+每条正文对应一道四档 Score：0 为无关或适用条件不成立，1 为只有背景，2 为部分可用依据，
+3 为直接回答依据且可见适用条件成立。服务返回的 `score >= 2.0` 才入选，稳定降序后取 limit；
+同分沿数据库的 updated_at/id 降序。`has_more` 仅表示达标数大于 limit，重复请求不会自动翻页。
+门槛是当前业务规则，不是置信门槛或经过验证的质量保证。
+
+远端不接收本地 ID、namespace、分类、时间、metadata、required_terms 或 limit；正文不在
+每题重复。入选 hit 的 `snippet` 是完整原文，`is_complete=true`，无需存在 query 词法命中；
+常规结果字符预算和 artifact 机制仍然生效。结果正文不添加分数或概率，仅在真实调用成功时
+附加 `metadata["decision"]`，记录 `feature="memory.recall"`、provider、实际 model、题数及 token 用量。
+容量或服务错误转为 `IrisMemoryError`，不会静默裁尾、分批、词法回退或伪装为未命中；外层取消透传。
+
+SDK 可以通过 `MemorySearchTool(..., decision_client=evaluator)` 或
+`register_memory_tools(..., memory_decision_client=evaluator)` 借用只实现 `evaluate` 的对象。
+Search 不创建或关闭 client，不把模式写入共享 `MemoryService`，Fetch 与写工具也不接收它；
+两个 Agent 可以共享服务并分别使用本地或 Decision Search。Agent 自建连接由 environment 统一关闭，
+SDK 注入连接由宿主负责。仅增强 Search 标记 `READ+NETWORK`，沿默认内置允许策略及自定义权限裁决。
+
 ## Memory 工具
 
-Agent 开启 memory 后自动按 Search、Fetch 的顺序注册两个 `READ` 工具。无需在
+Agent 开启 memory 后自动按 Search、Fetch 的顺序注册工具。默认均为 `READ`；启用 Decision
+召回的 Search 为 `READ+NETWORK`，Fetch 仍为 `READ`。无需在
 `tools.builtin` 声明它们；手写 `memory.search` 或 `memory.fetch` 会在 registry 装配时报
 `IrisConfigError`，提示改用 `memory.enabled`。旧 `memory.backend` 字段在配置解析时拒绝。
 `include_tools=False` 仍会让当前请求不发送工具 schema，概览指引也按实际可用工具生成。
@@ -402,7 +435,7 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 `store.list_items(..., include_deleted=True)` 可检查软删除记录。新增/更新与索引在同一事务内
 完成，`rebuild_index()` 可从权威表重建。
 公开 store 的 `list_items()`、`list_events()` 与 `list_observations()` 对非 `1..100` 的 limit
-直接抛出 `IrisMemoryError`，不再静默截断；仅 `list_items(limit=None)` 表示完整 mirror 投影。
+直接抛出 `IrisMemoryError`，不再静默截断；`list_items(limit=None)` 表示完整 active 读取，供 mirror 投影和直接语义召回使用。
 
 ## 限制与非目标
 

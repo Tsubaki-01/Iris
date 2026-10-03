@@ -21,6 +21,7 @@ from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..decision import DecisionEvaluator
 from ..exceptions import IrisMemoryError
 from ..message import TextBlock
 from ..tools import (
@@ -44,6 +45,7 @@ from .models import (
     MemorySourceType,
     MemoryWriteInput,
 )
+from .recall import recall_memories
 from .service import MemoryService
 
 # endregion
@@ -179,25 +181,50 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
 
     name: ClassVar[str] = "memory_search"
     description: ClassVar[str] = (
-        "搜索允许读取的记忆，返回条目 ID、原文片段及完整性标记。"
-        "query 拆词后按 OR 匹配，加词不保证收紧。"
-        "可选 required_terms 指定有依据的必要原文词组，各词组与 query 同时满足。"
-        "词组按现有分词进行有序相邻匹配，非逐字匹配；英文忽略大小写。"
-        "categories/kinds 仅在已知存储标签时填写。"
-        "空结果只表示本次查询未命中，可根据证据调整条件。"
+        "查找允许范围内与 query 相关的记忆，最多返回 limit 条原文及完整性标记。"
+        "required_terms 为正文必须同时匹配的必要词组，按现有分词有序相邻匹配，英文忽略大小写。"
+        "categories/kinds 仅在已知分类时填写。空结果表示本次未命中。"
     )
     input_type: type[MemorySearchQuery] = MemorySearchQuery
 
+    def __init__(
+        self,
+        *,
+        service: MemoryService,
+        access_policy_factory: MemoryAccessPolicyFactory,
+        max_result_chars: int = 50000,
+        decision_client: DecisionEvaluator | None = None,
+    ) -> None:
+        """借用当前 Agent 的可选 evaluator，不向共享 service 写入模式或资源。"""
+        super().__init__(
+            service=service,
+            access_policy_factory=access_policy_factory,
+            max_result_chars=max_result_chars,
+        )
+        self.decision_client = decision_client
+        if decision_client is not None:
+            self.definition.capabilities = {ToolCapability.READ, ToolCapability.NETWORK}
+
     async def _impl(self, params: MemorySearchQuery, context: ToolExecutionContext) -> ToolResult:
-        """直接传递已验证查询和本次宿主读取范围。"""
-        response = await self.service.asearch(params, self._read_namespaces(context))
+        """沿当前读取范围检索，并汇入两个后端共享的既有结果路径。"""
+        namespaces = self._read_namespaces(context)
+        metadata: dict[str, Any] = {}
+        if self.decision_client is None:
+            response = await self.service.asearch(params, namespaces)
+        else:
+            candidates = await self.service.alist_items(
+                namespaces, limit=None, categories=params.categories, kinds=params.kinds
+            )
+            response, metadata = await recall_memories(candidates, params, self.decision_client)
         payload: dict[str, Any] = {
             "items": [_hit_payload(hit) for hit in response.items],
             "has_more": response.has_more,
         }
         if response.has_more:
             payload["hint"] = "还有候选；这不要求继续查询。"
-        return self._json_result(payload)
+        result = self._json_result(payload)
+        result.metadata.update(metadata)
+        return result
 
 
 class MemoryFetchTool(MemoryTool[MemoryFetchToolInput]):
@@ -322,6 +349,7 @@ def register_memory_tools(
     registry: ToolRegistry | None = None,
     max_result_chars: int = 50000,
     tool_names: Sequence[str] = (),
+    memory_decision_client: DecisionEvaluator | None = None,
 ) -> ToolRegistry:
     """注册选定记忆工具并返回 registry，默认不注册任何工具。
 
@@ -332,6 +360,7 @@ def register_memory_tools(
         registry (ToolRegistry | None): 要扩展的已有 registry。为 None 时创建新 registry。
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
         tool_names: 从 MEMORY_TOOL_CLASSES 选择的 builtin 声明名。
+        memory_decision_client: 仅供 Search 借用的可选 Decision evaluator。
 
     Returns:
         ToolRegistry: 注册完选定记忆工具的 registry。
@@ -340,13 +369,14 @@ def register_memory_tools(
     registry = registry or ToolRegistry()
     for name in tool_names:
         tool_cls = MEMORY_TOOL_CLASSES[name]
-        registry.register(
-            tool_cls(
-                service=service,
-                access_policy_factory=access_policy_factory,
-                max_result_chars=max_result_chars,
-            )
-        )
+        options: dict[str, Any] = {
+            "service": service,
+            "access_policy_factory": access_policy_factory,
+            "max_result_chars": max_result_chars,
+        }
+        if tool_cls is MemorySearchTool:
+            options["decision_client"] = memory_decision_client
+        registry.register(tool_cls(**options))
     return registry
 
 

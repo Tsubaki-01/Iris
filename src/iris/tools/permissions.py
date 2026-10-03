@@ -108,8 +108,9 @@ class DefaultPermissionPolicy(PermissionPolicy):
         params: dict[str, Any],
         context: ToolExecutionContext,
     ) -> PermissionDecision:
-        """读与内置 Web/工具发现/Sub Agent 自动允许，写入和执行分别裁决。"""
-        # file 工具初始化时会导入本模块，Web 类型在裁决时加载以避免循环导入。
+        """读与内置 Web/Decision/Sub Agent 自动允许，写入和执行分别裁决。"""
+        # 内置工具初始化会导入本模块，相关类型在裁决时加载以避免循环导入。
+        from ..memory.tools import MemorySearchTool
         from .builtin.web import WebFetchTool, WebSearchTool
 
         del context
@@ -129,7 +130,9 @@ class DefaultPermissionPolicy(PermissionPolicy):
                 )
             if capabilities <= {ToolCapability.READ, ToolCapability.EXECUTE}:
                 return PermissionDecision(effect=PermissionEffect.ALLOW)
-        if isinstance(tool, (SubagentTool, WebSearchTool, WebFetchTool, ToolSearchTool)):
+        if isinstance(
+            tool, (SubagentTool, WebSearchTool, WebFetchTool, ToolSearchTool, MemorySearchTool)
+        ):
             return PermissionDecision(effect=PermissionEffect.ALLOW)
         if ToolCapability.MCP in tool.definition.capabilities and tool.is_read_only(params):
             return PermissionDecision(effect=PermissionEffect.ALLOW)

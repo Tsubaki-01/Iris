@@ -36,6 +36,21 @@ def prepare_fts_query(terms: Sequence[str], required_terms: Sequence[str] = ()) 
     return f"({query}) AND " + " AND ".join(phrases)
 
 
+def matches_required_phrases(text: str, required_terms: Sequence[str]) -> bool:
+    """按现有词法匹配全部已验证的必要词组，保留相邻顺序与重复词。"""
+    if not required_terms:
+        return True
+    tokens = tokenize_text(text)
+    for phrase in required_terms:
+        phrase_tokens = tokenize_text(phrase)
+        if not any(
+            tokens[start : start + len(phrase_tokens)] == phrase_tokens
+            for start in range(len(tokens) - len(phrase_tokens) + 1)
+        ):
+            return False
+    return True
+
+
 def make_snippet(text: str, query_terms: Set[str]) -> tuple[str, bool]:
     """返回全文或首个命中词附近的连续 300 字符原文窗口。"""
     if len(text) <= 300:
@@ -45,4 +60,10 @@ def make_snippet(text: str, query_terms: Set[str]) -> tuple[str, bool]:
     return text[start : start + 300], False
 
 
-__all__ = ["iter_token_spans", "make_snippet", "prepare_fts_query", "tokenize_text"]
+__all__ = [
+    "iter_token_spans",
+    "make_snippet",
+    "matches_required_phrases",
+    "prepare_fts_query",
+    "tokenize_text",
+]
