@@ -131,6 +131,11 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 - `PermissionsConfig` defaults to workspace `.`, writes `confirm`, and execute `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
+- `AgentConfig.speech` uses `iris.speech.SpeechConfig` and is disabled by default. When enabled,
+  it declares an adapter, endpoint, and speech model. The host explicitly calls
+  `create_speech_client(config.speech)`; the runner does not record audio or open an ASR connection.
+  The [speech SDK guide](../speech/README.md) includes complete Doubao and Alibaba YAML examples,
+  separate credentials, and final-text submission semantics.
 
 ### Hooks and tool middleware
 

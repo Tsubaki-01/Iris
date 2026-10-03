@@ -54,6 +54,19 @@ uv run python -m examples.image.basic --env-file .env.local --image "path/to/pho
 图片缓存是恢复数据，备份需同时保留数据库和 `image-cache`。`iris chat` 当前没有发图或图片
 渲染界面，图片输入通过 SDK 提交；缓存、fork 与摘要后的回读规则见示例说明。
 
+## 语音转文字
+
+[音频 SDK 示例](audio/README.md) 将 16 kHz、16-bit、单声道 PCM WAV 分块流式转录。
+同一个脚本可选择豆包或阿里 YAML；默认只调用所选 ASR，追加 `--submit` 才将最终文字提交给 Agent。
+
+```powershell
+uv run python examples/audio/transcribe_stream.py --config examples/audio/doubao.yaml --audio sample.wav --env-file .env.local
+uv run python examples/audio/transcribe_stream.py --config examples/audio/dashscope.yaml --audio sample.wav --env-file .env.local
+```
+
+所选语音服务的专属 key 独立于 DeepSeek key；阿里配置中的业务空间需替换为实际值。
+示例不采集麦克风、不自动转码，也不扩展 `iris chat` 的输入界面。
+
 ## MCP
 
 本地 MCP 的 JSON/Codex TOML 双格式示例见 [mcp/README.md](mcp/README.md)。服务提供无需凭据的
