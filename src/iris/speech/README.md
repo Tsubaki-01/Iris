@@ -29,6 +29,37 @@ async def transcribe(audio: AsyncIterable[bytes], adapter: SpeechAdapter) -> str
 仅在流正常退出后，将非空最终文字交给已有的 Agent 输入入口。失败或取消时不要提交预览。
 客户端可以复用，每次 stream 的识别状态和资源由 adapter 独立创建。
 
+## 豆包流式识别
+
+宿主可以直接组合豆包 adapter，凭据使用 Iris 已有配置；`.env` 中设置
+`IRIS_PROVIDER_API_KEYS__DOUBAO_ASR`，并显式加载 dotenv：
+
+```python
+import iris
+
+from iris.speech.adapters.doubao import DoubaoASRAdapter
+
+iris.init_config(env_file=".env")
+adapter = DoubaoASRAdapter(
+    endpoint="wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async",
+    model="volc.seedasr.sauc.duration",
+    api_key=iris.get_config().provider_api_keys["doubao_asr"],
+)
+```
+
+把这个 adapter 交给上面的 transcribe 函数即可。model 是已开通的豆包语音资源 ID，
+不是主 Agent 的聊天模型。构造不联网，实际推进 stream 才建立本次 WebSocket。
+当前固定使用全文结果、标点、数字书面化与二遍修正，不启用语义顺滑或额外改写模型。
+
+豆包只在 adapter 内保留一块音频，以便将最后真实音频作为负序号末包发送；
+100 ms 分块会增加约一块的等待。收到服务整段末响应后才产生 final，
+句子的 definite 标志不代表用户已经结束输入。连接期限为 10 秒，正常末包发送后
+等待整段终态的期限为 10 秒；partial 不重置该期限，录音期间的静音不触发它。
+
+帧编码遵循当前[官方 Demo](https://portal.volccdn.com/obj/volcfe/cloud-universal-doc/upload_f9323339af7c7ce6d15678622eb77ccf.zip)。
+Demo 的音频序列化标志与旧版文字协议存在差异，实际账号仍需联调确认；
+SDK 不通过失败后改协议或重放音频来自动兼容。
+
 ## 音频与结果
 
 - 输入为 16 kHz、16-bit signed little-endian、单声道 raw PCM。
