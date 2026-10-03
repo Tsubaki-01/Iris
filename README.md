@@ -45,6 +45,16 @@ run 或 runner 结束保留缓存，fork 继续依赖源 session 图片目录；
 对应的 `read_file` 回读。图片预算是近似值，实际 usage 以服务端返回为准。
 `iris chat` 当前没有发图或图片渲染界面。
 
+## 语音转文字
+
+Python SDK 支持可替换的豆包 ASR 和阿里 Fun-ASR 流式转录。宿主提供 PCM 音频、展示当前
+全文，识别完整结束后将最终文字作为普通输入提交给 Agent。`speech.enabled` 默认关闭；
+语音服务使用独立的 adapter、endpoint、model 和专属 key，主 Agent 的模型配置保持独立。
+
+[语音 SDK](src/iris/speech/README.md) 同时提供两家完整 YAML、配置工厂和资源关闭约定；
+[可运行示例](examples/audio/README.md) 使用同一脚本切换两份配置，默认只转录，`--submit`
+才调用 Agent。`iris chat` 当前不提供录音入口。
+
 ## 本地命令与可选 Docker 沙箱
 
 普通文件、Python 扩展和 MCP 工具在宿主执行。显式声明的命令工具和配置式命令 Hook 使用所选

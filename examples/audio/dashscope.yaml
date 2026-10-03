@@ -1,0 +1,9 @@
+name: voice-agent
+model: deepseek/deepseek-flash
+system: |
+  你是一个助手，根据用户提交的文字回答问题。
+speech:
+  enabled: true
+  adapter: dashscope_funasr
+  endpoint: "wss://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference"
+  model: fun-asr-realtime

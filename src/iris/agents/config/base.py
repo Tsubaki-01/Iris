@@ -23,6 +23,7 @@ from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
 from ...message.llm import ProviderOptions, ResponseFormat, ToolChoice
 from ...providers import ModelRoute, parse_model_route
+from ...speech.config import SpeechConfig
 from ...todo.config import TodoConfig
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
@@ -248,6 +249,7 @@ class AgentConfig(BaseModel):
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
+        speech (SpeechConfig): 默认关闭的语音输入声明，由宿主装配客户端。
         tools (ToolsConfig): 工具配置。
         hooks (tuple[HookConfig, ...]): 按声明顺序执行的四事件处理器。
         middleware (MiddlewareConfig): 普通工具调用的包装链配置。
@@ -268,6 +270,7 @@ class AgentConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
+    speech: SpeechConfig = Field(default_factory=SpeechConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     hooks: tuple[HookConfig, ...] = ()
     middleware: MiddlewareConfig = Field(default_factory=MiddlewareConfig)

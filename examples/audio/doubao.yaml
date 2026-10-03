@@ -1,0 +1,9 @@
+name: voice-agent
+model: deepseek/deepseek-flash
+system: |
+  你是一个助手，根据用户提交的文字回答问题。
+speech:
+  enabled: true
+  adapter: doubao_asr
+  endpoint: wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async
+  model: volc.seedasr.sauc.duration
