@@ -4,6 +4,7 @@ from .base import IrisError, IrisValidationError
 from .command import IrisCommandCleanupError, IrisCommandError
 from .config import IrisConfigError
 from .context import IrisContextCompactionError, IrisContextError
+from .decision import IrisDecisionError
 from .goal import (
     IrisGoalConflictError,
     IrisGoalError,
@@ -59,6 +60,7 @@ from .tools import (
 )
 
 __all__ = [
+    "IrisDecisionError",
     "IrisImageError",
     "IrisHookError",
     "IrisHookProtocolError",
