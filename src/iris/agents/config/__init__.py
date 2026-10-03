@@ -14,6 +14,7 @@ from .base import (
 )
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
+from .decision import AgentDecisionConfig
 from .hooks import (
     CommandHookHandlerConfig,
     HookConfig,
@@ -28,6 +29,7 @@ from .tools import build_tool_registry
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentDecisionConfig",
     "AgentMCPConfig",
     "AgentSkillsConfig",
     "CompactionConfig",

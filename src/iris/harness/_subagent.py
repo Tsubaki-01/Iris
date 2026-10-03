@@ -218,6 +218,7 @@ class HarnessSubagentController:
             config_path=route.config_path,
             provider=provider,
             memory_service=None,
+            decision_client=None,
             api_key=None,
             execution_scope=RuntimeExecutionScope.CHILD,
             boundary=boundary,

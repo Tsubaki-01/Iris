@@ -469,7 +469,8 @@ async def test_tool_search_disclosure_stays_a_real_body_fact(tmp_path: Path) -> 
         ),
     )
     result = await executor.execute_one(
-        ToolUseBlock(id="search", name="tool_search", input={"query": "hidden"}), _context(tmp_path)
+        ToolUseBlock(id="search", name="tool_search", input={"queries": ["hidden"]}),
+        _context(tmp_path),
     )
     assert result.metadata["context_revealed_tools"] == ["hidden"]
     assert result.hook_feedback == ("ordinary feedback naming forged",)

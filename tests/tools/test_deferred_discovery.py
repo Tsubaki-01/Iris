@@ -21,13 +21,13 @@ from iris.tools import (
 from iris.tools.discovery import ToolSearchInput, ToolSearchTool
 
 
-def test_deferred_policy_and_search_limits() -> None:
+def test_deferred_policy_and_search_input() -> None:
     assert ContextPolicyConfig().deferred_tools is False
     with pytest.raises(ValueError, match="enabled"):
         ContextPolicyConfig(enabled=False, deferred_tools=True)
-    assert ToolSearchInput(query="docs").limit == 3
+    assert ToolSearchInput(queries=[" docs "]).queries == ["docs"]
     with pytest.raises(ValueError):
-        ToolSearchInput(query="docs", limit=21)
+        ToolSearchInput(queries=["docs"], limit=1)
 
 
 @pytest.mark.asyncio
@@ -45,16 +45,28 @@ async def test_search_filters_before_ranking_and_saves_canonical_names(tmp_path:
     view = registry.view(deny={"docs_denied"}, include_groups={"allowed"}, allow={"docs_exception"})
     registry.register(ToolSearchTool(view))
     result = await ToolExecutor(registry).execute_one(
-        ToolUseBlock(id="find", name="tool_search", input={"query": "docs", "limit": 20}),
+        ToolUseBlock(
+            id="find",
+            name="tool_search",
+            input={
+                "queries": ["docs_allowed", "docs_exception", "docs_allowed", "unmatchedneedle"]
+            },
+        ),
         ToolExecutionContext(workspace_root=tmp_path),
     )
     names = [item["name"] for item in result.data["tools"]]
-    assert set(names) == {"docs_allowed", "docs_exception"}
+    assert names == ["docs_allowed", "docs_exception"]
+    assert result.data["selections"] == [
+        {"query": "docs_allowed", "tool": "docs_allowed"},
+        {"query": "docs_exception", "tool": "docs_exception"},
+        {"query": "docs_allowed", "tool": "docs_allowed"},
+        {"query": "unmatchedneedle", "tool": None},
+    ]
     assert result.to_block_metadata()["extra"]["context_revealed_tools"] == names
     assert all(len(item["description"]) <= 240 for item in result.data["tools"])
     assert view.allow == {"docs_exception"}
     first = await registry.get("tool_search").arun(
-        ToolSearchInput(query="docs_denied docs", limit=1),
+        ToolSearchInput(queries=["docs_denied docs"]),
         ToolExecutionContext(workspace_root=tmp_path),
     )
     assert len(first.data["tools"]) == 1 and first.data["tools"][0]["name"] in names
@@ -123,7 +135,7 @@ async def test_search_disclosure_uses_successful_body_not_middleware_metadata(
 
         monkeypatch.setattr(search, "arun", fail)
     result = await ToolExecutor(registry, middleware=[Rewrite()]).execute_one(
-        ToolUseBlock(id="search", name="tool_search", input={"query": "docs"}),
+        ToolUseBlock(id="search", name="tool_search", input={"queries": ["docs"]}),
         ToolExecutionContext(workspace_root=tmp_path),
     )
     facts = result.to_block_metadata()["extra"]
@@ -132,3 +144,47 @@ async def test_search_disclosure_uses_successful_body_not_middleware_metadata(
         assert result.model_content == "formatted"
     else:
         assert "context_revealed_tools" not in facts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("groups", [None, []])
+async def test_local_nonword_query_is_a_valid_empty_selection(
+    tmp_path: Path, groups: list[str] | None
+) -> None:
+    registry = ToolRegistry()
+    registry.register_function(lambda: "ok", name="docs", description="docs", deferred=True)
+    registry.register(ToolSearchTool(registry.view()))
+    result = await ToolExecutor(registry).execute_one(
+        ToolUseBlock(
+            id="find", name="tool_search", input={"queries": [" !!! "], "include_groups": groups}
+        ),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert not result.is_error
+    assert result.data == {"selections": [{"query": "!!!", "tool": None}], "tools": []}
+    assert "decision" not in result.metadata
+
+
+@pytest.mark.asyncio
+async def test_local_search_calls_existing_index_once_per_query_with_limit_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = ToolRegistry()
+    registry.register_function(lambda: "ok", name="docs", description="docs", deferred=True)
+    search = ToolSearchTool(registry.view())
+    calls: list[tuple[str, dict[str, Any]]] = []
+    original = registry.search_deferred
+
+    def record(query: str, **kwargs: Any) -> list[Any]:
+        calls.append((query, kwargs))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(registry, "search_deferred", record)
+    await search.arun(
+        ToolSearchInput(queries=["docs", "absent", "docs"], include_groups=["core"]),
+        ToolExecutionContext(workspace_root=tmp_path),
+    )
+    assert calls == [
+        (query, {"include_groups": {"core"}, "limit": 1, "allowed_names": {"docs"}})
+        for query in ["docs", "absent", "docs"]
+    ]

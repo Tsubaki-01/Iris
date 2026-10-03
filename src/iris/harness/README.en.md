@@ -10,6 +10,11 @@ ownership from it.
 
 ## Quick start
 
+Both `from_config*()` entry points accept optional `decision_client=` and borrow only its `evaluate`
+capability. Runner shutdown never closes an injected evaluator. A client created from configuration
+is reused across sessions/Runs and closed by the environment. Children construct independent clients
+from their own configuration without inheriting root injection. See [Decision](../decision/README.md).
+
 With `todo.enabled`, `await runner.get_todo(session_id)` reads the current workspace's Markdown
 checklist and returns its absolute `path`, immutable `items`, and an optional format `error`.
 It also works with a directly constructed runtime, does not create a session or run, and does not

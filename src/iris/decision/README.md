@@ -67,10 +67,47 @@ asyncio.run(main())
 所有权移交；借用 evaluator 的业务不负责关闭连接。网络、HTTP、期限和解析失败统一抛出
 `IrisDecisionError`，沿 provider source / `DECISION_ERROR`；外层取消原样传播。凭据只用于请求头。
 
+## Agent 配置与工具发现
+
+在 `agent.yaml` 引用独立配置；路径相对 Agent YAML 解析。直接传入 `AgentConfig` 时以
+`config_path` 所在目录为基准，未提供则使用当前目录。
+
+```yaml
+# agent.yaml
+decision:
+  path: decision.yaml
+context_policy:
+  enabled: true
+  deferred_tools: true
+```
+
+```yaml
+# decision.yaml
+provider: typesafe
+model: jev-1.13.0
+timeout_seconds: 5
+tools:
+  discovery: true
+```
+
+省略 `decision` 或关闭全部接点时不构造客户端、不要求 key。开启工具发现必须同时启用
+deferred tools；未知配置字段或依赖冲突在装配时报告 `IrisConfigError`。配置固定于构造期。
+
+`tool_search` 的两种后端共用 `queries` / `include_groups` 输入。每个意图至多选一项；本地
+逐意图取词法 top-1，增强模式将全部允许的 deferred 候选一次批量 Choice，eager 工具仍直接
+调用。出站只包含 queries 与候选 name/description，失败不回退。详见 [工具说明](../tools/README.md)。
+
+`AgentRunner.from_config/from_config_path` 和 `RuntimeFactory.from_config/from_config_path`
+都接收 `decision_client=`。注入对象只需实现 `evaluate`，不读取 TypeSafe key，也不由 Iris 关闭。
+自建客户端保存在 runtime environment，同一 Agent 跨 session/Run 复用，由环境最终关闭；
+child 按自己的配置独立构造，不继承 root 注入。增强的内置工具声明 READ+NETWORK，默认
+权限允许，自定义 policy 与执行前权限刷新仍生效。
+
 ## 维护入口
 
 公共输入和可信结果见 [models.py](models.py)，窄协议见 [client.py](client.py)，厂商映射与连接见
-[jev.py](jev.py)。测试使用 MockTransport 在本地验证请求和响应契约。
+[jev.py](jev.py)，配置与客户端装配见 [config.py](config.py) 和 [factory.py](factory.py)。
+测试使用 MockTransport 在本地验证请求和响应契约。
 
 ```powershell
 $env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"

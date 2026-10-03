@@ -130,6 +130,7 @@ from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .observer import RunEventObserver
 
 if TYPE_CHECKING:
+    from ..decision import DecisionEvaluator
     from ..hooks import HookRegistration
     from ..tools import ToolMiddleware
     from .streaming import CommandCleanupFailed, LiveFact, LivePublisher
@@ -453,6 +454,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
         tool_middlewares: Sequence[ToolMiddleware] = (),
@@ -472,6 +474,7 @@ class AgentRunner:
             permission_policy=permission_policy,
             child_provider_factory=child_provider_factory,
             memory_service=memory_service,
+            decision_client=decision_client,
             context_source=context_source,
             hooks=hooks,
             tool_middlewares=tool_middlewares,
@@ -493,6 +496,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
         tool_middlewares: Sequence[ToolMiddleware] = (),
@@ -540,6 +544,7 @@ class AgentRunner:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            decision_client=decision_client,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
             boundary=boundary,

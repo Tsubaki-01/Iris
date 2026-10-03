@@ -22,6 +22,12 @@ from ..context import (
     ContextSource,
     load_context_build_input,
 )
+from ..decision import (
+    DecisionConfig,
+    DecisionEvaluator,
+    build_decision_client,
+    load_decision_config,
+)
 from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
 from ..goal.context import GoalContextSource
 from ..goal.tools import GetGoalTool, ReportGoalTool
@@ -176,6 +182,7 @@ def assemble_runtime(
     goal_service: GoalService | None = None,
     hooks: Sequence[HookRegistration] = (),
     tool_middlewares: Sequence[ToolMiddleware] = (),
+    decision_client: DecisionEvaluator | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
     if config.goal.enabled:
@@ -200,6 +207,13 @@ def assemble_runtime(
         workspace_root=boundary.workspace_root,
     )
     base_dir = _base_dir(config_path)
+    decision_config = (
+        load_decision_config(_resolve_relative_to_base(config.decision.path, base_dir=base_dir))
+        if config.decision is not None
+        else DecisionConfig()
+    )
+    if decision_config.tools.discovery and not config.context_policy.deferred_tools:
+        raise IrisConfigError("Decision tools.discovery 要求 context_policy.deferred_tools=true")
     if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
         config = config.model_copy(
             update={
@@ -284,9 +298,17 @@ def assemble_runtime(
             defer_tools=config.context_policy.deferred_tools,
         )
     tool_view = tool_registry.view()
+    decision_client, owned_decision_client = build_decision_client(
+        decision_config, decision_client=decision_client
+    )
     if config.context_policy.deferred_tools:
         try:
-            tool_registry.register(ToolSearchTool(tool_view))
+            tool_registry.register(
+                ToolSearchTool(
+                    tool_view,
+                    decision_client=decision_client if decision_config.tools.discovery else None,
+                )
+            )
         except IrisToolValidationError as exc:
             raise IrisConfigError("tool_search 与现有工具名称或别名冲突") from exc
     tool_executor = ToolExecutor(
@@ -319,6 +341,8 @@ def assemble_runtime(
         command_stop_slots=boundary.command_stop_slots,
         context_source=context_source,
         hook_dispatcher=hook_dispatcher,
+        decision_client=decision_client,
+        owned_decision_client=owned_decision_client,
     )
     return AgentRuntime(environment)
 

@@ -1,11 +1,13 @@
 """通过真实会话、暂停与恢复验证工具披露不改变共享注册表。"""
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from iris.agents import AgentConfig
 from iris.context import ContextBuildScope, ContextSnapshot
+from iris.decision import ChoiceAnswer, DecisionRequest, DecisionResponse, DecisionUsage
 from iris.harness import AgentRunner, AgentRunRequest
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import ForkSession, LifecycleStore
@@ -20,26 +22,63 @@ def _schema_names(request: LLMRequest) -> set[str]:
     return {schema.name for schema in request.tools}
 
 
+class SelectingDecision:
+    """按工具 canonical name 选择候选，记录完整的真实消费者请求。"""
+
+    def __init__(self) -> None:
+        self.requests: list[DecisionRequest] = []
+
+    async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
+        """一次返回所有意图的选择，不提供资源关闭接口。"""
+        self.requests.append(request)
+        state = cast(dict[str, Any], request.state)
+        choices = [
+            next(key for key, tool in state["tools"].items() if tool["name"] == query)
+            for query in state["queries"]
+        ]
+        return DecisionResponse(
+            provider="typesafe",
+            model="noul",
+            answers={
+                f"q{index}": ChoiceAnswer(
+                    choice=choice, probabilities={choice: 1.0}, confidence=1.0
+                )
+                for index, choice in enumerate(choices)
+            },
+            usage=DecisionUsage(input_tokens=12, output_tokens=2),
+        )
+
+
+def _discovery_backend(
+    tmp_path: Path, *, use_decision: bool
+) -> tuple[dict[str, Any], SelectingDecision | None]:
+    """按需启用 tools.discovery 并借用离线 evaluator。"""
+    if not use_decision:
+        return {}, None
+    path = tmp_path / "decision.yaml"
+    path.write_text("provider: typesafe\ntools:\n  discovery: true\n", encoding="utf-8")
+    return {"decision": {"path": str(path)}}, SelectingDecision()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("use_decision", [False, True], ids=["local", "decision"])
 async def test_search_disclosure_survives_pause_without_leaking_between_sessions(
-    tmp_path: Path, persistent: bool
+    tmp_path: Path,
+    persistent: bool,
+    use_decision: bool,
 ) -> None:
     """另一会话搜索不改 waiting 批次，重开 SQLite 后按已保存可见集合执行。"""
     provider = StaticProvider(
         tool_response(
-            ToolUseBlock(
-                id="discover-alpha", name="tool_search", input={"query": "alpha", "limit": 1}
-            )
+            ToolUseBlock(id="discover-alpha", name="tool_search", input={"queries": ["alpha"]})
         ),
         tool_batch_response(
             ToolUseBlock(id="ask", name="ask_question", input={"question": "继续检查？"}),
             ToolUseBlock(id="use-alpha", name="alpha", input={"document": "A"}),
         ),
         tool_response(
-            ToolUseBlock(
-                id="discover-beta", name="tool_search", input={"query": "beta", "limit": 1}
-            )
+            ToolUseBlock(id="discover-beta", name="tool_search", input={"queries": ["beta"]})
         ),
         text_response("第二会话完成"),
         text_response("第一会话完成"),
@@ -65,6 +104,7 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
         executed.append(f"unexpected:{document}")
         return document
 
+    decision_config, decision_client = _discovery_backend(tmp_path, use_decision=use_decision)
     config = AgentConfig.model_validate(
         {
             "name": "deferred-documents",
@@ -73,13 +113,18 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
             "permissions": {"workspace": str(tmp_path)},
             "tools": {"builtin": ["human.ask"]},
             "context_policy": {"deferred_tools": True},
+            **decision_config,
         }
     )
 
     def make_runner(store: LifecycleStore) -> AgentRunner:
         """每次宿主启动注册同一份工具定义，不恢复任何进程内披露缓存。"""
         runner = AgentRunner.from_config(
-            config, provider=provider, store=store, context_source=Source()
+            config,
+            provider=provider,
+            store=store,
+            context_source=Source(),
+            decision_client=decision_client,
         )
         registry = runner.runtime.environment.tool_bridge.tool_view.registry
         registry.register_function(alpha, deferred=True)
@@ -96,13 +141,14 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
         assert not executed
         initial_names, discovered_names = map(_schema_names, provider.requests)
         assert "tool_search" in initial_names
+        search_schema = next(
+            item for item in provider.requests[0].tools if item.name == "tool_search"
+        )
+        assert set(search_schema.input_schema["properties"]) == {"queries", "include_groups"}
+        assert search_schema.input_schema["required"] == ["queries"]
         assert not {"alpha", "beta"} & initial_names
         assert "alpha" in discovered_names and "beta" not in discovered_names
-        schema = next(
-            item
-            for item in provider.requests[1].tools
-            if item.name == "alpha"
-        )
+        schema = next(item for item in provider.requests[1].tools if item.name == "alpha")
         assert schema.input_schema["properties"]["document"]["type"] == "string"
         assert schema.input_schema["required"] == ["document"]
         checkpoint = store.load_checkpoint("first")
@@ -117,6 +163,8 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
         assert "alpha" not in _schema_names(provider.requests[3])
         assert store.load_checkpoint("first") == checkpoint
         assert not runner.runtime.environment.tool_bridge.tool_view.allow
+        if decision_client is not None:
+            assert len(decision_client.requests) == 2
 
         if persistent:
             await runner.aclose()
@@ -137,6 +185,73 @@ async def test_search_disclosure_survives_pause_without_leaking_between_sessions
         records = runner.list_tool_calls("first")
         assert len(records) == 3
         assert records[-1].result.model_content == "检查完成:A"
+        if decision_client is not None:
+            assert len(decision_client.requests) == 2
+            assert records[0].result.metadata["decision"] == {
+                "feature": "tools.discovery",
+                "provider": "typesafe",
+                "model": "noul",
+                "question_count": 1,
+                "input_tokens": 12,
+                "output_tokens": 2,
+            }
+        else:
+            assert "decision" not in records[0].result.metadata
+    finally:
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_decision", [False, True], ids=["local", "decision"])
+async def test_discovered_tool_waits_for_next_request_before_execution(
+    tmp_path: Path, use_decision: bool
+) -> None:
+    """同批发现不能授权本批调用，提交后下一请求才取得完整定义并正常执行。"""
+    provider = StaticProvider(
+        tool_batch_response(
+            ToolUseBlock(id="discover", name="tool_search", input={"queries": ["alpha"]}),
+            ToolUseBlock(id="early", name="alpha", input={"document": "本批"}),
+        ),
+        tool_response(ToolUseBlock(id="next", name="alpha", input={"document": "下一批"})),
+        text_response("完成"),
+    )
+    decision_config, decision_client = _discovery_backend(tmp_path, use_decision=use_decision)
+    runner = AgentRunner.from_config(
+        AgentConfig.model_validate(
+            {
+                "name": "same-batch-discovery",
+                "model": "openai/test",
+                "system": "先发现，再调用工具。",
+                "permissions": {"workspace": str(tmp_path)},
+                "context_policy": {"deferred_tools": True},
+                **decision_config,
+            }
+        ),
+        provider=provider,
+        decision_client=decision_client,
+    )
+    executed: list[str] = []
+
+    def alpha(document: str) -> str:
+        """记录真正执行的文档。"""
+        executed.append(document)
+        return document
+
+    runner.runtime.environment.tool_bridge.tool_view.registry.register_function(
+        alpha, deferred=True
+    )
+    try:
+        result = await runner.start(AgentRunRequest(input="检查文档", run_id="same-batch"))
+        assert result.run.stop_reason.value == "completed"
+        assert executed == ["下一批"]
+        assert "alpha" not in _schema_names(provider.requests[0])
+        assert "alpha" in _schema_names(provider.requests[1])
+        records = runner.list_tool_calls("same-batch")
+        assert records[0].result.metadata["context_revealed_tools"] == ["alpha"]
+        assert records[1].result.error.code == "TOOL_NOT_ALLOWED"
+        assert records[2].result.model_content == "下一批"
+        if decision_client is not None:
+            assert len(decision_client.requests) == 1
     finally:
         await runner.aclose()
 
@@ -163,13 +278,9 @@ async def test_fork_rebuilds_only_copied_discovery_and_final_consumes_protection
             )
 
     provider = PressureProvider(
-        tool_response(
-            ToolUseBlock(id="find-a", name="tool_search", input={"query": "alpha", "limit": 1})
-        ),
+        tool_response(ToolUseBlock(id="find-a", name="tool_search", input={"queries": ["alpha"]})),
         text_response("已发现 alpha"),
-        tool_response(
-            ToolUseBlock(id="find-b", name="tool_search", input={"query": "beta", "limit": 1})
-        ),
+        tool_response(ToolUseBlock(id="find-b", name="tool_search", input={"queries": ["beta"]})),
         text_response("已发现 beta"),
         text_response("分支完成"),
     )

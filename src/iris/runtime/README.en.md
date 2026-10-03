@@ -2,6 +2,14 @@
 
 # `iris.runtime`
 
+Both RuntimeFactory entry points and Runner accept `decision_client=` through shared assembly.
+The separate Decision configuration selects enabled consumers; disabled consumers require no key.
+Only enabled deferred discovery receives the evaluator. Hook factories run before resource creation;
+the owned Jev client creates HTTP resources on its first evaluate. `RuntimeEnvironment.decision_client`
+is borrowed by consumers; `owned_decision_client` is set only for assembly-owned instances and closed
+after MCP/command cleanup, even when earlier cleanup fails. Children construct and close independent
+clients; SDK-injected evaluators are never closed. See [Decision](../decision/README.md).
+
 `RuntimeEnvironment.hook_dispatcher` holds the current Agent's optional process-local dispatcher;
 it is never checkpointed. Environment construction connects the same dispatcher and command binding
 to its tool executor. Both `RuntimeFactory.from_config()` and `from_config_path()` accept

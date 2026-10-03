@@ -35,6 +35,7 @@ from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
 
 if TYPE_CHECKING:
+    from ..decision import DecisionEvaluator, JevClient
     from ..goal.service import GoalService
     from ..hooks.dispatcher import HookDispatcher
     from ..mcp.manager import MCPManager
@@ -125,6 +126,8 @@ class RuntimeEnvironment:
         memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
         context_source (ContextSource | None): 宿主每步采集接口，不缓存快照。
         hook_dispatcher (HookDispatcher | None): 当前 Agent 的可选进程内 Hook 派发依赖。
+        decision_client (DecisionEvaluator | None): 当前已启用接点共同借用的判断能力。
+        owned_decision_client (JevClient | None): 本环境自建且负责关闭的判断客户端。
     """
 
     agent_config: AgentConfig
@@ -147,6 +150,8 @@ class RuntimeEnvironment:
     memory_capture_port: RuntimeMemoryCapturePort | None = None
     context_source: ContextSource | None = None
     hook_dispatcher: HookDispatcher | None = None
+    decision_client: DecisionEvaluator | None = None
+    owned_decision_client: JevClient | None = None
 
     def __post_init__(self) -> None:
         """归一化 workspace，交接当前 Agent 的 Hooks 与共享命令依赖。"""
@@ -164,16 +169,20 @@ class RuntimeEnvironment:
         return None
 
     async def aclose(self) -> None:
-        """关闭自有 MCP 和 ROOT 执行资源，CHILD 保留借用的命令服务。"""
+        """依次关闭自有资源；child 保留借用命令服务但关闭自建判断客户端。"""
         try:
             if self.mcp_manager is not None:
                 await self.mcp_manager.aclose()
         finally:
-            if (
-                self.execution_scope is RuntimeExecutionScope.ROOT
-                and self.command_binding is not None
-            ):
-                await self.command_binding.service.aclose()
+            try:
+                if (
+                    self.execution_scope is RuntimeExecutionScope.ROOT
+                    and self.command_binding is not None
+                ):
+                    await self.command_binding.service.aclose()
+            finally:
+                if self.owned_decision_client is not None:
+                    await self.owned_decision_client.aclose()
 
 
 __all__ = [

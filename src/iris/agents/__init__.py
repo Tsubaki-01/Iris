@@ -3,6 +3,7 @@
 from .config import (
     AgentConfig,
     AgentContextConfig,
+    AgentDecisionConfig,
     AgentMCPConfig,
     AgentSkillsConfig,
     CommandConfig,
@@ -27,6 +28,7 @@ from .config import (
 __all__ = [
     "AgentConfig",
     "AgentContextConfig",
+    "AgentDecisionConfig",
     "AgentMCPConfig",
     "AgentSkillsConfig",
     "CompactionConfig",

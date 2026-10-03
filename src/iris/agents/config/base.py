@@ -26,6 +26,7 @@ from ...providers import ModelRoute, parse_model_route
 from ...todo.config import TodoConfig
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
+from .decision import AgentDecisionConfig
 from .hooks import HookConfig, MiddlewareConfig
 from .mcp import AgentMCPConfig
 
@@ -241,6 +242,7 @@ class AgentConfig(BaseModel):
         context (AgentContextConfig | None): 结构化 context 配置声明。
         skills (AgentSkillsConfig | None): 可选的项目级 Skill 发现配置。
         mcp (AgentMCPConfig | None): 可选的外部 MCP 文件引用与本地策略。
+        decision (AgentDecisionConfig | None): 可选的独立判断服务及接点配置引用。
         compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
         context_policy (ContextPolicyConfig): 当前会话上下文回读策略。
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
@@ -260,6 +262,7 @@ class AgentConfig(BaseModel):
     context: AgentContextConfig | None = None
     skills: AgentSkillsConfig | None = None
     mcp: AgentMCPConfig | None = None
+    decision: AgentDecisionConfig | None = None
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)

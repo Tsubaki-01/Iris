@@ -24,6 +24,7 @@ from ._assembly import RuntimeExecutionScope, assemble_runtime, resolve_runtime_
 from .runtime import AgentRuntime
 
 if TYPE_CHECKING:
+    from ..decision import DecisionEvaluator
     from ..hooks import HookRegistration
     from ..memory import MemoryService
     from ..tools import ToolMiddleware
@@ -48,6 +49,7 @@ class RuntimeFactory:
         *,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        decision_client: DecisionEvaluator | None = None,
         context_access: ContextAccessPort | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -60,6 +62,7 @@ class RuntimeFactory:
             path (str | Path): Agent YAML 配置文件路径。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            decision_client: 可选借用的判断能力，是否挂载由接点配置决定。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             context_source (ContextSource | None): 可选的每步运行态采集接口。
             hooks (Sequence[HookRegistration]): 追加在 YAML 项之后的当前 Agent 处理器。
@@ -76,6 +79,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            decision_client=decision_client,
             context_access=context_access,
             context_source=context_source,
             hooks=hooks,
@@ -91,6 +95,7 @@ class RuntimeFactory:
         config_path: Path | None = None,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        decision_client: DecisionEvaluator | None = None,
         context_access: ContextAccessPort | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -104,6 +109,7 @@ class RuntimeFactory:
             config_path (Path | None): 配置文件路径；相对它解析 workspace、context 和摘要 prompt。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            decision_client: 可选借用的判断能力，是否挂载由接点配置决定。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
             context_source (ContextSource | None): 可选的每步运行态采集接口。
             hooks (Sequence[HookRegistration]): 追加在 YAML 项之后的当前 Agent 处理器。
@@ -122,6 +128,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            decision_client=decision_client,
             context_access=context_access,
             context_source=context_source,
             hooks=hooks,

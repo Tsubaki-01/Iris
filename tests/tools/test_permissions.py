@@ -183,3 +183,56 @@ async def test_web_call_refreshes_parent_policy_before_execution(tmp_path: Path)
     assert result.error is not None and result.error.code == "PERMISSION_ERROR"
     assert result.error.message == "parent"
     assert len(parent.calls) >= 2
+
+
+def test_default_allows_concrete_decision_search_not_other_network_tools(tmp_path: Path) -> None:
+    """内置搜索可联网，普通同名工具保持原有权限。"""
+    from iris.decision import DecisionRequest, DecisionResponse
+    from iris.tools import ToolRegistry, ToolSearchTool
+
+    class Port:
+        async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
+            raise AssertionError("权限检查不执行远程调用")
+
+    search = ToolSearchTool(ToolRegistry().view(), decision_client=Port())
+    ordinary = CallableTool(
+        lambda: "ok", name="tool_search", description="other", capabilities={ToolCapability.NETWORK}
+    )
+    policy = DefaultPermissionPolicy()
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    assert policy.check(search, {}, context).effect == PermissionEffect.ALLOW
+    assert policy.check(ordinary, {}, context).effect == PermissionEffect.REQUIRE_HUMAN
+    assert not search.is_read_only({})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("check_at", ["preflight", "refresh"])
+async def test_custom_policy_denial_prevents_decision_search_call(
+    tmp_path: Path, check_at: str
+) -> None:
+    """自定义策略的预检和执行前刷新均能阻止 Decision 请求。"""
+    from iris.decision import DecisionRequest, DecisionResponse
+    from iris.message import ToolUseBlock
+    from iris.tools import ToolExecutor, ToolRegistry, ToolSearchTool
+
+    class Port:
+        async def evaluate(self, request: DecisionRequest) -> DecisionResponse:
+            raise AssertionError("拒绝后不得发送请求")
+
+    registry = ToolRegistry()
+    registry.register_function(lambda: "ok", name="docs", description="docs", deferred=True)
+    registry.register(ToolSearchTool(registry.view(), decision_client=Port()))
+    policy = FixedPolicy(
+        "custom", PermissionEffect.DENY if check_at == "preflight" else PermissionEffect.ALLOW
+    )
+    executor = ToolExecutor(registry, permission_policy=policy)
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    prepared = executor.prepare_many(
+        [ToolUseBlock(id="search", name="tool_search", input={"queries": ["docs"]})], context
+    ).calls[0]
+    if check_at == "refresh":
+        assert prepared.preflight_result is None
+        policy.effect = PermissionEffect.DENY
+    result = await executor.execute_prepared(prepared, context)
+    assert result.error is not None and result.error.code == "PERMISSION_ERROR"
+    assert result.error.message == "custom"

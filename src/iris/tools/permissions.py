@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from ..exceptions import IrisToolValidationError
 from .base import BaseTool, ToolCapability, ToolExecutionContext
+from .discovery import ToolSearchTool
 from .subagent import SubagentTool
 
 
@@ -107,7 +108,7 @@ class DefaultPermissionPolicy(PermissionPolicy):
         params: dict[str, Any],
         context: ToolExecutionContext,
     ) -> PermissionDecision:
-        """读与内置 Web/Sub Agent 沿原策略，写入和执行分别裁决。"""
+        """读与内置 Web/工具发现/Sub Agent 自动允许，写入和执行分别裁决。"""
         # file 工具初始化时会导入本模块，Web 类型在裁决时加载以避免循环导入。
         from .builtin.web import WebFetchTool, WebSearchTool
 
@@ -128,7 +129,7 @@ class DefaultPermissionPolicy(PermissionPolicy):
                 )
             if capabilities <= {ToolCapability.READ, ToolCapability.EXECUTE}:
                 return PermissionDecision(effect=PermissionEffect.ALLOW)
-        if isinstance(tool, (SubagentTool, WebSearchTool, WebFetchTool)):
+        if isinstance(tool, (SubagentTool, WebSearchTool, WebFetchTool, ToolSearchTool)):
             return PermissionDecision(effect=PermissionEffect.ALLOW)
         if ToolCapability.MCP in tool.definition.capabilities and tool.is_read_only(params):
             return PermissionDecision(effect=PermissionEffect.ALLOW)

@@ -187,6 +187,7 @@ def test_factory_failure_precedes_framework_resource_construction(
 
     monkeypatch.setattr(_assembly, "create_provider_client", resource)
     monkeypatch.setattr(_assembly, "build_memory_service_from_config", resource)
+    monkeypatch.setattr(_assembly, "build_decision_client", resource)
     monkeypatch.setattr(_assembly, "build_tool_registry", resource)
     with pytest.raises(IrisConfigError, match="factory"):
         owner.from_config(AgentConfig.model_validate(payload))

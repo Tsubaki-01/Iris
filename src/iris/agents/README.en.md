@@ -8,6 +8,12 @@ session. `iris.runtime` consumes the resulting configuration.
 
 ## Architecture
 
+`AgentConfig.decision` accepts optional `AgentDecisionConfig(path)` (exported from `iris.agents`).
+The path is relative to the agent YAML and names a separate Decision configuration. Its
+`tools.discovery` switch enables one batched Choice for deferred tool discovery, disabled by
+default. Shared assembly validates dependencies and borrows or creates the evaluator; YAML loading
+does not connect. See [Decision configuration](../decision/README.md).
+
 `todo.enabled` defaults to false. Enabling it provides SDK access to per-session Markdown Todo
 lists and a fresh snapshot for each model step. It
 requires `context_policy.enabled=true`; it does not register file tools or change permissions.

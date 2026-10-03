@@ -587,23 +587,40 @@ cleanup facts. Recovery reuses committed results without replaying handlers.
 `DeferredToolIndex` uses a local BM25-like ranker over name, tags, group, and description, with CJK
 bigrams, low-weight single characters, query coverage, and stable sorting. Construct `ToolSearchTool`
 with a static `ToolRegistryView`, for example `ToolSearchTool(registry.view())`. Its model-facing name
-is `tool_search`; `ToolSearchInput(query, include_groups=None, limit=3)` permits limits from 1 to 20.
-The lower-level registry search still defaults to 10. Base deny/group/allow and query group filters
-apply before ranking and top-k; search results cannot expand the host's group scope.
+is `tool_search`, with `ToolSearchInput(queries, include_groups=None)`, for example
+`{"queries": ["read project notes", "edit config"], "include_groups": ["file"]}`. `queries` is a nonempty
+array of strings that remain nonblank after trimming. Legacy `query/limit` and unknown fields are rejected.
+The local backend calls `registry.search_deferred(..., limit=1)` separately for each intent; the
+lower-level registry query/limit API still defaults to 10. Both backends first apply base
+deny/group/allow and call-specific group filters to deferred tools. `include_groups=[]` allows no groups;
+search results cannot expand the host's group scope.
 
-JSON text and `data["tools"]` contain candidate summaries with `name`, `description` capped at 240
-characters, and `group`. No matches return an empty list; full parameter JSON Schema stays out of search text.
-A successful system search saves ranked canonical names in the committed tool message's
-`metadata.extra.context_revealed_tools`. Executor does not accept this field from other tools as a
-disclosure fact. Names come from the successful search body and survive an after-middleware text
-replacement; final errors and substitutes for a failed body do not create disclosure.
+`ToolSearchTool(view, decision_client=evaluator)` borrows a Decision evaluator; full assembly selects
+this backend through `tools.discovery` in the Decision file. It reads the complete allowed deferred
+catalog at call time and evaluates the entire batch once, with one Choice including a no-match option
+per intent. Business state contains only `queries` and candidate IDs mapped to `name/description` in
+`tools`; tags, group, schemas, and other tool metadata are not sent. Local text ranking does not narrow
+the remote candidate set. Empty catalogs make no request; eager tools, Skills, and subagents remain
+directly available. Enhanced instances declare READ+NETWORK and are allowed by the default builtin
+policy; custom policies still run before the request. Request failures become tool errors without a
+local-search fallback.
+
+Both backends return `selections` and `tools` in JSON text and `data`. Input-ordered `selections` contain
+`{query, tool: canonical_name | null}`, preserving duplicates and no-match entries. `tools` deduplicates
+by first selection and contains summaries with `name`, `description` capped at 240 characters, and `group`.
+Full parameter JSON Schema stays out of search text. A successful system search saves canonical names
+in that same order in the committed tool message's `metadata.extra.context_revealed_tools`. Executor
+does not accept this field from other tools as a disclosure fact. Names come from the successful search
+body and survive an after-middleware text replacement; final errors and substitutes for a failed body
+do not create disclosure.
 
 Search alone does not mutate the registry. With `context_policy.deferred_tools: true`, runtime
 registers the tool automatically and selects candidate tool definitions with full parameter JSON Schema
 for the next main model request only after the search result commits to that session's history. Newly found tools cannot
 be used in the same batch as their discovery call; the model waits for the tool definition in the next
 request. See [runtime](../runtime/README.en.md#deferred-tool-definitions) for budgets, forced tools,
-and batch recovery.
+and batch recovery. Resume reuses committed disclosure facts without calling Decision again to rebuild
+tool definitions.
 
 ## Public surface and boundaries
 

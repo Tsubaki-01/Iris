@@ -26,6 +26,10 @@ finally:
 reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
 
+两个 `from_config*()` 入口都接收可选 `decision_client=`，只借用其 `evaluate` 能力，关闭 runner
+不会关闭注入对象。配置自建的 Jev 客户端跨 session/Run 复用并随环境关闭；子 Agent 根据自身
+配置独立构造，不继承 root 的注入。接点开关和配置示例见 [Decision](../decision/README.md)。
+
 在尚未关闭的 runner 上，图片输入先导入，再提交完整数据块；主模型需支持所选协议的视觉输入：
 
 ```python

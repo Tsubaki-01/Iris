@@ -714,19 +714,31 @@ registry.register(ToolSearchTool(registry.view()))
 ```
 
 `ToolSearchTool` 接收静态 `ToolRegistryView`，工具名固定为 `tool_search`。输入模型为
-`ToolSearchInput(query, include_groups=None, limit=3)`，limit 范围为 1–20；底层
-`registry.search_deferred()` 的默认 limit 仍为 10。搜索只覆盖 base view 允许发现的 deferred
-工具，在排名和 top-k 之前应用 deny/group/allow 与本次组过滤。搜索名称不能扩大宿主的组范围。
+`ToolSearchInput(queries, include_groups=None)`，例如
+`{"queries": ["读取项目说明", "修改配置"], "include_groups": ["file"]}`。`queries` 是非空数组，
+每项去除首尾空白后必须非空；不再接收旧 `query/limit` 字段，未知字段也会被拒绝。
+本地后端逐意图调用 `registry.search_deferred(..., limit=1)`，底层 registry 的 query/limit API
+及默认 limit=10 保持不变。两个后端均先按 base view 的 deny/group/allow 与本次组过滤筛选
+deferred 工具；`include_groups=[]` 表示没有允许组，搜索名称不能扩大宿主的组范围。
 
-返回 JSON 文本和 `data["tools"]` 候选摘要，每项包含 `name`、最多 240 字符的 `description`
-及 `group`；无匹配时列表为空。完整参数 JSON Schema 不放进搜索正文。成功系统搜索结果提交为工具消息后，
-其 `metadata.extra.context_revealed_tools` 保存按排名排列的 canonical names；executor 不接受
-其它工具写入同名字段作为披露事实。该名单来自成功搜索本体，after middleware 重建正文不会
-丢失；最终错误或对失败 body 合成的替代成功结果不产生披露。
+可通过 `ToolSearchTool(view, decision_client=evaluator)` 借用 Decision evaluator；完整装配由
+Decision 文件的 `tools.discovery` 开关控制。它在调用时读取全部允许的 deferred 候选，
+每个意图一道 Choice（含无匹配选项），整批只 evaluate 一次。业务 state 仅包含 `queries` 和
+`tools` 中候选 ID 对应的 `name/description`，不发送 tags、group、schema 或其它工具元数据，
+不先用本地文本排名缩小候选。空目录不请求；eager 工具、Skill 与 subagent 保持直接可用。
+增强实例为 READ+NETWORK，默认内置策略允许，自定义策略仍先裁决；请求失败形成工具错误，不回退本地搜索。
+
+两个后端的 JSON 文本和 `data` 都包含 `selections` 与 `tools`。`selections` 按输入顺序返回
+`{query, tool: canonical_name | null}`，保留重复意图和无匹配项；`tools` 按首次选择顺序去重，
+每项包含 `name`、最多 240 字符的 `description` 及 `group`。完整参数 JSON Schema 不放进搜索正文。
+成功系统搜索结果提交为工具消息后，其 `metadata.extra.context_revealed_tools` 保存相同顺序的
+canonical names；executor 不接受其它工具写入同名字段作为披露事实。该名单来自成功搜索本体，
+after middleware 重建正文不会丢失；最终错误或对失败 body 合成的替代成功结果不产生披露。
 
 低层搜索不修改 registry。完整 runtime 开启 `context_policy.deferred_tools: true` 后自动注册
 该工具，只在搜索结果提交到当前 session 历史后，才为下一主模型请求选择候选工具定义及完整参数 JSON Schema。
 模型应等下一请求实际披露工具定义后再调用，不能在同一批搜索调用中使用新发现工具。
+暂停恢复复用已提交的披露事实，不为重建工具定义再次调用 Decision。
 预算、强制工具与批次恢复规则见 [runtime 说明](../runtime/README.md#按需工具定义)。
 
 ## Schema 与装饰器

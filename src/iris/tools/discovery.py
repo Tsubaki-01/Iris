@@ -1,24 +1,24 @@
-"""延迟工具发现与本地搜索工具。
+"""延迟工具发现与本地、Decision 共用的搜索工具。
 
-提供了对注册表中 deferred 工具的本地索引和基于 BM25 等机制的综合搜索支持。
+提供 deferred 工具的 BM25 本地索引与可选 Decision 选择，共享模型输入和结果契约。
 """
 
 # region imports
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, cast
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..exceptions import IrisToolValidationError
-from ..message import TextBlock
-from .base import BaseTool, ToolDefinition, ToolExecutionContext, ToolResult
+from ._discovery_selection import select_with_decision, selection_result
+from .base import BaseTool, ToolCapability, ToolDefinition, ToolExecutionContext, ToolResult
 
 if TYPE_CHECKING:
+    from ..decision import DecisionEvaluator
     from .registry import ToolRegistryView
 
 # endregion
@@ -42,30 +42,18 @@ _FIELD_WEIGHTS: dict[str, float] = {
 
 
 class ToolSearchInput(BaseModel):
-    """tool_search 的输入参数模型。"""
+    """本地与 Decision 工具发现共用的模型可见输入。"""
 
-    query: str
-    include_groups: list[str] | None = None
-    limit: int = Field(default=3, gt=0, le=20)
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("query")
-    @classmethod
-    def _validate_query(cls, value: str) -> str:
-        """规范化并拒绝空白查询。"""
-        normalized = value.strip()
-        if not normalized:
-            raise ValueError("query 不能为空")
-        return normalized
+    queries: list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]] = Field(
+        min_length=1, description="独立搜索意图，每项至多选择一个工具。"
+    )
+    include_groups: list[str] | None = Field(default=None, description="可选工具组过滤。")
 
     def normalized_groups(self) -> set[str] | None:
-        """返回去重后的组过滤集合。
-
-        Returns:
-            set[str] | None: 去重后的组名集合，如果没有提供过滤则返回 None。
-        """
-        if self.include_groups is None:
-            return None
-        return set(self.include_groups)
+        """返回去重后的组集合；空集合表示不允许任何组。"""
+        return None if self.include_groups is None else set(self.include_groups)
 
 
 class DeferredToolIndex:
@@ -141,10 +129,12 @@ class DeferredToolIndex:
             list[ToolDefinition]: 按相关性从高到低排序后的候选工具定义列表。
 
         Raises:
-            IrisToolValidationError: 当查询为空或无有效关键词时抛出。
+            IrisToolValidationError: 当查询为空时抛出；无有效关键词返回空结果。
         """
         # --- 1. 验证查询语句并筛选文档 ---
         normalized_query, query_terms, capped_limit = _validated_query(query, limit)
+        if not query_terms:
+            return []
         filtered_docs = [
             doc
             for doc in self._documents
@@ -206,6 +196,8 @@ class DeferredToolIndex:
             list[ToolDefinition]: 相关查询的候选定义集合。
         """
         normalized_query, query_terms, capped_limit = _validated_query(query, limit)
+        if not query_terms:
+            return []
         scored: list[tuple[int, ToolDefinition]] = []
         for definition, _, _, haystack in self._documents:
             if include_groups is not None and definition.group not in include_groups:
@@ -222,50 +214,31 @@ class DeferredToolIndex:
 
 
 class ToolSearchTool(BaseTool):
-    """搜索注册表中默认隐藏的 deferred 工具的系统内置工具。"""
+    """按独立意图发现 deferred 工具，保留 executor 认证的工具身份。"""
 
-    # ==========================================
-    #               Initialization
-    # ==========================================
-    # region
-    def __init__(self, tool_view: ToolRegistryView) -> None:
-        """初始化 tool_search。
-
-        Args:
-            tool_view (ToolRegistryView): 宿主静态 base 视图，搜索不能扩大其范围。
-        """
+    def __init__(
+        self,
+        tool_view: ToolRegistryView,
+        *,
+        decision_client: DecisionEvaluator | None = None,
+    ) -> None:
+        """保存静态范围视图，并借用可选的 Decision evaluator。"""
         self.tool_view = tool_view
+        self.decision_client = decision_client
+        capabilities = {ToolCapability.READ}
+        if decision_client is not None:
+            capabilities.add(ToolCapability.NETWORK)
         self.definition = ToolDefinition(
             name="tool_search",
             description=(
-                "搜索延迟工具的候选摘要；下一请求只有实际加载了完整 schema 的工具才可调用。"
+                "按独立搜索意图选择延迟工具，每项至多一个，无匹配返回 null；"
+                "下一请求只有实际加载了完整 schema 的工具才可调用。"
             ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "搜索关键词。",
-                    },
-                    "include_groups": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "可选工具组过滤。",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 3,
-                        "minimum": 1,
-                        "maximum": 20,
-                        "description": "最大返回数量。",
-                    },
-                },
-                "required": ["query"],
-            },
+            input_schema=ToolSearchInput.model_json_schema(),
             group="core",
+            capabilities=capabilities,
             metadata={
-                "examples": [{"input": {"query": "file search"}}],
+                "examples": [{"input": {"queries": ["file search"]}}],
                 "tags": ["discovery"],
                 "version": "1.0",
                 "deprecated": False,
@@ -273,98 +246,47 @@ class ToolSearchTool(BaseTool):
             },
         )
 
-    # endregion
-
-    # ==========================================
-    #               Properties
-    # ==========================================
-    # region
     @property
     def input_model(self) -> type[BaseModel] | None:
-        """返回搜索输入模型类引用。
-
-        Returns:
-            type[BaseModel] | None: 指定的 ToolSearchInput 校验模型。
-        """
+        """返回两个后端共享的输入模型。"""
         return ToolSearchInput
 
-    # endregion
-
-    # ==========================================
-    #               Core Methods
-    # ==========================================
-    # region
     def validate_input(self, params: dict[str, Any]) -> BaseModel | dict[str, Any]:
-        """校验 tool_search 命令输入参数。
-
-        Args:
-            params (dict[str, Any]): 用户或模型请求的原始参数。
-
-        Returns:
-            BaseModel | dict[str, Any]: 校验通过的参数模型或字典对象。
-
-        Raises:
-            IrisToolValidationError: 若基础类型校验不通过，或查询字段为空、
-                限量非法等原因导致无法查询。
-        """
+        """在模型工具参数入口校验并规范化各项查询。"""
         try:
-            value = ToolSearchInput.model_validate(params)
+            return ToolSearchInput.model_validate(params)
         except ValueError as exc:
             raise IrisToolValidationError("tool_search 参数校验失败", error=str(exc)) from exc
-
-        return value
 
     async def arun(
         self,
         params: BaseModel | dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        """执行 deferred 工具的实际检索。
-
-        Args:
-            params (BaseModel | dict[str, Any]): 执行参数。
-            context (ToolExecutionContext): 环境执行上下文。
-
-        Returns:
-            ToolResult: 包含检索出的候选工具摘要组成的成功负载结构。
-        """
+        """从本次允许目录选择工具，并投影统一的选择结果。"""
         del context
         search_input = cast(ToolSearchInput, params)
-
-        matches = self.tool_view.registry.search_deferred(
-            search_input.query,
-            include_groups=search_input.normalized_groups(),
-            limit=search_input.limit,
-            allowed_names={tool.name for tool in self.tool_view.available_tools},
-        )
-        tools = [_definition_summary(definition) for definition in matches]
-        text = json.dumps({"tools": tools}, ensure_ascii=False, separators=(",", ":"))
-
-        return ToolResult(
-            tool_use_id="",
-            tool_name=self.name,
-            content=[TextBlock(text=text)],
-            data={"tools": tools},
-            metadata={"context_revealed_tools": [definition.name for definition in matches]},
-        )
-
-    # endregion
-
-
-def _definition_summary(definition: ToolDefinition) -> dict[str, Any]:
-    """生成适合返回给大语言模型的简化工具摘要。
-
-    Args:
-        definition (ToolDefinition): 原始工具元定义。
-
-    Returns:
-        dict[str, Any]: 滤除无关细节后的紧凑 JSON 字典。
-    """
-    return {
-        "name": definition.name,
-        "description": definition.description[:240],
-        "group": definition.group,
-    }
+        groups = search_input.normalized_groups()
+        available = self.tool_view.available_tools
+        decision_metadata: dict[str, Any] = {}
+        if self.decision_client is None:
+            selected: list[ToolDefinition | None] = []
+            allowed_names = {tool.name for tool in available}
+            for query in search_input.queries:
+                matches = self.tool_view.registry.search_deferred(
+                    query, include_groups=groups, limit=1, allowed_names=allowed_names
+                )
+                selected.append(matches[0] if matches else None)
+        else:
+            candidates = [
+                tool.definition
+                for tool in available
+                if tool.definition.deferred and (groups is None or tool.definition.group in groups)
+            ]
+            selected, decision_metadata = await select_with_decision(
+                self.decision_client, search_input.queries, candidates
+            )
+        return selection_result(self.name, search_input.queries, selected, decision_metadata)
 
 
 def _validated_query(query: str, limit: int) -> tuple[str, dict[str, float], int]:
@@ -378,12 +300,12 @@ def _validated_query(query: str, limit: int) -> tuple[str, dict[str, float], int
         tuple[str, dict[str, float], int]: 格式化搜索词，各词汇的查询权重表，受保护的 limit。
 
     Raises:
-        IrisToolValidationError: 如果最终词汇全为空则抛异常。
+        IrisToolValidationError: 如果查询为空白则抛异常。
     """
     normalized_query = query.strip().lower()
     query_terms = _token_weights(normalized_query)
-    if not query_terms:
-        raise IrisToolValidationError("tool_search query 必须包含可搜索文本")
+    if not normalized_query:
+        raise IrisToolValidationError("tool_search query 不能为空")
     return normalized_query, query_terms, limit
 
 
