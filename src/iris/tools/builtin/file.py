@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import tempfile
 from abc import abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -27,6 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ...exceptions import IrisToolExecutionError, IrisToolValidationError
 from ...message import ImageBlock, TextBlock, image_reference_text
+from ...utils.files import atomic_write_text
 from .._file_mutation import file_mutation
 from .._io import run_tool_io
 from .._read_state import ReadFileRecord, ReadFileState
@@ -306,16 +306,7 @@ class WorkspaceFileService:
             path (Path): 目标文件路径。
             content (str): 要写入的完整文本内容。
         """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=path.parent,
-        ) as handle:
-            handle.write(content)
-            temp_path = Path(handle.name)
-        temp_path.replace(path)
+        atomic_write_text(path, content)
 
     def iter_files(
         self,

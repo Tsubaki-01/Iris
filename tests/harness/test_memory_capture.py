@@ -269,7 +269,7 @@ def test_child_does_not_install_automatic_maintenance(tmp_path: Path) -> None:
     runtime.environment.memory_service = MemoryService(SQLiteMemoryStore(tmp_path / "child.db"))
     runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
     assert runner._maintenance is None
-    assert runtime.environment.memory_capture_port is None
+    assert runtime.environment.capture_port is None
 
 
 @pytest.mark.asyncio

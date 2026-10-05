@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
-from typing import Any
-
 from ..lifecycle import RunRecord
 from ..lifecycle.history import RunMessageSlice
 from ..memory.generation_models import MemoryCaptureSource
 from ..memory.models import MemoryEpisode, MemoryRecord, MemorySourceType
-from ..message import Role, TextBlock, ToolResultBlock, ToolUseBlock
+from ._capture_records import capture_records
 
 
 def capture_source(run: RunRecord, *, source_id: str, namespace: str) -> MemoryCaptureSource:
@@ -32,67 +28,20 @@ def capture_episode(
     end = messages.end_message_count
     if through_count is not None:
         end = max(messages.start_message_count, min(end, through_count))
-    records: list[MemoryRecord] = []
-    for ordinal, message in enumerate(messages.messages, messages.start_message_count):
-        if ordinal >= end:
-            break
-        if message.role is Role.SYSTEM or message.metadata.get("context_kind") in {
-            "before_current_input",
-            "memory",
-        }:
-            continue
-        occurred_at = datetime.fromtimestamp(message.timestamp, UTC).isoformat()
-        for block_index, block in enumerate(message.blocks):
-            record_id = f"{messages.source_id}:{messages.run_id}:{ordinal}:{block_index}"
-            metadata: dict[str, Any] = {"message_ordinal": ordinal, "block_index": block_index}
-            source_type = MemorySourceType.MESSAGE
-            if isinstance(block, TextBlock):
-                text = block.text
-                role = message.role.value
-            elif isinstance(block, ToolUseBlock):
-                role = "assistant"
-                text = json.dumps(block.input, ensure_ascii=False)
-                metadata.update(tool_name=block.name, call_id=block.id, record_kind="tool_call")
-                if block.name in {"memory_search", "memory_fetch"}:
-                    metadata.update(evidence_allowed=False, query=block.input)
-                    text = ""
-                if block.name in {"memory_update", "memory_forget", "memory_fetch"}:
-                    item_id = block.input.get("item_id")
-                    if isinstance(item_id, str):
-                        metadata["memory_item_ids"] = [item_id]
-            elif isinstance(block, ToolResultBlock):
-                role = "tool"
-                source_type = MemorySourceType.TOOL_EVENT
-                metadata.update(
-                    tool_name=block.name,
-                    call_id=block.tool_use_id,
-                    is_error=block.is_error,
-                    record_kind="tool_result",
-                )
-                if block.name in {"memory_search", "memory_fetch"}:
-                    metadata["memory_item_ids"] = _memory_item_ids(block.text)
-                    metadata["evidence_allowed"] = False
-                    text = ""
-                else:
-                    text = block.text
-                    if block.name in {"memory_remember", "memory_update"}:
-                        metadata["memory_item_ids"] = _memory_item_ids(block.text)
-                artifact = block.metadata.get("artifact")
-                if artifact is not None:
-                    metadata["artifact"] = artifact
-            else:
-                continue
-            records.append(
-                MemoryRecord(
-                    id=record_id,
-                    role=role,
-                    text=text,
-                    source_type=source_type,
-                    source_id=record_id,
-                    occurred_at=occurred_at,
-                    metadata=metadata,
-                )
-            )
+    records = tuple(
+        MemoryRecord(
+            id=record.ref,
+            role=record.role,
+            text=record.text,
+            source_type=MemorySourceType.TOOL_EVENT
+            if record.tool_event
+            else MemorySourceType.MESSAGE,
+            source_id=record.ref,
+            occurred_at=record.occurred_at,
+            metadata=record.metadata,
+        )
+        for record in capture_records(messages, end=end)
+    )
     terminal = messages.terminal_message_count if end == messages.terminal_message_count else None
     updated = source.model_copy(
         update={
@@ -119,22 +68,3 @@ def capture_episode(
             },
         )
     return updated, episode
-
-
-def _memory_item_ids(content: str) -> list[str]:
-    """在工具原始 JSON 边界只提取 ID，任何读回正文均不进入新证据。"""
-    try:
-        payload = json.loads(content)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    items = payload.get("items", [payload.get("item")])
-    if not isinstance(items, list):
-        return []
-    return [
-        item_id
-        for item in items
-        if isinstance(item, dict)
-        if isinstance(item_id := item.get("item_id", item.get("id")), str)
-    ]

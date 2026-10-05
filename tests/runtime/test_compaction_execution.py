@@ -96,7 +96,7 @@ async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool, co
         def request_capture(self, run_id: str, through_count: int) -> None:
             hints.append((run_id, through_count))
 
-    runtime.environment.memory_capture_port = CapturePort()
+    runtime.environment.capture_port = CapturePort()
     raw = [Msg.user("旧任务"), Msg.assistant("旧结果")]
     activation = start_activation(input="当前任务", initial_session_message_count=2)
     port = FakeRuntimeCommitPort(activation, messages=raw)

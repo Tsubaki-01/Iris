@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot
-from ._generation_worker import check_generation_cancelled
+from ..utils.generation_worker import check_generation_cancelled
 from ._prompts import structured_memory_prompt
 from .models import MemoryNamespaceSnapshot, MemoryOverviewConfig, MemoryOverviewContent
 

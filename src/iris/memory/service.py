@@ -23,7 +23,7 @@ from typing import TypeVar
 from ..exceptions import IrisMemoryError
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
-from ._generation_worker import generation_worker
+from ..utils.generation_worker import generation_worker
 from ._prompts import snapshot_memory_prompts
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled

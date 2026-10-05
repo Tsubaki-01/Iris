@@ -22,6 +22,7 @@ PROMPT_IDS = (
     "memory_flush",
     "memory_overview",
     "memory_recall_instruction",
+    "project_skill_update",
     "skill_catalog_usage",
     "todo_context",
     "todo_reminder",

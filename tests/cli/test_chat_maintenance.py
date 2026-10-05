@@ -35,15 +35,20 @@ class ChatMaintenanceProvider(FakeStreamingProvider):
         raise AssertionError("测试中的后台生成只能被取消")
 
 
+@pytest.mark.parametrize("feature", ["memory", "evolution"])
 def test_chat_owns_maintenance_and_drains_before_loop_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, feature: str
 ) -> None:
     """实际 CLI 路径应完成绑定、空闲生成与退出取消，不要求 SDK 用户代劳。"""
     config_path = tmp_path / "agent.yaml"
+    feature_config = (
+        "memory:\n  enabled: true\n  generation:\n    enabled: true\n"
+        if feature == "memory"
+        else "skills:\n  enabled: true\nevolution:\n  enabled: true\n"
+    )
     config_path.write_text(
         "name: chat\nmodel: openai/test\nsystem: help\n"
-        "maintenance:\n  idle_seconds: 0\n"
-        "memory:\n  enabled: true\n  generation:\n    enabled: true\n",
+        "maintenance:\n  idle_seconds: 0\n" + feature_config,
         encoding="utf-8",
     )
     provider = ChatMaintenanceProvider()
@@ -70,6 +75,8 @@ def test_chat_owns_maintenance_and_drains_before_loop_exit(
     assert errors == []
     assert provider.cancelled.is_set()
     assert len(provider.stream_requests) == len(provider.requests) == 1
+    if feature == "evolution":
+        assert not (tmp_path / ".iris" / "memory").exists()
 
 
 def test_chat_preparation_failure_reports_error_after_cleanup(

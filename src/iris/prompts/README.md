@@ -45,6 +45,7 @@ print(text)  # Select the best tool from state.tools for state.queries[0].
 | compaction 与 compaction_input | 完整压缩开始，所有批次共用一份快照 |
 | memory_context、Goal、Todo、Skill 用法、Decision 指令 | runner/runtime 构造；实际领域数据仍动态传入 |
 | system/context 自定义模板 | runtime 装配冻结各自来源目录；仍使用原配置声明入口 |
+| project_skill_update | A 取得项目锁后，每轮固定一份模板快照，同时读取本轮策略 Skill |
 
 child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套目录。独立
 `TemplateRenderer()` 和 `ContextBuilder` 的文件更新语义保持不变；冻结能力见
@@ -52,7 +53,7 @@ child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套�
 
 ## 固定模板与领域职责
 
-`PROMPT_IDS` 列出当前 13 个入口，每个 ID 对应同名 `.j2`：
+`PROMPT_IDS` 列出当前 14 个入口，每个 ID 对应同名 `.j2`：
 
 | 用途 | ID |
 | --- | --- |
@@ -62,10 +63,12 @@ child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套�
 | 后续提示 | `goal_continuation`、`todo_reminder` |
 | Skill 使用 | `skill_catalog_usage` |
 | Decision | `memory_recall_instruction`、`tool_discovery_instruction` |
+| 项目经验整理 | `project_skill_update` |
 
 默认种子与 Python 包一起分发。`prompts` 仅负责来源与渲染入口，不导入消费领域；变量、请求
 角色、结构化输出 schema、解析及应用规则由各领域持有。Memory 的固定输出要求和实际模型
-schema 直接加入请求，不依赖可编辑模板保留相关文案。
+schema 直接加入请求，不依赖可编辑模板保留相关文案。项目经验 A 阶段同样由 evolution
+追加正文/no-change 的固定协议与响应 schema。
 
 当前支持手工修改项目正文；自动修订不属于此包已实现能力。初始化与并发发布测试位于
 `tests/prompts/`，完整 Jinja 快照语义测试位于 `tests/utils/test_templating.py`。

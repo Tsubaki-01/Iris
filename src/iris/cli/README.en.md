@@ -23,6 +23,12 @@ system/context guidance; compaction and automatic Memory adopt edits at the star
 complete operation or cycle. Existing `system` / `context` configuration stays in place;
 see [project prompt sources](../prompts/README.md).
 
+With `evolution.enabled` and `skills.enabled`, the CLI constructs a project experience service
+from the main configuration and binds it to the host's shared coordinator. Memory and evolution
+retain separate locks, cancellation state and cleanup. Evolution also works with Memory disabled.
+Exit drains existing work without running an extra summary. A newly generated Skill is discovered
+on the next runner startup; there is no additional maintenance command.
+
 - Ordinary input starts a Run when idle or steers the current Run at an existing execution boundary.
 - `/follow-up <message>` queues the next Run after the current one finishes.
 - `/todo` reads the current session's checklist and displays its actual file path.

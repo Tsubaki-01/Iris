@@ -678,10 +678,21 @@ BCI、system/reasoning 和记忆读回正文不成为新证据；Search/Fetch �
 每次消费提交前重读生命周期资格；缺少 reader 时保留 pending。SQLite lifecycle 支持重启续作，
 纯内存 lifecycle 丢失后不自动猜测旧材料资格。
 
-一个宿主最多一项 Memory 维护。规范化实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
+一个宿主最多同时运行一项 Memory 和一项项目学习维护，取消状态、worker 与锁互相独立。
+Memory 使用实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
 执行有界领域周期并排空真实 IO，同库同 namespace 的独立进程不会重复调用模型。
 锁忙让出本地位置，至少等待 `max(idle_seconds, 1 秒)` 后自动再试，多资源按有界周期轮转。
 Memory 服务拥有 dream 优先、flush 后 dream、投影与 overview 修复的顺序，协调器不解释内容。
+
+项目学习由宿主用 `build_project_evolution_binding(config, workspace_root=workspace,
+prompt_source=prompt_source, provider=provider)` 构造，然后通过
+`runner.bind_maintenance(coordinator, evolution=project_binding)` 让多个 runner 借用同一资源。
+也可同时传入 `memory=binding`。仅主配置决定维护策略，贡献材料的 runner 不争夺配置所有权。
+项目锁按 workspace 标识，与 Memory 锁不嵌套；Memory 关闭不会阻止项目经验维护。
+`await coordinator.request_project_experience(project_binding)` 可请求一次整理并跳过一般空闲等待，
+仍遵守前台、来源资格和资源锁；没有合格材料时返回 empty，不调用模型。
+关闭借用它的 runner 后，可用 `await coordinator.unbind_evolution(project_binding)` 单独撤销。
+完整启用、产物采用和材料边界见 [evolution](../evolution/README.md)。
 
 前台 admission/activation 全部退出并安静达到 idle 后才维护。新前台立即撤销未提交生成，
 不等待模型或资源锁；Goal/follow-up 的短交接保留同一前台计数。
@@ -701,6 +712,7 @@ THREAD 服务使用专用 worker，INLINE 保持调用线程执行；已派发�
 ## 公开接口
 
 `iris.harness` 导出 `AgentRunner`、`MaintenanceCoordinator`、`MemoryMaintenanceBinding`、
+`ProjectEvolutionBinding`、`build_project_evolution_binding`、
 `SessionHistory`、`SessionManager`、`SubmitReceipt`、
 `ResumeReceipt`、`SubmissionEvent`、
 `SessionSubmissionEvent`、`SessionEvent`、`LiveFact`、`LivePublisher`，以及 run

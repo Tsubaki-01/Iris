@@ -17,7 +17,8 @@ from ..lifecycle import (
     RunUsage,
 )
 from ._subagent import ChildProviderFactory
-from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding
+from .evolution import build_project_evolution_binding
+from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding, ProjectEvolutionBinding
 from .observer import RunEventObserver
 from .runner import AgentRunner
 from .session_history import SessionHistory
@@ -44,6 +45,8 @@ __all__ = [
     "LivePublisher",
     "MaintenanceCoordinator",
     "MemoryMaintenanceBinding",
+    "ProjectEvolutionBinding",
+    "build_project_evolution_binding",
     "ResumeReceipt",
     "RunEvent",
     "RunEventKind",

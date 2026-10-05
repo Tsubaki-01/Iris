@@ -1,5 +1,9 @@
 [中文](README.md)
 
+Source capture uses `RuntimeCapturePort.request_capture(run_id, through_count)`, injected through
+`RuntimeEnvironment.capture_port`. Runtime does not choose Memory or project experience consumers.
+Capture progress, terminal eligibility, learning schedules and locks stay with their respective owners.
+
 # `iris.runtime`
 
 Both RuntimeFactory entry points accept optional `prompt_source=`. Without an injected source,

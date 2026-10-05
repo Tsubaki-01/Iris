@@ -36,6 +36,7 @@ from ..harness import (
     SessionManager,
     SubmissionEvent,
 )
+from ..harness.evolution import build_project_evolution_binding
 from ..harness.streaming import CommandCleanupFailed, LiveFact
 from ..hitl import (
     HumanInteraction,
@@ -209,6 +210,9 @@ def run_chat(
             overview_provider=provider,
             overview_model=config.model.name,
         )
+        evolution = build_project_evolution_binding(
+            config, workspace_root=workspace, prompt_source=prompt_source, provider=provider
+        )
         runner = AgentRunner.from_config(
             config,
             config_path=options.config_path,
@@ -218,15 +222,21 @@ def run_chat(
             live_publisher=live_output,
         )
         maintenance = None
-        if memory_service is not None and config.memory.generation.enabled:
+        memory_binding = (
+            MemoryMaintenanceBinding(
+                service=memory_service,
+                database_path=resolve_memory_path(config.memory.path, workspace),
+                namespace=config.memory.write_namespace,
+            )
+            if memory_service is not None and config.memory.generation.enabled
+            else None
+        )
+        if memory_binding is not None or evolution is not None:
             maintenance = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
             runner.bind_maintenance(
                 maintenance,
-                memory=MemoryMaintenanceBinding(
-                    service=memory_service,
-                    database_path=resolve_memory_path(config.memory.path, workspace),
-                    namespace=config.memory.write_namespace,
-                ),
+                memory=memory_binding,
+                evolution=evolution,
             )
     except IrisError as exc:
         write_error(_format_iris_error(exc))

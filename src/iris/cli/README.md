@@ -21,6 +21,10 @@ iris chat agent.yaml --session-id work --max-steps 8
 分别在下一次完整压缩、下一轮维护开始时采用。原 `system` / `context` 配置入口不变，详见
 [项目提示来源](../prompts/README.md)。
 
+启用 `evolution.enabled`（同时启用 `skills.enabled`）时，CLI 用主配置装配项目经验服务，
+与 Memory 共用宿主维护协调器；两类任务各自持锁、取消和排空。关闭 Memory 仍可维护项目
+经验；退出只收尾，不补跑总结。新生成 Skill 由下次启动的 runner 发现，没有新增维护命令。
+
 - 普通输入：空闲时创建 Run，执行中按现有安全边界 steer 当前 Run。
 - `/follow-up <消息>`：排入下一轮，等待当前 Run 收尾。
 - `/todo`：只读查看当前会话待办及实际文件路径。

@@ -1,5 +1,9 @@
 [English](README.en.md)
 
+原文捕获通过 `RuntimeCapturePort` 的 `request_capture(run_id, through_count)` 提示宿主，
+由 `RuntimeEnvironment.capture_port` 注入。Runtime 不知道该事实提示会写入 Memory、
+项目经验材料或两者；捕获进度、终态资格、学习调度和锁由各自 owner 处理。
+
 # `iris.runtime`
 
 `RuntimeFactory.from_config()` / `from_config_path()` 接收可选 `prompt_source=`。
