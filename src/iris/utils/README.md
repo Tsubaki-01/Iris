@@ -24,7 +24,7 @@ text = renderer.render_file(Path("prompts/greeting.j2"), {"name": "Iris"})
 print(text)  # 你好，Iris。
 ```
 
-构造器不接收参数。`render_file(template_path: Path, context: dict[str, Any]) -> str` 接收入口
+默认构造器不接收参数。`render_file(template_path: Path, context: dict[str, Any]) -> str` 接收入口
 路径和当前变量，返回 Jinja 的渲染结果。调用方负责模板路径、数据准备、消息角色、预算和实例
 生命周期；同一个 renderer 实例可渲染多个目录中的模板。
 
@@ -39,6 +39,24 @@ print(text)  # 你好，Iris。
   Jinja 的编译缓存和默认更新检测按文件 mtime 处理入口及实际使用依赖的变更；最终输出不缓存。
 - `include`、`import` 和 `extends` 使用 Jinja 原生语义，支持动态文件名和按需加载。
 
+## 固定操作内的模板源
+
+需要在完整操作内固定正文时，使用 `TemplateRenderer.freeze_directories(directories)`：
+
+```python
+renderer = TemplateRenderer.freeze_directories([Path("prompts")])
+text = renderer.render_file(Path("prompts/greeting.j2"), {"name": "Iris"})
+```
+
+工厂捕获各入口父目录下全部可加载文件内容，目录之间相互隔离；返回的 renderer 只从内存
+取源，后续磁盘改动不影响当前实例。动态依赖、候选列表和可选文件的缺失状态一并固定，实际
+使用时才解码与编译，不提前编译未执行分支中的模板。每次渲染仍接收当前变量，Jinja 输出
+规则与默认文件 renderer 相同。捕获不承诺多文件事务原子性。
+
+命名项目模板由 [`iris.prompts`](../prompts/README.md) 负责初始化和选择快照时机；runtime
+装配也使用冻结 renderer 固定自定义 system/context 模板。独立 `TemplateRenderer()` 继续
+按文件更新检测，不因新增快照能力改变语义。
+
 读取、解码、解析或执行模板失败时抛出 `IrisTemplateError`，包含模板路径和底层错误。
 业务调用边界负责转换领域异常：context 与 compaction 使用 `IrisContextError`，memory 使用
 `IrisMemoryError`，skill 使用 `IrisSkillError`，goal 使用 `IrisGoalError`。
@@ -51,11 +69,11 @@ print(text)  # 你好，Iris。
 | 调用方 | 模板 | 实例生命周期 |
 | --- | --- | --- |
 | `ContextBuilder` | 用户配置的 context 模板 | Builder 持有，可通过 `template_renderer` 注入 |
-| Runtime compaction | `compaction.j2`、`compaction_input.j2` | `RuntimeEnvironment.prompt_renderer` |
-| Runtime 记忆窗口 | `memory_context.j2` | 同一 `RuntimeEnvironment.prompt_renderer` |
-| `MemoryService` | `memory_flush.j2`、`memory_dream.j2`、`memory_overview.j2` | Service 自己持有 `prompt_renderer` |
-| `SkillCatalog` | `skill_catalog_usage.j2` | 构造时读取一次，后续复用使用指引 |
-| Goal 上下文与自动输入 | `goal_context.j2`、`goal_continuation.j2` | `goal.context` 复用模块级 renderer |
+| Runtime compaction | `compaction.j2`、`compaction_input.j2` | 一次完整压缩的项目来源快照 |
+| Runtime 记忆窗口 | `memory_context.j2` | runner/runtime 构造期项目来源快照 |
+| `MemoryService` | `memory_flush.j2`、`memory_dream.j2`、`memory_overview.j2` | 整个自动 cycle 或单次独立生成操作共用快照 |
+| `SkillCatalog` | `skill_catalog_usage.j2` | 构造期来源，后续复用使用指引 |
+| Goal、Todo 与 Decision | 对应项目命名模板 | runner/runtime 构造期快照，领域变量保持动态 |
 
 实现位于 [`templating.py`](templating.py)，公共导出位于 [`__init__.py`](__init__.py)。
 模板加载、更新、转义与异常契约由 `tests/utils/test_templating.py` 验证；各领域测试覆盖请求装配

@@ -13,9 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
+from ..prompts import PromptSnapshot
 from ..providers.protocols import CompletionProvider
 from ._generation_worker import check_generation_cancelled
-from ._prompts import render_memory_prompt
+from ._prompts import structured_memory_prompt
 from .generation_models import (
     DreamOperation,
     DreamPlan,
@@ -92,6 +93,24 @@ class _DreamResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operations: tuple[_ProposedOperation, ...]
     resolutions: tuple[_Resolution, ...]
+
+
+_FLUSH_INSTRUCTIONS = """observations 是本批提炼的观察；没有值得保留的内容时返回空列表。
+text 是正文，applicability 是适用范围，reason 只说明保存用途；category/kind 使用 schema 枚举。
+episodes 描述来源，records.episode_ref 对应 episodes.ref；只有 records.ref 可作本批证据。
+context 仅供理解，每条观察至少引用一个支持正文的证据 ref；target_item_ids 只能引用输入中已有条目。
+不调用工具，不使用模型外部知识。"""
+
+_DREAM_INSTRUCTIONS = """operations 是正式记忆的最终操作，resolutions 为本批每个观察提供唯一去向。
+所有证据引用使用 evidence 中的 ref；evidence.record 是原文分组，真实区间由程序保存。
+explicit_changes 列出本批必须检查的事件 ref，events.changes 给出修改前后字段值。
+add 使用唯一 new_key，数据库 ID 由程序生成；其它操作 target_id 必须来自本批 items。
+update 保持 ID；merge 的 target_id 是已有 keeper，merge_ids 是其它被合并条目。
+同一已有条目只能有一种最终操作；新增或改写必须给出完整正文及当前支持证据集合。
+support 只补证据不改正文，delete 删除已无保留价值的知识。
+每个观察必须且只能有一个 resolution：target_id 为已有 ID 或本响应新增标签，
+也可为 null 并用 reason 解释忽略原因；不得指向本次退役条目。
+无需修改时 operations 可为空，但仍须完成全部观察的 resolution 与 explicit_changes 检查。"""
 
 
 def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int) -> LLMRequest:
@@ -299,7 +318,11 @@ def _select_flush(
 
 
 async def flush(
-    service: MemoryService, namespace: str, *, scope: MemoryMaintenanceScope | None = None
+    service: MemoryService,
+    namespace: str,
+    *,
+    prompt_snapshot: PromptSnapshot,
+    scope: MemoryMaintenanceScope | None = None,
 ) -> GenerationResult:
     """消费一批固定原文片段，原子保存观察和处理位置。"""
     provider, model = _dependencies(service)
@@ -318,10 +341,8 @@ async def flush(
         if not progresses:
             return GenerationResult(namespace=namespace, stage="flush", status="empty")
         prompt = await service.run_async_io(
-            lambda: render_memory_prompt(
-                service.prompt_renderer,
-                "memory_flush.j2",
-                {"schema_json": json.dumps(_FlushResponse.model_json_schema(), ensure_ascii=False)},
+            lambda: structured_memory_prompt(
+                prompt_snapshot, "memory_flush", _FLUSH_INSTRUCTIONS, _FlushResponse
             )
         )
         slices, request = await service.run_async_io(
@@ -654,6 +675,7 @@ async def dream(
     service: MemoryService,
     namespace: str,
     *,
+    prompt_snapshot: PromptSnapshot,
     retry_blocked: bool = False,
     scope: MemoryMaintenanceScope | None = None,
 ) -> GenerationResult:
@@ -683,10 +705,8 @@ async def dream(
                 namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
             )
         prompt = await service.run_async_io(
-            lambda: render_memory_prompt(
-                service.prompt_renderer,
-                "memory_dream.j2",
-                {"schema_json": json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False)},
+            lambda: structured_memory_prompt(
+                prompt_snapshot, "memory_dream", _DREAM_INSTRUCTIONS, _DreamResponse
             )
         )
         while True:

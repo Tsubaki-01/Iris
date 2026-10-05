@@ -272,7 +272,9 @@ def test_missing_typesafe_key_fails_during_construction(
 ) -> None:
     """主聊天 key 不能替代启用 Decision 所需的独立凭据。"""
     monkeypatch.setattr(
-        decision_factory, "get_config", lambda: Config(api_key="chat-key", provider_api_keys={})
+        decision_factory,
+        "get_config",
+        lambda: Config.model_construct(api_key="chat-key", provider_api_keys={}),
     )
     with pytest.raises(IrisConfigError, match="provider_api_keys.typesafe"):
         AgentRunner.from_config(

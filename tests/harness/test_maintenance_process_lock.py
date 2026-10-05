@@ -16,6 +16,7 @@ from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
 from iris.memory.generation_models import MemoryMaintenanceScope
 from iris.memory.mirror import FileMemoryMirror
 from iris.message import LLMRequest, LLMResponse
+from iris.prompts import PromptSource
 
 from .fakes import StaticProvider, text_response
 from .test_maintenance_coordinator import configured_runner
@@ -57,6 +58,7 @@ def _maintain_process(
         provider = Provider()
         service = ObservedService(
             SQLiteMemoryStore(path / "memory.db"),
+            prompt_source=PromptSource.initialize(path),
             mirror=FileMemoryMirror(path / "mirror", workspace_root=path),
             generation_provider=provider,
             generation_model="generation",

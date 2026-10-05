@@ -31,6 +31,7 @@ from iris.memory import (
     SQLiteMemoryStore,
 )
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.store import SQLiteStore
 
 from .fakes import StaticProvider, text_response, tool_response
@@ -60,6 +61,7 @@ async def test_model_controls_search_fetch_and_results_remain_normal_history(
         mirror=mirror,
         overview_provider=overview_provider,
         overview_model="fake-model",
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     item = service.remember(
         MemoryWriteInput(
@@ -266,6 +268,7 @@ async def test_disabled_config_ignores_injected_service_and_saved_overview(
         mirror=FileMemoryMirror(tmp_path / "mirror"),
         overview_provider=overview_provider,
         overview_model="fake-model",
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     item = service.remember(MemoryWriteInput(text="历史条目原文", reason="用户明确保存"))
     await service.refresh_overview("project")

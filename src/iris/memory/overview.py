@@ -9,17 +9,22 @@ from pydantic import ValidationError
 
 from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
-from ..utils import TemplateRenderer
+from ..prompts import PromptSnapshot
 from ._generation_worker import check_generation_cancelled
-from ._prompts import render_memory_prompt
+from ._prompts import structured_memory_prompt
 from .models import MemoryNamespaceSnapshot, MemoryOverviewConfig, MemoryOverviewContent
+
+_OVERVIEW_INSTRUCTIONS = """响应必须且只能包含 core_facts 和 knowledge_scope 两个字符串字段。
+core_facts 保存核心事实，允许空字符串但不能省略；
+knowledge_scope 覆盖输入实际包含的全部知识主题，不能为空。
+两个字段均使用 Markdown 正文，不添加程序节标题。"""
 
 
 def build_overview_request(
     snapshot: MemoryNamespaceSnapshot,
     model: str,
     config: MemoryOverviewConfig,
-    renderer: TemplateRenderer,
+    prompt_snapshot: PromptSnapshot,
 ) -> LLMRequest:
     """将完整 active 正式知识按分类和类型组织成一次无工具生成请求。"""
     groups: list[dict[str, object]] = []
@@ -54,7 +59,14 @@ def build_overview_request(
     return LLMRequest(
         model=model,
         messages=[
-            Msg.system(render_memory_prompt(renderer, "memory_overview.j2", {})),
+            Msg.system(
+                structured_memory_prompt(
+                    prompt_snapshot,
+                    "memory_overview",
+                    _OVERVIEW_INSTRUCTIONS,
+                    MemoryOverviewContent,
+                )
+            ),
             Msg.user(source),
         ],
         max_tokens=config.max_tokens,

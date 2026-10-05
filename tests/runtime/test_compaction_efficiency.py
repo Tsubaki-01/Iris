@@ -9,17 +9,19 @@ from fakes import history_snapshot
 from iris.agents import CompactionConfig
 from iris.lifecycle import SessionContextWindow
 from iris.message import LLMRequest, Msg
+from iris.prompts import PromptSnapshot
 from iris.runtime._compaction_summary import next_summary_batch, serialize_history
 from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.compaction import select_compaction_end
 from iris.runtime.memory_context import select_context_window
-from iris.utils import TemplateRenderer
 
-from .test_compaction_summary import _DEFAULT_PROMPT, _estimate, _main_request
+from .test_compaction_summary import _estimate, _main_request
 from .test_memory_context import TextTokenProvider, _request
 
 
-def test_many_small_records_need_few_complete_request_estimates() -> None:
+def test_many_small_records_need_few_complete_request_estimates(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """整批能装下时，无需对每一个逐渐增长的前缀重新计量。"""
     records = serialize_history([Msg.user(f"record {i}: Atlas uses uv") for i in range(256)], 0)
     calls = 0
@@ -37,8 +39,8 @@ def test_many_small_records_need_few_complete_request_estimates() -> None:
         (0, 0),
         config,
         estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=TemplateRenderer(),
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     assert batch.next_position == (256, 0)
     assert calls < 20
@@ -97,7 +99,9 @@ def test_identical_overview_candidates_reuse_full_request_and_token_count() -> N
     assert tokens == TextTokenProvider().estimate_input_tokens(request)
 
 
-def test_nonzero_offset_and_empty_records_preserve_sequential_coverage() -> None:
+def test_nonzero_offset_and_empty_records_preserve_sequential_coverage(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """跨批次起点只裁剪第一条正文，空正文仍保留身份并推进位置。"""
     records = serialize_history(
         [Msg.user("skip"), Msg.user("prefix-tail"), Msg.user(""), Msg.user("last")], 0
@@ -109,8 +113,8 @@ def test_nonzero_offset_and_empty_records_preserve_sequential_coverage() -> None
         (1, 7),
         CompactionConfig(),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=TemplateRenderer(),
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     text = batch.request.messages[1].text
     assert batch.next_position == (4, 0)
@@ -121,7 +125,9 @@ def test_nonzero_offset_and_empty_records_preserve_sequential_coverage() -> None
     assert "text_coverage=complete [0,0)/0" in text
 
 
-def test_nonmonotonic_estimates_return_only_an_accepted_request() -> None:
+def test_nonmonotonic_estimates_return_only_an_accepted_request(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """候选 token 不严格单调时仍返回实际合预算的请求，不要求最大装填率。"""
     records = serialize_history([Msg.user(f"record {i}") for i in range(9)], 0)
     accepted: list[LLMRequest] = []
@@ -140,15 +146,17 @@ def test_nonmonotonic_estimates_return_only_an_accepted_request() -> None:
         (0, 0),
         CompactionConfig(input_budget_tokens=6500),
         estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=TemplateRenderer(),
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     assert any(batch.request is request for request in accepted)
     assert batch.next_position > (0, 0)
     assert estimate(batch.request) <= 6500
 
 
-def test_many_records_across_batches_are_covered_once_without_gaps() -> None:
+def test_many_records_across_batches_are_covered_once_without_gaps(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """多个完整前缀与末条分片交替时，实际请求覆盖恰好等于持久原文。"""
     records = serialize_history([Msg.user(f"source-{i}:" * 450) for i in range(19)], 0)
     config = CompactionConfig(input_budget_tokens=6500)
@@ -163,8 +171,8 @@ def test_many_records_across_batches_are_covered_once_without_gaps() -> None:
             position,
             config,
             _estimate,
-            system_prompt=_DEFAULT_PROMPT,
-            prompt_renderer=TemplateRenderer(),
+            system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+            prompt_snapshot=prompt_snapshot,
         )
         assert batch.next_position > position
         assert _estimate(batch.request) <= config.input_budget_tokens
@@ -182,7 +190,9 @@ def test_many_records_across_batches_are_covered_once_without_gaps() -> None:
     assert consumed == [len(record.text) for record in records]
 
 
-def test_no_room_for_next_record_keeps_last_successful_request() -> None:
+def test_no_room_for_next_record_keeps_last_successful_request(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """下一条连 header 都放不下时，请求仍对应已确认的完整前缀。"""
     records = serialize_history([Msg.user("first"), Msg.user("next" * 100)], 0)
     reference = next_summary_batch(
@@ -192,8 +202,8 @@ def test_no_room_for_next_record_keeps_last_successful_request() -> None:
         (0, 0),
         CompactionConfig(),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=TemplateRenderer(),
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     batch = next_summary_batch(
         _main_request(),
@@ -202,8 +212,8 @@ def test_no_room_for_next_record_keeps_last_successful_request() -> None:
         (0, 0),
         CompactionConfig(input_budget_tokens=_estimate(reference.request)),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=TemplateRenderer(),
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     assert batch.next_position == (1, 0)
     assert batch.request.messages[1].text == reference.request.messages[1].text

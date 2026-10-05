@@ -18,6 +18,7 @@ from iris.memory.generation_models import MemoryGenerationConfig
 from iris.memory.mirror import FileMemoryMirror
 from iris.memory.service import MemoryIOExecutionMode
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
 
@@ -37,6 +38,7 @@ def memory_service(
         mirror=FileMemoryMirror(path.parent / "mirror", workspace_root=path.parent),
         generation_provider=provider,
         generation_model="generation",
+        prompt_source=PromptSource.initialize(path.parent),
         overview_provider=provider,
         overview_model="overview",
         io_execution_mode=io_mode,

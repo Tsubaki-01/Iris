@@ -15,6 +15,12 @@ iris chat agent.yaml --session-id work --max-steps 8
 加载指定 dotenv 文件。`--max-steps` 限制每个 Run 的模型步数；`--no-tools` 关闭模型工具，
 此选项不能用于创建自动 Goal。
 
+启动时先按有效 root workspace 解析 `prompts.root`（默认 `.iris/prompts`），只补齐缺少的
+命名模板，然后把同一个 `PromptSource` 传给 Memory 服务和 runner。已有项目正文保留。
+手工修改策略后，Goal/Todo、system/context 等指引由新建 runner 采用；压缩和自动 Memory
+分别在下一次完整压缩、下一轮维护开始时采用。原 `system` / `context` 配置入口不变，详见
+[项目提示来源](../prompts/README.md)。
+
 - 普通输入：空闲时创建 Run，执行中按现有安全边界 steer 当前 Run。
 - `/follow-up <消息>`：排入下一轮，等待当前 Run 收尾。
 - `/todo`：只读查看当前会话待办及实际文件路径。
@@ -23,7 +29,7 @@ iris chat agent.yaml --session-id work --max-steps 8
 
 ## 自动维护
 
-启用 `memory.generation.enabled` 后，CLI 显式创建 Memory 服务和一个共享
+启用 `memory.generation.enabled` 后，CLI 将已构造的 Memory 服务绑定到一个共享
 `MaintenanceCoordinator`，在接收输入前绑定 runner。`maintenance.idle_seconds` 控制安静时间，
 默认 300 秒；Memory 的生成预算继续位于 `memory.generation`。
 

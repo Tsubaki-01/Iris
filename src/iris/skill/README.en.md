@@ -95,10 +95,13 @@ contains only `name` and `description`. After selecting an entry, the model call
 {"name": "my-skill"}
 ```
 
-Catalog usage instructions come from [`skill_catalog_usage.j2`](../prompts/skill_catalog_usage.j2).
-`SkillCatalog` reads them once at construction through `iris.utils.TemplateRenderer` and reuses the
-text in subsequent slot projections. `ContextXmlRenderer` escapes the `usage` attribute when building
-default XML output. Template failures raise `IrisSkillError`.
+Catalog guidance comes from `skill_catalog_usage.j2` under the project's `prompts.root`, defaulting
+to `.iris/prompts`. Runner initialization adds missing [default templates](../prompts/skill_catalog_usage.j2)
+and preserves existing text. `SkillCatalog(registry, *, prompt_snapshot=...)` explicitly receives
+the construction-time project snapshot and reuses its guidance in later slot projections. New
+runners adopt prompt edits. `ContextXmlRenderer` escapes `usage` in default XML output; template
+failures raise `IrisSkillError`. This does not refresh the Skill registry: registered Skill bodies
+still follow the `load_skill` rules below. See [prompts](../prompts/README.md).
 
 `load_skill` returns the first 1000 lines of current `SKILL.md` text, including frontmatter, without
 parsing frontmatter again. Discovery owns the

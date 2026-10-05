@@ -8,6 +8,8 @@ Example:
         agent_config=config,
         context_input=context_input,
         provider=provider,
+        prompt_source=prompt_source,
+        prompt_snapshot=prompt_source.snapshot(),
     )
 """
 
@@ -27,10 +29,10 @@ from ..command.service import CommandBinding
 from ..context import ContextBuilder, ContextBuildInput, ContextSource
 from ..memory import MemoryService
 from ..message import LLMRequest, ModelStreamEvent
+from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
-from ..utils import TemplateRenderer
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
 
@@ -110,7 +112,8 @@ class RuntimeEnvironment:
         context_input (ContextBuildInput): context 构建输入。
         provider (CompletionProvider): provider-neutral 调用边界。
         context_builder (ContextBuilder): 固定 context 生成器。
-        prompt_renderer (TemplateRenderer): runtime 独立指令的模板渲染器。
+        prompt_source (PromptSource): root 初始化、child 借用的项目模板来源。
+        prompt_snapshot (PromptSnapshot): 当前 runtime 构造期采用的正文快照。
         assembler (RuntimeMessageAssembler): provider 请求装配器。
         tool_bridge (ToolBridge): 工具可见性、预检与执行边界。
         workspace_root (Path): 工具执行使用的 workspace 根路径。
@@ -133,8 +136,9 @@ class RuntimeEnvironment:
     agent_config: AgentConfig
     context_input: ContextBuildInput
     provider: CompletionProvider
+    prompt_source: PromptSource
+    prompt_snapshot: PromptSnapshot
     context_builder: ContextBuilder = field(default_factory=ContextBuilder)
-    prompt_renderer: TemplateRenderer = field(default_factory=TemplateRenderer)
     assembler: RuntimeMessageAssembler = field(default_factory=RuntimeMessageAssembler)
     tool_bridge: ToolBridge = field(default_factory=_default_tool_bridge)
     workspace_root: Path = field(default_factory=Path.cwd)

@@ -721,8 +721,12 @@ registry.register(ToolSearchTool(registry.view()))
 及默认 limit=10 保持不变。两个后端均先按 base view 的 deny/group/allow 与本次组过滤筛选
 deferred 工具；`include_groups=[]` 表示没有允许组，搜索名称不能扩大宿主的组范围。
 
-可通过 `ToolSearchTool(view, decision_client=evaluator)` 借用 Decision evaluator；完整装配由
-Decision 文件的 `tools.discovery` 开关控制。它在调用时读取全部允许的 deferred 候选，
+可通过 `ToolSearchTool(view, decision_client=evaluator, prompt_snapshot=...)` 借用 Decision
+evaluator 和构造期项目快照；完整装配由 Decision 文件的 `tools.discovery` 开关控制。
+`tool_discovery_instruction.j2` 读取项目 `prompts.root`（默认 `.iris/prompts`），初始化只补齐
+缺少的默认文件；新工具才采用指令修改，调用时继续传入当前 `query_index` 和最新候选数据。
+Choice 选项、无匹配项、题号及 state 字段由代码固定；本地搜索不要求提示快照。
+它在调用时读取全部允许的 deferred 候选，
 每个意图一道 Choice（含无匹配选项），整批只 evaluate 一次。业务 state 仅包含 `queries` 和
 `tools` 中候选 ID 对应的 `name/description`，不发送 tags、group、schema 或其它工具元数据，
 不先用本地文本排名缩小候选。空目录不请求；eager 工具、Skill 与 subagent 保持直接可用。

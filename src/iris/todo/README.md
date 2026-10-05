@@ -74,6 +74,12 @@ items 为空，不能把它解释成“全部完成”；修复后下一次查�
 的 `iris.todo` 动态贡献。没有宿主 context_source、文件不存在或清单为空时，模型仍能看到
 当前文件位置。人或工具改动文件后，下一步骤读取最新内容。
 
+维护说明来自项目 `prompts.root` 下的 `todo_context.j2` 与 `todo_reminder.j2`，默认目录为
+`.iris/prompts`。runner 初始化只补齐缺少的种子，并在构造时固定模板及依赖；修改项目提示
+由新 runner 采用，Markdown 清单仍逐步读取最新内容。内部
+`render_todo_context(snapshot, *, prompt_snapshot=..., remind=False)` 显式接收这份构造期
+模板快照，不重新读取或解析清单。来源规则见 [prompts](../prompts/README.md)。
+
 同一步的上下文压缩和摘要重试复用已读取的快照；清单不写入原始历史、checkpoint 或摘要
 原料。required 内容不能容纳时沿既有上下文预算错误处理，不截短清单。
 

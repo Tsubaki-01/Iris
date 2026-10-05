@@ -2,6 +2,17 @@
 
 # `iris.runtime`
 
+Both RuntimeFactory entry points accept optional `prompt_source=`. Without an injected source,
+shared assembly resolves the workspace and fills missing templates under `prompts.root` (default
+`.iris/prompts`) before constructing Memory, Skill, or other consumers. All 13 templates use this
+project source. Injected sources are used directly, and children borrow their root source.
+Existing text is preserved; missing runtime templates never fall back to bundled seeds.
+`RuntimeEnvironment.prompt_source` holds the source and `prompt_snapshot` the construction snapshot.
+Goal, Todo, Memory context, Skill usage, and Decision instructions adopt edits with a new runtime;
+their domain data keeps its existing refresh schedule. Custom system/context templates and all
+loadable dependencies are frozen at assembly, while slot values remain dynamic. Standalone
+`ContextBuilder` and `TemplateRenderer.render_file()` SDK usage still observes file updates.
+
 Both RuntimeFactory entry points and Runner accept `decision_client=` through shared assembly.
 The separate Decision configuration prepares one evaluator when either `tools.discovery` or
 `memory.recall` is enabled; all-disabled requires no key. Only the corresponding ToolSearchTool or
@@ -337,17 +348,17 @@ only for the next record when needed. This avoids recounting every growing prefi
 is measured as a complete request; selection does not promise maximum packing or cache working summaries
 across batches. Cut-point planning reuses identical empty-suffix estimates without changing message-group
 boundaries or the recent-history target.
-Summary instructions come from a separate Jinja2 file. The bundled
-[`prompts/compaction.j2`](../prompts/compaction.j2) requests seven Markdown headings with body text in
-the conversation's primary language. `compaction.prompt` can replace the instructions and output
-format; Iris still supplies the previous summary and current history batch, with the user-message
-wrapper stored in [`compaction_input.j2`](../prompts/compaction_input.j2). Each compaction obtains
-instructions directly from `RuntimeEnvironment.prompt_renderer`, strips leading and trailing whitespace,
-and reuses them for all batch estimates and requests.
-Jinja reuses compiled templates and detects edits by mtime for the next compaction. There is no heading
-parser or format-repair loop. See [agents](../agents/README.en.md) for path configuration.
+Summary instructions use the project's `compaction.j2`; its seed requests seven Markdown headings
+in the conversation's primary language. Edit project templates to change instructions and output
+format. The old `compaction.prompt` / `prompt_path` entry points have been removed.
+Iris still supplies the previous summary and current history batch through `compaction_input.j2`.
+Each complete compaction takes a fresh snapshot from `RuntimeEnvironment.prompt_source`, freezing
+both entry points and their dynamic include/import/extends dependencies in memory. All batches,
+budget estimates, and retries share this source; the next compaction adopts edits. Instructions
+still have leading and trailing whitespace stripped. There is no heading parser or format-repair
+loop. See [prompts](../prompts/README.en.md) for source configuration.
 
-The environment holds `prompt_renderer` as a shared `iris.utils.TemplateRenderer` instance. Autoescape
+Snapshots use the shared `iris.utils.TemplateRenderer` in-memory source support. Autoescape
 is disabled by default, preserving JSON, quotes, and `<>&` in summary inputs. Runtime converts template
 loading and rendering failures to `IrisContextError`, retaining the `context` error source.
 
@@ -568,7 +579,7 @@ continue to compaction. This passes one candidate's result through helpers witho
 cache or replacing complete estimation with the sum of individual tool costs.
 
 [`memory_context.j2`](../prompts/memory_context.j2) owns overview instructions, headings, and wrappers.
-It uses the same `RuntimeEnvironment.prompt_renderer`; Python supplies overview and available-tool
+It uses the construction-time `RuntimeEnvironment.prompt_snapshot`; Python supplies current overview and available-tool
 data. Window budgeting still measures the complete request containing the rendered text.
 
 `ContextBuilder.build(system_addendum=...)` appends the adopted overview after system-template output,

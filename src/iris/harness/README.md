@@ -26,6 +26,12 @@ finally:
 reads/writes 使用该 exact object；否则 `session.backend: none` 选择
 `InMemoryLifecycleStore`，`sqlite` 选择 lifecycle `SQLiteStore`。
 
+`prompts.root` 是相对有效 root workspace 的命名提示目录，默认 `.iris/prompts`。两个
+`from_config*()` 入口可接收已初始化的 `prompt_source=`；未传时，在构造 Memory 等消费者前
+初始化来源，只补齐缺少的默认模板，保留项目已有正文。child 借用同一来源，但在自己的构造
+时刻取快照，不按 child YAML 或缩窄 workspace 重新解释目录；注入的 MemoryService 保留宿主
+绑定，runner 不修改其来源。各提示的采用时机见 [prompts](../prompts/README.md)。
+
 两个 `from_config*()` 入口都接收可选 `decision_client=`，只借用其 `evaluate` 能力，关闭 runner
 不会关闭注入对象。配置自建的 Jev 客户端跨 session/Run 复用并随环境关闭；子 Agent 根据自身
 配置独立构造，不继承 root 的注入。接点开关和配置示例见 [Decision](../decision/README.md)。
@@ -572,10 +578,12 @@ infrastructure 退出会先等待 runtime children drain，随后 revoke commit 
 工具目录不会触发全局配置相等检查。已保存的请求、运行限制、cursor、调用身份和执行结果
 仍来自原 run；待执行工具仍需满足参数与当前权限规则。运行记录和 checkpoint 不保存环境指纹。
 
-Context 和 runtime 各自使用共享的 [`iris.utils.TemplateRenderer`](../utils/README.md)，
-保留 Jinja 原生按需加载、编译缓存与默认更新检测，同一 runtime 的后续渲染可读到文件修改。
-模板默认关闭自动转义，XML 模板自行声明转义；`StrictUndefined` 在渲染时检查，context
-字符上限在完整文本生成后检查。详见 [`iris.context`](../context/README.md)。
+Runner 构造时固定 system/context 模板、Goal/Todo、Memory 概览指引、Skill catalog 与 Decision
+指令的内存源及依赖；后续模型步骤继续传入最新状态，已有 runner 不热载模板修改。
+压缩在每次完整操作开始取新快照，自动 Memory 则每个 cycle 取一次，分块、重试或子阶段
+共用当次来源。渲染仍使用共享的 [`TemplateRenderer`](../utils/README.md)，默认不转义，
+XML 模板自行声明转义；`StrictUndefined` 在渲染时检查，context 字符上限在完整文本生成后
+检查。`system` / `context` 保留原配置入口，详见 [`iris.context`](../context/README.md)。
 
 start、resume、subagent parent resume 和 recover 都从 durable run 传递 `run_input` 与
 `initial_session_message_count`。新 run 在 `before_input` 将 BCI 和用户输入归档；session 首次
@@ -607,9 +615,10 @@ BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的�
 未启用 Memory 的 runner 也可调用 `runner.bind_maintenance(coordinator)`，只贡献前台状态，
 使同宿主其他 runner 的维护及时让位；不会创建 Memory 资源或捕获材料。
 
-宿主先构造完整的 `MemoryService`（flush/dream、overview provider/model 和 mirror），
-把同一实例注入 runner 和 `MemoryMaintenanceBinding`，并传入实际 SQLite 数据库路径、
-write namespace。注入服务保留自己的 provider、预算和 IO 模式。以下函数展示共享装配与关闭：
+宿主先解析 root workspace 并初始化一个 `PromptSource`，再构造完整的 `MemoryService`
+（flush/dream、overview provider/model 和 mirror），把同一来源传给服务与 runner；同一服务
+注入 runner 和 `MemoryMaintenanceBinding`，并绑定实际 SQLite 数据库路径与 write namespace。
+注入服务保留自己的 provider、预算、IO 模式和来源。以下示例要求配置已启用 Memory 自动生成：
 
 ```python
 from pathlib import Path
@@ -617,24 +626,33 @@ from pathlib import Path
 from iris.agents import AgentConfig
 from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
 from iris.lifecycle import AgentRunRequest
-from iris.memory import MemoryService
+from iris.memory import build_memory_service_from_config, resolve_memory_path
+from iris.prompts import PromptSource
 from iris.providers import CompletionProvider
 
 
 async def run_sessions(
     config: AgentConfig,
     provider: CompletionProvider,
-    memory: MemoryService,
-    database_path: Path,
+    config_path: Path,
 ) -> None:
+    workspace = (config_path.parent / config.permissions.workspace).resolve()
+    prompt_source = PromptSource.initialize(workspace, config.prompts.root)
+    memory = build_memory_service_from_config(
+        config.memory, workspace, prompt_source=prompt_source,
+        overview_provider=provider, overview_model=config.model.name,
+    )
     coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
     binding = MemoryMaintenanceBinding(
         service=memory,
-        database_path=database_path,
+        database_path=resolve_memory_path(config.memory.path, workspace),
         namespace=config.memory.write_namespace,
     )
     runners = [
-        AgentRunner.from_config(config, provider=provider, memory_service=memory)
+        AgentRunner.from_config(
+            config, config_path=config_path, provider=provider,
+            memory_service=memory, prompt_source=prompt_source,
+        )
         for _ in range(2)
     ]
     try:

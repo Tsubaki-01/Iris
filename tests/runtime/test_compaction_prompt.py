@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from fakes import FakeProvider, FakeRuntimeCommitPort, MutableCancellationSignal, start_activation
 
-from iris.agents import AgentConfig, CompactionConfig
+from iris.agents import AgentConfig
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock
+from iris.prompts import PromptSource
 from iris.runtime import RuntimeActivationOutcome, RuntimeFactory
 
 
@@ -21,13 +22,13 @@ class _PromptProvider(FakeProvider):
         return 95000
 
 
-def _config(prompt: Path | None = None) -> AgentConfig:
+def _config(workspace: Path) -> AgentConfig:
     return AgentConfig(
         name="agent",
         model="openai/test",
         system="业务指令",
         context_policy={"enabled": False},
-        compaction=CompactionConfig(prompt=prompt),
+        permissions={"workspace": str(workspace)},
     )
 
 
@@ -37,9 +38,11 @@ async def test_summary_uses_prompt_file_and_framework_provides_history(
     tmp_path: Path,
     custom: bool,
 ) -> None:
-    prompt = tmp_path / "summary.j2"
+    source = PromptSource.initialize(tmp_path)
+    prompt = source.root / "compaction.j2"
     instructions = "只保留任务约束与待办，使用两个中文标题。"
-    prompt.write_text(instructions, encoding="utf-8")
+    if custom:
+        prompt.write_text(instructions, encoding="utf-8")
     provider = _PromptProvider(
         [
             LLMResponse(
@@ -49,7 +52,7 @@ async def test_summary_uses_prompt_file_and_framework_provides_history(
         ]
     )
     runtime = RuntimeFactory.from_config(
-        _config(prompt if custom else None),
+        _config(tmp_path),
         provider=provider,
     )
     activation = start_activation(input="新任务", initial_session_message_count=1)
@@ -74,21 +77,27 @@ async def test_summary_uses_prompt_file_and_framework_provides_history(
     assert main.messages[-1].text == "新任务"
 
 
-def test_sdk_prompt_path_uses_supplied_config_directory(tmp_path: Path) -> None:
-    prompt = tmp_path / "summary.j2"
-    prompt.write_text("本地摘要指令", encoding="utf-8")
+def test_sdk_prompt_root_uses_workspace_and_preserves_injected_source(tmp_path: Path) -> None:
+    source = PromptSource.initialize(tmp_path, "shared-prompts")
+    missing = source.root / "compaction.j2"
+    missing.unlink()
     runtime = RuntimeFactory.from_config(
-        _config(Path("summary.j2")),
-        config_path=tmp_path / "agent.yaml",
+        _config(tmp_path / "child"),
+        config_path=tmp_path / "config" / "agent.yaml",
         provider=FakeProvider([]),
+        prompt_source=source,
     )
-    assert runtime.environment.agent_config.compaction.prompt == prompt.resolve()
+    assert runtime.environment.prompt_source is source
+    assert runtime.environment.prompt_snapshot.root == source.root
+    assert not missing.exists()
+    assert not (tmp_path / "child" / ".iris" / "prompts").exists()
 
 
 @pytest.mark.asyncio
 async def test_missing_prompt_fails_when_compaction_reads_it(tmp_path: Path) -> None:
     provider = _PromptProvider([])
-    runtime = RuntimeFactory.from_config(_config(tmp_path / "missing.j2"), provider=provider)
+    runtime = RuntimeFactory.from_config(_config(tmp_path), provider=provider)
+    (runtime.environment.prompt_source.root / "compaction.j2").unlink()
     activation = start_activation(input="新任务", initial_session_message_count=1)
     commits = FakeRuntimeCommitPort(activation, messages=[Msg.user("已经保存的历史")])
 
@@ -110,7 +119,8 @@ async def test_compaction_template_uses_plain_text_unless_explicitly_escaped(
     tmp_path: Path, xml: bool
 ) -> None:
     """摘要指令独立于 ContextBuilder，XML 输出由模板显式选择。"""
-    prompt = tmp_path / "summary.j2"
+    source = PromptSource.initialize(tmp_path)
+    prompt = source.root / "compaction.j2"
     expression = "{{ '<a>&' }}"
     if xml:
         expression = "{% autoescape true %}" + expression + "{% endautoescape %}"
@@ -121,7 +131,7 @@ async def test_compaction_template_uses_plain_text_unless_explicitly_escaped(
             for text in ("摘要结果", "完成")
         ]
     )
-    runtime = RuntimeFactory.from_config(_config(prompt), provider=provider)
+    runtime = RuntimeFactory.from_config(_config(tmp_path), provider=provider)
     activation = start_activation(input="新任务", initial_session_message_count=1)
     commits = FakeRuntimeCommitPort(activation, messages=[Msg.user('原文 <a>&"')])
     result = await runtime.execute(

@@ -57,6 +57,7 @@ from ..tools.subagent import (
 )
 
 if TYPE_CHECKING:
+    from ..prompts import PromptSource
     from ._command_lifecycle import CommandLifecycle
     from .runner import AgentRunner, Clock
 
@@ -88,12 +89,14 @@ class HarnessSubagentController:
         routes: SubagentRouteTable,
         store: LifecycleStore,
         parent_boundary: RuntimeAssemblyBoundary,
+        prompt_source: PromptSource,
         child_provider_factory: ChildProviderFactory | None,
         clock: Clock,
     ) -> None:
         self.routes = routes
         self.store = store
         self.parent_boundary = parent_boundary
+        self.prompt_source = prompt_source
         self.child_provider_factory = child_provider_factory
         self.clock = clock
         self.command_lifecycle: CommandLifecycle | None = None
@@ -218,6 +221,7 @@ class HarnessSubagentController:
             config_path=route.config_path,
             provider=provider,
             memory_service=None,
+            prompt_source=self.prompt_source,
             decision_client=None,
             api_key=None,
             execution_scope=RuntimeExecutionScope.CHILD,

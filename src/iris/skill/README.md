@@ -90,9 +90,12 @@ Read the relevant files, then report concrete findings.
 {"name": "my-skill"}
 ```
 
-Catalog 的使用指引来自 [`skill_catalog_usage.j2`](../prompts/skill_catalog_usage.j2)。
-`SkillCatalog` 构造时通过 `iris.utils.TemplateRenderer` 读取一次，后续 slot 投影复用这份文案；
-写入默认 XML 的 `usage` 属性时由 `ContextXmlRenderer` 转义。模板失败使用 `IrisSkillError`。
+Catalog 使用指引读取项目 `prompts.root` 下的 `skill_catalog_usage.j2`，默认目录为
+`.iris/prompts`。runner 初始化只补齐缺少的[默认模板](../prompts/skill_catalog_usage.j2)，保留
+已有正文。`SkillCatalog(registry, *, prompt_snapshot=...)` 显式接收构造期项目快照，后续 slot
+投影复用指引；新 runner 才采用提示修改。写入默认 XML 的 `usage` 属性时由
+`ContextXmlRenderer` 转义，模板失败使用 `IrisSkillError`。这不刷新 Skill registry，
+已登记 Skill 的正文仍按下面的 `load_skill` 规则读取。来源约定见 [prompts](../prompts/README.md)。
 
 `load_skill` 返回当前 `SKILL.md` 含 frontmatter 的前 1000 行，不重新解析 frontmatter。Discovery 负责配置 root
 与扫描目录边界；实际加载时会重新校验文件仍位于原 Skill 目录内，并由共享文件服务复核

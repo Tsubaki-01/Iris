@@ -373,10 +373,10 @@ async def test_malformed_document_enters_request_as_diagnostic(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["read", "template"])
 async def test_todo_domain_failure_retains_runtime_code_and_details(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    tmp_path: Path, failure: str
 ) -> None:
     """真实 I/O 与模板失败保留 Todo 领域码和路径，不被 host context 包装。"""
-    from iris.todo import context as todo_context
+    from iris.prompts import PromptSource
 
     path = _write_todo(tmp_path, "session-1", "- [ ] example")
     if failure == "read":
@@ -385,9 +385,8 @@ async def test_todo_domain_failure_retains_runtime_code_and_details(
         detail_key = "path"
         failed_path = path
     else:
-        failed_path = tmp_path / "broken_todo_context.j2"
+        failed_path = PromptSource.initialize(tmp_path).root / "todo_context.j2"
         failed_path.write_text("{% invalid %}", encoding="utf-8")
-        monkeypatch.setattr(todo_context, "_TEMPLATE", failed_path)
         detail_key = "template"
     provider = CountingProvider()
     runtime = _runtime(tmp_path, provider)

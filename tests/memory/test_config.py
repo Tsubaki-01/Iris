@@ -19,6 +19,7 @@ from iris.memory import (
     SQLiteMemoryStore,
     build_memory_service_from_config,
 )
+from iris.prompts import PromptSource
 from iris.providers import CompletionProvider
 
 
@@ -77,6 +78,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
     """关闭优先于注入，开启注入也不解析配置路径或改写宿主依赖。"""
     store = Mock(spec=MemoryStore)
     provider = Mock(spec=CompletionProvider)
+    prompt_source = PromptSource(tmp_path / "host-prompts")
     mirror = FileMemoryMirror(tmp_path / "host-mirror")
     overview_config = MemoryOverviewConfig(max_tokens=128)
     service = MemoryService(
@@ -85,6 +87,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
         overview_provider=provider,
         overview_model="host-model",
         overview_config=overview_config,
+        prompt_source=prompt_source,
     )
 
     def forbidden(*args: object, **kwargs: object) -> None:
@@ -100,6 +103,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
         memory_service=service if injected else None,
         overview_provider=Mock(spec=CompletionProvider),
         overview_model="agent-model",
+        prompt_source=PromptSource(tmp_path / "agent-prompts"),
     )
 
     assert result is (service if enabled else None)
@@ -108,6 +112,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
     assert service.overview_provider is provider
     assert service.overview_model == "host-model"
     assert service.overview_config is overview_config
+    assert service.prompt_source is prompt_source
     assert service.io_execution_mode is MemoryIOExecutionMode.INLINE
     assert store.mock_calls == []
     assert provider.mock_calls == []
@@ -125,8 +130,13 @@ def test_enabled_memory_factory_builds_sqlite_and_binds_generation_dependencies(
         overview=MemoryOverviewConfig(max_tokens=256),
     )
     provider = Mock(spec=CompletionProvider)
+    prompt_source = PromptSource.initialize(tmp_path)
     service = build_memory_service_from_config(
-        config, tmp_path, overview_provider=provider, overview_model="agent-model"
+        config,
+        tmp_path,
+        overview_provider=provider,
+        overview_model="agent-model",
+        prompt_source=prompt_source,
     )
 
     assert service is not None
@@ -141,6 +151,7 @@ def test_enabled_memory_factory_builds_sqlite_and_binds_generation_dependencies(
     assert service.generation_provider is provider
     assert service.generation_model == "agent-model"
     assert service.generation_config is config.generation
+    assert service.prompt_source is prompt_source
     assert service.io_execution_mode is MemoryIOExecutionMode.THREAD
     assert provider.mock_calls == []
     assert list(service.mirror.root.rglob("Memory.md")) == []

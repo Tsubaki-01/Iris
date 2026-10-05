@@ -126,10 +126,22 @@ Details the user explicitly asks to remember are retained. The `reason` briefly 
 recording or consolidating. These are model instructions: JSON schema validation checks structure and
 field constraints, not whether the text's conclusions follow from its evidence.
 
-Flush and Dream instructions live in [`memory_flush.j2`](../prompts/memory_flush.j2) and
-[`memory_dream.j2`](../prompts/memory_dream.j2). `MemoryService.prompt_renderer` owns an independent
-`iris.utils.TemplateRenderer`; Python prepares schemas and input data, while templates preserve JSON
-quotes and `<>&` as plain text. Template loading and rendering failures become `IrisMemoryError`.
+Default Flush and Dream strategies ship in [`memory_flush.j2`](../prompts/memory_flush.j2) and
+[`memory_dream.j2`](../prompts/memory_dream.j2). Runnable Agent initialization adds missing seeds to
+the project's `prompts.root` (default `.iris/prompts`) while preserving existing text. Generation
+reads only the explicitly bound `MemoryService.prompt_source`. Edit strategies in that project
+directory; templates preserve quotes and `<>&` as plain text. Domain code appends fixed business
+instructions and the response model's JSON Schema to every request. Editable text cannot remove
+the actual output contract; responses still pass through the existing single parsing boundary.
+Source loading and template rendering failures become `IrisMemoryError`.
+
+An automatic cycle takes one in-memory source snapshot for Flush, Dream, and Overview; edits during
+the cycle take effect next cycle. Each standalone `flush/dream/refresh_overview` call takes a fresh
+snapshot, including template dependencies. Snapshots are not archived. Configured services receive
+the root project's source; injected services keep their host binding and runners do not rewrite it.
+Ordinary reads, search, and remember/update/forget require no source. Standalone generation requires
+an explicitly initialized `PromptSource`, failing at the domain boundary when absent instead of
+inferring a working directory. Automatic strategy revision is not part of this phase.
 
 Flush/dream requests use `temperature=0` and `response_format={"type": "json_object"}`; the generation
 provider must support both parameters. JSON mode constrains response format; the existing parsing
@@ -251,9 +263,12 @@ mirror:
 ```python
 from pathlib import Path
 from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
+from iris.prompts import PromptSource
 
+workspace = Path.cwd()
 service = MemoryService(
     SQLiteMemoryStore(Path("memory.db")),
+    prompt_source=PromptSource.initialize(workspace),
     generation_provider=provider,  # The application's configured CompletionProvider.
     generation_model="your-model",
 )
@@ -306,9 +321,10 @@ is published as `Memory.md` in the canonical namespace directory. Configure `ove
 an explicitly injected service keeps its host-supplied configuration. Construction and reads do not
 call the model; optional runner maintenance owns automatic generation.
 
-Overview generation instructions live in [`memory_overview.j2`](../prompts/memory_overview.j2), read
-through the same service's `prompt_renderer`. Editing instructions does not require changing Python
-snapshot preparation, budgets, or response parsing.
+The default Overview strategy ships in [`memory_overview.j2`](../prompts/memory_overview.j2);
+generation reads the project's source snapshot. Request assembly appends the two-field schema from
+`MemoryOverviewContent` and its fixed business instructions. Editing the project strategy does not
+require changing input preparation, budgets, or response parsing.
 
 ```python
 # The service already has its overview provider/model configured.
@@ -449,7 +465,11 @@ question count, and token usage. Capacity and service failures become `IrisMemor
 silent truncation, batching, lexical fallback, or empty-success replacement. Outer cancellation propagates.
 
 SDK callers may borrow an evaluate-only object through `MemorySearchTool(..., decision_client=evaluator)`
-or `register_memory_tools(..., memory_decision_client=evaluator)`. Search neither creates nor closes
+or `register_memory_tools(..., memory_decision_client=evaluator)`. Both also take
+`prompt_snapshot=prompt_source.snapshot()` to freeze `memory_recall_instruction` when constructing
+the tool. Calls still use current candidate indices and bodies; new tools adopt strategy edits.
+Code owns score levels, threshold, question IDs, and state keys. Local Search needs no prompt source.
+Search neither creates nor closes
 the client and never stores its mode on the shared `MemoryService`. Fetch and write tools do not
 receive it, so two Agents may share a service while selecting different search modes. The environment
 closes Agent-owned connections; the host owns injected clients. Only enhanced Search declares

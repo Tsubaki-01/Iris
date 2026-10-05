@@ -26,6 +26,7 @@ from iris.memory.models import (
 )
 from iris.memory.sqlite import SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.prompts import PromptSource
 
 
 def capture(
@@ -235,7 +236,12 @@ async def test_flush_rechecks_actual_batch_before_consuming(
                 (episode.id,),
             )
     provider = ScopeProvider()
-    memory = MemoryService(store, generation_provider=provider, generation_model="test")
+    memory = MemoryService(
+        store,
+        generation_provider=provider,
+        generation_model="test",
+        prompt_source=PromptSource.initialize(tmp_path),
+    )
     checks: list[tuple[MemorySource, ...]] = []
 
     async def check(sources: tuple[MemorySource, ...]) -> bool:
@@ -260,6 +266,7 @@ async def test_dream_reselection_and_blocking_keep_scope(tmp_path: Path) -> None
         generation_provider=provider,
         generation_model="test",
         generation_config=MemoryGenerationConfig(dream_input_budget_tokens=5000),
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     events = []
     for run, text in (
@@ -302,7 +309,12 @@ async def test_dream_checks_sources_after_model_and_before_block(tmp_path: Path)
     store.add_item(MemoryItem(text="待整理"), event=event)
     capture(store, "ready", call_id="call")
     provider = ScopeProvider()
-    memory = MemoryService(store, generation_provider=provider, generation_model="test")
+    memory = MemoryService(
+        store,
+        generation_provider=provider,
+        generation_model="test",
+        prompt_source=PromptSource.initialize(tmp_path),
+    )
     eligible = True
 
     def expire() -> None:
@@ -338,6 +350,7 @@ async def test_capacity_blocking_yields_after_a_bounded_batch(tmp_path: Path) ->
         generation_provider=provider,
         generation_model="test",
         generation_config=MemoryGenerationConfig(dream_input_budget_tokens=1),
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     result = await memory.dream("project")
     assert result.status == "blocked" and result.counts["blocked"] == 16

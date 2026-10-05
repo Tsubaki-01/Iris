@@ -2,6 +2,11 @@
 
 # `iris.context`
 
+Standalone `ContextBuilder` keeps observing template file updates. Runtime assembly injects a
+frozen renderer that captures template directories and loadable dependencies for all three sections
+at construction. Slot values are still supplied on each `build()` call; only template sources are
+fixed. A new runtime adopts edits without changing the standalone SDK's file-refresh behavior.
+
 `iris.context` renders declarative YAML or Python models into three fixed message positions:
 
 - required system message;

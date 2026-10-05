@@ -17,6 +17,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..exceptions import IrisConfigError
+from ..prompts import PromptSource
 from ..providers.protocols import CompletionProvider
 from .generation_models import MemoryGenerationConfig
 from .mirror import FileMemoryMirror
@@ -50,6 +51,7 @@ def build_memory_service_from_config(
     memory_service: MemoryService | None = None,
     overview_provider: CompletionProvider | None = None,
     overview_model: str | None = None,
+    prompt_source: PromptSource | None = None,
 ) -> MemoryService | None:
     """按 memory 开关选择宿主服务或构造 SQLite 服务。
 
@@ -59,6 +61,7 @@ def build_memory_service_from_config(
         memory_service: 可选宿主服务，开启时原样复用，关闭时不挂载或操作。
         overview_provider: 宿主显式生成概览时使用的模型调用边界。
         overview_model: 显式概览请求使用的模型名称。
+        prompt_source: 已初始化的项目提示来源；纯读写服务可不提供。
 
     Returns:
         MemoryService | None: 关闭返回 None；开启时复用注入对象或创建 SQLite 服务。
@@ -84,6 +87,7 @@ def build_memory_service_from_config(
         generation_provider=overview_provider,
         generation_model=overview_model,
         generation_config=config.generation,
+        prompt_source=prompt_source,
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
 

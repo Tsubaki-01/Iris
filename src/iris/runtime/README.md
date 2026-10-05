@@ -2,6 +2,15 @@
 
 # `iris.runtime`
 
+`RuntimeFactory.from_config()` / `from_config_path()` 接收可选 `prompt_source=`。
+未注入时，共享装配在解析 workspace 后按 `prompts.root`（默认 `.iris/prompts`）补齐
+13 个项目模板，再构造 Memory、Skill 与其他消费者；注入来源直接使用，child 借用 root
+的同一来源。已有正文不会被覆盖，运行时缺失模板不会回退包内种子。
+`RuntimeEnvironment.prompt_source` 保存来源，`prompt_snapshot` 保存本 runtime 构造时采用的正文。
+Goal、Todo、Memory context、Skill 用法及 Decision 指令随新 runtime 采用修改；领域数据仍按原时机读取。
+自定义 system/context 的入口及全部可加载依赖也在装配时固定，slots 每次渲染仍可变化；
+独立 `ContextBuilder` 与 `TemplateRenderer.render_file()` SDK 继续读取文件更新。
+
 `RuntimeFactory.from_config()` / `from_config_path()` 与 Runner 共用 `decision_client=` 注入入口。
 shared assembly 按独立 Decision 配置决定启用接点；任一开启就准备一个 evaluator，全关闭不读 key。
 `tools.discovery` 向 `ToolSearchTool` 注入，`memory.recall` 仅向 `MemorySearchTool` 注入，不改变
@@ -270,15 +279,14 @@ original/model 的路径、MIME、尺寸及所属 message/result 位置；原始
 全部已接受前缀。每个返回批次都经过完整请求计量；分批不承诺最大装填率，也不跨批缓存工作摘要。
 切点规划复用相同空后缀的估算，不改变完整消息组和近期原文保留规则。
 
-摘要指令来自独立 Jinja2 文件，默认使用 [`prompts/compaction.j2`](../prompts/compaction.j2)，
-要求七栏 Markdown、正文跟随对话主要语言。`compaction.prompt` 可以替换指令与输出格式；
-旧摘要与本批历史仍由框架提供，user 消息的包装文案来自
-[`compaction_input.j2`](../prompts/compaction_input.j2)。每次压缩操作直接通过
-`RuntimeEnvironment.prompt_renderer` 取得一次摘要指令并去除首尾空白，供全部分块
-计量和请求共用；Jinja 复用编译缓存并按 mtime 检测更新，文件修改在下次压缩操作生效。没有标题 parser 或
-格式修复循环。路径配置见 [agents 说明](../agents/README.md#compactionconfig)。
+摘要指令使用项目 `compaction.j2`，种子要求七栏 Markdown、正文跟随对话主要语言。
+手工编辑项目模板可替换指令与输出格式，旧 `compaction.prompt` / `prompt_path` 入口已删除。
+旧摘要与本批历史仍由框架提供，user 消息包装使用同目录的 `compaction_input.j2`。
+每次完整压缩开始从 `RuntimeEnvironment.prompt_source` 取得新快照；两个入口及其动态
+include/import/extends 依赖在内存中固定，全部批次、预算计量及重试共用，下一次压缩才采用修改。
+摘要指令仍去除首尾空白；没有标题 parser 或格式修复循环。来源配置见 [prompts](../prompts/README.md)。
 
-`prompt_renderer` 是环境持有的共享 `iris.utils.TemplateRenderer`，默认关闭自动转义；
+快照使用共享 `iris.utils.TemplateRenderer` 的内存源能力，默认关闭自动转义；
 摘要输入中的 JSON、引号和 `<>&` 按原文保留。模板读取或渲染失败在 runtime 边界转换为
 `IrisContextError`，继续使用 `context` 错误来源。
 
@@ -468,7 +476,7 @@ full/base 的专用额度差额使用同形、未裁剪的历史计算；压缩�
 这是单个候选的结果传递，不建立跨请求缓存，也不把各工具的独立 token 数相加来代替整包估算。
 
 概览指引、标题和正文包装由 [`memory_context.j2`](../prompts/memory_context.j2) 管理，
-通过同一 `RuntimeEnvironment.prompt_renderer` 渲染。Python 提供概览与实际可用工具数据，
+通过 `RuntimeEnvironment.prompt_snapshot` 渲染构造期正文。Python 提供当前概览与实际可用工具数据，
 窗口预算仍以实际渲染后准备发送的请求计算。
 
 概览通过 `ContextBuilder.build(system_addendum=...)` 放在 system 模板结果之后，计入 system

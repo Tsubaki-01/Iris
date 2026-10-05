@@ -131,6 +131,8 @@ file. `RuntimeFactory` later validates it through `load_context_build_input()`.
 - `PermissionsConfig` defaults to workspace `.`, writes `confirm`, and execute `confirm`; enforcement belongs to the
   tool executor.
 - `SessionConfig` supports `none` and `sqlite`; SQLite defaults to `.iris/session.db`.
+- `AgentConfig.prompts` uses `PromptConfig`; its single directory setting defaults to
+  `root: .iris/prompts` for all named project prompts.
 - `AgentConfig.speech` uses `iris.speech.SpeechConfig` and is disabled by default. When enabled,
   it declares an adapter, endpoint, and speech model. The host explicitly calls
   `create_speech_client(config.speech)`; the runner does not record audio or open an ASR connection.
@@ -307,10 +309,13 @@ The switch is fixed when constructing the Agent. Rebuild it and start a new sess
 the setting; hot switching is not supported. Static context memory and existing history remain.
 `include_tools=False` still controls whether a request includes tool definitions.
 
-`build_tool_registry(config, *, memory_service=None, memory_config=None, command_binding=None)` registers Search/Fetch
+`build_tool_registry(config, *, memory_service=None, memory_config=None, memory_decision_client=None, prompt_snapshot=None, command_binding=None)` registers Search/Fetch
 when given a resolved service, then declared builtins and Python extensions. Explicit memory writes
 require a service; manual read declarations are rejected at this assembly boundary. `memory_config`
 binds read and write namespaces, defaulting to `MemoryConfig()`; this helper does not recheck enabled.
+`memory_decision_client` and the construction-time `prompt_snapshot` go only to Search, leaving
+the shared service, Fetch, and write tools unchanged. Decision recall requires the project snapshot;
+local search does not.
 Actual name or alias conflicts
 remain registry errors. This helper neither resolves a workspace nor opens databases; use the
 complete runner or RuntimeFactory to construct services from YAML.
@@ -334,26 +339,28 @@ down. Recent-text retention and summary output limits multiply the budget by the
 ratios, rounded up. Recent-text retention is a soft target, so the two ratios need not sum to less
 than 80%. The input budget and timeout must be positive; both ratios must be between 0 and 1.
 
-To customize summary instructions and output format, provide a separate Jinja2 file:
+Named prompts, including summary instructions, share one project directory:
 
 ```yaml
-compaction:
-  prompt: ./prompts/summary.j2
+prompts:
+  root: .iris/prompts
 ```
 
-`prompt` resolves relative to `agent.yaml`. Omitting it or using `null` selects the bundled
-[default seven-heading prompt](../prompts/compaction.j2). The file supplies the summary request's
-system message. Iris provides the previous summary and current history batch in the user message;
-the template needs no data variables. Custom instructions may change the headings and wording.
-Iris still wraps the summary body in `<summary>` when adding it to the main request.
+`prompts.root` resolves relative to the effective root workspace and stays fixed after construction,
+not relative to `agent.yaml` or a child's narrower workspace. Loading configuration creates no
+directory. Constructing a runnable Agent adds missing default templates and preserves existing
+files. Edit the project's `compaction.j2` to change headings and wording; `compaction_input.j2`
+uses `previous_summary_or_none` and `serialized_history` for the user message. Summaries remain
+natural-language text wrapped in `<summary>` in the main request. The old `compaction.prompt`
+and SDK `CompactionConfig.prompt_path` have been removed and are rejected.
 
-Files use the shared [`iris.utils.TemplateRenderer`](../utils/README.md), with Jinja2's native on-demand
-loading and compiled cache, including dynamic include/import/extends. Autoescape is disabled by default;
-XML templates can explicitly use `{% autoescape true %}` or `|e`. Runtime strips leading and trailing
-whitespace from summary instructions. The same runtime detects file edits on the next compaction; all
-batches and retries within one operation reuse the same rendered instructions. Config loading resolves only the path; the
-first compaction reads the file. With the Python SDK, relative paths use the directory of
-`config_path`, or the current working directory when it is omitted.
+Each compaction freezes both templates and their dependencies in memory for all batches and retries;
+the next compaction adopts edits. Goal, Todo, Memory context guidance, Skill catalog, Decision
+instructions, and system/context templates freeze at runner construction while call data remains
+dynamic. `system` / `context` keep their existing declaration paths; `prompts` does not duplicate
+system configuration. The shared [`TemplateRenderer`](../utils/README.md) disables autoescape by
+default; XML can use `{% autoescape true %}` or `|e`. See [prompts](../prompts/README.md) for source
+and adoption boundaries.
 
 `load_agent_config()` and `AgentConfig` validate these values without calling a model or tokenizer.
 The existing `RuntimeEnvironment.agent_config` carries the resulting configuration. Before each

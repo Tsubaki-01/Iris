@@ -4,8 +4,9 @@ import json
 from typing import Any, cast
 
 from ..decision import ChoiceAnswer, ChoiceQuestion, DecisionEvaluator, DecisionRequest
-from ..exceptions import IrisDecisionError, IrisToolExecutionError
+from ..exceptions import IrisDecisionError, IrisTemplateError, IrisToolExecutionError
 from ..message import TextBlock
+from ..prompts import PromptSnapshot
 from .base import ToolDefinition, ToolResult
 
 
@@ -13,10 +14,21 @@ async def select_with_decision(
     evaluator: DecisionEvaluator,
     queries: list[str],
     candidates: list[ToolDefinition],
+    *,
+    prompt_snapshot: PromptSnapshot | None,
 ) -> tuple[list[ToolDefinition | None], dict[str, Any]]:
     """把全部允许候选与独立意图一次提交，再按题号回映工具。"""
     if not candidates:
         return [None for _ in queries], {}
+    if prompt_snapshot is None:
+        raise IrisToolExecutionError("Decision 工具发现需要项目 prompt 快照")
+    try:
+        instructions = [
+            prompt_snapshot.render("tool_discovery_instruction", {"query_index": i}).strip()
+            for i in range(len(queries))
+        ]
+    except IrisTemplateError as exc:
+        raise IrisToolExecutionError("工具发现指令模板渲染失败", **exc.context) from exc
     candidate_map = {f"c{i}": definition for i, definition in enumerate(candidates)}
     options: dict[str, str | None] = {key: None for key in candidate_map}
     options["none"] = "No available tool matches this query."
@@ -30,7 +42,7 @@ async def select_with_decision(
         },
         questions={
             f"q{i}": ChoiceQuestion.model_construct(
-                instructions=f"Select the best tool from state.tools for state.queries[{i}].",
+                instructions=instructions[i],
                 options=options,
             )
             for i in range(len(queries))

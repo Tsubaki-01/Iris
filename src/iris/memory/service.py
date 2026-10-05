@@ -21,9 +21,10 @@ from time import perf_counter
 from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
+from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
-from ..utils import TemplateRenderer
 from ._generation_worker import generation_worker
+from ._prompts import snapshot_memory_prompts
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
 from .generation_models import (
@@ -100,6 +101,7 @@ class MemoryService:
         generation_provider: CompletionProvider | None = None,
         generation_model: str | None = None,
         generation_config: MemoryGenerationConfig | None = None,
+        prompt_source: PromptSource | None = None,
         io_execution_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
     ) -> None:
         """初始化记忆服务。"""
@@ -111,7 +113,7 @@ class MemoryService:
         self.generation_provider = generation_provider
         self.generation_model = generation_model
         self.generation_config = generation_config or MemoryGenerationConfig()
-        self.prompt_renderer = TemplateRenderer()
+        self.prompt_source = prompt_source
         self._io_execution_mode = io_execution_mode
         self._io_tasks: set[asyncio.Task[object]] = set()
         self._change_listeners: list[Callable[[str], None]] = []
@@ -200,7 +202,8 @@ class MemoryService:
         self, namespace: str, *, scope: MemoryMaintenanceScope | None = None
     ) -> GenerationResult:
         """从已捕获经历提炼一批观察；正式知识在 dreaming 后才可读取。"""
-        return await flush(self, namespace, scope=scope)
+        prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        return await flush(self, namespace, prompt_snapshot=prompts, scope=scope)
 
     async def dream(
         self,
@@ -210,7 +213,10 @@ class MemoryService:
         scope: MemoryMaintenanceScope | None = None,
     ) -> GenerationResult:
         """将一批观察和显式修改原子整理到正式知识，不隐式执行 flush。"""
-        return await dream(self, namespace, retry_blocked=retry_blocked, scope=scope)
+        prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        return await dream(
+            self, namespace, prompt_snapshot=prompts, retry_blocked=retry_blocked, scope=scope
+        )
 
     async def maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> bool:
         """执行一轮有界学习与投影修复，返回本范围是否仍有可执行积压。"""
@@ -222,17 +228,18 @@ class MemoryService:
             )
         )
         state = await self.ageneration_state(namespace, scope=scope)
+        prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
         if state.pending_observations or state.pending_changes:
-            result = await self.dream(namespace, scope=scope)
+            result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
             if result.status in {"failed", "cancelled", "conflict"}:
                 return False
         elif state.pending_episodes:
-            result = await self.flush(namespace, scope=scope)
+            result = await flush(self, namespace, prompt_snapshot=prompts, scope=scope)
             if result.status in {"failed", "cancelled", "conflict"}:
                 return False
             state = await self.ageneration_state(namespace, scope=scope)
             if state.pending_observations or state.pending_changes:
-                result = await self.dream(namespace, scope=scope)
+                result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
                 if result.status in {"failed", "cancelled", "conflict"}:
                     return False
         state = await self.ageneration_state(namespace, scope=scope)
@@ -242,7 +249,7 @@ class MemoryService:
                     lambda: self.mirror.rebuild_from_store(self.store, namespace)
                 )
             if state.item_revision and state.overview_revision != state.item_revision:
-                await self.refresh_overview(namespace)
+                await self._refresh_overview(namespace, prompts)
         state = await self.ageneration_state(namespace, scope=scope)
         return bool(
             state.pending_episodes
@@ -628,6 +635,13 @@ class MemoryService:
 
     async def refresh_overview(self, namespace: str) -> MemoryOverviewGenerationResult:
         """显式生成和发布概览，保留旧完整产物及实际模型用量。"""
+        prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        return await self._refresh_overview(namespace, prompts)
+
+    async def _refresh_overview(
+        self, namespace: str, prompt_snapshot: PromptSnapshot
+    ) -> MemoryOverviewGenerationResult:
+        """在调用方固定的提示快照下生成和发布概览。"""
         if self.mirror is None or self.overview_provider is None or self.overview_model is None:
             raise IrisMemoryError("memory 概览生成依赖未配置", namespace=namespace)
         started = perf_counter()
@@ -638,7 +652,7 @@ class MemoryService:
             if snapshot.items:
                 request = await self.run_async_io(
                     lambda: build_overview_request(
-                        snapshot, self.overview_model, self.overview_config, self.prompt_renderer
+                        snapshot, self.overview_model, self.overview_config, prompt_snapshot
                     )
                 )
                 estimated_tokens = await self.run_async_io(

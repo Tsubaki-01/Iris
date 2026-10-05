@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from ..context import ContextSlot, ContextXmlRenderer
 from ..exceptions import IrisSkillError, IrisTemplateError
-from ..utils import TemplateRenderer
+from ..prompts import PromptSnapshot
 from .registry import SkillRegistry
 
 CATALOG_SLOT_NAME = "available_skills"
 CATALOG_SLOT_ORDER = 900
-_CATALOG_USAGE_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "skill_catalog_usage.j2"
 
 
 class SkillCatalog:
     """从只读 registry 构造结构化 catalog slot。"""
 
-    def __init__(self, registry: SkillRegistry) -> None:
+    def __init__(self, registry: SkillRegistry, *, prompt_snapshot: PromptSnapshot) -> None:
+        """借用构造期项目模板，不改变技能目录和正文读取时机。"""
         self.registry = registry
         try:
-            self._usage = TemplateRenderer().render_file(_CATALOG_USAGE_PROMPT, {}).strip()
+            self._usage = prompt_snapshot.render("skill_catalog_usage", {}).strip()
         except IrisTemplateError as exc:
             raise IrisSkillError("Skill catalog 使用指引模板渲染失败", **exc.context) from exc
 

@@ -12,6 +12,7 @@ from iris.decision import DecisionRequest, DecisionResponse
 from iris.exceptions import IrisConfigError, IrisMemoryError, IrisToolValidationError
 from iris.harness import AgentRunner
 from iris.memory import MemoryConfig, MemoryService, MemoryWriteInput, SQLiteMemoryStore
+from iris.prompts import PromptSource
 from iris.providers import CompletionProvider, ModelRoute
 from iris.runtime import RuntimeFactory
 from iris.tools import ToolCapability, ToolExecutionContext
@@ -40,7 +41,7 @@ def test_memory_disabled_creates_no_service_or_tools(tmp_path: Path) -> None:
     runtime = RuntimeFactory.from_config(_config(tmp_path), provider=FakeProvider([]))
     assert runtime.environment.memory_service is None
     assert not runtime.environment.tool_bridge.tool_view.active_tools
-    assert not (tmp_path / ".iris").exists()
+    assert not (tmp_path / ".iris" / "memory").exists()
 
 
 class RecallEvaluator:
@@ -140,6 +141,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
     overview_config = MemoryConfig().overview
     service = MemoryService(
         SQLiteMemoryStore(tmp_path / "explicit.db"),
+        prompt_source=PromptSource.initialize(tmp_path, "explicit-prompts"),
         overview_provider=overview_provider,
         overview_model="independent-model",
         overview_config=overview_config,
@@ -147,6 +149,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
 
     original = assembly.build_memory_service_from_config
     captured: list[MemoryService | None] = []
+    original_source = service.prompt_source
 
     def resolve_service(
         config: MemoryConfig,
@@ -155,6 +158,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
         memory_service: MemoryService | None = None,
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
+        prompt_source: PromptSource | None = None,
     ) -> MemoryService | None:
         captured.append(memory_service)
         return original(
@@ -163,6 +167,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
             memory_service=memory_service,
             overview_provider=overview_provider,
             overview_model=overview_model,
+            prompt_source=prompt_source,
         )
 
     monkeypatch.setattr(assembly, "build_memory_service_from_config", resolve_service)
@@ -179,7 +184,8 @@ def test_injected_service_is_resolved_by_the_memory_switch(
     assert service.overview_provider is overview_provider
     assert service.overview_model == "independent-model"
     assert service.overview_config is overview_config
-    assert not (tmp_path / ".iris").exists()
+    assert service.prompt_source is original_source
+    assert not (tmp_path / ".iris" / "memory").exists()
 
 
 @pytest.mark.parametrize("injected_provider", [False, True])
@@ -213,14 +219,18 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
         memory_service: MemoryService | None = None,
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
+        prompt_source: PromptSource | None = None,
     ) -> MemoryService | None:
         captured.append((overview_provider, overview_model, memory_service))
+        assert prompt_source is not None
+        assert (prompt_source.root / "memory_overview.j2").is_file()
         return original(
             config,
             workspace_root,
             memory_service=memory_service,
             overview_provider=overview_provider,
             overview_model=overview_model,
+            prompt_source=prompt_source,
         )
 
     monkeypatch.setattr(assembly, "create_provider_client", create_provider)
@@ -236,6 +246,7 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
     assert service.overview_provider is provider
     assert service.overview_model == "test"
     assert service.overview_config is runtime.environment.agent_config.memory.overview
+    assert service.prompt_source is runtime.environment.prompt_source
     assert provider.requests == []
 
 
@@ -310,6 +321,7 @@ def test_memory_initialization_error_propagates_from_assembly(
         memory_service: MemoryService | None = None,
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
+        prompt_source: PromptSource | None = None,
     ) -> None:
         raise IrisMemoryError("memory 初始化失败")
 

@@ -21,6 +21,7 @@ from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
 from iris.memory.generation_models import MemoryGenerationConfig
 from iris.memory.mirror import FileMemoryMirror
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.runtime import RuntimeCursor
 from iris.store import InMemoryLifecycleStore
 
@@ -93,6 +94,7 @@ def _runner(
         generation_config=settings,
         overview_provider=generation,
         overview_model="overview",
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     config = goal_config(tmp_path)
     config = config.model_copy(

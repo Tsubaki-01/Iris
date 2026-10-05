@@ -16,6 +16,7 @@ from ..command.models import CommandEnvironment, CommandMode, CommandStopSlot
 from ..command.native import NativeCommandService
 from ..command.service import CommandBinding, CommandService
 from ..context import (
+    ContextBuilder,
     ContextBuildInput,
     ContextSection,
     ContextSlot,
@@ -28,10 +29,17 @@ from ..decision import (
     build_decision_client,
     load_decision_config,
 )
-from ..exceptions import IrisConfigError, IrisSkillPathError, IrisToolValidationError
+from ..exceptions import (
+    IrisConfigError,
+    IrisContextError,
+    IrisSkillPathError,
+    IrisTemplateError,
+    IrisToolValidationError,
+)
 from ..goal.context import GoalContextSource
 from ..goal.tools import GetGoalTool, ReportGoalTool
 from ..memory.config import build_memory_service_from_config
+from ..prompts import PromptSnapshot, PromptSource
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
 from ..sandbox import DockerConfig
@@ -49,7 +57,9 @@ from ..tools.context_access import ContextAccessPort, ContextReadTool, ContextSe
 from ..tools.discovery import ToolSearchTool
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
+from ..utils import TemplateRenderer
 from ._extensions import build_extensions
+from ._prompts import snapshot_prompts
 from .environment import RuntimeEnvironment, RuntimeExecutionScope
 from .runtime import AgentRuntime
 from .tool_bridge import ToolBridge
@@ -183,6 +193,7 @@ def assemble_runtime(
     hooks: Sequence[HookRegistration] = (),
     tool_middlewares: Sequence[ToolMiddleware] = (),
     decision_client: DecisionEvaluator | None = None,
+    prompt_source: PromptSource | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
     if config.goal.enabled:
@@ -216,19 +227,10 @@ def assemble_runtime(
         raise IrisConfigError("Decision tools.discovery 要求 context_policy.deferred_tools=true")
     if decision_config.memory.recall and not config.memory.enabled:
         raise IrisConfigError("Decision memory.recall 要求 memory.enabled=true")
-    if config.compaction.prompt is not None and not config.compaction.prompt.is_absolute():
-        config = config.model_copy(
-            update={
-                "compaction": config.compaction.model_copy(
-                    update={
-                        "prompt": _resolve_relative_to_base(
-                            config.compaction.prompt, base_dir=base_dir
-                        )
-                    }
-                )
-            }
-        )
     workspace_root = boundary.workspace_root
+    if prompt_source is None:
+        prompt_source = PromptSource.initialize(workspace_root, config.prompts.root)
+    prompt_snapshot = snapshot_prompts(prompt_source)
     resolved_provider = (
         create_provider_client(
             config.to_model_route(),
@@ -246,12 +248,26 @@ def assemble_runtime(
         memory_service=memory_service,
         overview_provider=resolved_provider,
         overview_model=config.model.name,
+        prompt_source=prompt_source,
     )
     context_input = _build_context_input(config, base_dir=base_dir)
+    try:
+        context_renderer = TemplateRenderer.freeze_directories(
+            section.template.parent
+            for section in (
+                context_input.system,
+                context_input.memory,
+                context_input.before_current_input,
+            )
+            if section is not None and section.template is not None
+        )
+    except IrisTemplateError as exc:
+        raise IrisContextError(exc.message, **exc.context) from exc
     context_input, skill_registry = _prepare_skills(
         context_input,
         config=config,
         workspace_root=workspace_root,
+        prompt_snapshot=prompt_snapshot,
     )
     mcp_config = None
     if config.mcp is not None:
@@ -270,6 +286,7 @@ def assemble_runtime(
         memory_config=config.memory,
         memory_decision_client=decision_client if decision_config.memory.recall else None,
         command_binding=boundary.command_binding,
+        prompt_snapshot=prompt_snapshot,
     )
     if config.context_policy.enabled:
         access = cast(ContextAccessPort, context_access)
@@ -283,7 +300,9 @@ def assemble_runtime(
             tool_registry.register_many((GetGoalTool(goal_service), ReportGoalTool(goal_service)))
         except IrisToolValidationError as exc:
             raise IrisConfigError("get_goal/report_goal 与现有工具名称或别名冲突") from exc
-        context_source = GoalContextSource(goal_service, host_source=context_source)
+        context_source = GoalContextSource(
+            goal_service, host_source=context_source, prompt_snapshot=prompt_snapshot
+        )
     if skill_registry is not None:
         try:
             tool_registry.register(LoadSkillTool(skill_registry))
@@ -314,6 +333,7 @@ def assemble_runtime(
                 ToolSearchTool(
                     tool_view,
                     decision_client=decision_client if decision_config.tools.discovery else None,
+                    prompt_snapshot=prompt_snapshot,
                 )
             )
         except IrisToolValidationError as exc:
@@ -330,7 +350,10 @@ def assemble_runtime(
     environment = RuntimeEnvironment(
         agent_config=config,
         context_input=context_input,
+        context_builder=ContextBuilder(template_renderer=context_renderer),
         provider=resolved_provider,
+        prompt_source=prompt_source,
+        prompt_snapshot=prompt_snapshot,
         tool_bridge=tool_bridge,
         workspace_root=workspace_root,
         memory_service=memory_service,
@@ -384,6 +407,7 @@ def _prepare_skills(
     *,
     config: AgentConfig,
     workspace_root: Path,
+    prompt_snapshot: PromptSnapshot,
 ) -> tuple[ContextBuildInput, SkillRegistry | None]:
     """发现项目级 Skill，并为非空 registry 追加 catalog slot。"""
     skills_config = config.skills
@@ -437,7 +461,7 @@ def _prepare_skills(
             },
         )
 
-    catalog = SkillCatalog(registry)
+    catalog = SkillCatalog(registry, prompt_snapshot=prompt_snapshot)
     content_chars = catalog.content_chars()
     logger.info(
         "skill catalog built",

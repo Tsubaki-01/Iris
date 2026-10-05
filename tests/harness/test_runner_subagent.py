@@ -55,6 +55,7 @@ from iris.message import (
     Msg,
     ToolUseBlock,
 )
+from iris.prompts import PromptSnapshot, PromptSource
 from iris.providers import CompletionProvider
 from iris.runtime import RuntimeCursor, RuntimeStreamEvent
 from iris.store import InMemoryLifecycleStore, SQLiteStore
@@ -85,6 +86,39 @@ def _parent_provider() -> StaticProvider:
         ),
         text_response("Parent complete"),
     )
+
+
+@pytest.mark.asyncio
+async def test_child_borrows_parent_prompt_source_without_initializing_its_own(
+    tmp_path: Path,
+) -> None:
+    """缩窄 child workspace 不改变命名模板来源，也不修改宿主注入来源。"""
+    config_path = _write_configs(tmp_path)
+    child_workspace = tmp_path / "child-workspace"
+    child_workspace.mkdir()
+    child_config = tmp_path / "child.yaml"
+    with child_config.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "permissions:\n  workspace: child-workspace\nprompts:\n  root: child-prompts\n"
+        )
+    prompts = PromptSource.initialize(tmp_path, "host-prompts")
+    (prompts.root / "todo_context.j2").write_text("宿主自定义正文", encoding="utf-8")
+    runner = AgentRunner.from_config_path(
+        config_path,
+        provider=_parent_provider(),
+        prompt_source=prompts,
+        child_provider_factory=ChildProviders(StaticProvider(text_response("Child done"))),
+    )
+    controller = runner._subagent_controller
+    child = controller._assemble_child(controller.routes.routes["researcher"])
+    assert child.runtime.environment.workspace_root == child_workspace
+    assert runner.runtime.environment.prompt_source is prompts
+    assert child.runtime.environment.prompt_source is prompts
+    assert child.runtime.environment.prompt_snapshot.render("todo_context", {}) == "宿主自定义正文"
+    assert not (tmp_path / ".iris" / "prompts").exists()
+    assert not (child_workspace / "child-prompts").exists()
+    await child.aclose()
+    await runner.aclose()
 
 
 @pytest.mark.asyncio
@@ -1516,6 +1550,7 @@ def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
         memory_config: MemoryConfig | None = None,
         memory_decision_client: DecisionEvaluator | None = None,
         command_binding: CommandBinding | None = None,
+        prompt_snapshot: PromptSnapshot | None = None,
     ) -> ToolRegistry:
         registry = build_tool_registry(
             config,
@@ -1523,6 +1558,7 @@ def blocking_child_tool(monkeypatch: pytest.MonkeyPatch) -> BlockingChildTool:
             memory_config=memory_config,
             memory_decision_client=memory_decision_client,
             command_binding=command_binding,
+            prompt_snapshot=prompt_snapshot,
         )
         if "human.ask" in config.builtin:
             registry.register_function(tool.run, name="blocking_child")

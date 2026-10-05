@@ -120,7 +120,8 @@ model: openai/gpt-4o-mini
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
 - `mcp`: 可选的 `AgentMCPConfig`；引用 JSON/JSONC/TOML 文件，默认 `None`。
-- `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
+- `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算与超时。
+- `prompts`: `PromptConfig`，项目命名提示的唯一目录入口，默认 `root: .iris/prompts`。
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
 - `maintenance`: 宿主共享维护的 `idle_seconds`，默认 300 秒，允许 0；不属于 Memory 生成预算。
@@ -249,24 +250,25 @@ compaction:
 预算乘以对应比例（向上取整）。近期原文只是软目标，不要求两个比例之和小于 80%。
 输入预算与超时必须为正数，两个比例必须位于 0 与 1 之间。
 
-可用独立 Jinja2 文件自定义摘要指令和输出格式：
+命名提示通过一个项目目录统一配置，摘要也使用这一来源：
 
 ```yaml
-compaction:
-  prompt: ./prompts/summary.j2
+prompts:
+  root: .iris/prompts
 ```
 
-`prompt` 相对 `agent.yaml` 所在目录解析；省略或设为 `null` 时使用包内的
-[默认七栏 prompt](../prompts/compaction.j2)。文件内容作为摘要请求的 system 消息，
-旧摘要与本批历史由框架作为 user 消息提供，无需在模板里插入数据变量。自定义文件可以
-改变栏目和措辞；摘要正文仍由框架统一包裹 `<summary>` 后注入主请求。
+`prompts.root` 相对已解析的 root workspace，构造后固定；不是相对 `agent.yaml`，child
+也不会按缩窄后的 workspace 重新解释。配置加载只校验声明，不创建目录；首次构造可运行
+Agent 时补齐缺少的默认模板，保留已有文件。手工修改项目目录中的 `compaction.j2` 可改变
+摘要栏目和措辞，`compaction_input.j2` 使用 `previous_summary_or_none` 与 `serialized_history`
+组织 user 消息。摘要仍是自然语言，由框架包裹 `<summary>` 注入主请求。旧
+`compaction.prompt` 和 SDK `CompactionConfig.prompt_path` 已删除，传入会报配置错误。
 
-模板通过共享的 [`iris.utils.TemplateRenderer`](../utils/README.md) 使用 Jinja2 原生按需加载
-与编译缓存，支持动态 include/import/extends。默认不进行 XML 转义；XML 模板可显式使用
-`{% autoescape true %}` 或 `|e`。Runtime 在消费摘要指令时去除首尾空白。
-同一 runtime 在下次压缩操作检测文件修改；一次操作的全部分块与重试共用同一份已渲染指令。
-配置加载只解析路径，首次压缩时读取文件。直接使用 Python SDK
-时，相对路径以 `config_path` 所在目录为基准，未提供时以当前工作目录为基准。
+每次压缩开始固定两份模板及依赖的内存源，全部分块与重试共用，下一次压缩才采用文件修改。
+Goal、Todo、Memory 概览指引、Skill catalog、Decision 指令和 system/context 模板则在 runner
+构造时固定正文，调用数据继续动态传入。`system` / `context` 保留原声明入口，不在 `prompts`
+下另配一份系统指令。模板使用共享的 [`TemplateRenderer`](../utils/README.md)，默认不转义；
+XML 可显式使用 `{% autoescape true %}` 或 `|e`。来源和各采用边界见 [prompts](../prompts/README.md)。
 
 配置仍由 `load_agent_config()` 或 `AgentConfig` 校验，随后通过
 `RuntimeEnvironment.agent_config` 传递；加载时不调用模型或 tokenizer。每次主模型调用前，
@@ -509,9 +511,10 @@ Docker child 的 `writes: deny` 只限制原生文件工具，不保证命令只
 读取 UTF-8 YAML 文件并返回 `AgentConfig`。配置缺失、YAML 格式错误、字段类型错误、
 未知字段、不可读路径都会包装为 `IrisConfigError`。
 
-### `build_tool_registry(config, *, memory_service=None, memory_config=None, memory_decision_client=None, command_binding=None)`
+### `build_tool_registry(config, *, memory_service=None, memory_config=None, memory_decision_client=None, prompt_snapshot=None, command_binding=None)`
 
-`memory_decision_client` 仅透传给 `MemorySearchTool`，不写入共享 service，不改变 Fetch/写工具。
+`memory_decision_client` 和构造时的 `prompt_snapshot` 仅透传给 `MemorySearchTool`，不写入
+共享 service，不改变 Fetch/写工具。Decision 召回须提供项目快照，本地搜索无需它。
 
 根据 `ToolsConfig` 构建 `ToolRegistry`：
 

@@ -18,19 +18,17 @@ from iris.message import (
     ToolResultBlock,
     ToolUseBlock,
 )
+from iris.prompts import PromptSnapshot
 from iris.runtime._compaction_summary import (
     consume_summary_response,
     next_summary_batch,
     serialize_history,
 )
-from iris.utils import TemplateRenderer
-
-_PROMPT_RENDERER = TemplateRenderer()
-_DEFAULT_PROMPT = _PROMPT_RENDERER.render_file(CompactionConfig().prompt_path, {}).strip()
 
 
 def test_image_summary_keeps_refs_order_and_tool_facts_without_pixels_or_replay(
     tmp_path: Path,
+    prompt_snapshot: PromptSnapshot,
 ) -> None:
     """摘要只投影既有视觉结论与可定位的引用，完全不读取图片文件。"""
     original = ImageFileRef(
@@ -88,8 +86,8 @@ def test_image_summary_keeps_refs_order_and_tool_facts_without_pixels_or_replay(
         (0, 0),
         CompactionConfig(),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     payload = batch.request.model_dump_json()
     material = batch.request.messages[-1].text
@@ -175,7 +173,9 @@ def test_history_preserves_all_blocks_and_necessary_tool_semantics() -> None:
     assert "trace-secret" not in rendered and "result-trace" not in rendered
 
 
-def test_summary_request_uses_canonical_seven_headings_and_final_request_options() -> None:
+def test_summary_request_uses_canonical_seven_headings_and_final_request_options(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     main = _main_request()
     config = CompactionConfig()
     records = serialize_history([Msg.user("已保存的任务")], start_index=0)
@@ -187,8 +187,8 @@ def test_summary_request_uses_canonical_seven_headings_and_final_request_options
         (0, 0),
         config,
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     request = batch.request
 
@@ -220,7 +220,9 @@ def test_summary_request_uses_canonical_seven_headings_and_final_request_options
     assert batch.next_position == (len(records), 0)
 
 
-def test_long_completed_result_is_covered_once_in_order_with_call_identity() -> None:
+def test_long_completed_result_is_covered_once_in_order_with_call_identity(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     content = "".join(f"数据行{i:05d}。" for i in range(3000))
     records = serialize_history(
         [Msg.tool_result(tool_use_id="long-call", name="read_file", content=content)],
@@ -240,8 +242,8 @@ def test_long_completed_result_is_covered_once_in_order_with_call_identity() -> 
             position,
             config,
             _estimate,
-            system_prompt=_DEFAULT_PROMPT,
-            prompt_renderer=_PROMPT_RENDERER,
+            system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+            prompt_snapshot=prompt_snapshot,
         )
         user = batch.request.messages[1].text
         end = len(records[0].text) if batch.next_position[0] else batch.next_position[1]
@@ -262,7 +264,9 @@ def test_long_completed_result_is_covered_once_in_order_with_call_identity() -> 
     assert content in processed
 
 
-def test_each_batch_recounts_the_current_larger_working_summary() -> None:
+def test_each_batch_recounts_the_current_larger_working_summary(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     records = serialize_history([Msg.user("A" * 20000)], start_index=0)
     config = CompactionConfig(input_budget_tokens=6500)
     main = _main_request()
@@ -273,8 +277,8 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
         (0, 0),
         config,
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     larger_summary = "仍有效的旧约束。" * 60
     second = next_summary_batch(
@@ -284,8 +288,8 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
         first.next_position,
         config,
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
 
     first_length = first.next_position[1]
@@ -295,7 +299,9 @@ def test_each_batch_recounts_the_current_larger_working_summary() -> None:
     assert _estimate(second.request) <= config.input_budget_tokens
 
 
-def test_records_are_merged_in_order_including_empty_content() -> None:
+def test_records_are_merged_in_order_including_empty_content(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     records = serialize_history(
         [Msg.user(""), Msg.assistant([]), Msg.user("第三条"), Msg.assistant("第四条")],
         start_index=11,
@@ -307,8 +313,8 @@ def test_records_are_merged_in_order_including_empty_content() -> None:
         (0, 0),
         CompactionConfig(),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     user = batch.request.messages[1].text
 
@@ -318,7 +324,9 @@ def test_records_are_merged_in_order_including_empty_content() -> None:
     assert "有效的旧摘要" in user
 
 
-def test_minimum_fragment_failure_does_not_drop_the_previous_summary() -> None:
+def test_minimum_fragment_failure_does_not_drop_the_previous_summary(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     records = serialize_history([Msg.user("新记录")], start_index=0)
 
     with pytest.raises(IrisContextCompactionError) as error:
@@ -329,8 +337,8 @@ def test_minimum_fragment_failure_does_not_drop_the_previous_summary() -> None:
             (0, 0),
             CompactionConfig(input_budget_tokens=6500),
             _estimate,
-            system_prompt=_DEFAULT_PROMPT,
-            prompt_renderer=_PROMPT_RENDERER,
+            system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+            prompt_snapshot=prompt_snapshot,
         )
 
     assert error.value.runtime_code == "CONTEXT_COMPACTION_UNAVAILABLE"
@@ -346,7 +354,9 @@ def test_summary_consumption_accepts_text_without_parsing_its_headings() -> None
     assert consume_summary_response(response) == "普通摘要\n继续工作。"
 
 
-def test_summary_input_preserves_previous_summary_and_history_as_plain_text() -> None:
+def test_summary_input_preserves_previous_summary_and_history_as_plain_text(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     """独立输入模板插值不会二次解释 Jinja 文本或把正文变成 XML 实体。"""
     previous = '路径 <src>&"；原样保留 {{ value }}'
     history = '```json\n{"key": "<a>&"}\n```'
@@ -357,8 +367,8 @@ def test_summary_input_preserves_previous_summary_and_history_as_plain_text() ->
         (0, 0),
         CompactionConfig(),
         _estimate,
-        system_prompt=_DEFAULT_PROMPT,
-        prompt_renderer=_PROMPT_RENDERER,
+        system_prompt=prompt_snapshot.render("compaction", {}).strip(),
+        prompt_snapshot=prompt_snapshot,
     )
     user = batch.request.messages[1].text
     assert "=== BEGIN PREVIOUS SUMMARY ===\n" + previous + "\n=== END" in user

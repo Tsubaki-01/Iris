@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..decision import DecisionEvaluator
 from ..exceptions import IrisMemoryError
 from ..message import TextBlock
+from ..prompts import PromptSnapshot
 from ..tools import (
     BaseTool,
     ToolCapability,
@@ -207,6 +208,7 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
         access_policy_factory: MemoryAccessPolicyFactory,
         max_result_chars: int = 50000,
         decision_client: DecisionEvaluator | None = None,
+        prompt_snapshot: PromptSnapshot | None = None,
     ) -> None:
         """借用当前 Agent 的可选 evaluator，不向共享 service 写入模式或资源。"""
         super().__init__(
@@ -215,6 +217,7 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
             max_result_chars=max_result_chars,
         )
         self.decision_client = decision_client
+        self.prompt_snapshot = prompt_snapshot
         if decision_client is not None:
             self.definition.capabilities = {ToolCapability.READ, ToolCapability.NETWORK}
 
@@ -228,7 +231,9 @@ class MemorySearchTool(MemoryTool[MemorySearchQuery]):
             candidates = await self.service.alist_items(
                 namespaces, limit=None, categories=params.categories, kinds=params.kinds
             )
-            response, metadata = await recall_memories(candidates, params, self.decision_client)
+            response, metadata = await recall_memories(
+                candidates, params, self.decision_client, self.prompt_snapshot
+            )
         payload: dict[str, Any] = {
             "items": [_hit_payload(hit) for hit in response.items],
             "has_more": response.has_more,
@@ -363,6 +368,7 @@ def register_memory_tools(
     max_result_chars: int = 50000,
     tool_names: Sequence[str] = (),
     memory_decision_client: DecisionEvaluator | None = None,
+    prompt_snapshot: PromptSnapshot | None = None,
 ) -> ToolRegistry:
     """注册选定记忆工具并返回 registry，默认不注册任何工具。
 
@@ -374,6 +380,7 @@ def register_memory_tools(
         max_result_chars (int): 每个记忆工具允许返回给模型的最大字符数。
         tool_names: 从 MEMORY_TOOL_CLASSES 选择的 builtin 声明名。
         memory_decision_client: 仅供 Search 借用的可选 Decision evaluator。
+        prompt_snapshot: Search 构造时固定的项目提示快照，Decision 调用使用最新候选数据。
 
     Returns:
         ToolRegistry: 注册完选定记忆工具的 registry。
@@ -389,6 +396,7 @@ def register_memory_tools(
         }
         if tool_cls is MemorySearchTool:
             options["decision_client"] = memory_decision_client
+            options["prompt_snapshot"] = prompt_snapshot
         registry.register(tool_cls(**options))
     return registry
 

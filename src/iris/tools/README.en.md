@@ -596,8 +596,13 @@ lower-level registry query/limit API still defaults to 10. Both backends first a
 deny/group/allow and call-specific group filters to deferred tools. `include_groups=[]` allows no groups;
 search results cannot expand the host's group scope.
 
-`ToolSearchTool(view, decision_client=evaluator)` borrows a Decision evaluator; full assembly selects
-this backend through `tools.discovery` in the Decision file. It reads the complete allowed deferred
+`ToolSearchTool(view, decision_client=evaluator, prompt_snapshot=...)` borrows a Decision evaluator
+and a construction-time project snapshot. Full assembly selects this backend through
+`tools.discovery` in the Decision file. `tool_discovery_instruction.j2` comes from the project's
+`prompts.root` (default `.iris/prompts`); initialization adds only missing defaults. New tools adopt
+instruction edits, while each call still supplies its current `query_index` and candidates.
+Code owns Choice options, the no-match option, question IDs, and state keys. Local search needs no
+prompt snapshot. It reads the complete allowed deferred
 catalog at call time and evaluates the entire batch once, with one Choice including a no-match option
 per intent. Business state contains only `queries` and candidate IDs mapped to `name/description` in
 `tools`; tags, group, schemas, and other tool metadata are not sent. Local text ranking does not narrow

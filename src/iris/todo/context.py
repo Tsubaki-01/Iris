@@ -1,15 +1,10 @@
 """将当前 Todo 文档投影为每个模型步骤的必要上下文。"""
 
-from pathlib import Path
-
 from ..context import ContextContribution
 from ..exceptions import IrisTemplateError, IrisTodoError
-from ..utils.templating import TemplateRenderer
+from ..prompts import PromptSnapshot
 from .models import TodoSnapshot, TodoStatus
 
-_TEMPLATE = Path(__file__).resolve().parents[1] / "prompts" / "todo_context.j2"
-_REMINDER_TEMPLATE = _TEMPLATE.with_name("todo_reminder.j2")
-_RENDERER = TemplateRenderer()
 _MARKERS = {
     TodoStatus.PENDING: " ",
     TodoStatus.IN_PROGRESS: "-",
@@ -17,11 +12,17 @@ _MARKERS = {
 }
 
 
-def render_todo_context(snapshot: TodoSnapshot, *, remind: bool = False) -> ContextContribution:
+def render_todo_context(
+    snapshot: TodoSnapshot,
+    *,
+    prompt_snapshot: PromptSnapshot,
+    remind: bool = False,
+) -> ContextContribution:
     """用已解析的快照构造 required contribution，不读取或重新校验清单。
 
     Args:
         snapshot: 当前步骤读取所得的不可变文件快照。
+        prompt_snapshot: 构造时固定的模板正文和依赖，业务数据仍由本次传入。
         remind: 当前步骤是否为已安排的唯一结束自查步骤。
 
     Returns:
@@ -32,11 +33,13 @@ def render_todo_context(snapshot: TodoSnapshot, *, remind: bool = False) -> Cont
     """
     variables = {"snapshot": snapshot, "markers": _MARKERS}
     parts: list[str] = []
-    for template in (_TEMPLATE, _REMINDER_TEMPLATE) if remind else (_TEMPLATE,):
+    for template in ("todo_context", "todo_reminder") if remind else ("todo_context",):
         try:
-            parts.append(_RENDERER.render_file(template, variables))
+            parts.append(prompt_snapshot.render(template, variables))
         except IrisTemplateError as exc:
             raise IrisTodoError(
-                "Todo 提示模板渲染失败", template=str(template), error=str(exc)
+                "Todo 提示模板渲染失败",
+                template=str(prompt_snapshot.root / f"{template}.j2"),
+                error=str(exc),
             ) from exc
     return ContextContribution("iris.todo", "\n\n".join(parts), required=True)

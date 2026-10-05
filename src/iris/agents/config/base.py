@@ -22,6 +22,7 @@ from ...exceptions import IrisConfigError, IrisValidationError
 from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
 from ...message.llm import ProviderOptions, ResponseFormat, ToolChoice
+from ...prompts.config import PromptConfig
 from ...providers import ModelRoute, parse_model_route
 from ...speech.config import SpeechConfig
 from ...todo.config import TodoConfig
@@ -255,6 +256,7 @@ class AgentConfig(BaseModel):
         compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
         context_policy (ContextPolicyConfig): 当前会话上下文回读策略。
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
+        prompts (PromptConfig): 相对 root workspace 的项目命名模板目录。
         maintenance (MaintenanceConfig): 宿主共享维护的空闲等待。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
@@ -277,6 +279,7 @@ class AgentConfig(BaseModel):
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    prompts: PromptConfig = Field(default_factory=PromptConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
