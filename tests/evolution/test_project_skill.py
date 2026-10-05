@@ -14,6 +14,7 @@ from iris.evolution.models import (
     EvolutionCaptureBlock,
     EvolutionMaintenanceScope,
     EvolutionRecord,
+    EvolutionSession,
     EvolutionSource,
 )
 from iris.evolution.service import EvolutionService
@@ -57,6 +58,10 @@ async def eligible(sources: tuple[EvolutionSource, ...]) -> bool:
     return True
 
 
+async def eligible_session(session: EvolutionSession | None) -> bool:
+    return True
+
+
 def prepare(
     tmp_path: Path, **config: object
 ) -> tuple[EvolutionService, Provider, EvolutionMaintenanceScope]:
@@ -93,7 +98,13 @@ def prepare(
         config=EvolutionConfig(**config),
         prompt_source=PromptSource.initialize(tmp_path),
     )
-    return service, provider, EvolutionMaintenanceScope(frozenset({("host", "run")}), eligible)
+    return (
+        service,
+        provider,
+        EvolutionMaintenanceScope(
+            frozenset({("host", "run")}), eligible, frozenset(), eligible_session
+        ),
+    )
 
 
 def append_source(service: EvolutionService, run_id: str) -> EvolutionMaintenanceScope:
@@ -120,7 +131,9 @@ def append_source(service: EvolutionService, run_id: str) -> EvolutionMaintenanc
             ),
         )
     )
-    return EvolutionMaintenanceScope(frozenset({("host", "run"), ("host", run_id)}), eligible)
+    return EvolutionMaintenanceScope(
+        frozenset({("host", "run"), ("host", run_id)}), eligible, frozenset(), eligible_session
+    )
 
 
 @pytest.mark.asyncio
@@ -200,7 +213,11 @@ async def test_manual_edit_and_expired_eligibility_cannot_be_overwritten(tmp_pat
 
     provider.on_complete = lambda: None
     with pytest.raises(asyncio.CancelledError):
-        await service.maintain_cycle(scope=EvolutionMaintenanceScope(scope.allowed_sources, expire))
+        await service.maintain_cycle(
+            scope=EvolutionMaintenanceScope(
+                scope.allowed_sources, expire, frozenset(), eligible_session
+            )
+        )
     assert service.store.list_pending_sources()
 
 
@@ -217,7 +234,7 @@ async def test_editable_strategy_cannot_remove_response_schema(tmp_path: Path) -
     assert "原始经验必须注明适用范围" in prompt
     assert prompt.startswith("只输出 fake")
     schema = json.loads(prompt.rsplit("\n", 1)[1])
-    assert set(schema["properties"]) == {"body", "reason"}
+    assert set(schema["properties"]) == {"body", "reason", "issue"}
 
 
 @pytest.mark.asyncio

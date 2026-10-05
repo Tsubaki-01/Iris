@@ -773,9 +773,9 @@ async def run_sessions(
         for index, runner in enumerate(runners):
             await runner.start(AgentRunRequest(input="Process the project task", session_id=f"session-{index}"))
     finally:
+        await coordinator.aclose()
         for runner in runners:
             await runner.aclose()
-        await coordinator.aclose()
 ```
 
 [`_capture.py`](_capture.py) records source material without scheduling learning. A root Run
@@ -811,6 +811,15 @@ without the usual idle delay, while retaining foreground, eligibility and lockin
 material returns empty without a model call. After its borrowing runners close,
 `await coordinator.unbind_evolution(project_binding)` removes only that resource.
 See [evolution](../evolution/README.md) for configuration and artifact adoption.
+
+With `config_targets`, the factory also requires `config_path` pointing to the primary YAML.
+Hosts can call `await coordinator.request_revision(project_binding, RevisionRequest(...))` with a
+description, finite `RevisionTarget(kind="prompt" or "config", name=...)` values, and an optional
+`EvolutionSession(lifecycle_source_id=runner.store.source_id, session_id=...)`. Session-bound requests
+respect that session's WAITING state; requests without a Run do not fabricate task evidence.
+Explicit A returns an A result; explicit B waits for its own request ID. Failed or cancelled B stays
+pending for later external activity. Automatic A saves its issue and releases the project lock before
+B reacquires it in another cycle and rereads current targets. Publishing config never rebuilds runners.
 
 Maintenance starts only after foreground admission/activation calls fully exit and the idle
 interval passes. New foreground work cancels uncommitted generation without waiting for a

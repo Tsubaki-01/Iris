@@ -7,7 +7,7 @@ import json
 from collections import Counter
 from functools import partial
 from time import perf_counter
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -16,7 +16,7 @@ from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot
 from ..providers.protocols import CompletionProvider
 from ..utils.generation_worker import check_generation_cancelled
-from ._prompts import structured_memory_prompt
+from ._prompts import memory_output_contract, structured_memory_prompt
 from .generation_models import (
     DreamOperation,
     DreamPlan,
@@ -122,6 +122,14 @@ def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int
         temperature=0,
         response_format="json_object",
     )
+
+
+def generation_prompt_descriptions() -> dict[str, tuple[str, dict[str, Any]]]:
+    """给出 flush/dream 的实际固定契约与代表模板变量，不暴露响应模型。"""
+    return {
+        "memory_flush": (memory_output_contract(_FLUSH_INSTRUCTIONS, _FlushResponse), {}),
+        "memory_dream": (memory_output_contract(_DREAM_INSTRUCTIONS, _DreamResponse), {}),
+    }
 
 
 def _dependencies(service: MemoryService) -> tuple[CompletionProvider, str]:

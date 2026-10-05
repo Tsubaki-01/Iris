@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
 from iris.agents import AgentConfig
+from iris.exceptions import IrisConfigError
 from iris.harness.evolution import build_project_evolution_binding
 from iris.prompts import PromptSource
 
@@ -47,3 +50,59 @@ def test_project_binding_uses_explicit_host_resources(tmp_path: Path) -> None:
     assert binding.service.config is config.evolution
     assert binding.service.skill_path == tmp_path / "knowledge/skills/project-experience/SKILL.md"
     assert not (tmp_path / ".iris" / "memory").exists()
+
+
+def test_config_targets_require_explicit_primary_path(tmp_path: Path) -> None:
+    """内存构造的配置没有主文件时，不能猜测要修改哪一份 YAML。"""
+    config = AgentConfig.model_validate(
+        {
+            "name": "learner",
+            "model": "openai/test",
+            "system": "help",
+            "skills": {"enabled": True},
+            "evolution": {"enabled": True, "config_targets": ["system"]},
+        }
+    )
+    with pytest.raises(IrisConfigError, match="config_path"):
+        build_project_evolution_binding(
+            config,
+            workspace_root=tmp_path,
+            prompt_source=PromptSource.initialize(tmp_path),
+            provider=StaticProvider(),
+        )
+
+
+def test_bindings_expose_only_open_targets_and_use_domain_contracts(tmp_path: Path) -> None:
+    """候选收到同源说明，配置解析沿原文件基准，绑定不提供通用文件入口。"""
+    config = AgentConfig.model_validate(
+        {
+            "name": "learner",
+            "model": "openai/test",
+            "system": "help",
+            "skills": {"enabled": True},
+            "evolution": {
+                "enabled": True,
+                "config_targets": ["compaction.input_budget_tokens"],
+                "prompt_targets": ["memory_flush", "compaction_input"],
+            },
+        }
+    )
+    path = tmp_path / "configs" / "agent.yaml"
+    binding = build_project_evolution_binding(
+        config,
+        workspace_root=tmp_path,
+        prompt_source=PromptSource.initialize(tmp_path),
+        provider=StaticProvider(),
+        config_path=path,
+    )
+    assert {target.name for target in binding.service.prompt_targets} == {
+        "memory_flush",
+        "compaction_input",
+    }
+    target = binding.service.config_target
+    assert target.path == path
+    assert set(target.descriptions) == {"compaction.input_budget_tokens"}
+    assert '"exclusiveMinimum": 0' in target.descriptions["compaction.input_budget_tokens"]
+    raw = {"name": "test", "model": "openai/test", "context": {"path": "context.yaml"}}
+    target.validate(raw)
+    assert raw["context"]["path"] == "context.yaml" and not path.exists()

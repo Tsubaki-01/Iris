@@ -1,14 +1,18 @@
 [中文](README.md)
 
+# `iris.runtime`
+
 Source capture uses `RuntimeCapturePort.request_capture(run_id, through_count)`, injected through
 `RuntimeEnvironment.capture_port`. Runtime does not choose Memory or project experience consumers.
 Capture progress, terminal eligibility, learning schedules and locks stay with their respective owners.
 
-# `iris.runtime`
+`compaction_prompt_descriptions()` provides representative template variables and the natural-language
+summary contract. Representative and actual compaction inputs share one variable projection; prompt
+revision does not change the summary protocol.
 
 Both RuntimeFactory entry points accept optional `prompt_source=`. Without an injected source,
 shared assembly resolves the workspace and fills missing templates under `prompts.root` (default
-`.iris/prompts`) before constructing Memory, Skill, or other consumers. All 13 templates use this
+`.iris/prompts`) before constructing Memory, Skill, or other consumers. All named templates use this
 project source. Injected sources are used directly, and children borrow their root source.
 Existing text is preserved; missing runtime templates never fall back to bundled seeds.
 `RuntimeEnvironment.prompt_source` holds the source and `prompt_snapshot` the construction snapshot.
@@ -106,7 +110,7 @@ session after changing it.
 `RuntimeEnvironment.execution_scope` preserves ROOT/CHILD explicitly; children never register automatic
 maintenance. Root runners borrow a host-owned `MaintenanceCoordinator`; runtime neither creates nor owns it.
 Only after `_compact_request()` selects a real compaction range does runtime call the
-optional `RuntimeMemoryCapturePort.request_capture(run_id, through_count)` with the committed message
+optional `RuntimeCapturePort.request_capture(run_id, through_count)` with the committed message
 boundary. Ordinary requests and early returns without a compressible prefix send no hint. This
 synchronous port waits for neither IO nor memory models and leaves `RuntimeCommitPort` responsible for
 durable execution facts. Harness owns background capture/flush/dream and shutdown. Compaction need not

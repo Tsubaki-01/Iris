@@ -8,9 +8,16 @@ from .models import (
     EvolutionRange,
     EvolutionRecord,
     EvolutionResult,
+    EvolutionSession,
     EvolutionSource,
     EvolutionSourceState,
+    ExperienceOrigin,
+    HostOrigin,
     PendingMaterials,
+    RevisionEvidence,
+    RevisionItem,
+    RevisionRequest,
+    RevisionTarget,
 )
 
 __all__ = [
@@ -24,4 +31,11 @@ __all__ = [
     "EvolutionSource",
     "EvolutionSourceState",
     "PendingMaterials",
+    "EvolutionSession",
+    "ExperienceOrigin",
+    "HostOrigin",
+    "RevisionEvidence",
+    "RevisionItem",
+    "RevisionRequest",
+    "RevisionTarget",
 ]

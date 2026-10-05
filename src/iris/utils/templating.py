@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jinja2 import (
     BaseLoader,
@@ -111,6 +111,27 @@ class TemplateRenderer:
             raise IrisTemplateError(
                 "模板渲染失败", path=str(template_path), error=str(exc)
             ) from exc
+
+    def with_template(self, template_path: Path, source: str) -> TemplateRenderer:
+        """在同一冻结来源中替换一个入口，返回独立候选 renderer。
+
+        不读取文件，也不改变原实例；其他来源及动态依赖保持原快照。
+        """
+        path = template_path.resolve()
+        environment = self._environments.get(path.parent)
+        if not self._frozen or environment is None:
+            raise IrisTemplateError("候选模板需要已冻结的来源", path=str(template_path))
+        loader = cast(_FrozenLoader, environment.loader)
+        name = os.path.normcase(path.name)
+        if name not in loader._sources:
+            raise IrisTemplateError("候选模板不在冻结来源中", path=str(template_path))
+        candidate = TemplateRenderer()
+        candidate._frozen = True
+        candidate._environments = dict(self._environments)
+        candidate._environments[path.parent] = _environment(
+            _FrozenLoader({**loader._sources, name: source.encode("utf-8")})
+        )
+        return candidate
 
     def _load_template(self, template_path: Path) -> Template:
         """检查入口更新，依赖按 Jinja 原生执行规则加载。"""

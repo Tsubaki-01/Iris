@@ -190,17 +190,37 @@ memory:
   enabled: true
   generation:
     enabled: true
-    idle_seconds: 30
+maintenance:
+  idle_seconds: 30
 ```
 
 root run 的已提交经历先保存为 Episode，flush 提炼为带证据的 Observation，dreaming 再统一
 为正式记忆并发布概览。生成在前台空闲时运行，新输入优先；中间观察不参与检索，关闭后保留
 待处理材料。自动生成默认关闭，维护调用的模型用量与主任务分开记录。
 
+CLI 自动装配共享维护协调器；SDK 宿主须显式绑定 `MaintenanceCoordinator` 与
+`MemoryMaintenanceBinding`，多个 runner 共用宿主的协调器。仅终态且捕获完整的 Run
+可维护；会话处于 WAITING 时排除该会话，其他合格来源仍可维护。接线见
+[`iris.harness`](src/iris/harness/README.md)。
+
 本次模型重构使用 memory schema v5 与 lifecycle schema v9；旧数据库会明确拒绝，
 不自动迁移或删除已有数据。
 
 配置、显式概览生成和 SDK 用法见 [`iris.memory`](src/iris/memory/README.md)。
+
+## 项目经验与有限自进化
+
+`evolution.enabled` 默认关闭。启用后，已结束任务的经历可整理为项目
+`project-experience/SKILL.md`；须同时启用 `skills.enabled`，Memory 可独立关闭。
+首次生成的 Skill 由新 runner 发现，现有 runner 不热刷新目录。
+
+项目 prompt 首次初始化到 `.iris/prompts`，已有文件不覆盖。策略正文可编辑，输出 schema
+仍由消费领域的代码拥有。自进化只修订显式开放的 prompt/config 目标，两个目标列表默认空；
+prompt 在下一次完整操作采用，config 在新建 runner 时采用。
+
+Memory 与自进化可并行，各自持有对应资源的跨进程锁；共享协调器处理空闲、来源资格与
+前台取消。完整配置、单/多 runner 接线与有限修订入口见
+[`iris.evolution`](src/iris/evolution/README.md)。文件更新表示维护完成，不代表已验证学习收益。
 
 ## 可选 Decision
 

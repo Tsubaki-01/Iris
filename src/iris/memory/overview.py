@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from itertools import groupby
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -11,13 +12,18 @@ from ..exceptions import IrisMemoryError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot
 from ..utils.generation_worker import check_generation_cancelled
-from ._prompts import structured_memory_prompt
+from ._prompts import memory_output_contract, structured_memory_prompt
 from .models import MemoryNamespaceSnapshot, MemoryOverviewConfig, MemoryOverviewContent
 
 _OVERVIEW_INSTRUCTIONS = """响应必须且只能包含 core_facts 和 knowledge_scope 两个字符串字段。
 core_facts 保存核心事实，允许空字符串但不能省略；
 knowledge_scope 覆盖输入实际包含的全部知识主题，不能为空。
 两个字段均使用 Markdown 正文，不添加程序节标题。"""
+
+
+def overview_prompt_description() -> tuple[str, dict[str, Any]]:
+    """返回与实际概览请求同源的固定契约及空模板变量。"""
+    return memory_output_contract(_OVERVIEW_INSTRUCTIONS, MemoryOverviewContent), {}
 
 
 def build_overview_request(

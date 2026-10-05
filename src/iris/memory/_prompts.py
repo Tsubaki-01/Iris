@@ -32,8 +32,10 @@ def structured_memory_prompt(
 ) -> str:
     """在可编辑策略后追加由领域拥有的固定说明与真实响应 schema。"""
     strategy = render_memory_prompt(snapshot, prompt_id, {})
+    return f"{strategy}\n\n固定输出契约：\n{memory_output_contract(instructions, response_model)}"
+
+
+def memory_output_contract(instructions: str, response_model: type[BaseModel]) -> str:
+    """实际请求和领域说明共用同一份输出协议。"""
     schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
-    return (
-        f"{strategy}\n\n固定输出契约：\n{instructions}\n"
-        f"只返回符合以下 JSON Schema 的 JSON，不附加文字或代码围栏。\n{schema}"
-    )
+    return f"{instructions}\n只返回符合以下 JSON Schema 的 JSON，不附加文字或代码围栏。\n{schema}"

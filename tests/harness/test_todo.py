@@ -104,7 +104,7 @@ async def test_todo_query_does_not_change_active_run(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_todo_query_reports_disabled_and_empty_identity(tmp_path: Path) -> None:
-    """关闭开关和空身份明确失败，不偷偷启用或创建文件。"""
+    """关闭开关和空身份明确失败，不偷偷启用或创建 Todo 文件。"""
     config = AgentConfig.model_validate(
         {
             "name": "agent",
@@ -119,6 +119,6 @@ async def test_todo_query_reports_disabled_and_empty_identity(tmp_path: Path) ->
             await runner.get_todo("  ")
         with pytest.raises(IrisTodoError, match="未启用"):
             await runner.get_todo("work")
-        assert not (tmp_path / ".iris").exists()
+        assert not (tmp_path / ".iris" / "todos").exists()
     finally:
         await runner.aclose()

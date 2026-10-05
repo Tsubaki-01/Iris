@@ -661,9 +661,9 @@ async def run_sessions(
         for index, runner in enumerate(runners):
             await runner.start(AgentRunRequest(input="处理项目任务", session_id=f"session-{index}"))
     finally:
+        await coordinator.aclose()
         for runner in runners:
             await runner.aclose()
-        await coordinator.aclose()
 ```
 
 [`_capture.py`](_capture.py) 只保存原始材料，独立于维护调度。
@@ -693,6 +693,14 @@ prompt_source=prompt_source, provider=provider)` 构造，然后通过
 仍遵守前台、来源资格和资源锁；没有合格材料时返回 empty，不调用模型。
 关闭借用它的 runner 后，可用 `await coordinator.unbind_evolution(project_binding)` 单独撤销。
 完整启用、产物采用和材料边界见 [evolution](../evolution/README.md)。
+
+开放 `config_targets` 时，构造函数还必须接收 `config_path=主YAML路径`。宿主可提交
+`await coordinator.request_revision(project_binding, RevisionRequest(...))`；请求包含描述、
+有限 `RevisionTarget(kind="prompt"或"config", name=...)`，以及可选的
+`EvolutionSession(lifecycle_source_id=runner.store.source_id, session_id=...)`。
+有会话归属的请求同样受该 session 的 WAITING 状态约束；无 Run 请求不伪造任务经历。
+显式 A 仍返回 A 结果，显式 B 等待自己的请求 ID；B 失败或取消保留 pending，后续活动再处理。
+自动 A 保存问题并释放项目锁后，B 在下一轮重新取得锁、重读当前目标。Config 发布不重建 runner。
 
 前台 admission/activation 全部退出并安静达到 idle 后才维护。新前台立即撤销未提交生成，
 不等待模型或资源锁；Goal/follow-up 的短交接保留同一前台计数。

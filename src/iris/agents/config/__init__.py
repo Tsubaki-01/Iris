@@ -12,6 +12,7 @@ from .base import (
     SessionConfig,
     ToolsConfig,
     load_agent_config,
+    parse_agent_config,
 )
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
@@ -51,4 +52,5 @@ __all__ = [
     "ToolMiddlewareConfig",
     "build_tool_registry",
     "load_agent_config",
+    "parse_agent_config",
 ]

@@ -7,14 +7,20 @@ import logging
 import math
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import cast
 
 from filelock import FileLock, Timeout
 
-from ..evolution.models import EvolutionMaintenanceScope, EvolutionResult, EvolutionSource
+from ..evolution.models import (
+    EvolutionMaintenanceScope,
+    EvolutionResult,
+    EvolutionSession,
+    EvolutionSource,
+    RevisionRequest,
+)
 from ..evolution.service import EvolutionService
 from ..exceptions import IrisConfigError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
@@ -55,6 +61,14 @@ class _MemoryResource:
     attachments: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _RevisionWaiter:
+    """等待具体持久请求的宿主调用，不存储第二份运行资格。"""
+
+    future: asyncio.Future[EvolutionResult]
+    session: EvolutionSession | None
+
+
 @dataclass(slots=True)
 class _EvolutionResource:
     """一个项目的经验维护状态，与 Memory 独立占用任务和锁。"""
@@ -66,6 +80,7 @@ class _EvolutionResource:
     ready_at: float = 0
     attachments: int = 0
     request: asyncio.Future[EvolutionResult] | None = None
+    revision_requests: dict[str, _RevisionWaiter] = field(default_factory=dict)
 
 
 class MaintenanceCoordinator:
@@ -167,7 +182,9 @@ class MaintenanceCoordinator:
         if self._active_project is project:
             self._cancel_evolution_task()
             await asyncio.gather(self._evolution_task, return_exceptions=True)
+        await project.binding.service.wait_pending_io()
         self._fail_request(project, IrisRunStateError("项目经验维护绑定已撤销"))
+        self._fail_revisions(project, IrisRunStateError("项目经验维护绑定已撤销"))
 
     async def request_project_experience(self, binding: ProjectEvolutionBinding) -> EvolutionResult:
         """合并同项目主动请求，跳过普通 idle；前台、资格和项目锁仍然有效。"""
@@ -183,6 +200,30 @@ class MaintenanceCoordinator:
         if self._active_project is not project:
             self._wake(project)
         return await asyncio.shield(request)
+
+    async def request_revision(
+        self,
+        binding: ProjectEvolutionBinding,
+        request: RevisionRequest,
+    ) -> EvolutionResult:
+        """保存显式 B 请求并等待其自身结算；不把其他 A/B 结果当成本请求完成。"""
+        await self.prepare()
+        key = os.path.normcase(str(binding.workspace_root.resolve()))
+        project = self._projects[key]
+        if project.binding.service is not binding.service:
+            raise IrisConfigError("主动修订必须使用已绑定的项目经验服务")
+        item = await binding.service.enqueue_revision(request)
+        if self._closed or self._projects.get(key) is not project:
+            raise IrisRunStateError("项目维护已关闭或绑定已撤销，请求已保存")
+        future: asyncio.Future[EvolutionResult] = asyncio.get_running_loop().create_future()
+        future.add_done_callback(_consume_request_error)
+        project.revision_requests[item.id] = _RevisionWaiter(future, request.session)
+        project.ready_at = 0
+        self._wake(project)
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise asyncio.CancelledError
+        return await asyncio.shield(future)
 
     async def prepare(self) -> None:
         """首次使用时订阅所有绑定；资源按统一 idle 进入有界维护。"""
@@ -266,7 +307,12 @@ class MaintenanceCoordinator:
         )
         if self._evolution_task is None:
             ready.extend(
-                max(project.ready_at, 0 if project.request is not None else self._quiet_until)
+                max(
+                    project.ready_at,
+                    0
+                    if project.request is not None or project.revision_requests
+                    else self._quiet_until,
+                )
                 for project in self._projects.values()
                 if project.dirty
             )
@@ -296,7 +342,10 @@ class MaintenanceCoordinator:
             index = (self._next_project + offset) % len(projects)
             project = projects[index]
             ready_at = max(
-                project.ready_at, 0 if project.request is not None else self._quiet_until
+                project.ready_at,
+                0
+                if project.request is not None or project.revision_requests
+                else self._quiet_until,
             )
             if project.dirty and ready_at <= self._loop.time():
                 self._next_project = (index + 1) % len(projects)
@@ -335,6 +384,28 @@ class MaintenanceCoordinator:
         lane = reader.load_session_lane(session_id)
         current = reader.load_run(lane) if lane is not None else None
         return current is None or current.phase is not RunPhase.WAITING
+
+    def _session_eligible(self, session: EvolutionSession | None) -> bool:
+        """宿主明确请求没有虚构 Run；携带会话时必须能读取其真实 lane。"""
+        if session is None:
+            return True
+        reader = self._readers.get(session.lifecycle_source_id)
+        if reader is None or reader.load_session(session.session_id) is None:
+            return False
+        lane = reader.load_session_lane(session.session_id)
+        current = reader.load_run(lane) if lane is not None else None
+        return current is None or current.phase is not RunPhase.WAITING
+
+    async def _eligible_session(
+        self, project: _EvolutionResource, session: EvolutionSession | None
+    ) -> bool:
+        """B 发布前重查宿主请求会话与前台状态。"""
+        if self._closed or self._foreground:
+            return False
+        eligible = self._session_eligible(session)
+        if not eligible:
+            project.revision += 1
+        return eligible
 
     async def _run_cycle(self, resource: _MemoryResource) -> None:
         """有界周期持有 OS 锁，取消后直到真实 worker 排空才释放。"""
@@ -382,7 +453,7 @@ class MaintenanceCoordinator:
         self._schedule()
 
     async def _run_project_cycle(self, project: _EvolutionResource) -> EvolutionResult | None:
-        """一个有界 A 持项目锁；真实短 IO 排空前不释放该类位置。"""
+        """一个有界 A 或 B 持项目锁；真实短 IO 排空前不释放该类位置。"""
         lock = FileLock(project.lock_path, timeout=0)
         try:
             lock.acquire()
@@ -394,7 +465,14 @@ class MaintenanceCoordinator:
         try:
             with self._evolution_worker.bind():
                 service = project.binding.service
+                for item_id in tuple(project.revision_requests):
+                    settled = await service.run_async_io(
+                        partial(service.store.revision_result, item_id)
+                    )
+                    if settled is not None:
+                        project.revision_requests.pop(item_id).future.set_result(settled)
                 sources = await service.alist_pending_sources()
+                sessions = await service.alist_pending_sessions()
                 scope = EvolutionMaintenanceScope(
                     allowed_sources=frozenset(
                         (source.lifecycle_source_id, source.run_id)
@@ -404,10 +482,29 @@ class MaintenanceCoordinator:
                         )
                     ),
                     check=partial(self._eligible, project),
+                    allowed_sessions=frozenset(
+                        (session.lifecycle_source_id, session.session_id)
+                        for session in sessions
+                        if self._session_eligible(session)
+                    ),
+                    check_session=partial(self._eligible_session, project),
+                    experience_only=project.request is not None,
+                    requested_revision_id=next(
+                        (
+                            item_id
+                            for item_id, waiter in project.revision_requests.items()
+                            if self._session_eligible(waiter.session)
+                        ),
+                        None,
+                    ),
                 )
                 result = await service.maintain_cycle(scope=scope)
                 project.dirty = result.has_more or project.revision != revision
-                project.ready_at = self._loop.time() + self.idle_seconds
+                project.ready_at = (
+                    0
+                    if project.request is not None or project.revision_requests
+                    else self._loop.time() + self.idle_seconds
+                )
                 return result
         except BaseException:
             project.dirty = project.revision != revision
@@ -425,10 +522,26 @@ class MaintenanceCoordinator:
             self._fail_request(project, asyncio.CancelledError())
         elif (error := task.exception()) is not None:
             self._fail_request(project, error)
+            self._fail_revisions(project, error)
             logger.error("项目经验维护失败", exc_info=error)
-        elif (result := task.result()) is not None and project.request is not None:
-            project.request.set_result(result)
-            project.request = None
+        elif (result := task.result()) is not None:
+            completed_request = False
+            if result.stage == "experience" and project.request is not None:
+                project.request.set_result(result)
+                project.request = None
+                completed_request = True
+            if result.revision_id in project.revision_requests:
+                project.revision_requests.pop(result.revision_id).future.set_result(result)
+                completed_request = True
+            if project.request is not None or (
+                completed_request
+                and any(
+                    self._session_eligible(waiter.session)
+                    for waiter in project.revision_requests.values()
+                )
+            ):
+                project.dirty = True
+                project.ready_at = 0
         self._schedule()
 
     @staticmethod
@@ -437,6 +550,13 @@ class MaintenanceCoordinator:
         if project.request is not None:
             project.request.set_exception(error)
             project.request = None
+
+    @staticmethod
+    def _fail_revisions(project: _EvolutionResource, error: BaseException) -> None:
+        """宿主关闭或撤销绑定时结束全部显式等待，持久 pending 仍保留。"""
+        for waiter in project.revision_requests.values():
+            waiter.future.set_exception(error)
+        project.revision_requests.clear()
 
     async def aclose(self) -> None:
         """宿主停止派发、排空实际 IO；服务和 lifecycle reader 仍由宿主关闭。"""
@@ -456,7 +576,9 @@ class MaintenanceCoordinator:
         if self._evolution_task is not None:
             await asyncio.gather(self._evolution_task, return_exceptions=True)
         for project in self._projects.values():
+            await project.binding.service.wait_pending_io()
             self._fail_request(project, IrisRunStateError("维护协调器已关闭"))
+            self._fail_revisions(project, IrisRunStateError("维护协调器已关闭"))
         await self._worker.aclose()
         await self._evolution_worker.aclose()
 

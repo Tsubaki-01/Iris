@@ -22,12 +22,27 @@ maintenance:
   idle_seconds: 300
 ```
 
-`evolution.enabled` requires `skills.enabled=true` and only maintains
+`evolution.enabled` requires `skills.enabled=true` and by default only maintains
 `<skills.root>/project-experience/SKILL.md`. Optional `evolution.policy_skill` selects a policy file
 relative to the workspace; otherwise the bundled policy is used. Configuration loading starts no
 maintenance. SDK hosts explicitly bind a shared coordinator; `iris chat` performs this wiring.
 A new runner discovers a newly created Skill; an already registered Skill reads its current body
 on the next load. There is no registry refresh. See [evolution](../evolution/README.md).
+
+Automatic revision is explicitly scoped; both lists default to empty:
+
+```yaml
+evolution:
+  enabled: true
+  prompt_targets: [memory_flush, compaction_input]
+  config_targets: [compaction.keep_recent_ratio, system]
+```
+
+Supported targets are fixed. Candidates and file loading share
+`parse_agent_config(raw_config, config_path=...)`, preserving the original path base and validating
+before publication. Parsed models are never dumped over the original declaration. `system` only
+updates text in existing simple mode. Configuration edits take effect in a new runner; a new session
+on an existing runner keeps the runner's original configuration.
 
 ## Architecture
 

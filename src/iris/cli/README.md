@@ -25,6 +25,10 @@ iris chat agent.yaml --session-id work --max-steps 8
 与 Memory 共用宿主维护协调器；两类任务各自持锁、取消和排空。关闭 Memory 仍可维护项目
 经验；退出只收尾，不补跑总结。新生成 Skill 由下次启动的 runner 发现，没有新增维护命令。
 
+`prompt_targets/config_targets` 允许按真实任务中的具体问题修订有限目标。CLI 始终把本次
+主 YAML 路径交给候选解析器；Config 保存后需重新启动 `iris chat` 才采用，新 session 不会
+热切换已有 runner 的配置。
+
 - 普通输入：空闲时创建 Run，执行中按现有安全边界 steer 当前 Run。
 - `/follow-up <消息>`：排入下一轮，等待当前 Run 收尾。
 - `/todo`：只读查看当前会话待办及实际文件路径。

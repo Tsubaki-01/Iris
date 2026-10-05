@@ -19,6 +19,7 @@ from iris.evolution.models import (
     EvolutionCaptureBlock,
     EvolutionMaintenanceScope,
     EvolutionResult,
+    EvolutionSession,
     EvolutionSource,
     EvolutionSourceState,
 )
@@ -57,6 +58,13 @@ class ControlledEvolution:
     async def alist_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """无真实来源；本组只验证协调器独立调度与取消。"""
         return ()
+
+    async def alist_pending_sessions(self) -> tuple[EvolutionSession, ...]:
+        """调度测试没有宿主会话请求。"""
+        return ()
+
+    async def wait_pending_io(self) -> None:
+        """此替身不执行同步 IO。"""
 
     async def maintain_cycle(self, *, scope: EvolutionMaintenanceScope) -> EvolutionResult:
         """保持当前调用，直到主动放行或本类收到取消。"""
