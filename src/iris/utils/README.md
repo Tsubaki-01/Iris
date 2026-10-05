@@ -12,6 +12,8 @@
 
 [`atomic_write_text(path, content)`](files.py) 通过同目录完整临时文件发布 UTF-8 文本。
 文件工具和项目学习复用这一个实现；目标选择、基线比较与跨进程锁由调用领域负责。
+可通过 `temporary_directory` 指定同一文件系统上的暂存目录；prompt 发布在模板根外暂存，
+使并发模板快照不会枚举到发布中的临时文件。
 单文件替换不等于多个文件之间的事务。
 
 ## 使用文件模板
@@ -62,6 +64,10 @@ text = renderer.render_file(Path("prompts/greeting.j2"), {"name": "Iris"})
 取源，后续磁盘改动不影响当前实例。动态依赖、候选列表和可选文件的缺失状态一并固定，实际
 使用时才解码与编译，不提前编译未执行分支中的模板。每次渲染仍接收当前变量，Jinja 输出
 规则与默认文件 renderer 相同。捕获不承诺多文件事务原子性。
+
+冻结 renderer 的 `with_template(template_path, source)` 在原内存集合中替换一个已有入口，
+返回独立候选实例；其余依赖仍取原快照，不回读磁盘，也不修改原实例或文件。候选仍经同一个
+`render_file` 和当前变量渲染，不提前编译未使用分支。
 
 命名项目模板由 [`iris.prompts`](../prompts/README.md) 负责初始化和选择快照时机；runtime
 装配也使用冻结 renderer 固定自定义 system/context 模板。独立 `TemplateRenderer()` 继续

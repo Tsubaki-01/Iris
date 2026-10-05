@@ -237,3 +237,16 @@ def test_frozen_renderer_preserves_windows_filename_semantics(tmp_path: Path) ->
         assert renderer.render_file(main, {"selected": "NESTED/BODY.J2"}) == "body"
         with pytest.raises(IrisTemplateError):
             renderer.render_file(main, {"selected": "nested\\body.j2"})
+
+
+def test_candidate_renderer_replaces_one_source_without_rereading_files(tmp_path: Path) -> None:
+    main = tmp_path / "main.j2"
+    main.write_text("old {{ value }}", encoding="utf-8")
+    dependency = tmp_path / "body.j2"
+    dependency.write_text("frozen", encoding="utf-8")
+    original = TemplateRenderer.freeze_directories([tmp_path])
+    dependency.unlink()
+    revised = original.with_template(main, '{% include "body.j2" %} {{ value }}')
+    assert original.render_file(main, {"value": 1}) == "old 1"
+    assert revised.render_file(main, {"value": 2}) == "frozen 2"
+    assert main.read_text(encoding="utf-8") == "old {{ value }}"

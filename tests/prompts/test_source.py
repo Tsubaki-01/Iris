@@ -24,7 +24,7 @@ def test_initialization_preserves_existing_and_fills_missing(tmp_path: Path) -> 
     assert PromptConfig().root == ".iris/prompts"
     source = PromptSource.initialize(tmp_path)
     assert source.root == root.resolve()
-    assert len(PROMPT_IDS) == 14
+    assert len(PROMPT_IDS) == 15
     assert {path.stem for path in root.glob("*.j2")} == set(PROMPT_IDS)
     assert custom.read_text(encoding="utf-8") == "用户模板 {{ value }}"
     for prompt_id in PROMPT_IDS:

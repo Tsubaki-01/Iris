@@ -1,14 +1,17 @@
 [English](README.en.md)
 
+# `iris.runtime`
+
 原文捕获通过 `RuntimeCapturePort` 的 `request_capture(run_id, through_count)` 提示宿主，
 由 `RuntimeEnvironment.capture_port` 注入。Runtime 不知道该事实提示会写入 Memory、
 项目经验材料或两者；捕获进度、终态资格、学习调度和锁由各自 owner 处理。
 
-# `iris.runtime`
+`compaction_prompt_descriptions()` 提供摘要模板的代表变量和自然语言输出说明；
+`compaction_input` 的代表输入与真实请求共用同一变量投影，自动修订不改变摘要协议。
 
 `RuntimeFactory.from_config()` / `from_config_path()` 接收可选 `prompt_source=`。
 未注入时，共享装配在解析 workspace 后按 `prompts.root`（默认 `.iris/prompts`）补齐
-13 个项目模板，再构造 Memory、Skill 与其他消费者；注入来源直接使用，child 借用 root
+项目命名模板，再构造 Memory、Skill 与其他消费者；注入来源直接使用，child 借用 root
 的同一来源。已有正文不会被覆盖，运行时缺失模板不会回退包内种子。
 `RuntimeEnvironment.prompt_source` 保存来源，`prompt_snapshot` 保存本 runtime 构造时采用的正文。
 Goal、Todo、Memory context、Skill 用法及 Decision 指令随新 runtime 采用修改；领域数据仍按原时机读取。
@@ -88,7 +91,7 @@ Docker 命令服务内部拥有 [`DockerSandbox`](../sandbox/README.md) 资源�
 `RuntimeEnvironment.execution_scope` 明确保留 ROOT/CHILD，child 不注册自动维护。
 多个 root runner 共享宿主创建的 `MaintenanceCoordinator`；runtime 不创建或持有调度器。
 Runtime 只在 `_compact_request()` 已经选出实际压缩范围后，通过可选
-`RuntimeMemoryCapturePort.request_capture(run_id, through_count)` 通知已提交原文范围。
+`RuntimeCapturePort.request_capture(run_id, through_count)` 通知已提交原文范围。
 普通请求与没有可压缩前缀的早退不会提示；该同步端口不等待 IO 或记忆模型，不改变
 `RuntimeCommitPort` 的持久运行事实职责。后台 capture/flush/dream 和关闭均由 harness 管理，
 当前压缩无需等待新记忆，成功后仍只采用当时已经发布的概览。

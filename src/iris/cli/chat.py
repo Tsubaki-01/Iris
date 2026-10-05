@@ -211,7 +211,11 @@ def run_chat(
             overview_model=config.model.name,
         )
         evolution = build_project_evolution_binding(
-            config, workspace_root=workspace, prompt_source=prompt_source, provider=provider
+            config,
+            workspace_root=workspace,
+            prompt_source=prompt_source,
+            provider=provider,
+            config_path=options.config_path,
         )
         runner = AgentRunner.from_config(
             config,

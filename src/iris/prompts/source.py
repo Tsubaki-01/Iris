@@ -15,6 +15,7 @@ from ..utils import TemplateRenderer
 PROMPT_IDS = (
     "compaction",
     "compaction_input",
+    "evolution_review",
     "goal_context",
     "goal_continuation",
     "memory_context",
@@ -91,6 +92,16 @@ class PromptSnapshot:
 
     root: Path
     renderer: TemplateRenderer
+
+    def with_template(self, prompt_id: str, source: str) -> PromptSnapshot:
+        """在原冻结源中替换一个命名模板，不回读磁盘或修改原快照。"""
+        try:
+            filename = _PROMPT_FILES[prompt_id]
+        except KeyError as exc:
+            raise IrisTemplateError(
+                "未知项目模板", prompt_id=prompt_id, path=str(self.root)
+            ) from exc
+        return PromptSnapshot(self.root, self.renderer.with_template(self.root / filename, source))
 
     def render(self, prompt_id: str, variables: dict[str, Any]) -> str:
         """按固定 ID 渲染模板，保留 Jinja 原始输出。

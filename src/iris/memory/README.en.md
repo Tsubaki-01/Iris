@@ -141,7 +141,7 @@ snapshot, including template dependencies. Snapshots are not archived. Configure
 the root project's source; injected services keep their host binding and runners do not rewrite it.
 Ordinary reads, search, and remember/update/forget require no source. Standalone generation requires
 an explicitly initialized `PromptSource`, failing at the domain boundary when absent instead of
-inferring a working directory. Automatic strategy revision is not part of this phase.
+inferring a working directory.
 
 Flush/dream requests use `temperature=0` and `response_format={"type": "json_object"}`; the generation
 provider must support both parameters. JSON mode constrains response format; the existing parsing
@@ -229,6 +229,11 @@ Shutdown waits for real IO and computation, then releases the worker.
 The execution and cancellation primitive lives in `iris.utils.generation_worker`. Memory and
 project evolution own separate worker instances and resource locks. Evolution neither reads private
 Memory storage nor waits for a particular Memory model call to provide its input.
+
+`generation_prompt_descriptions()` and `overview_prompt_description()` expose fixed contracts shared
+with actual requests, plus representative template variables. Assembly can bind these to finite prompt
+revision without exporting private response models or duplicating schemas. Real outputs still pass
+through Memory's parsing and application boundaries.
 Capture reads at most 128 messages per page and yields between pages, sealing only at the full run
 cutoff. SQLite releases its read transaction and lifecycle lock after fetching raw rows, before decoding
 messages. Registration and Capture before a run returns still await durable storage. A dedicated worker

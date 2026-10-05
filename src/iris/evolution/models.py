@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,6 +17,66 @@ class EvolutionSource(BaseModel):
     lifecycle_source_id: str
     run_id: str
     session_id: str
+
+
+class EvolutionSession(BaseModel):
+    """宿主显式请求的可选会话归属，不伪造 Run。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    lifecycle_source_id: str
+    session_id: str
+
+
+class RevisionTarget(BaseModel):
+    """候选目标身份；开放范围由 revision 边界拥有。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["prompt", "config"]
+    name: str = Field(pattern=r"\S")
+
+
+class RevisionEvidence(BaseModel):
+    """问题引用的已有记录与必要原文片段。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    ref: str = Field(pattern=r"\S")
+    quote: str = Field(pattern=r"\S")
+
+
+class ExperienceOrigin(BaseModel):
+    """A 从真实材料提炼的问题来源。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["experience"] = "experience"
+    sources: tuple[EvolutionSource, ...] = Field(min_length=1)
+
+
+class HostOrigin(BaseModel):
+    """宿主明确请求，可无历史失败或 Run 归属。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["host"] = "host"
+    session: EvolutionSession | None = None
+
+
+class RevisionRequest(BaseModel):
+    """宿主显式提交的有限目标修订请求。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    description: str = Field(pattern=r"\S")
+    targets: tuple[RevisionTarget, ...] = Field(min_length=1)
+    session: EvolutionSession | None = None
+
+
+class RevisionItem(BaseModel):
+    """B 的有界工作项；经历问题和宿主请求共享处理队列。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    description: str = Field(pattern=r"\S")
+    targets: tuple[RevisionTarget, ...] = Field(min_length=1)
+    evidence: tuple[RevisionEvidence, ...] = ()
+    origin: Annotated[ExperienceOrigin | HostOrigin, Field(discriminator="kind")]
 
 
 class EvolutionRecord(BaseModel):
@@ -113,15 +174,22 @@ class EvolutionMaintenanceScope:
 
     allowed_sources: frozenset[tuple[str, str]]
     check: Callable[[tuple[EvolutionSource, ...]], Awaitable[bool]]
+    allowed_sessions: frozenset[tuple[str, str]]
+    check_session: Callable[[EvolutionSession | None], Awaitable[bool]]
+    requested_revision_id: str | None = None
+    experience_only: bool = False
 
 
 class EvolutionResult(BaseModel):
-    """单次 A 的短结果与实际处理区间，不保存模型调用轨迹。"""
+    """单次 A 或 B 的短结果，不保存模型调用轨迹。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+    stage: Literal["experience", "revision"] = "experience"
     status: Literal["updated", "no_change", "empty", "failed", "cancelled", "conflict"]
     reason: str = ""
     consumed_ranges: tuple[EvolutionRange, ...] = ()
     usage: dict[str, int] = Field(default_factory=dict)
     has_more: bool = False
     effect: str = ""
+    revision_id: str | None = None
+    targets: tuple[RevisionTarget, ...] = ()

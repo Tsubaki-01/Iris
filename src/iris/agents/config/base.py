@@ -387,6 +387,22 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     if not isinstance(raw_config, dict):
         raise IrisConfigError("Agent 配置顶层必须是对象", path=str(config_path))
 
+    return parse_agent_config(raw_config, config_path=config_path)
+
+
+def parse_agent_config(raw_config: dict[str, Any], *, config_path: Path) -> AgentConfig:
+    """从原始声明解析配置，文件加载与写盘前候选共用唯一模型边界。
+
+    Args:
+        raw_config: YAML 对象声明，保留相对路径与未声明字段。
+        config_path: 原主配置路径，用于已有相对路径解析规则。
+
+    Returns:
+        校验完成的 Agent 配置，不写回原始声明。
+
+    Raises:
+        IrisConfigError: 字段类型、取值或跨字段关系不满足配置契约。
+    """
     try:
         return AgentConfig.model_validate(raw_config, context={"config_path": config_path})
     except ValidationError as exc:
@@ -405,4 +421,5 @@ __all__ = [
     "SessionConfig",
     "ToolsConfig",
     "load_agent_config",
+    "parse_agent_config",
 ]

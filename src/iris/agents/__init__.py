@@ -24,6 +24,7 @@ from .config import (
     ToolsConfig,
     build_tool_registry,
     load_agent_config,
+    parse_agent_config,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "ToolMiddlewareConfig",
     "build_tool_registry",
     "load_agent_config",
+    "parse_agent_config",
 ]

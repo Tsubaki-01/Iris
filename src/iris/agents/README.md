@@ -67,11 +67,25 @@ maintenance:
   idle_seconds: 300
 ```
 
-`evolution.enabled` 要求 `skills.enabled=true`，只维护
+`evolution.enabled` 要求 `skills.enabled=true`，默认只维护
 `<skills.root>/project-experience/SKILL.md`。可用 `evolution.policy_skill` 指定相对 workspace
 的策略文件；省略时读取内置策略。加载配置不启动维护；SDK 宿主必须显式绑定共享协调器，
 `iris chat` 自动完成宿主装配。生成的经验首次进入 catalog 需要新 runner，已登记 Skill
 下次加载会读取当前文件；不自动刷新 registry。见 [evolution](../evolution/README.md)。
+
+按需开放自动修订目标，例如：
+
+```yaml
+evolution:
+  enabled: true
+  prompt_targets: [memory_flush, compaction_input]
+  config_targets: [compaction.keep_recent_ratio, system]
+```
+
+两个列表默认空。支持范围固定，未实现的流程不能靠新增 YAML 字段获得。
+配置候选与文件加载共用 `parse_agent_config(raw_config, config_path=...)`，写盘前按原文件
+基准校验，不将已解析模型回写成全部默认值。`system` 只修改已采用简单模式的文本。
+Config 改动只由新 runner 采用，旧 runner 创建新 session 仍使用原配置。
 
 ```yaml
 name: notes-agent

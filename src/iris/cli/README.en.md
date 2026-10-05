@@ -29,6 +29,10 @@ retain separate locks, cancellation state and cleanup. Evolution also works with
 Exit drains existing work without running an extra summary. A newly generated Skill is discovered
 on the next runner startup; there is no additional maintenance command.
 
+`prompt_targets/config_targets` permit finite revisions driven by specific issues in real tasks.
+The CLI binds its primary YAML path to the candidate parser. Saved configuration takes effect after
+restarting `iris chat`; a new session does not hot-switch an existing runner's configuration.
+
 - Ordinary input starts a Run when idle or steers the current Run at an existing execution boundary.
 - `/follow-up <message>` queues the next Run after the current one finishes.
 - `/todo` reads the current session's checklist and displays its actual file path.

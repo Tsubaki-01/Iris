@@ -19,7 +19,7 @@ from ..message import (
     image_reference_text,
 )
 from ..prompts import PromptSnapshot
-from ._prompts import render_prompt
+from ._prompts import compaction_input_variables, render_prompt
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,12 +234,7 @@ def _summary_request(
                     render_prompt(
                         prompt_snapshot,
                         "compaction_input",
-                        {
-                            "previous_summary_or_none": (
-                                "(none)" if previous_summary is None else previous_summary
-                            ),
-                            "serialized_history": serialized_history,
-                        },
+                        compaction_input_variables(previous_summary, serialized_history),
                     )
                 ),
             ],

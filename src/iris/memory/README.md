@@ -128,7 +128,7 @@ Flush/Dream 的默认策略分别由 [`memory_flush.j2`](../prompts/memory_flush
 才采用；独立 SDK 的每次 `flush/dream/refresh_overview` 调用各取一次新快照。快照包含模板依赖，
 不保存为历史档案。配置构造的服务接收 root 项目来源；注入服务保留宿主绑定，runner 不改写它。
 普通读取、搜索和 remember/update/forget 不要求来源。独立生成必须显式提供已初始化的
-`PromptSource`，缺少时按生成依赖错误失败，不推断当前工作目录；本阶段不包含自动修订。
+`PromptSource`，缺少时按生成依赖错误失败，不推断当前工作目录。
 
 Flush/dream 请求使用 `temperature=0` 和 `response_format={"type": "json_object"}`，生成 provider
 须支持这两个参数。JSON 输出模式约束响应格式，字段与证据引用仍在既有解析边界检查；不合契约
@@ -199,6 +199,10 @@ Capture 仍走原执行路径，不排在后台计算后面；独立 SDK 调用�
 
 同步执行和取消原语来自 `iris.utils.generation_worker`；Memory 与项目学习各持有自己的
 worker 和资源锁。项目学习不读取本包私有存储，也不等待某次 Memory 模型调用作为输入。
+
+`generation_prompt_descriptions()` 与 `overview_prompt_description()` 提供实际生成请求共用的
+固定协议和代表模板变量。装配层可将这些说明交给有限 prompt 修订，不暴露私有响应模型，
+也不复制一套候选 schema；真正输出仍由本包解析和应用。
 Capture 每页最多 128 条消息，页间让出事件循环；游标到达完整终点才封源。SQLite 原始行
 读取后释放事务和 lifecycle 锁，再解码消息。来源登记和返回前 Capture 仍等待持久化；
 专用 worker 隔离后台队列，不消除数据库锁和 CPU 竞争，也不承诺前台零额外延迟。

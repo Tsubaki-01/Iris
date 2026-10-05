@@ -32,6 +32,8 @@ print(text)  # Select the best tool from state.tools for state.queries[0].
 - `render(prompt_id, variables)`：按固定 ID 渲染，ID 不含 `.j2`；变量每次调用重新传入。
 - `root`：本次来源的绝对目录。
 - `renderer`：冻结的 `TemplateRenderer`，可供已有 `render_file(path, context)` 调用使用。
+- `with_template(prompt_id, source)`：在相同内存源中仅替换一个模板，返回独立候选快照；
+  不改变原快照或磁盘，供有限候选使用领域代表变量试渲染。
 
 动态 `include` / `extends` / `import`、候选 include 列表及 `ignore missing` 都从同一内存
 集合取源。取快照后新增、改写或删除文件不改变当前快照。未执行的依赖分支不提前编译，坏模板
@@ -46,6 +48,7 @@ print(text)  # Select the best tool from state.tools for state.queries[0].
 | memory_context、Goal、Todo、Skill 用法、Decision 指令 | runner/runtime 构造；实际领域数据仍动态传入 |
 | system/context 自定义模板 | runtime 装配冻结各自来源目录；仍使用原配置声明入口 |
 | project_skill_update | A 取得项目锁后，每轮固定一份模板快照，同时读取本轮策略 Skill |
+| evolution_review | B 重新取得项目锁后固定本轮模板、策略及候选目标来源 |
 
 child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套目录。独立
 `TemplateRenderer()` 和 `ContextBuilder` 的文件更新语义保持不变；冻结能力见
@@ -53,7 +56,7 @@ child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套�
 
 ## 固定模板与领域职责
 
-`PROMPT_IDS` 列出当前 14 个入口，每个 ID 对应同名 `.j2`：
+`PROMPT_IDS` 列出当前 15 个入口，每个 ID 对应同名 `.j2`：
 
 | 用途 | ID |
 | --- | --- |
@@ -64,11 +67,17 @@ child 借用 parent 的项目来源，不按缩窄 workspace 初始化另一套�
 | Skill 使用 | `skill_catalog_usage` |
 | Decision | `memory_recall_instruction`、`tool_discovery_instruction` |
 | 项目经验整理 | `project_skill_update` |
+| 有限策略修订 | `evolution_review` |
 
 默认种子与 Python 包一起分发。`prompts` 仅负责来源与渲染入口，不导入消费领域；变量、请求
 角色、结构化输出 schema、解析及应用规则由各领域持有。Memory 的固定输出要求和实际模型
 schema 直接加入请求，不依赖可编辑模板保留相关文案。项目经验 A 阶段同样由 evolution
 追加正文/no-change 的固定协议与响应 schema。
 
-当前支持手工修改项目正文；自动修订不属于此包已实现能力。初始化与并发发布测试位于
+`project_skill_update` 负责把本批片段合并成有适用条件的项目经验；`evolution_review` 负责
+对照当前有限目标选择候选或 no-change。共同的判断方法由 evolution 的策略 Skill 提供，
+模板只补充各自任务步骤，不复制字段 schema，也不把历史未知信息补成配置修改依据。
+
+项目正文可手工修改；[evolution](../evolution/README.md) 可按显式开放列表修订有限目标，
+此包仍只提供来源与统一渲染，不拥有修订模型、调度或消费进度。初始化与并发发布测试位于
 `tests/prompts/`，完整 Jinja 快照语义测试位于 `tests/utils/test_templating.py`。

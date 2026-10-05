@@ -18,7 +18,13 @@ from iris.evolution.models import (
     EvolutionRange,
     EvolutionRecord,
     EvolutionResult,
+    EvolutionSession,
     EvolutionSource,
+    ExperienceOrigin,
+    HostOrigin,
+    RevisionEvidence,
+    RevisionItem,
+    RevisionTarget,
 )
 from iris.exceptions import IrisEvolutionError
 
@@ -69,6 +75,168 @@ def _result(items: tuple[EvolutionMaterial, ...]) -> EvolutionResult:
             )
             for item in items
         ),
+    )
+
+
+def _issue(source: EvolutionSource, *, item_id: str = "issue") -> RevisionItem:
+    """只携带B需要的稳定引用与小片段。"""
+    return RevisionItem(
+        id=item_id,
+        description="压缩需要保留关键标识符",
+        targets=(RevisionTarget(kind="prompt", name="compaction"),),
+        evidence=(RevisionEvidence(ref="run:2:0", quote="message 2"),),
+        origin=ExperienceOrigin(sources=(source,)),
+    )
+
+
+def test_a_progress_preserves_issue_before_body_cleanup_and_b_settles_independently(
+    tmp_path: Path,
+) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    source = _source()
+    store.register_source(source, 2)
+    store.commit_capture(_block(source, 2, 3, terminal=3))
+    allowed = frozenset({("lifecycle", "run")})
+    selected = store.read_pending(allowed_sources=allowed).items
+    issue = _issue(source)
+    store.consume(selected, _result(selected), issue=issue)
+    assert list((store.root / "blocks").glob("*.json")) == []
+    restarted = EvolutionMaterialStore(tmp_path)
+    assert restarted.read_pending(allowed_sources=allowed).items == ()
+    assert restarted.read_pending_revisions(
+        allowed_sources=allowed,
+        allowed_sessions=frozenset(),
+        allowed_targets=frozenset({("prompt", "compaction")}),
+    ) == (issue,)
+    assert restarted.list_pending_sources() == (source,)
+    restarted.record_step(EvolutionResult(status="failed", stage="revision", revision_id=issue.id))
+    assert restarted.read_pending_revisions(
+        allowed_sources=allowed,
+        allowed_sessions=frozenset(),
+        allowed_targets=frozenset({("prompt", "compaction")}),
+    ) == (issue,)
+    settled = EvolutionResult(
+        status="no_change", stage="revision", revision_id=issue.id, reason="当前规则已满足"
+    )
+    restarted.settle_revision(issue.id, settled)
+    final = EvolutionMaterialStore(tmp_path)
+    assert final.revision_result(issue.id) == settled
+    assert (
+        final.read_pending_revisions(
+            allowed_sources=allowed,
+            allowed_sessions=frozenset(),
+            allowed_targets=frozenset({("prompt", "compaction")}),
+        )
+        == ()
+    )
+    assert final.list_pending_sources() == ()
+
+
+def test_host_request_is_independent_and_origin_filter_precedes_limit(tmp_path: Path) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    waiting = RevisionItem(
+        id="waiting",
+        description="暂时不可处理",
+        targets=(RevisionTarget(kind="config", name="system"),),
+        origin=HostOrigin(
+            session=EvolutionSession(lifecycle_source_id="reader", session_id="waiting")
+        ),
+    )
+    independent = RevisionItem(
+        id="independent",
+        description="没有历史失败的明确请求",
+        targets=waiting.targets,
+        origin=HostOrigin(),
+    )
+    store.enqueue_revision(waiting)
+    store.enqueue_revision(independent)
+    assert store.list_pending_sources() == ()
+    assert store.list_pending_sessions() == (waiting.origin.session,)
+    assert store.read_pending_revisions(
+        allowed_sources=frozenset(),
+        allowed_sessions=frozenset(),
+        allowed_targets=frozenset({("config", "system")}),
+        limit=1,
+    ) == (independent,)
+    assert store.revision_result(waiting.id) is None
+
+
+@pytest.mark.parametrize("settled", [False, True])
+def test_host_request_cleanup_during_pending_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: bool
+) -> None:
+    """枚举后的正文消失只有在已有完成收据时才可跳过。"""
+    store = EvolutionMaterialStore(tmp_path)
+    item = RevisionItem(
+        description="明确宿主请求",
+        targets=(RevisionTarget(kind="prompt", name="compaction"),),
+        origin=HostOrigin(),
+    )
+    store.enqueue_revision(item)
+    reached, release = Event(), Event()
+    original_read = material_module._read
+
+    def read(path: Path, schema: type[BaseModel]) -> BaseModel:
+        if path.parent.name == "requests":
+            reached.set()
+            assert release.wait(timeout=10)
+        return original_read(path, schema)
+
+    monkeypatch.setattr(material_module, "_read", read)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(
+            store.read_pending_revisions,
+            allowed_sources=frozenset(),
+            allowed_sessions=frozenset(),
+            allowed_targets=frozenset({("prompt", "compaction")}),
+        )
+        try:
+            assert reached.wait(timeout=10)
+            if settled:
+                store.settle_revision(
+                    item.id,
+                    EvolutionResult(status="no_change", stage="revision", revision_id=item.id),
+                )
+                assert list((store.root / "requests").glob("*.json")) == []
+            else:
+                next((store.root / "requests").glob("*.json")).unlink()
+            release.set()
+            if settled:
+                assert pending.result(timeout=10) == ()
+            else:
+                with pytest.raises(IrisEvolutionError, match="读取失败"):
+                    pending.result(timeout=10)
+        finally:
+            release.set()
+
+
+def test_failed_a_progress_does_not_publish_issue_or_consume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    source = _source()
+    store.register_source(source, 2)
+    store.commit_capture(_block(source, 2, 3, terminal=3))
+    allowed = frozenset({("lifecycle", "run")})
+    selected = store.read_pending(allowed_sources=allowed).items
+    original = material_module.atomic_write_text
+
+    def fail_progress(path: Path, content: str) -> None:
+        if path.name == "progress.json":
+            raise OSError("not published")
+        original(path, content)
+
+    monkeypatch.setattr(material_module, "atomic_write_text", fail_progress)
+    with pytest.raises(IrisEvolutionError):
+        store.consume(selected, _result(selected), issue=_issue(source))
+    assert store.read_pending(allowed_sources=allowed).items == selected
+    assert (
+        store.read_pending_revisions(
+            allowed_sources=allowed,
+            allowed_sessions=frozenset(),
+            allowed_targets=frozenset({("prompt", "compaction")}),
+        )
+        == ()
     )
 
 

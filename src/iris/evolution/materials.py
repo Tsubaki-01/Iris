@@ -17,9 +17,13 @@ from .models import (
     EvolutionMaterial,
     EvolutionRecord,
     EvolutionResult,
+    EvolutionSession,
     EvolutionSource,
     EvolutionSourceState,
+    ExperienceOrigin,
+    HostOrigin,
     PendingMaterials,
+    RevisionItem,
 )
 
 
@@ -37,6 +41,8 @@ class _Progress(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     consumed: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     latest_step: EvolutionResult | None = None
+    issues: dict[str, RevisionItem] = Field(default_factory=dict)
+    settled_revisions: dict[str, EvolutionResult] = Field(default_factory=dict)
 
 
 def _key(source: EvolutionSource) -> str:
@@ -70,6 +76,7 @@ class EvolutionMaterialStore:
         self._sources = self.root / "sources"
         self._captures = self.root / "captures"
         self._blocks = self.root / "blocks"
+        self._requests = self.root / "requests"
         self._progress_path = self.root / "progress.json"
 
     def register_source(
@@ -113,12 +120,102 @@ class EvolutionMaterialStore:
     def list_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """列出连续到终态且尚未全部消费的来源，不判断 lifecycle 资格。"""
         states, _ = self._load_sources()
-        return tuple(
-            state.source
+        sources = {
+            _key(state.source): state.source
             for state in states.values()
             if state.terminal_message_count is not None
             and state.consumed_until < state.terminal_message_count
+        }
+        for item in self._pending_revisions():
+            if isinstance(item.origin, ExperienceOrigin):
+                sources.update((_key(source), source) for source in item.origin.sources)
+        return tuple(sources.values())
+
+    def list_pending_sessions(self) -> tuple[EvolutionSession, ...]:
+        """列出宿主请求携带的会话身份，实际状态仍由 lifecycle reader 判断。"""
+        return tuple(
+            dict.fromkeys(
+                item.origin.session
+                for item in self._pending_revisions()
+                if isinstance(item.origin, HostOrigin) and item.origin.session is not None
+            )
         )
+
+    def enqueue_revision(self, item: RevisionItem) -> None:
+        """独立发布宿主请求，不在项目锁外覆盖 A/B 的共享进度。"""
+        _write(self._requests / f"{item.id}.json", item)
+
+    def _pending_revisions(self) -> tuple[RevisionItem, ...]:
+        """合并 A 进度中的问题与独立宿主请求，排除已经结算的 ID。"""
+        progress = self._read_progress()
+        items = dict(progress.issues)
+        for path in sorted(self._requests.glob("*.json")):
+            if path.stem in progress.settled_revisions:
+                continue
+            try:
+                item = _read(path, RevisionItem)
+            except IrisEvolutionError as exc:
+                if (
+                    isinstance(exc.__cause__, FileNotFoundError)
+                    and path.stem in self._read_progress().settled_revisions
+                ):
+                    continue
+                raise
+            items[item.id] = item
+        return tuple(item for item in items.values() if item.id not in progress.settled_revisions)
+
+    def read_pending_revisions(
+        self,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        allowed_sessions: frozenset[tuple[str, str]],
+        allowed_targets: frozenset[tuple[str, str]],
+        limit: int = 1,
+        requested_revision_id: str | None = None,
+    ) -> tuple[RevisionItem, ...]:
+        """先按来源与当前开放目标过滤，再优先本次显式请求并限量。"""
+        eligible = []
+        for item in self._pending_revisions():
+            origin = item.origin
+            if isinstance(origin, ExperienceOrigin):
+                allowed = all(
+                    (source.lifecycle_source_id, source.run_id) in allowed_sources
+                    for source in origin.sources
+                )
+            else:
+                allowed = (
+                    origin.session is None
+                    or (origin.session.lifecycle_source_id, origin.session.session_id)
+                    in allowed_sessions
+                )
+            if allowed and all(
+                (target.kind, target.name) in allowed_targets for target in item.targets
+            ):
+                eligible.append(item)
+        if requested_revision_id is not None:
+            eligible.sort(key=lambda item: item.id != requested_revision_id)
+        return tuple(eligible[:limit])
+
+    def settle_revision(self, item_id: str, step: EvolutionResult) -> None:
+        """项目锁内结算一项 B，不重写 A 消费位置，也不保留已完成问题正文。"""
+        progress = self._read_progress()
+        _write(
+            self._progress_path,
+            progress.model_copy(
+                update={
+                    "issues": {
+                        key: item for key, item in progress.issues.items() if key != item_id
+                    },
+                    "settled_revisions": {**progress.settled_revisions, item_id: step},
+                    "latest_step": step,
+                }
+            ),
+        )
+        self._remove_body(self._requests / f"{item_id}.json")
+
+    def revision_result(self, item_id: str) -> EvolutionResult | None:
+        """读取指定请求的简短已结算结果，允许宿主观察另一进程的完成。"""
+        return self._read_progress().settled_revisions.get(item_id)
 
     def read_pending(
         self, *, allowed_sources: frozenset[tuple[str, str]], limit: int = 128
@@ -169,7 +266,13 @@ class EvolutionMaterialStore:
                     return PendingMaterials(tuple(items[:limit]), True)
         return PendingMaterials(tuple(items), False)
 
-    def consume(self, selected: tuple[EvolutionMaterial, ...], step: EvolutionResult) -> None:
+    def consume(
+        self,
+        selected: tuple[EvolutionMaterial, ...],
+        step: EvolutionResult,
+        *,
+        issue: RevisionItem | None = None,
+    ) -> None:
         """项目锁内确认实际选中范围，先保存消费位置再清理完整已读正文。"""
         states, captures = self._load_sources()
         progress = self._read_progress()
@@ -183,7 +286,19 @@ class EvolutionMaterialStore:
                     "项目材料消费范围不连续", run_id=item.source.run_id, consumed_until=position
                 )
             consumed[key] = item.end_message_count
-        _write(self._progress_path, _Progress.model_construct(consumed=consumed, latest_step=step))
+        issues = dict(progress.issues)
+        if issue is not None:
+            issues[issue.id] = issue
+        _write(
+            self._progress_path,
+            progress.model_copy(
+                update={
+                    "consumed": consumed,
+                    "latest_step": step,
+                    "issues": issues,
+                }
+            ),
+        )
         for path, capture in captures:
             key = _key(capture.source)
             if capture.end_message_count <= consumed.get(key, capture.initial_message_count):

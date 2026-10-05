@@ -6,6 +6,7 @@ from .config import (
     resolve_memory_path,
 )
 from .files import MemoryFileAccess, namespace_key
+from .generation import generation_prompt_descriptions
 from .generation_models import (
     GenerationResult,
     GenerationState,
@@ -41,6 +42,7 @@ from .models import (
     MemorySourceType,
     MemoryWriteInput,
 )
+from .overview import overview_prompt_description
 from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
 from .store import MemoryStore
@@ -63,6 +65,8 @@ from .tools import (
 )
 
 __all__ = [
+    "generation_prompt_descriptions",
+    "overview_prompt_description",
     "GenerationResult",
     "GenerationState",
     "MemoryGenerationConfig",
