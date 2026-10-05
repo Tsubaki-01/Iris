@@ -75,8 +75,9 @@ schema 直接加入请求，不依赖可编辑模板保留相关文案。项目�
 追加正文/no-change 的固定协议与响应 schema。
 
 `project_skill_update` 负责把本批片段合并成有适用条件的项目经验；`evolution_review` 负责
-对照当前有限目标选择候选或 no-change。共同的判断方法由 evolution 的策略 Skill 提供，
-模板只补充各自任务步骤，不复制字段 schema，也不把历史未知信息补成配置修改依据。
+对照当前有限目标选择候选或 no-change。共同的承载位置、依据标准与适用范围由 evolution 的策略
+Skill 提供；经验合并步骤只在 A 模板中，prompt/config 的具体修订步骤只在 B 模板中。
+模板不复制字段 schema，也不把历史未知信息补成配置修改依据。
 
 项目正文可手工修改；[evolution](../evolution/README.md) 可按显式开放列表修订有限目标，
 此包仍只提供来源与统一渲染，不拥有修订模型、调度或消费进度。初始化与并发发布测试位于

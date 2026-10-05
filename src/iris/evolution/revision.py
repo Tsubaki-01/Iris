@@ -229,7 +229,7 @@ def prepare_candidate(response: LLMResponse, context: RevisionContext) -> Prepar
         return PreparedRevision(
             "prompt",
             candidate.reason,
-            (RevisionTarget(kind="prompt", name=candidate.target),),
+            (RevisionTarget.model_construct(kind="prompt", name=candidate.target),),
             effect,
             {path: context.baselines[path]},
             path,
@@ -259,7 +259,10 @@ def prepare_candidate(response: LLMResponse, context: RevisionContext) -> Prepar
     return PreparedRevision(
         "config",
         candidate.reason,
-        tuple(RevisionTarget(kind="config", name=name) for name in candidate.assignments),
+        tuple(
+            RevisionTarget.model_construct(kind="config", name=name)
+            for name in candidate.assignments
+        ),
         "仅新 runner 采用；已有 runner 的新 session、follow-up 和 Goal 连续运行保持原配置。",
         {path: context.baselines[path]},
         path,

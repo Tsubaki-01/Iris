@@ -102,13 +102,11 @@ class MaintenanceCoordinator:
         self._evolution_task: asyncio.Task[EvolutionResult | None] | None = None
         self._active_project: _EvolutionResource | None = None
         self._evolution_worker = GenerationWorker(on_idle=self._schedule)
-        self._evolution_cancelling = False
         self._next_project = 0
         self._foreground = 0
         self._quiet_until = 0.0
         self._next_resource = 0
         self._closed = False
-        self._cancelling = False
 
     def _attach(
         self,
@@ -281,15 +279,13 @@ class MaintenanceCoordinator:
     def _cancel_task(self) -> None:
         """只取消当前 coroutine 一次，后续前台不能再次打断真实 IO 收尾。"""
         self._worker.cancel()
-        if self._task is not None and not self._cancelling:
-            self._cancelling = True
+        if self._task is not None and not self._task.cancelling():
             self._task.cancel()
 
     def _cancel_evolution_task(self) -> None:
         """仅撤销项目经验 slot，不打断 Memory 或已经开始的本类 IO 收尾。"""
         self._evolution_worker.cancel()
-        if self._evolution_task is not None and not self._evolution_cancelling:
-            self._evolution_cancelling = True
+        if self._evolution_task is not None and not self._evolution_task.cancelling():
             self._evolution_task.cancel()
 
     def _schedule(self) -> None:
@@ -333,7 +329,6 @@ class MaintenanceCoordinator:
                 self._next_resource = (index + 1) % len(resources)
                 self._active_resource = resource
                 resource.dirty = False
-                self._cancelling = False
                 self._task = asyncio.create_task(self._run_cycle(resource))
                 self._task.add_done_callback(self._finished)
                 break
@@ -351,7 +346,6 @@ class MaintenanceCoordinator:
                 self._next_project = (index + 1) % len(projects)
                 self._active_project = project
                 project.dirty = False
-                self._evolution_cancelling = False
                 self._evolution_task = asyncio.create_task(self._run_project_cycle(project))
                 self._evolution_task.add_done_callback(self._evolution_finished)
                 break
@@ -434,10 +428,7 @@ class MaintenanceCoordinator:
                 more = await service.maintain_cycle(resource.binding.namespace, scope=scope)
                 resource.dirty = more or resource.revision != revision
                 resource.ready_at = self._loop.time() + self.idle_seconds
-        except asyncio.CancelledError:
-            resource.dirty = resource.revision != revision
-            raise
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             resource.dirty = resource.revision != revision
             raise
         finally:

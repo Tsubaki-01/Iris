@@ -41,7 +41,7 @@ class RunCapture:
         self._on_evolution_capture = on_evolution_capture
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
-        self._capture_requests: dict[str, int | None] = {}
+        self._capture_requests: dict[str, int] = {}
         self._capture_task: asyncio.Task[None] | None = None
         self._known_runs: dict[str, RunRecord] = {}
 
@@ -97,7 +97,7 @@ class RunCapture:
     def request_capture(self, run_id: str, through_count: int) -> None:
         """合并 runtime 提示，捕获可在前台执行中进行，模型维护仍等待空闲。"""
         current = self._capture_requests.get(run_id, 0)
-        self._capture_requests[run_id] = None if current is None else max(current, through_count)
+        self._capture_requests[run_id] = max(current, through_count)
         if self._loop is not None and not self._closed and self._capture_task is None:
             self._capture_task = asyncio.create_task(self._drain_capture_requests())
 

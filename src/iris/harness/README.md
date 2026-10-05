@@ -679,6 +679,7 @@ BCI、system/reasoning 和记忆读回正文不成为新证据；Search/Fetch �
 纯内存 lifecycle 丢失后不自动猜测旧材料资格。
 
 一个宿主最多同时运行一项 Memory 和一项项目学习维护，取消状态、worker 与锁互相独立。
+是否已发出取消直接使用对应 asyncio Task 的状态，不额外保存镜像标志。
 Memory 使用实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
 执行有界领域周期并排空真实 IO，同库同 namespace 的独立进程不会重复调用模型。
 锁忙让出本地位置，至少等待 `max(idle_seconds, 1 秒)` 后自动再试，多资源按有界周期轮转。
