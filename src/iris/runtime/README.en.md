@@ -83,17 +83,24 @@ Disabled memory does not attach even an injected service. When enabled, injectio
 otherwise the factory builds a SQLite service with the resolved provider, model name, overview, and
 generation configuration. A resolved service automatically provides Search/Fetch; write tools remain
 explicit. Construction makes no model calls. Hosts can call `refresh_overview()` explicitly; root runners
-with automatic generation enabled also publish during idle maintenance. Injected services keep their
+with automatic generation enabled must first bind the host's shared maintenance coordinator. It schedules
+idle generation across runners. Injected services keep their
 own generation dependencies. The switch is fixed at construction; rebuild the Agent and start a new
 session after changing it.
 
-`RuntimeEnvironment.execution_scope` preserves ROOT/CHILD explicitly; root harness owns automatic
-maintenance. Only after `_compact_request()` selects a real compaction range does runtime call the
+`RuntimeEnvironment.execution_scope` preserves ROOT/CHILD explicitly; children never register automatic
+maintenance. Root runners borrow a host-owned `MaintenanceCoordinator`; runtime neither creates nor owns it.
+Only after `_compact_request()` selects a real compaction range does runtime call the
 optional `RuntimeMemoryCapturePort.request_capture(run_id, through_count)` with the committed message
 boundary. Ordinary requests and early returns without a compressible prefix send no hint. This
 synchronous port waits for neither IO nor memory models and leaves `RuntimeCommitPort` responsible for
 durable execution facts. Harness owns background capture/flush/dream and shutdown. Compaction need not
 wait for newly generated memories; successful compaction adopts only the overview already published.
+
+Runner supplies the lifecycle `source_id` to ToolBridge, which forwards it through existing tool
+metadata without querying lifecycle. Memory writes identify events by source, Run, and call ID, so
+repeated IDs across sessions or independent lifecycle stores cannot be misassociated. Low-level calls
+without a bound source do not masquerade as captured Runs.
 
 ## Dependency direction
 

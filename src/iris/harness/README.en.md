@@ -708,46 +708,93 @@ long-term memory use. Static `context.yaml` memory stays independent and outside
 BCI, original user input, and latest steer keep their existing protection; recovery after compaction
 uses the new revision and the same pending model step.
 
-`memory.generation.enabled: true` separately enables automatic capture and idle maintenance for root
-runners; it defaults to false. Construction only binds dependencies. Automatic maintenance requires
-flush/dream and overview providers/models plus a mirror. Config-built services reuse the resolved
-provider; injected services retain their own generation dependencies and budgets. Maintenance writes
-only the Agent's `write_namespace`. Children retain reads and explicit writes but do not automatically
-learn their internal trajectories again.
+`memory.generation.enabled: true` enables automatic capture and maintenance for root runners;
+it defaults to false. The host creates one [`MaintenanceCoordinator`](maintenance.py) and binds
+its root runners through `runner.bind_maintenance(coordinator, memory=binding)`. `from_config*`
+never creates a private maintenance loop. An enabled but unbound runner fails at its first
+prepare/run boundary. The host selects `config.maintenance.idle_seconds` (300 seconds by default).
+Runners without Memory can still call `runner.bind_maintenance(coordinator)` to contribute
+foreground activity, pausing maintenance from other runners without creating a Memory resource.
 
-The private [`_memory_maintenance.py`](_memory_maintenance.py) owns the background lifecycle.
-`aprepare()` restores unsealed sources from the same lifecycle store and reopens blocked inputs whose
-budget changed, independently of MCP preparation. Root runs register their lifecycle source ID and run
-ID before committing their first new message. Compaction hints, WAITING/terminal exits, and close capture
-only the unrecorded suffix. WAITING leaves the source open; completion, failure, cancellation, and
-recovery paths that finish without runtime execution retain the actual outcome. BCI, system/reasoning,
-and memory readback text are excluded; Search/Fetch retain item references, and tool calls/results retain
-stable provenance. Result bodies and memory-item JSON are read from the `.text` projection.
-Durable watermarks make repeated hints idempotent.
-An automatically captured Episode stores the run ID in top-level `source_id`; its metadata holds the
-lifecycle source ID and session boundaries.
+Build a complete `MemoryService` with generation and overview providers/models plus a mirror,
+and inject the same service into the runners and `MemoryMaintenanceBinding`. The binding names
+the actual SQLite database path and write namespace. Injected providers, budgets and IO mode
+are preserved. This helper demonstrates shared ownership:
 
-Capture commits pages of at most 128 messages, yielding between pages and sealing only at the full
-terminal cutoff. SQLite fetches raw rows in one transaction, then releases the shared lock before
-decoding; source conversion does not hold a lifecycle transaction.
+```python
+from pathlib import Path
 
-Flush → dream → overview runs only after all foreground admission and activation calls have exited
-and `idle_seconds` has elapsed (300 seconds by default). Pending observations receive dreaming priority.
-New start/resume/recover calls and managed follow-ups cancel the timer and background model work without
-waiting for that model before admitting foreground execution.
-For THREAD services, synchronous maintenance jobs use a dedicated single-thread worker; foreground IO
-and Capture retain their original path. An injected INLINE choice is preserved. Selection responds to
-cancellation between records, and old synchronous jobs must exit before another cycle starts.
-Queued follow-ups hold a short foreground handoff reservation from the preceding terminal event until
-their admission resolves. This preserves priority even with zero idle delay; admission success, failure,
-and manager close release the reservation. Close waits for already-dispatched database
-IO and computation, releases the maintenance worker, leaves unfinished durable work pending, and does
-not close injected providers, memory, or stores.
-A failure stops the cycle until new activity or restart. Projection failures after input consumption
-repair the projection without regenerating knowledge. SQLite lifecycle sources can recover committed
-tails after restart; a lost InMemory lifecycle source can only leave already-captured material available.
-Maintenance usage belongs to memory generation results rather than `RunUsage`. Published overviews still
-wait for a new context window or successful compaction before adoption.
+from iris.agents import AgentConfig
+from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
+from iris.lifecycle import AgentRunRequest
+from iris.memory import MemoryService
+from iris.providers import CompletionProvider
+
+
+async def run_sessions(
+    config: AgentConfig,
+    provider: CompletionProvider,
+    memory: MemoryService,
+    database_path: Path,
+) -> None:
+    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    binding = MemoryMaintenanceBinding(
+        service=memory,
+        database_path=database_path,
+        namespace=config.memory.write_namespace,
+    )
+    runners = [
+        AgentRunner.from_config(config, provider=provider, memory_service=memory)
+        for _ in range(2)
+    ]
+    try:
+        for runner in runners:
+            runner.bind_maintenance(coordinator, memory=binding)
+        for index, runner in enumerate(runners):
+            await runner.start(AgentRunRequest(input="Process the project task", session_id=f"session-{index}"))
+    finally:
+        for runner in runners:
+            await runner.aclose()
+        await coordinator.aclose()
+```
+
+[`_capture.py`](_capture.py) records source material without scheduling learning. A root Run
+registers its lifecycle source ID, run and session before its first input commit. Compaction
+hints, WAITING/terminal exits and close capture only the unrecorded suffix, committing pages
+of at most 128 messages. Only the final terminal cutoff seals the source. Completion, failure,
+cancellation and recovery without runtime execution retain their actual outcomes. BCI,
+system/reasoning and memory readback bodies are not new evidence. Search/Fetch retain item
+references; tool calls/results retain their call IDs. Durable watermarks prevent duplication.
+
+Automatic learning consumes only terminal, fully captured Runs. A WAITING session excludes
+its older pending sources while other sessions can still be maintained. Tool-origin changes
+are linked through captured call IDs and remain pending until matched. Eligibility is reread
+before each consumption commit. Missing lifecycle readers leave material pending; SQLite
+lifecycle supports restart continuation, whereas lost in-memory state is never reconstructed
+as a second eligibility database.
+
+A host runs at most one Memory job. Canonical database path plus namespace determines the
+native OS lock. Each bounded cycle rereads material under the lock and holds it through real
+IO cleanup, preventing duplicate model calls across independent processes for the same resource.
+A busy lock yields the local slot and retries after `max(idle_seconds, 1 second)` without user
+input. Multiple resources receive bounded turns. MemoryService owns the dream-first or
+flush-then-dream sequence and projection/overview repair; the coordinator does not interpret content.
+
+Maintenance starts only after foreground admission/activation calls fully exit and the idle
+interval passes. New foreground work cancels uncommitted generation without waiting for a
+model or resource lock. Goal/follow-up handoffs reserve the same foreground counter. THREAD
+services use a dedicated worker; INLINE retains the calling thread. Actual synchronous work
+must finish before its slot and lock are released. Model failures wait for external activity
+or restart; the cycle's own writes are not new activity. No-change advances consumed inputs.
+
+`runner.aclose()` drains its capture and detaches its borrowing relationship, without closing
+shared coordination, services or readers, and without waiting for another runner's foreground
+counter. After closing all runners that borrow a resource, the host can call
+`await coordinator.unbind_memory(binding)` to cancel/drain and remove just that resource.
+Other resources remain available. At host shutdown, close the coordinator before releasing
+host-owned providers, services and lifecycle stores. Close never runs extra learning models.
+Maintenance usage remains separate from `RunUsage`; a new overview is adopted at a new context
+window or successful compaction.
 
 `RunUsage` input/output/total fields count only the main model. Summary calls accumulate under
 `usage.compaction`; add the corresponding fields for combined consumption. A summary usage-only
@@ -757,7 +804,8 @@ immediately so later cancellation reads remain valid. Projection commits indepen
 
 ## Public API
 
-`iris.harness` exports `AgentRunner`, `SessionHistory`, `SessionManager`, `SubmitReceipt`,
+`iris.harness` exports `AgentRunner`, `MaintenanceCoordinator`, `MemoryMaintenanceBinding`,
+`SessionHistory`, `SessionManager`, `SubmitReceipt`,
 `ResumeReceipt`, `SubmissionEvent`,
 `SessionSubmissionEvent`, `SessionEvent`, `LiveFact`, and `LivePublisher`; run
 request/options/limits/runtime options; phase, stop reason, usage, error, snapshot, and result;

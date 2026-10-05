@@ -35,7 +35,11 @@ from iris.tools.permissions import DefaultPermissionPolicy
 
 
 def _context(tmp_path: Path, agent_id: str = "agent") -> ToolExecutionContext:
-    return ToolExecutionContext(workspace_root=tmp_path, agent_id=agent_id)
+    return ToolExecutionContext(
+        workspace_root=tmp_path,
+        agent_id=agent_id,
+        metadata={"lifecycle_source_id": "host", "run_id": "run"},
+    )
 
 
 @pytest.mark.parametrize(
@@ -271,10 +275,10 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
     stored = service.get_item(item["id"], ["private"])
     assert stored is not None
     assert stored.source_type is MemorySourceType.TOOL_EVENT
-    assert stored.source_id == "remember"
+    assert json.loads(stored.source_id) == ["host", "run", "remember"]
     remembered_event = service.list_events("private")[0]
     assert remembered_event.actor is MemoryActor.AGENT
-    assert remembered_event.source_id == "remember"
+    assert remembered_event.source_id == stored.source_id
     assert stored.evidence == (MemoryEvidenceRef(kind="event", source_id=remembered_event.id),)
     found = await executor.execute_one(
         ToolUseBlock(id="get", name="memory_fetch", input={"item_id": item["id"]}),
@@ -298,7 +302,8 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
     updated_item = service.get_item(item["id"], ["private"])
     updated_event = service.list_events("private", item_id=item["id"])[0]
     assert updated_item is not None
-    assert updated_event.source_id == updated_item.source_id == "update"
+    assert updated_event.source_id == updated_item.source_id
+    assert json.loads(updated_item.source_id) == ["host", "run", "update"]
     assert updated_event.actor is MemoryActor.AGENT
     assert updated_item.evidence == (MemoryEvidenceRef(kind="event", source_id=updated_event.id),)
     assert updated_event.before["evidence"] == [
@@ -322,6 +327,12 @@ async def test_write_tools_crud_uses_same_service_and_reports_actual_delete(tmp_
         )
         assert not forgotten.is_error
         assert json.loads(forgotten.content[0].text) == {"deleted": expected}
+        if expected:
+            assert json.loads(service.list_events("private", item_id=item["id"])[0].source_id) == [
+                "host",
+                "run",
+                "forget",
+            ]
     assert service.get_item(item["id"], ["private"]) is None
 
 
@@ -485,5 +496,5 @@ async def test_metadata_update_preserves_omitted_text_and_current_evidence(
     assert updated.metadata == {"origin": "user", "reviewed": True}
     assert updated.text == item.text
     assert updated.evidence == item.evidence
-    assert updated.source_id == "update-metadata"
+    assert json.loads(updated.source_id) == ["host", "run", "update-metadata"]
     assert service.list_events("project", item_id=item.id)[0].source_id == updated.source_id

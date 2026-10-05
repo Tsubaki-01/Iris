@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -21,11 +22,10 @@ from .models import (
 
 
 class MemoryGenerationConfig(BaseModel):
-    """自动维护开关、空闲等待和各生成阶段的独立预算。"""
+    """自动维护开关和各生成阶段的独立预算。"""
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
-    idle_seconds: float = Field(default=300, ge=0)
     flush_input_budget_tokens: int = Field(default=32000, gt=0)
     flush_output_budget_tokens: int = Field(default=4000, gt=0)
     dream_input_budget_tokens: int = Field(default=32000, gt=0)
@@ -77,6 +77,23 @@ class MemoryCaptureSource(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
+class MemorySource:
+    """待消费输入关联的生命周期来源，不复制运行状态。"""
+
+    lifecycle_source_id: str
+    run_id: str
+    session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryMaintenanceScope:
+    """宿主提供本轮范围，并在生成与消费前重查实际输入资格。"""
+
+    allowed_sources: frozenset[tuple[str, str]]
+    check: Callable[[tuple[MemorySource, ...]], Awaitable[bool]]
+
+
+@dataclass(frozen=True, slots=True)
 class EpisodeCursor:
     """指向不可变记录序列内下一个待处理字符。"""
 
@@ -91,6 +108,7 @@ class EpisodeProgress:
     episode: MemoryEpisode
     cursor: EpisodeCursor
     source_outcome: str | None = None
+    source: MemorySource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +166,7 @@ class DreamSnapshot:
     changes: tuple[DreamChange, ...]
     items: tuple[MemoryItem, ...]
     events: tuple[MemoryEvent, ...]
+    sources: tuple[MemorySource, ...] = ()
 
 
 class DreamOperation(BaseModel):

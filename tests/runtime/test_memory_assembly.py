@@ -325,12 +325,11 @@ def test_cli_uses_the_shared_memory_assembly(
 ) -> None:
     import iris.cli.chat as chat_module
     import iris.config as iris_config
-    import iris.runtime._assembly as assembly
     from iris.cli.chat import ChatOptions, run_chat
 
     monkeypatch.setattr(iris_config, "_config", iris_config.Config())
     monkeypatch.setattr(
-        assembly, "create_provider_client", lambda *args, **kwargs: FakeProvider([])
+        chat_module, "create_provider_client", lambda *args, **kwargs: FakeProvider([])
     )
     path = tmp_path / "agent.yaml"
     path.write_text(

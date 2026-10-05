@@ -54,6 +54,19 @@ InputT = TypeVar("InputT", bound=BaseModel)
 MemoryAccessPolicyFactory = Callable[[ToolExecutionContext], "MemoryAccessPolicy"]
 
 
+def _tool_source_id(context: ToolExecutionContext) -> str:
+    """用已有字段编码完整调用身份，避免 provider 重复 call ID 串联来源。"""
+    return json.dumps(
+        [
+            context.metadata.get("lifecycle_source_id"),
+            context.metadata.get("run_id"),
+            context.call_id,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryAccessPolicy:
     """一次工具执行可使用的记忆访问策略。
@@ -265,7 +278,7 @@ class MemoryRememberTool(MemoryTool[MemoryRememberToolInput]):
                 kind=params.kind,
                 actor=MemoryActor.AGENT,
                 source_type=MemorySourceType.TOOL_EVENT,
-                source_id=context.call_id,
+                source_id=_tool_source_id(context),
             )
         )
         return await self._write_result(item.namespace, {"item": _item_payload(item)})
@@ -290,7 +303,7 @@ class MemoryUpdateTool(MemoryTool[MemoryUpdateToolInput]):
             actor=MemoryActor.AGENT,
             reason=params.reason,
             source_type=MemorySourceType.TOOL_EVENT,
-            source_id=context.call_id,
+            source_id=_tool_source_id(context),
         )
         return await self._write_result(item.namespace, {"item": _item_payload(item)})
 
@@ -314,7 +327,7 @@ class MemoryForgetTool(MemoryTool[MemoryForgetToolInput]):
             actor=MemoryActor.AGENT,
             reason=params.reason,
             source_type=MemorySourceType.TOOL_EVENT,
-            source_id=context.call_id,
+            source_id=_tool_source_id(context),
         )
         return await self._write_result(namespace, {"deleted": deleted})
 

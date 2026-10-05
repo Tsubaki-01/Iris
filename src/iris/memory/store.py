@@ -13,6 +13,7 @@ from .generation_models import (
     GenerationResult,
     GenerationState,
     MemoryCaptureSource,
+    MemorySource,
     ObservationState,
 )
 from .models import (
@@ -102,8 +103,17 @@ class MemoryStore(Protocol):
     def get_episode(self, episode_id: str, namespace: str) -> MemoryEpisode | None:
         """读取不可变来源内容。"""
 
-    def list_pending_episodes(self, namespace: str, *, limit: int = 100) -> list[EpisodeProgress]:
+    def list_pending_episodes(
+        self,
+        namespace: str,
+        *,
+        limit: int = 100,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> list[EpisodeProgress]:
         """读取待提炼材料和精确处理位置。"""
+
+    def list_pending_sources(self, namespace: str) -> tuple[MemorySource, ...]:
+        """读取未消费原文、观察及工具变更的来源投影。"""
 
     def register_source(self, source: MemoryCaptureSource) -> MemoryCaptureSource:
         """登记或读取同一个 run 的捕获水位。"""
@@ -138,6 +148,7 @@ class MemoryStore(Protocol):
         change_ids: Sequence[str] | None = None,
         limit: int = 16,
         related_limit: int = 8,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
     ) -> DreamSnapshot:
         """同一读事务获取固定输入、目标、关联及纠正。"""
 
@@ -156,13 +167,21 @@ class MemoryStore(Protocol):
     ) -> bool:
         """原子记录容量阻塞，不消费输入。"""
 
-    def retry_blocked(self, namespace: str, *, budget: int | None = None) -> int:
+    def retry_blocked(
+        self,
+        namespace: str,
+        *,
+        budget: int | None = None,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> int:
         """预算变化或显式重试时恢复相关输入。"""
 
     def record_generation_result(self, result: GenerationResult) -> None:
         """保存独立阶段状态及已发生用量。"""
 
-    def generation_state(self, namespace: str) -> GenerationState:
+    def generation_state(
+        self, namespace: str, *, allowed_sources: frozenset[tuple[str, str]] | None = None
+    ) -> GenerationState:
         """读取生成状态与最近阶段结果。"""
 
 

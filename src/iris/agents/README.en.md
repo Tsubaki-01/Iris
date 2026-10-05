@@ -261,6 +261,16 @@ visible. After a successful search result commits, the next request selects cand
 with full parameter JSON Schema within its budget. The selected names are saved with that batch's calls; see
 [runtime](../runtime/README.en.md#deferred-tool-definitions) for the detailed rules.
 
+`AgentConfig.maintenance` uses `MaintenanceConfig`, exported from `iris.agents` and `iris.agents.config`.
+Its `idle_seconds` is the host-wide quiet interval: 300 seconds by default, with zero allowed.
+`memory.generation` no longer accepts an idle interval. The CLI creates and binds the host coordinator;
+SDK hosts explicitly bind `MaintenanceCoordinator` and `MemoryMaintenanceBinding` before prepare/run.
+Multiple runners borrow that one coordinator; see [harness](../harness/README.en.md).
+
+Automatic learning consumes terminal, fully captured Runs and excludes only the WAITING session's
+pending materials. If an in-memory lifecycle loses its source state on restart, those materials remain
+pending; use SQLite lifecycle for automatic continuation across restarts.
+
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.
 Enable it to connect the service, published overview, and both read tools:
 

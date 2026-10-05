@@ -11,6 +11,7 @@ from typing import Any, TypeVar
 
 from ..exceptions import IrisMemoryError
 from ._query import make_snippet, prepare_fts_query, tokenize_text
+from ._sources import SOURCE_CTE, read_sources, source_filter
 from .generation_models import (
     DreamChange,
     DreamPlan,
@@ -21,6 +22,7 @@ from .generation_models import (
     GenerationResult,
     GenerationState,
     MemoryCaptureSource,
+    MemorySource,
     ObservationState,
 )
 from .models import (
@@ -406,28 +408,63 @@ class SQLiteMemoryStore:
             ).fetchone()
             return None if row is None else MemoryEpisode.model_validate_json(row["payload"])
 
-    def list_pending_episodes(self, namespace: str, *, limit: int = 100) -> list[EpisodeProgress]:
+    def list_pending_episodes(
+        self,
+        namespace: str,
+        *,
+        limit: int = 100,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> list[EpisodeProgress]:
         """读取尚未完整 flush 的经历与精确处理游标。"""
         with self._connection() as connection:
+            restriction, params = source_filter("episode", "e", "id", allowed_sources)
             rows = connection.execute(
-                "SELECT e.*,s.payload AS source_payload FROM memory_episodes e "
+                SOURCE_CTE + "SELECT e.*,s.payload AS source_payload FROM memory_episodes e "
                 "LEFT JOIN memory_capture_sources s ON s.namespace=e.namespace "
                 "AND s.run_id=json_extract(e.payload,'$.source_id') "
                 "AND s.lifecycle_source_id="
                 "json_extract(e.payload,'$.metadata.lifecycle_source_id') "
-                "WHERE e.namespace=? AND e.flushed=0 ORDER BY e.created_at,e.id LIMIT ?",
-                (namespace, _validated_list_limit(limit)),
+                "WHERE e.namespace=? AND e.flushed=0"
+                + restriction
+                + " ORDER BY e.created_at,e.id LIMIT ?",
+                [namespace, *params, _validated_list_limit(limit)],
             ).fetchall()
-            return [
-                EpisodeProgress(
-                    MemoryEpisode.model_validate_json(row["payload"]),
-                    EpisodeCursor(row["record_index"], row["text_offset"]),
+            progresses = []
+            for row in rows:
+                episode = MemoryEpisode.model_validate_json(row["payload"])
+                source = (
                     None
                     if row["source_payload"] is None
-                    else MemoryCaptureSource.model_validate_json(row["source_payload"]).outcome,
+                    else MemoryCaptureSource.model_validate_json(row["source_payload"])
                 )
-                for row in rows
-            ]
+                progresses.append(
+                    EpisodeProgress(
+                        episode,
+                        EpisodeCursor(row["record_index"], row["text_offset"]),
+                        None if source is None else source.outcome,
+                        None
+                        if source is None
+                        else MemorySource(
+                            source.lifecycle_source_id, source.run_id, source.session_id
+                        ),
+                    )
+                )
+            return progresses
+
+    def list_pending_sources(self, namespace: str) -> tuple[MemorySource, ...]:
+        """列出所有未消费材料的来源，包括已封源和暂时不合格的来源。"""
+        with self._connection() as connection:
+            rows = connection.execute(
+                SOURCE_CTE + "SELECT DISTINCT src.source_id,src.run_id,src.session_id "
+                "FROM input_sources src WHERE src.namespace=? AND src.source_id IS NOT NULL AND ("
+                "(kind='episode' AND id IN (SELECT id FROM memory_episodes WHERE flushed=0)) OR "
+                "(kind='observation' AND id IN (SELECT id FROM memory_observations "
+                "WHERE status IN ('pending','blocked'))) OR "
+                "(kind='change' AND id IN (SELECT event_id FROM memory_dream_changes "
+                "WHERE status IN ('pending','blocked')))) ORDER BY src.source_id,src.run_id",
+                (namespace,),
+            )
+            return tuple(MemorySource(*row) for row in rows)
 
     def register_source(self, source: MemoryCaptureSource) -> MemoryCaptureSource:
         """首次登记 run；重复登记保留已持久化的捕获水位。"""
@@ -608,6 +645,7 @@ class SQLiteMemoryStore:
         change_ids: Sequence[str] | None = None,
         limit: int = 16,
         related_limit: int = 8,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
     ) -> DreamSnapshot:
         """同一连接读取固定输入、目标、已知关联、相关 tombstone 和纠正。"""
         with self._connection() as connection:
@@ -616,13 +654,25 @@ class SQLiteMemoryStore:
             observations = tuple(
                 MemoryObservation.model_validate_json(row["payload"])
                 for row in self._pending_rows(
-                    connection, "memory_observations", "id", namespace, observation_ids, limit
+                    connection,
+                    "memory_observations",
+                    "id",
+                    namespace,
+                    observation_ids,
+                    limit,
+                    allowed_sources,
                 )
             )
             changes = tuple(
                 _row_to_change(row)
                 for row in self._pending_rows(
-                    connection, "memory_dream_changes", "event_id", namespace, change_ids, limit
+                    connection,
+                    "memory_dream_changes",
+                    "event_id",
+                    namespace,
+                    change_ids,
+                    limit,
+                    allowed_sources,
                 )
             )
             target_ids = {change.item_id for change in changes}
@@ -749,7 +799,15 @@ class SQLiteMemoryStore:
                 (namespace, _dump_json(sorted(event_ids))),
             ).fetchall()
             events = tuple(MemoryEvent.model_validate_json(row["payload"]) for row in event_rows)
-            return DreamSnapshot(namespace, revision, observations, changes, items, events)
+            sources = read_sources(
+                connection,
+                namespace,
+                (
+                    ("observation", tuple(item.id for item in observations)),
+                    ("change", tuple(item.event_id for item in changes)),
+                ),
+            )
+            return DreamSnapshot(namespace, revision, observations, changes, items, events, sources)
 
     def commit_dream(
         self, snapshot: DreamSnapshot, plan: DreamPlan, *, result: GenerationResult
@@ -884,13 +942,25 @@ class SQLiteMemoryStore:
                 )
             return True
 
-    def retry_blocked(self, namespace: str, *, budget: int | None = None) -> int:
+    def retry_blocked(
+        self,
+        namespace: str,
+        *,
+        budget: int | None = None,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> int:
         """预算改变或调用方显式要求时，重新开放对应受阻输入。"""
         with self._connection() as connection:
             changed = 0
             for table in ("memory_observations", "memory_dream_changes"):
+                kind, column = (
+                    ("observation", "id")
+                    if table == "memory_observations"
+                    else ("change", "event_id")
+                )
+                restriction, source_params = source_filter(kind, table, column, allowed_sources)
                 sql = (
-                    f"UPDATE {table} SET "
+                    SOURCE_CTE + f"UPDATE {table} SET "
                     f"status='pending',reason='',blocked_budget=NULL,dependencies='[]'"
                     f" WHERE namespace=? AND status='blocked'"
                 )
@@ -898,7 +968,8 @@ class SQLiteMemoryStore:
                 if budget is not None:
                     sql += " AND blocked_budget != ?"
                     params.append(budget)
-                changed += connection.execute(sql, params).rowcount
+                connection.execute(sql + restriction, [*params, *source_params])
+                changed += connection.execute("SELECT changes()").fetchone()[0]
             return changed
 
     def record_generation_result(self, result: GenerationResult) -> None:
@@ -906,20 +977,32 @@ class SQLiteMemoryStore:
         with self._connection() as connection:
             self._insert_result(connection, result)
 
-    def generation_state(self, namespace: str) -> GenerationState:
+    def generation_state(
+        self, namespace: str, *, allowed_sources: frozenset[tuple[str, str]] | None = None
+    ) -> GenerationState:
         """读取当前积压及各阶段最近一次实际结果。"""
         with self._connection() as connection:
             connection.execute("BEGIN")
             state = self._read_namespace_state(connection, namespace)
+            restriction, params = source_filter("episode", "memory_episodes", "id", allowed_sources)
             episodes = connection.execute(
-                "SELECT count(*) FROM memory_episodes WHERE namespace=? AND flushed=0", (namespace,)
+                SOURCE_CTE
+                + "SELECT count(*) FROM memory_episodes WHERE namespace=? AND flushed=0"
+                + restriction,
+                [namespace, *params],
             ).fetchone()[0]
             counts: dict[str, int] = {}
             for table in ("memory_observations", "memory_dream_changes"):
+                kind, column = (
+                    ("observation", "id")
+                    if table == "memory_observations"
+                    else ("change", "event_id")
+                )
+                restriction, params = source_filter(kind, table, column, allowed_sources)
                 for row in connection.execute(
-                    f"SELECT status,count(*) AS count FROM {table} WHERE "
-                    f"namespace=? GROUP BY status",
-                    (namespace,),
+                    SOURCE_CTE + f"SELECT status,count(*) AS count FROM {table} WHERE "
+                    f"namespace=?" + restriction + " GROUP BY status",
+                    [namespace, *params],
                 ):
                     counts[f"{table}:{row['status']}"] = row["count"]
             rows = connection.execute(
@@ -1126,10 +1209,17 @@ class SQLiteMemoryStore:
         namespace: str,
         ids: Sequence[str] | None,
         limit: int,
+        allowed_sources: frozenset[tuple[str, str]] | None,
     ) -> list[sqlite3.Row]:
         """在单一读事务中选择 pending 输入；显式空列表代表不选该类。"""
-        sql = f"SELECT * FROM {table} WHERE namespace=? AND status='pending'"
-        params: list[Any] = [namespace]
+        kind = "observation" if table == "memory_observations" else "change"
+        restriction, source_params = source_filter(kind, table, id_column, allowed_sources)
+        sql = (
+            SOURCE_CTE
+            + f"SELECT * FROM {table} WHERE namespace=? AND status='pending'"
+            + restriction
+        )
+        params: list[Any] = [namespace, *source_params]
         if ids is not None:
             sql += f" AND {id_column} IN (SELECT value FROM json_each(?))"
             params.append(_dump_json(list(ids)))

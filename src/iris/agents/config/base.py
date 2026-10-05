@@ -233,6 +233,14 @@ class AgentContextConfig(BaseModel):
         return value
 
 
+class MaintenanceConfig(BaseModel):
+    """宿主共享维护的空闲调度配置，不拥有领域生成预算。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    idle_seconds: float = Field(default=300, ge=0, allow_inf_nan=False)
+
+
 class AgentConfig(BaseModel):
     """Agent YAML 的稳定 Python 配置模型。
 
@@ -247,6 +255,7 @@ class AgentConfig(BaseModel):
         compaction (CompactionConfig): 自动上下文压缩的预算与摘要指令配置。
         context_policy (ContextPolicyConfig): 当前会话上下文回读策略。
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
+        maintenance (MaintenanceConfig): 宿主共享维护的空闲等待。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
         speech (SpeechConfig): 默认关闭的语音输入声明，由宿主装配客户端。
@@ -268,6 +277,7 @@ class AgentConfig(BaseModel):
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
@@ -375,6 +385,7 @@ __all__ = [
     "AgentConfig",
     "AgentSkillsConfig",
     "CommandConfig",
+    "MaintenanceConfig",
     "ModelConfig",
     "PermissionsConfig",
     "PythonToolsConfig",
