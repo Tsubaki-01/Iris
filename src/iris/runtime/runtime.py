@@ -77,7 +77,7 @@ from ._compaction_summary import (
 )
 from ._context_projection import project_context_request
 from ._context_refs import with_context_refs
-from ._prompts import render_prompt
+from ._prompts import render_prompt, snapshot_prompts
 from ._request_measurement import MeasuredRequest, measure_request
 from ._tool_context import ToolContextSelection, select_tool_context
 from .commit import (
@@ -1156,7 +1156,7 @@ class AgentRuntime:
         """只在窗口采用时读取发布物并应用memory专用额度。"""
         config = self.environment.agent_config
         candidates = await load_context_windows(
-            prompt_renderer=self.environment.prompt_renderer,
+            prompt_snapshot=self.environment.prompt_snapshot,
             memory_service=self.environment.memory_service,
             namespaces=config.memory.read_namespaces,
             tool_names=(
@@ -1250,6 +1250,7 @@ class AgentRuntime:
                                 *context_snapshot.contributions,
                                 render_todo_context(
                                     todo_snapshot,
+                                    prompt_snapshot=self.environment.prompt_snapshot,
                                     remind=cursor.step_index == cursor.todo_reminder_step,
                                 ),
                             )
@@ -1645,9 +1646,8 @@ class AgentRuntime:
             )
         completed = False
         try:
-            system_prompt = render_prompt(
-                self.environment.prompt_renderer, config.prompt_path, {}
-            ).strip()
+            prompt_snapshot = snapshot_prompts(self.environment.prompt_source)
+            system_prompt = render_prompt(prompt_snapshot, "compaction", {}).strip()
             previous = snapshot.compaction
             summary = previous.summary if previous is not None else None
             start = previous.covered_message_count if previous is not None else 0
@@ -1662,7 +1662,7 @@ class AgentRuntime:
                     config,
                     provider.estimate_input_tokens,
                     system_prompt=system_prompt,
-                    prompt_renderer=self.environment.prompt_renderer,
+                    prompt_snapshot=prompt_snapshot,
                 )
                 for attempt in range(2):
                     stopped = _compaction_stop(cursor, commits, cancellation, operation_deadline)

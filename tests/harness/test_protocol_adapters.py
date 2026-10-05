@@ -14,6 +14,7 @@ from iris.harness import AgentRunner
 from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import AgentRunRequest, RunStopReason
 from iris.message import ImageBlock, LLMRequest, Msg, TextBlock, ToolSpec
+from iris.prompts import PromptSource
 from iris.providers import ProviderClient
 from iris.providers.chat_completions import ChatCompletionsAdapter
 from iris.providers.responses import ResponsesAdapter
@@ -24,7 +25,6 @@ from iris.runtime._compaction_summary import (
 )
 from iris.store import SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry, ToolResult
-from iris.utils import TemplateRenderer
 
 from .fakes import RecordingPublisher, build_runtime
 
@@ -261,7 +261,7 @@ async def test_protocol_tool_loop_resumes_from_sqlite_with_same_runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["responses", "chat_completions"])
 async def test_protocol_summary_uses_same_client_and_normalized_finish_reason(
-    monkeypatch: pytest.MonkeyPatch, style: ApiStyle
+    monkeypatch: pytest.MonkeyPatch, style: ApiStyle, tmp_path: Path
 ) -> None:
     seen: list[dict[str, Any]] = []
 
@@ -289,7 +289,7 @@ async def test_protocol_summary_uses_same_client_and_normalized_finish_reason(
         CompactionConfig(),
         lambda request: 1,
         system_prompt="Summarize.",
-        prompt_renderer=TemplateRenderer(),
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
     )
     response = await client.complete(batch.request)
     assert consume_summary_response(response) == "completed task summary"

@@ -26,6 +26,7 @@ from iris.memory import (
 from iris.memory.generation import _DreamResponse, _flush_input, _FlushResponse
 from iris.memory.generation_models import EpisodeCursor, EpisodeProgress, EpisodeSlice
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.prompts import PromptSource
 
 
 class Provider:
@@ -76,6 +77,7 @@ def service(tmp_path: Path, provider: Provider, **budgets: int) -> MemoryService
         generation_provider=provider,
         generation_model="test-model",
         generation_config=MemoryGenerationConfig(**budgets),
+        prompt_source=PromptSource.initialize(tmp_path),
     )
 
 
@@ -229,7 +231,7 @@ async def test_generation_prompts_preserve_json_schema_and_original_text(tmp_pat
 @pytest.mark.parametrize("stage", ["flush", "dream"])
 @pytest.mark.parametrize("template", ["{% invalid %}", "{{ missing }}"])
 async def test_template_failure_does_not_consume_generation_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, template: str
+    tmp_path: Path, stage: str, template: str
 ) -> None:
     provider = Provider(flush_one)
     memory = service(tmp_path, provider)
@@ -238,9 +240,8 @@ async def test_template_failure_does_not_consume_generation_input(
         await memory.flush("project")
     before = memory.generation_state("project")
     before_requests = len(provider.requests)
-    template_path = tmp_path / f"memory_{stage}.j2"
+    template_path = memory.prompt_source.root / f"memory_{stage}.j2"
     template_path.write_text(template, encoding="utf-8")
-    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path)
 
     with pytest.raises(IrisMemoryError) as captured:
         await (memory.flush("project") if stage == "flush" else memory.dream("project"))
@@ -258,12 +259,13 @@ async def test_template_failure_does_not_consume_generation_input(
 
 
 @pytest.mark.asyncio
-async def test_empty_generation_does_not_read_templates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_empty_generation_does_not_render_templates(tmp_path: Path) -> None:
     provider = Provider(flush_one)
     memory = service(tmp_path, provider)
-    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path / "missing")
+    for stage in ("flush", "dream"):
+        (memory.prompt_source.root / f"memory_{stage}.j2").write_text(
+            "{% invalid %}", encoding="utf-8"
+        )
     assert (await memory.flush("project")).status == "empty"
     assert (await memory.dream("project")).status == "empty"
     assert provider.requests == []
@@ -410,7 +412,7 @@ async def test_large_explicit_change_is_blocked_but_unrelated_small_change_advan
     memory.remember(MemoryWriteInput(text="large fact " * 2000, reason="大段有效材料"))
     memory.remember(MemoryWriteInput(text="独立的小事实", reason="独立材料"))
     with patch.object(
-        memory.prompt_renderer, "render_file", wraps=memory.prompt_renderer.render_file
+        _prompts, "render_memory_prompt", wraps=_prompts.render_memory_prompt
     ) as render:
         result = await memory.dream("project")
     assert render.call_count == 1

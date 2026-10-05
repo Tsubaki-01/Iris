@@ -87,6 +87,7 @@ from ..lifecycle import (
 )
 from ..memory import MemoryService
 from ..message import ImageBlock, Msg, image_block_from_saved
+from ..prompts import PromptSource
 from ..providers import CompletionProvider
 from ..runtime import (
     AgentRuntime,
@@ -506,6 +507,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        prompt_source: PromptSource | None = None,
         decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -526,6 +528,7 @@ class AgentRunner:
             permission_policy=permission_policy,
             child_provider_factory=child_provider_factory,
             memory_service=memory_service,
+            prompt_source=prompt_source,
             decision_client=decision_client,
             context_source=context_source,
             hooks=hooks,
@@ -548,6 +551,7 @@ class AgentRunner:
         permission_policy: PermissionPolicy | None = None,
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
+        prompt_source: PromptSource | None = None,
         decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -578,6 +582,8 @@ class AgentRunner:
             config_path=config_path,
             permission_policy=permission_policy,
         )
+        if prompt_source is None:
+            prompt_source = PromptSource.initialize(boundary.workspace_root, config.prompts.root)
         controller: HarnessSubagentController | None = None
         subagent: SubagentAssembly | None = None
         if config.tools.subagent is not None:
@@ -587,6 +593,7 @@ class AgentRunner:
                 routes=routes,
                 store=resolved_store,
                 parent_boundary=boundary,
+                prompt_source=prompt_source,
                 child_provider_factory=child_provider_factory,
                 clock=resolved_clock,
             )
@@ -596,6 +603,7 @@ class AgentRunner:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            prompt_source=prompt_source,
             decision_client=decision_client,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
@@ -735,7 +743,11 @@ class AgentRunner:
         goal = service.store.get_goal(expected.goal_id)
         command, cursor = self._build_start_facts(
             AgentRunRequest(
-                input=render_continuation(goal), session_id=goal.session_id, run_id=run_id
+                input=render_continuation(
+                    goal, prompt_snapshot=self.runtime.environment.prompt_snapshot
+                ),
+                session_id=goal.session_id,
+                run_id=run_id,
             ),
             options=goal.run_options,
         )

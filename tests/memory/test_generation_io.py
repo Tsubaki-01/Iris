@@ -23,8 +23,10 @@ from iris.memory import (
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
+    _prompts,
 )
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.prompts import PromptSource
 
 
 class _Provider:
@@ -77,6 +79,7 @@ def _service(tmp_path: Path) -> tuple[MemoryService, _Provider]:
         generation_model="test",
         overview_provider=provider,
         overview_model="test",
+        prompt_source=PromptSource.initialize(tmp_path),
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
     return service, provider
@@ -117,8 +120,8 @@ async def test_slow_generation_processing_leaves_loop_and_foreground_reads_avail
 
     monkeypatch.setattr(provider, "complete", complete)
     if boundary == "template":
-        target, attribute = service.prompt_renderer, "render_file"
-        original = service.prompt_renderer.render_file
+        target, attribute = _prompts, "render_memory_prompt"
+        original = _prompts.render_memory_prompt
     elif boundary == "prepare":
         target, attribute = provider, "estimate_input_tokens"
         original = provider.estimate_input_tokens

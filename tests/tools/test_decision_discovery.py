@@ -10,6 +10,7 @@ import pytest
 from iris.decision import ChoiceAnswer, DecisionRequest, DecisionResponse, DecisionUsage
 from iris.exceptions import IrisDecisionError, IrisToolValidationError
 from iris.message import ToolUseBlock
+from iris.prompts import PromptSnapshot, PromptSource
 from iris.tools import (
     CallableTool,
     ToolCapability,
@@ -18,6 +19,11 @@ from iris.tools import (
     ToolRegistry,
 )
 from iris.tools.discovery import ToolSearchInput, ToolSearchTool
+
+
+@pytest.fixture
+def prompt_snapshot(tmp_path: Path) -> PromptSnapshot:
+    return PromptSource.initialize(tmp_path).snapshot()
 
 
 class FakeDecision:
@@ -61,7 +67,7 @@ def _register(
 
 @pytest.mark.asyncio
 async def test_decision_uses_full_current_allowed_catalog_once_and_maps_ids(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt_snapshot: PromptSnapshot
 ) -> None:
     registry = ToolRegistry()
     for name in ("first", "none", "denied"):
@@ -69,7 +75,11 @@ async def test_decision_uses_full_current_allowed_catalog_once_and_maps_ids(
     _register(registry, "outside", group="other")
     _register(registry, "eager", deferred=False)
     evaluator = FakeDecision(("c1", "none", "c1", "c2"))
-    search = ToolSearchTool(registry.view(deny={"denied"}), decision_client=evaluator)
+    search = ToolSearchTool(
+        registry.view(deny={"denied"}),
+        decision_client=evaluator,
+        prompt_snapshot=prompt_snapshot,
+    )
     registry.register(search)
     _register(registry, "published_later")
 
@@ -188,38 +198,44 @@ async def test_empty_catalog_or_groups_returns_equal_length_nulls_without_evalua
 
 
 @pytest.mark.asyncio
-async def test_single_candidate_still_competes_with_none(tmp_path: Path) -> None:
+async def test_single_candidate_still_competes_with_none(
+    tmp_path: Path, prompt_snapshot: PromptSnapshot
+) -> None:
     registry = ToolRegistry()
     _register(registry, "only")
     evaluator = FakeDecision(("none",))
-    result = await ToolSearchTool(registry.view(), decision_client=evaluator).arun(
-        ToolSearchInput(queries=["unrelated"]), ToolExecutionContext(workspace_root=tmp_path)
-    )
+    result = await ToolSearchTool(
+        registry.view(), decision_client=evaluator, prompt_snapshot=prompt_snapshot
+    ).arun(ToolSearchInput(queries=["unrelated"]), ToolExecutionContext(workspace_root=tmp_path))
     assert len(evaluator.requests) == 1
     assert set(evaluator.requests[0].questions["q0"].options) == {"c0", "none"}
     assert result.data["selections"] == [{"query": "unrelated", "tool": None}]
 
 
 @pytest.mark.asyncio
-async def test_catalog_is_not_truncated_before_the_jev_boundary(tmp_path: Path) -> None:
+async def test_catalog_is_not_truncated_before_the_jev_boundary(
+    tmp_path: Path, prompt_snapshot: PromptSnapshot
+) -> None:
     registry = ToolRegistry()
     for i in range(255):
         _register(registry, f"tool{i}")
     evaluator = FakeDecision(("none",))
-    await ToolSearchTool(registry.view(), decision_client=evaluator).arun(
-        ToolSearchInput(queries=["pick"]), ToolExecutionContext(workspace_root=tmp_path)
-    )
+    await ToolSearchTool(
+        registry.view(), decision_client=evaluator, prompt_snapshot=prompt_snapshot
+    ).arun(ToolSearchInput(queries=["pick"]), ToolExecutionContext(workspace_root=tmp_path))
     assert len(evaluator.requests[0].questions["q0"].options) == 256
 
 
 @pytest.mark.asyncio
 async def test_decision_error_is_execution_error_without_disclosure_or_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt_snapshot: PromptSnapshot
 ) -> None:
     registry = ToolRegistry()
     _register(registry, "candidate")
     evaluator = FakeDecision((), IrisDecisionError("network failed"))
-    registry.register(ToolSearchTool(registry.view(), decision_client=evaluator))
+    registry.register(
+        ToolSearchTool(registry.view(), decision_client=evaluator, prompt_snapshot=prompt_snapshot)
+    )
 
     def no_fallback(*args: Any, **kwargs: Any) -> list[Any]:
         raise AssertionError("远程失败不可回退")
@@ -235,7 +251,9 @@ async def test_decision_error_is_execution_error_without_disclosure_or_fallback(
 
 
 @pytest.mark.asyncio
-async def test_outer_cancellation_reaches_borrowed_evaluator(tmp_path: Path) -> None:
+async def test_outer_cancellation_reaches_borrowed_evaluator(
+    tmp_path: Path, prompt_snapshot: PromptSnapshot
+) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -250,7 +268,9 @@ async def test_outer_cancellation_reaches_borrowed_evaluator(tmp_path: Path) -> 
 
     registry = ToolRegistry()
     _register(registry, "candidate")
-    tool = ToolSearchTool(registry.view(), decision_client=BlockingDecision())
+    tool = ToolSearchTool(
+        registry.view(), decision_client=BlockingDecision(), prompt_snapshot=prompt_snapshot
+    )
     task = asyncio.create_task(
         tool.arun(
             ToolSearchInput(queries=["candidate"]), ToolExecutionContext(workspace_root=tmp_path)
@@ -261,3 +281,39 @@ async def test_outer_cancellation_reaches_borrowed_evaluator(tmp_path: Path) -> 
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_decision_instructions_use_frozen_source_and_current_query_indices(
+    tmp_path: Path,
+) -> None:
+    """已构造工具固定项目正文，新请求仍逐条传入当前 query_index。"""
+    source = PromptSource.initialize(tmp_path)
+    prompt = source.root / "tool_discovery_instruction.j2"
+    prompt.write_text("旧指令 state.queries[{{ query_index }}]", encoding="utf-8")
+    registry = ToolRegistry()
+    _register(registry, "candidate")
+    evaluator = FakeDecision(("c0",))
+    tool = ToolSearchTool(
+        registry.view(), decision_client=evaluator, prompt_snapshot=source.snapshot()
+    )
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    await tool.arun(ToolSearchInput(queries=["first"]), context)
+    prompt.write_text("新指令 state.queries[{{ query_index }}]", encoding="utf-8")
+    evaluator.choices = ("c0", "none")
+    await tool.arun(ToolSearchInput(queries=["current", "unmatched"]), context)
+
+    current = evaluator.requests[-1]
+    assert current.state["queries"] == ["current", "unmatched"]
+    assert [question.instructions for question in current.questions.values()] == [
+        "旧指令 state.queries[0]",
+        "旧指令 state.queries[1]",
+    ]
+    replacement = ToolSearchTool(
+        registry.view(), decision_client=evaluator, prompt_snapshot=source.snapshot()
+    )
+    await replacement.arun(ToolSearchInput(queries=["current", "unmatched"]), context)
+    assert [question.instructions for question in evaluator.requests[-1].questions.values()] == [
+        "新指令 state.queries[0]",
+        "新指令 state.queries[1]",
+    ]

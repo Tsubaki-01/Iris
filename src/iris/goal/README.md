@@ -150,6 +150,10 @@ SQLite 当前 lifecycle schema 为 11，不兼容旧库且不迁移；使用新�
 helper 留在对应内部模块，不作为顶层稳定 SDK。模型在 [models.py](models.py)，原子存储协议
 在 [store.py](store.py)，宿主控制边界在 [session.py](session.py)。
 
-提示模板统一放在 [../prompts/](../prompts/)：[goal_context.j2](../prompts/goal_context.j2)
-生成每步的当前目标上下文，[goal_continuation.j2](../prompts/goal_continuation.j2) 生成自动新轮
-输入。[context.py](context.py) 仍负责目标投影、变量准备与渲染调用。
+默认模板随 [prompts](../prompts/README.md) 分发，runner 初始化只把缺少的模板补到项目
+`prompts.root`（默认 `.iris/prompts`），之后可手工修改项目文件。
+`goal_context.j2` 生成每步的目标上下文，`goal_continuation.j2` 生成自动新轮输入；二者正文与
+依赖在 runner 构造时固定，后续步骤继续读取最新 Goal 状态，已有 runner 不热载模板修改。
+[context.py](context.py) 负责目标投影、变量准备与渲染调用。直接使用领域适配器时，
+`GoalContextSource(service, host_source=None, *, prompt_snapshot=...)` 与
+`render_continuation(goal, *, prompt_snapshot=...)` 都显式接收同一构造期快照。

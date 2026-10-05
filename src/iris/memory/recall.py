@@ -5,6 +5,8 @@ from typing import Any, cast
 
 from ..decision import DecisionEvaluator, DecisionRequest, ScoreAnswer, ScoreQuestion
 from ..exceptions import IrisDecisionError, IrisMemoryError
+from ..prompts import PromptSnapshot
+from ._prompts import render_memory_prompt
 from ._query import matches_required_phrases
 from .models import MemoryItem, MemorySearchHit, MemorySearchQuery, MemorySearchResponse
 
@@ -20,6 +22,7 @@ async def recall_memories(
     candidates: Sequence[MemoryItem],
     query: MemorySearchQuery,
     evaluator: DecisionEvaluator,
+    prompt_snapshot: PromptSnapshot | None,
 ) -> tuple[MemorySearchResponse, dict[str, Any]]:
     """筛选显式必要词组，评分全部剩余正文并返回完整原文及独立用量。"""
     eligible = [
@@ -27,11 +30,15 @@ async def recall_memories(
     ]
     if not eligible:
         return MemorySearchResponse((), False), {}
+    if prompt_snapshot is None:
+        raise IrisMemoryError("memory recall prompt 来源未配置")
     request = DecisionRequest.model_construct(
         state={"query": query.query, "memories": [item.text for item in eligible]},
         questions={
             f"m{i}": ScoreQuestion.model_construct(
-                instructions=f"评价 state.memories[{i}] 对回答 state.query 的帮助程度。",
+                instructions=render_memory_prompt(
+                    prompt_snapshot, "memory_recall_instruction", {"candidate_index": i}
+                ),
                 levels=_RELEVANCE_LEVELS,
             )
             for i in range(len(eligible))

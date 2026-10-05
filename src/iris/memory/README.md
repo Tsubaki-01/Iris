@@ -117,10 +117,18 @@ Flush 先筛选对未来有用的信息，保留偏好、纠正、项目约定�
 不写成无效。用户明确要求记录的细节仍需保留；`reason` 只简述保存或整理用途。
 这些是模型的生成要求；JSON schema 校验只检查结构与字段约束，不证明正文的推论成立。
 
-Flush/Dream 的指令分别在 [`memory_flush.j2`](../prompts/memory_flush.j2) 和
-[`memory_dream.j2`](../prompts/memory_dream.j2) 中维护。`MemoryService.prompt_renderer` 持有
-独立的 `iris.utils.TemplateRenderer`，Python 负责准备 schema 和输入数据，模板保留 JSON
-中的引号与 `<>&` 原文。模板读取或渲染失败转换为 `IrisMemoryError`。
+Flush/Dream 的默认策略分别由 [`memory_flush.j2`](../prompts/memory_flush.j2) 和
+[`memory_dream.j2`](../prompts/memory_dream.j2) 提供。可运行 Agent 初始化时把缺少的种子补到
+项目 `prompts.root`（默认 `.iris/prompts`），保留已有正文；生成只读取显式绑定的
+`MemoryService.prompt_source`。可在项目目录手工修改策略，模板保持引号与 `<>&` 原文。
+最终请求由领域代码追加固定业务说明和响应模型生成的 JSON Schema，模板不能移除真实输出契约；
+响应仍在原解析边界校验一次。来源读取或模板渲染失败转换为 `IrisMemoryError`。
+
+自动维护在 cycle 开始取得一份内存快照，Flush、Dream、Overview 共用它，期间修改在下一轮
+才采用；独立 SDK 的每次 `flush/dream/refresh_overview` 调用各取一次新快照。快照包含模板依赖，
+不保存为历史档案。配置构造的服务接收 root 项目来源；注入服务保留宿主绑定，runner 不改写它。
+普通读取、搜索和 remember/update/forget 不要求来源。独立生成必须显式提供已初始化的
+`PromptSource`，缺少时按生成依赖错误失败，不推断当前工作目录；本阶段不包含自动修订。
 
 Flush/dream 请求使用 `temperature=0` 和 `response_format={"type": "json_object"}`，生成 provider
 须支持这两个参数。JSON 输出模式约束响应格式，字段与证据引用仍在既有解析边界检查；不合契约
@@ -217,9 +225,12 @@ Dream 结果包含各操作数量、`processed_observations`、`processed_change
 ```python
 from pathlib import Path
 from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
+from iris.prompts import PromptSource
 
+workspace = Path.cwd()
 service = MemoryService(
     SQLiteMemoryStore(Path("memory.db")),
+    prompt_source=PromptSource.initialize(workspace),
     generation_provider=provider,  # 应用已配置的 CompletionProvider
     generation_model="your-model",
 )
@@ -262,8 +273,9 @@ session 不会强制刷新已采用概览，需要当前概览时开始新会话
 遵循 `iris.providers.CompletionProvider`。配置构造的 Agent 使用已解析的主模型 provider，
 显式注入的 service 则保留宿主原配置。构造和读取不调用模型；自动生成由可选的 runner 维护负责。
 
-概览生成指令在 [`memory_overview.j2`](../prompts/memory_overview.j2) 中维护，也通过该 service
-的 `prompt_renderer` 读取。修改指令无需调整 Python 的快照准备、预算或响应解析逻辑。
+概览默认策略在 [`memory_overview.j2`](../prompts/memory_overview.j2) 中维护，实际生成读取项目
+来源快照。`MemoryOverviewContent` 的双字段 schema 与必要业务说明由领域请求组装追加；
+手工修改项目策略无需调整 Python 的输入准备、预算或响应解析逻辑。
 
 ```python
 # service 已通过构造器配置概览 provider/model。
@@ -381,6 +393,9 @@ Agent 的 `memory.enabled: true` 保持读取服务启用，再通过独立 Deci
 
 SDK 可以通过 `MemorySearchTool(..., decision_client=evaluator)` 或
 `register_memory_tools(..., memory_decision_client=evaluator)` 借用只实现 `evaluate` 的对象。
+两种入口同时传 `prompt_snapshot=prompt_source.snapshot()`，在工具构造时固定
+`memory_recall_instruction` 策略；实际调用仍传最新候选索引与正文。新工具才采用策略修改，
+评分档位、阈值、题号和 state 字段由代码固定。本地 Search 不要求提示来源。
 Search 不创建或关闭 client，不把模式写入共享 `MemoryService`，Fetch 与写工具也不接收它；
 两个 Agent 可以共享服务并分别使用本地或 Decision Search。Agent 自建连接由 environment 统一关闭，
 SDK 注入连接由宿主负责。仅增强 Search 标记 `READ+NETWORK`，沿默认内置允许策略及自定义权限裁决。

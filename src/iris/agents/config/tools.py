@@ -16,6 +16,7 @@ from ...memory import (
     MemoryService,
     default_memory_access_policy_factory,
 )
+from ...prompts import PromptSnapshot
 from ...tools import AskQuestionTool, ToolRegistry, WorkspaceFileService
 from ...tools.base import BaseTool
 from ...tools.builtin.artifact import PublishArtifactTool
@@ -66,6 +67,7 @@ def build_tool_registry(
     memory_config: MemoryConfig | None = None,
     memory_decision_client: DecisionEvaluator | None = None,
     command_binding: CommandBinding | None = None,
+    prompt_snapshot: PromptSnapshot | None = None,
 ) -> ToolRegistry:
     """根据 Agent 工具配置构建工具注册表。
 
@@ -75,6 +77,7 @@ def build_tool_registry(
         memory_config: 绑定工具的读取范围和单个写入 namespace。
         memory_decision_client: 仅由 Search 借用的可选判断能力，服务和其他工具不保存它。
         command_binding: root 已装配的命令服务与环境；显式 exec.command/exec.python 消费。
+        prompt_snapshot: 构造时固定的项目模板，供可选 Decision 指令使用。
 
     Returns:
         ToolRegistry: 已注册配置声明工具的注册表。
@@ -90,6 +93,7 @@ def build_tool_registry(
         memory_config=memory_config or MemoryConfig(),
         memory_decision_client=memory_decision_client,
         command_binding=command_binding,
+        prompt_snapshot=prompt_snapshot,
     )
     for ref in config.python.functions:
         registry.register_function(import_ref(ref))
@@ -113,6 +117,7 @@ def _register_builtin_tools(
     memory_config: MemoryConfig,
     memory_decision_client: DecisionEvaluator | None,
     command_binding: CommandBinding | None,
+    prompt_snapshot: PromptSnapshot | None,
 ) -> None:
     """先绑定有效记忆服务的双读工具，再注册 YAML 声明的其它内置工具。"""
     memory_policy = default_memory_access_policy_factory(memory_config)
@@ -122,6 +127,7 @@ def _register_builtin_tools(
                 service=memory_service,
                 access_policy_factory=memory_policy,
                 decision_client=memory_decision_client,
+                prompt_snapshot=prompt_snapshot,
             )
         )
         registry.register(

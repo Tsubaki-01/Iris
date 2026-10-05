@@ -47,6 +47,13 @@ finally:
 `store=`, every durable read and write uses that exact object. Otherwise `session.backend: none`
 selects `InMemoryLifecycleStore`, while `sqlite` selects lifecycle `SQLiteStore`.
 
+`prompts.root` resolves from the effective root workspace and defaults to `.iris/prompts`. Both
+`from_config*()` entry points accept an initialized `prompt_source=`. When omitted, construction
+initializes it before Memory and other consumers, adding only missing defaults and preserving
+existing project text. Children borrow the same source but take their own construction snapshot;
+their YAML and narrower workspace do not relocate it. An injected MemoryService keeps its host
+binding; runners never rewrite its source. See [prompts](../prompts/README.md) for adoption timing.
+
 On an open runner, import an image before submitting its data blocks. The main model must support vision through
 the selected API protocol:
 
@@ -674,11 +681,14 @@ check. Saved requests, run limits, cursors, call identities, and execution resul
 the original run. Pending tools must satisfy argument and current permission rules. Run records and
 checkpoints do not store an environment fingerprint.
 
-Context and runtime each use the shared [`iris.utils.TemplateRenderer`](../utils/README.md), with
-Jinja's native on-demand loading, compiled cache, and default reload detection. Later renders on the
-same runtime can see file edits. Autoescape is disabled by default; XML templates opt in explicitly.
-`StrictUndefined` applies during rendering, and context character limits apply after complete text
-generation. See [`iris.context`](../context/README.en.md).
+Runner construction freezes system/context templates, Goal/Todo, Memory context guidance, Skill
+catalog, and Decision instructions together with their dependencies. Later model steps still pass
+current data; an existing runner does not reload template edits. Each complete compaction takes a
+new source snapshot, and each automatic Memory cycle takes one shared by all its stages. Rendering
+uses the shared [`TemplateRenderer`](../utils/README.md), with autoescape disabled unless an XML
+template opts in. `StrictUndefined` applies during rendering, and context character limits apply
+after complete text generation. `system` / `context` keep their existing configuration entry points;
+see [`iris.context`](../context/README.en.md).
 
 Start, resume, subagent parent resume, and recovery pass `run_input` and
 `initial_session_message_count` from the durable run. At `before_input`, a new run archives BCI and
@@ -716,10 +726,11 @@ prepare/run boundary. The host selects `config.maintenance.idle_seconds` (300 se
 Runners without Memory can still call `runner.bind_maintenance(coordinator)` to contribute
 foreground activity, pausing maintenance from other runners without creating a Memory resource.
 
-Build a complete `MemoryService` with generation and overview providers/models plus a mirror,
-and inject the same service into the runners and `MemoryMaintenanceBinding`. The binding names
-the actual SQLite database path and write namespace. Injected providers, budgets and IO mode
-are preserved. This helper demonstrates shared ownership:
+First resolve the root workspace and initialize one `PromptSource`, then construct a complete
+`MemoryService` with generation and overview providers/models plus a mirror. Pass the same source
+to the service and runners, and the same service to runners and `MemoryMaintenanceBinding`.
+The binding names the actual SQLite path and write namespace. Injected providers, budgets, IO mode,
+and prompt source are preserved. This example assumes Memory automatic generation is enabled:
 
 ```python
 from pathlib import Path
@@ -727,24 +738,33 @@ from pathlib import Path
 from iris.agents import AgentConfig
 from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
 from iris.lifecycle import AgentRunRequest
-from iris.memory import MemoryService
+from iris.memory import build_memory_service_from_config, resolve_memory_path
+from iris.prompts import PromptSource
 from iris.providers import CompletionProvider
 
 
 async def run_sessions(
     config: AgentConfig,
     provider: CompletionProvider,
-    memory: MemoryService,
-    database_path: Path,
+    config_path: Path,
 ) -> None:
+    workspace = (config_path.parent / config.permissions.workspace).resolve()
+    prompt_source = PromptSource.initialize(workspace, config.prompts.root)
+    memory = build_memory_service_from_config(
+        config.memory, workspace, prompt_source=prompt_source,
+        overview_provider=provider, overview_model=config.model.name,
+    )
     coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
     binding = MemoryMaintenanceBinding(
         service=memory,
-        database_path=database_path,
+        database_path=resolve_memory_path(config.memory.path, workspace),
         namespace=config.memory.write_namespace,
     )
     runners = [
-        AgentRunner.from_config(config, provider=provider, memory_service=memory)
+        AgentRunner.from_config(
+            config, config_path=config_path, provider=provider,
+            memory_service=memory, prompt_source=prompt_source,
+        )
         for _ in range(2)
     ]
     try:

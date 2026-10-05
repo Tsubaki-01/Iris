@@ -25,7 +25,14 @@ from iris.memory import (
     register_memory_tools,
 )
 from iris.memory.recall import recall_memories
+from iris.prompts import PromptSnapshot, PromptSource
 from iris.tools import ToolCapability, ToolExecutionContext
+
+
+@pytest.fixture
+def prompt_snapshot(tmp_path: Path) -> PromptSnapshot:
+    """在工具构造边界固定项目提示。"""
+    return PromptSource.initialize(tmp_path).snapshot()
 
 
 class FakeDecision:
@@ -62,12 +69,12 @@ class FakeDecision:
     [(2, ["item3", "item4"], True), (5, ["item3", "item4", "item2"], False)],
 )
 async def test_score_boundary_stable_order_and_limit_only_affect_final_hits(
-    limit: int, expected_ids: list[str], has_more: bool
+    limit: int, expected_ids: list[str], has_more: bool, prompt_snapshot: PromptSnapshot
 ) -> None:
     candidates = [MemoryItem(id=f"item{i}", text=f"正文{i}") for i in range(5)]
     evaluator = FakeDecision((0, 1.99, 2.0, 2.8, 2.8))
     response, metadata = await recall_memories(
-        candidates, MemorySearchQuery(query="查询", limit=limit), evaluator
+        candidates, MemorySearchQuery(query="查询", limit=limit), evaluator, prompt_snapshot
     )
     assert [hit.item_id for hit in response.items] == expected_ids
     assert response.has_more is has_more
@@ -86,7 +93,9 @@ async def test_score_boundary_stable_order_and_limit_only_affect_final_hits(
 
 
 @pytest.mark.asyncio
-async def test_recall_sends_only_query_and_filtered_bodies_and_returns_full_original_text() -> None:
+async def test_recall_sends_only_query_and_filtered_bodies_and_returns_full_original_text(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     body = "Release checklist go go " + "🟢" * 420
     candidate = MemoryItem(
         id="local-id",
@@ -105,7 +114,7 @@ async def test_recall_sends_only_query_and_filtered_bodies_and_returns_full_orig
         kinds=[MemoryItemKind.FACT],
         limit=1,
     )
-    response, _ = await recall_memories([candidate, excluded], query, evaluator)
+    response, _ = await recall_memories([candidate, excluded], query, evaluator, prompt_snapshot)
     request = evaluator.requests[0]
     assert request.state == {"query": "如何撤回发布", "memories": [body]}
     assert list(request.questions) == ["m0"]
@@ -125,10 +134,14 @@ async def test_recall_sends_only_query_and_filtered_bodies_and_returns_full_orig
 @pytest.mark.parametrize("candidates", [[], [MemoryItem(text="unmatched")]])
 async def test_empty_or_phrase_filtered_catalog_skips_decision(
     candidates: list[MemoryItem],
+    prompt_snapshot: PromptSnapshot,
 ) -> None:
     evaluator = FakeDecision(())
     response, metadata = await recall_memories(
-        candidates, MemorySearchQuery(query="question", required_terms=["required"]), evaluator
+        candidates,
+        MemorySearchQuery(query="question", required_terms=["required"]),
+        evaluator,
+        prompt_snapshot,
     )
     assert response.items == () and not response.has_more
     assert metadata == {}
@@ -136,12 +149,15 @@ async def test_empty_or_phrase_filtered_catalog_skips_decision(
 
 
 @pytest.mark.asyncio
-async def test_single_phrase_matching_item_still_needs_semantic_score() -> None:
+async def test_single_phrase_matching_item_still_needs_semantic_score(
+    prompt_snapshot: PromptSnapshot,
+) -> None:
     evaluator = FakeDecision((0.0,))
     response, metadata = await recall_memories(
         [MemoryItem(text="go go unrelated")],
         MemorySearchQuery(query="!!!", required_terms=["go go"]),
         evaluator,
+        prompt_snapshot,
     )
     assert response.items == () and not response.has_more
     assert len(evaluator.requests) == 1
@@ -150,7 +166,7 @@ async def test_single_phrase_matching_item_still_needs_semantic_score() -> None:
 
 @pytest.mark.asyncio
 async def test_search_reads_the_full_current_scope_once_without_lexical_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt_snapshot: PromptSnapshot
 ) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "recall.db"))
     selected = service.remember(
@@ -197,6 +213,7 @@ async def test_search_reads_the_full_current_scope_once_without_lexical_search(
         service=service,
         access_policy_factory=lambda _: MemoryAccessPolicy(read_namespaces=("team", "project")),
         decision_client=evaluator,
+        prompt_snapshot=prompt_snapshot,
     )
     result = await tool.arun(
         MemorySearchQuery(
@@ -239,6 +256,7 @@ async def test_search_reads_the_full_current_scope_once_without_lexical_search(
 
 def test_shared_service_tools_have_identical_public_input_without_capability_pollution(
     tmp_path: Path,
+    prompt_snapshot: PromptSnapshot,
 ) -> None:
     service = MemoryService(SQLiteMemoryStore(tmp_path / "shared.db"))
 
@@ -251,6 +269,7 @@ def test_shared_service_tools_have_identical_public_input_without_capability_pol
         access_policy_factory=policy,
         tool_names=tuple(MEMORY_TOOL_CLASSES),
         memory_decision_client=FakeDecision(()),
+        prompt_snapshot=prompt_snapshot,
     )
     remote = remote_registry.get("memory_search")
     assert local.input_model is remote.input_model is MemorySearchQuery
@@ -281,7 +300,7 @@ def test_shared_service_tools_have_identical_public_input_without_capability_pol
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("reason", "count"), [("network failed", 1), ("capacity exceeded", 130)])
 async def test_failure_preserves_all_candidates_and_never_returns_lexical_fallback(
-    reason: str, count: int
+    reason: str, count: int, prompt_snapshot: PromptSnapshot
 ) -> None:
     error = IrisDecisionError(reason)
     evaluator = FakeDecision((), error)
@@ -290,13 +309,14 @@ async def test_failure_preserves_all_candidates_and_never_returns_lexical_fallba
             [MemoryItem(text=f"body {i}") for i in range(count)],
             MemorySearchQuery(query="anything", limit=1),
             evaluator,
+            prompt_snapshot,
         )
     assert caught.value.__cause__ is error
     assert len(evaluator.requests) == 1 and len(evaluator.requests[0].questions) == count
 
 
 @pytest.mark.asyncio
-async def test_outer_cancellation_propagates_to_decision() -> None:
+async def test_outer_cancellation_propagates_to_decision(prompt_snapshot: PromptSnapshot) -> None:
     started = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -311,7 +331,10 @@ async def test_outer_cancellation_propagates_to_decision() -> None:
 
     task = asyncio.create_task(
         recall_memories(
-            [MemoryItem(text="body")], MemorySearchQuery(query="anything"), BlockingDecision()
+            [MemoryItem(text="body")],
+            MemorySearchQuery(query="anything"),
+            BlockingDecision(),
+            prompt_snapshot,
         )
     )
     await started.wait()
@@ -319,3 +342,37 @@ async def test_outer_cancellation_propagates_to_decision() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_existing_tool_keeps_instruction_but_reads_new_candidates(tmp_path: Path) -> None:
+    source = PromptSource.initialize(tmp_path)
+    template = source.root / "memory_recall_instruction.j2"
+    template.write_text("old {{ candidate_index }}", encoding="utf-8")
+    service = MemoryService(SQLiteMemoryStore(tmp_path / "recall.db"))
+    first = service.remember(MemoryWriteInput(text="first", reason="seed"))
+    evaluator = FakeDecision((2.0,))
+    old_tool = MemorySearchTool(
+        service=service,
+        access_policy_factory=lambda _: MemoryAccessPolicy(),
+        decision_client=evaluator,
+        prompt_snapshot=source.snapshot(),
+    )
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    query = MemorySearchQuery(query="query")
+    await old_tool.arun(query, context)
+    template.write_text("new {{ candidate_index }}", encoding="utf-8")
+    second = service.remember(MemoryWriteInput(text="second", reason="seed"))
+    evaluator.scores = (2.0, 2.0)
+    await old_tool.arun(query, context)
+    new_tool = MemorySearchTool(
+        service=service,
+        access_policy_factory=lambda _: MemoryAccessPolicy(),
+        decision_client=evaluator,
+        prompt_snapshot=source.snapshot(),
+    )
+    await new_tool.arun(query, context)
+    assert evaluator.requests[0].state["memories"] == [first.text]
+    assert set(evaluator.requests[1].state["memories"]) == {first.text, second.text}
+    assert [q.instructions for q in evaluator.requests[1].questions.values()] == ["old 0", "old 1"]
+    assert [q.instructions for q in evaluator.requests[2].questions.values()] == ["new 0", "new 1"]

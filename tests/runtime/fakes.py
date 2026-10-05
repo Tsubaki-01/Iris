@@ -25,6 +25,7 @@ from iris.lifecycle import (
 from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, Msg, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
     AgentRuntime,
@@ -754,10 +755,13 @@ def build_runtime(
         registry,
         permission_policy=resolved_policy,
     )
+    prompt_source = PromptSource.initialize(workspace_root or Path.cwd(), agent_config.prompts.root)
     environment = RuntimeEnvironment(
         agent_config=agent_config,
         context_input=context_input,
         provider=provider,
+        prompt_source=prompt_source,
+        prompt_snapshot=prompt_source.snapshot(),
         context_builder=context_builder or ContextBuilder(),
         assembler=assembler or RuntimeMessageAssembler(),
         tool_bridge=ToolBridge(

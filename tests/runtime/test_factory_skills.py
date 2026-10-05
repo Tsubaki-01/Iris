@@ -20,6 +20,7 @@ from iris.exceptions import IrisConfigError, IrisContextError
 from iris.harness import AgentRunner
 from iris.lifecycle import AgentRunRequest
 from iris.message import LLMResponse, TextBlock, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.runtime import RuntimeFactory
 from iris.runtime._assembly import _prepare_skills
 from iris.skill import CATALOG_SLOT_NAME, LoadSkillTool
@@ -312,6 +313,7 @@ def test_explicit_small_system_budget_fails_without_catalog_omission(
         context_input,
         config=_config(tmp_path, skills=AgentSkillsConfig(enabled=True)),
         workspace_root=tmp_path,
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
     )
 
     assert registry is not None and len(registry) == 5

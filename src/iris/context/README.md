@@ -29,6 +29,9 @@ flowchart LR
 加载与模板路径解析；`builder.py` 负责编排过滤、排序、渲染和字符上限；
 `renderer.py` 提供默认 XML 渲染；文件模板由共享的
 [`iris.utils.TemplateRenderer`](../utils/README.md) 渲染。
+独立 `ContextBuilder` 默认继续读取模板文件更新。Runtime 装配会注入冻结的 renderer，
+在构造时固定三个 section 的模板目录及可加载依赖；动态 slots 仍在每次 `build()` 传入，
+不会随模板正文一起缓存。新 runtime 才采用模板编辑，独立 SDK 的读取语义不变。
 [`source.py`](source.py) 定义 `ContextSource` 与 frozen dataclass 快照；它不读 store，也不拥有
 模型调用、运行控制或总 token 预算。
 

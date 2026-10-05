@@ -16,6 +16,13 @@ Models and tools follow [Agent configuration](../agents/README.en.md). `--env-fi
 file. `--max-steps` bounds model steps within each Run; `--no-tools` disables model tools and cannot
 be used when creating an automatic Goal.
 
+Startup first resolves `prompts.root` (default `.iris/prompts`) from the effective root workspace
+and adds only missing named templates, then passes one `PromptSource` to Memory and the runner.
+Existing project text is preserved. After manual edits, a new runner adopts Goal/Todo and
+system/context guidance; compaction and automatic Memory adopt edits at the start of their next
+complete operation or cycle. Existing `system` / `context` configuration stays in place;
+see [project prompt sources](../prompts/README.md).
+
 - Ordinary input starts a Run when idle or steers the current Run at an existing execution boundary.
 - `/follow-up <message>` queues the next Run after the current one finishes.
 - `/todo` reads the current session's checklist and displays its actual file path.
@@ -26,8 +33,8 @@ be used when creating an automatic Goal.
 
 ## Automatic maintenance
 
-With `memory.generation.enabled`, the CLI explicitly creates the Memory service and one shared
-`MaintenanceCoordinator`, then binds the runner before accepting input. `maintenance.idle_seconds`
+With `memory.generation.enabled`, the CLI binds the constructed Memory service to one shared
+`MaintenanceCoordinator` and binds the runner before accepting input. `maintenance.idle_seconds`
 sets the quiet interval (300 seconds by default); generation budgets remain under `memory.generation`.
 
 Automatic learning consumes only terminal, fully captured Runs. A session waiting for a human response

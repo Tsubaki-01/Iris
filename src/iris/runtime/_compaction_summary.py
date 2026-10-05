@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
 from ..agents.config.compaction import CompactionConfig
 from ..exceptions import IrisContextCompactionError
@@ -19,10 +18,8 @@ from ..message import (
     ToolUseBlock,
     image_reference_text,
 )
-from ..utils import TemplateRenderer
+from ..prompts import PromptSnapshot
 from ._prompts import render_prompt
-
-_INPUT_TEMPLATE = Path(__file__).parents[1] / "prompts" / "compaction_input.j2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +118,7 @@ def next_summary_batch(
     estimate_input_tokens: Callable[[LLMRequest], int],
     *,
     system_prompt: str,
-    prompt_renderer: TemplateRenderer,
+    prompt_snapshot: PromptSnapshot,
 ) -> SummaryBatch:
     """指数探测完整记录前缀，再按需二分细化和切分长正文。
 
@@ -139,7 +136,7 @@ def next_summary_batch(
             "\n\n".join(parts),
             config,
             system_prompt,
-            prompt_renderer,
+            prompt_snapshot,
         )
 
     def prefix(count: int) -> LLMRequest:
@@ -227,7 +224,7 @@ def _summary_request(
     serialized_history: str,
     config: CompactionConfig,
     system_prompt: str,
-    prompt_renderer: TemplateRenderer,
+    prompt_snapshot: PromptSnapshot,
 ) -> LLMRequest:
     return main_request.model_copy(
         update={
@@ -235,8 +232,8 @@ def _summary_request(
                 Msg.system(system_prompt),
                 Msg.user(
                     render_prompt(
-                        prompt_renderer,
-                        _INPUT_TEMPLATE,
+                        prompt_snapshot,
+                        "compaction_input",
                         {
                             "previous_summary_or_none": (
                                 "(none)" if previous_summary is None else previous_summary

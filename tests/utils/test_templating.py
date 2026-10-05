@@ -169,3 +169,71 @@ def test_renderer_preserves_outer_spaces_and_reports_template_execution_error(
         renderer.render_file(main, {})
     assert error.value.context["path"] == str(main)
     assert isinstance(error.value.__cause__, ZeroDivisionError)
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("{% include selected %}", "old"),
+        ("{% extends selected %}", "old"),
+        ("{% import selected as m %}{{ m.content(value) }}", "old input"),
+    ],
+)
+def test_frozen_renderer_keeps_dynamic_dependency_sources(
+    tmp_path: Path, source: str, expected: str
+) -> None:
+    main = tmp_path / "main.j2"
+    main.write_text(source, encoding="utf-8")
+    dependency = tmp_path / "selected.j2"
+    dependency.write_text("old{% macro content(x) %}old {{ x }}{% endmacro %}", encoding="utf-8")
+    renderer = TemplateRenderer.freeze_directories([tmp_path])
+    dependency.unlink()
+    assert renderer.render_file(main, {"selected": "selected.j2", "value": "input"}) == expected
+
+
+def test_frozen_renderer_preserves_missing_and_lazy_branch_semantics(tmp_path: Path) -> None:
+    main = tmp_path / "main.j2"
+    main.write_text(
+        '{% include "optional.j2" ignore missing %}'
+        '{% include ["preferred.j2", "fallback.j2"] %}'
+        '{% if use_bad %}{% include "bad.j2" %}{% endif %} {{ value }}',
+        encoding="utf-8",
+    )
+    (tmp_path / "fallback.j2").write_text("fallback", encoding="utf-8")
+    (tmp_path / "bad.j2").write_text("{% broken syntax %}", encoding="utf-8")
+    (tmp_path / "unrelated.bin").write_bytes(b"\xff")
+    renderer = TemplateRenderer.freeze_directories([tmp_path])
+    (tmp_path / "optional.j2").write_text("optional", encoding="utf-8")
+    (tmp_path / "preferred.j2").write_text("preferred", encoding="utf-8")
+    (tmp_path / "bad.j2").write_text("fixed", encoding="utf-8")
+    assert renderer.render_file(main, {"use_bad": False, "value": 1}) == "fallback 1"
+    assert renderer.render_file(main, {"use_bad": False, "value": 2}) == "fallback 2"
+    with pytest.raises(IrisTemplateError):
+        renderer.render_file(main, {"use_bad": True, "value": 3})
+
+
+def test_frozen_renderer_isolates_directories_and_nested_dependencies(tmp_path: Path) -> None:
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for root in roots:
+        (root / "nested").mkdir(parents=True)
+        (root / "main.j2").write_text('{% include "./nested/body.txt" %}', encoding="utf-8")
+        (root / "nested" / "body.txt").write_text(root.name, encoding="utf-8")
+    renderer = TemplateRenderer.freeze_directories(roots)
+    for root in roots:
+        (root / "nested" / "body.txt").write_text("changed", encoding="utf-8")
+        assert renderer.render_file(root / "main.j2", {}) == root.name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="验证 Windows 原生文件名匹配规则")
+def test_frozen_renderer_preserves_windows_filename_semantics(tmp_path: Path) -> None:
+    """冻结来源与文件来源保持大小写匹配及 Jinja 分隔符规则一致。"""
+    main = tmp_path / "main.j2"
+    main.write_text("{% include selected %}", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "body.j2").write_text("body", encoding="utf-8")
+    renderers = [TemplateRenderer(), TemplateRenderer.freeze_directories([tmp_path])]
+    for renderer in renderers:
+        assert renderer.render_file(main, {"selected": "NESTED/BODY.J2"}) == "body"
+        with pytest.raises(IrisTemplateError):
+            renderer.render_file(main, {"selected": "nested\\body.j2"})

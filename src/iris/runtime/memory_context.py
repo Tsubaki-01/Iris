@@ -3,22 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from pathlib import Path
 from typing import Any
 
 from ..exceptions import IrisContextError
 from ..lifecycle import MemoryOverviewSource, SessionContextWindow
 from ..memory import MemoryService
-from ..utils import TemplateRenderer
+from ..prompts import PromptSnapshot
 from ._prompts import render_prompt
 from ._request_measurement import MeasuredRequest
-
-_MEMORY_CONTEXT_PROMPT = Path(__file__).resolve().parents[1] / "prompts" / "memory_context.j2"
 
 
 async def load_context_windows(
     *,
-    prompt_renderer: TemplateRenderer,
+    prompt_snapshot: PromptSnapshot,
     memory_service: MemoryService | None,
     namespaces: Sequence[str],
     tool_names: Sequence[str],
@@ -45,7 +42,7 @@ async def load_context_windows(
     }
     navigation = SessionContextWindow.model_construct(
         memory_overview=render_prompt(
-            prompt_renderer, _MEMORY_CONTEXT_PROMPT, {**template_context, "mode": "navigation"}
+            prompt_snapshot, "memory_context", {**template_context, "mode": "navigation"}
         ),
         mode="navigation",
         sources=sources,
@@ -54,7 +51,7 @@ async def load_context_windows(
         return navigation, navigation
     full = SessionContextWindow.model_construct(
         memory_overview=render_prompt(
-            prompt_renderer, _MEMORY_CONTEXT_PROMPT, {**template_context, "mode": "full"}
+            prompt_snapshot, "memory_context", {**template_context, "mode": "full"}
         ),
         mode="full",
         sources=sources,

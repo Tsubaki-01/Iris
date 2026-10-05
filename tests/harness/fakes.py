@@ -10,6 +10,7 @@ from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.harness.streaming import LiveFact
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.runtime import (
     AgentRuntime,
     RuntimeActivationInput,
@@ -176,6 +177,7 @@ def build_runtime(
         resolved_registry,
         permission_policy=permission_policy,
     )
+    prompt_source = PromptSource.initialize(workspace_root)
     environment = RuntimeEnvironment(
         agent_config=AgentConfig(
             name=agent_name,
@@ -193,6 +195,8 @@ def build_runtime(
             tool_executor=executor,
         ),
         workspace_root=workspace_root,
+        prompt_source=prompt_source,
+        prompt_snapshot=prompt_source.snapshot(),
     )
     return AgentRuntime(environment)
 

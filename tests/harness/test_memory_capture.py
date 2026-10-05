@@ -44,6 +44,7 @@ from iris.memory.generation_models import (
 )
 from iris.memory.mirror import FileMemoryMirror
 from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
+from iris.prompts import PromptSnapshot, PromptSource
 from iris.runtime.environment import RuntimeExecutionScope
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
@@ -71,6 +72,7 @@ def _runner(
             generation_config=MemoryGenerationConfig(),
             overview_provider=generation_provider,
             overview_model="overview",
+            prompt_source=PromptSource.initialize(tmp_path),
         )
     runtime = build_runtime(tmp_path, provider=provider, registry=registry)
     config = runtime.environment.agent_config
@@ -458,15 +460,15 @@ async def test_external_service_revision_during_overview_schedules_republication
     provider = UpdatingOverviewProvider()
     service.overview_provider = provider
     refreshed = asyncio.Event()
-    refresh = service.refresh_overview
+    refresh = service._refresh_overview
 
-    async def observe_refresh(namespace: str) -> object:
-        result = await refresh(namespace)
+    async def observe_refresh(namespace: str, prompt_snapshot: PromptSnapshot) -> object:
+        result = await refresh(namespace, prompt_snapshot)
         if result.source_revision == 2:
             refreshed.set()
         return result
 
-    monkeypatch.setattr(service, "refresh_overview", observe_refresh)
+    monkeypatch.setattr(service, "_refresh_overview", observe_refresh)
     await runner.aprepare()
     await asyncio.wait_for(refreshed.wait(), 1)
     await asyncio.sleep(0.03)
@@ -645,6 +647,7 @@ async def test_root_run_idle_generation_publishes_memory_without_refreshing_old_
         generation_config=MemoryGenerationConfig(),
         overview_provider=background_provider,
         overview_model="overview",
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     main_provider = StaticProvider(
         text_response("收到"), text_response("继续"), text_response("新会话")
@@ -657,14 +660,14 @@ async def test_root_run_idle_generation_publishes_memory_without_refreshing_old_
         idle_seconds=0.01,
     )
     published = asyncio.Event()
-    refresh = service.refresh_overview
+    refresh = service._refresh_overview
 
-    async def observe_publish(namespace: str) -> object:
-        result = await refresh(namespace)
+    async def observe_publish(namespace: str, prompt_snapshot: PromptSnapshot) -> object:
+        result = await refresh(namespace, prompt_snapshot)
         published.set()
         return result
 
-    monkeypatch.setattr(service, "refresh_overview", observe_publish)
+    monkeypatch.setattr(service, "_refresh_overview", observe_publish)
     result = await runner.start(AgentRunRequest(input="本项目使用 uv 管理依赖", run_id="root"))
     original_window = runner.store.load_session("default").context_window
     assert result.run.usage.total_tokens == 5

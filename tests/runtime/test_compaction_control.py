@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,7 @@ from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.exceptions import IrisAPIConnectionError, IrisAuthenticationError
 from iris.lifecycle import RuntimeExecutionOptions
 from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
+from iris.prompts import PromptSource
 from iris.runtime import (
     AgentRuntime,
     RuntimeActivationInput,
@@ -77,7 +77,6 @@ def _case(
     history_chars: int = 100,
     operation_timeout: float = 300,
     request_timeout: float | None = None,
-    prompt: Path | None = None,
 ) -> tuple[AgentRuntime, RuntimeActivationInput, FakeRuntimeCommitPort, MutableCancellationSignal]:
     activation = start_activation(
         initial_session_message_count=1,
@@ -92,7 +91,6 @@ def _case(
             compaction={
                 "input_budget_tokens": 10000,
                 "timeout_seconds": operation_timeout,
-                "prompt": prompt,
             },
         ),
         context_input=ContextBuildInput(
@@ -120,15 +118,13 @@ async def test_only_failed_batch_is_retried(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_summary_prompt_reloads_between_operations_not_batches(tmp_path: Path) -> None:
-    prompt = tmp_path / "summary.j2"
+    prompt = PromptSource.initialize(tmp_path).root / "compaction.j2"
     original_prompt = "You create a concise summary. Original instructions."
     updated_prompt = "You create a concise summary. Updated instructions."
     prompt.write_text(original_prompt, encoding="utf-8")
-    original_mtime = prompt.stat().st_mtime
 
     def edit_prompt() -> None:
         prompt.write_text(updated_prompt, encoding="utf-8")
-        os.utime(prompt, (original_mtime + 2, original_mtime + 2))
         provider.on_summary = None
 
     provider = _Provider(
@@ -141,9 +137,7 @@ async def test_summary_prompt_reloads_between_operations_not_batches(tmp_path: P
         ],
         on_summary=edit_prompt,
     )
-    runtime, activation, commits, cancellation = _case(
-        tmp_path, provider, history_chars=16000, prompt=prompt
-    )
+    runtime, activation, commits, cancellation = _case(tmp_path, provider, history_chars=16000)
 
     result = await runtime.execute(activation, commits=commits, cancellation=cancellation)
 

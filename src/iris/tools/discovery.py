@@ -19,6 +19,7 @@ from .base import BaseTool, ToolCapability, ToolDefinition, ToolExecutionContext
 
 if TYPE_CHECKING:
     from ..decision import DecisionEvaluator
+    from ..prompts import PromptSnapshot
     from .registry import ToolRegistryView
 
 # endregion
@@ -221,10 +222,12 @@ class ToolSearchTool(BaseTool):
         tool_view: ToolRegistryView,
         *,
         decision_client: DecisionEvaluator | None = None,
+        prompt_snapshot: PromptSnapshot | None = None,
     ) -> None:
         """保存静态范围视图，并借用可选的 Decision evaluator。"""
         self.tool_view = tool_view
         self.decision_client = decision_client
+        self.prompt_snapshot = prompt_snapshot
         capabilities = {ToolCapability.READ}
         if decision_client is not None:
             capabilities.add(ToolCapability.NETWORK)
@@ -284,7 +287,10 @@ class ToolSearchTool(BaseTool):
                 if tool.definition.deferred and (groups is None or tool.definition.group in groups)
             ]
             selected, decision_metadata = await select_with_decision(
-                self.decision_client, search_input.queries, candidates
+                self.decision_client,
+                search_input.queries,
+                candidates,
+                prompt_snapshot=self.prompt_snapshot,
             )
         return selection_result(self.name, search_input.queries, selected, decision_metadata)
 

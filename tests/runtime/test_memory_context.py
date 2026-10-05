@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,9 +13,9 @@ from iris.exceptions import IrisContextError, IrisTemplateError
 from iris.lifecycle import SessionContextWindow
 from iris.memory import MemoryOverviewDocument, MemoryService, SQLiteMemoryStore
 from iris.message import LLMRequest, LLMResponse, Msg
+from iris.prompts import PromptSource
 from iris.runtime._request_measurement import MeasuredRequest, measure_request
 from iris.runtime.memory_context import load_context_windows, select_context_window
-from iris.utils import TemplateRenderer
 
 
 class TextTokenProvider:
@@ -159,7 +160,7 @@ async def test_all_namespaces_instructions_and_warnings_share_the_actual_request
         tmp_path / "memory.db", (_document("research"), _document("project"))
     )
     full, navigation = await load_context_windows(
-        prompt_renderer=TemplateRenderer(),
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
         memory_service=service,
         namespaces=["research", "project"],
         tool_names=["memory_search", "memory_fetch"],
@@ -207,7 +208,7 @@ async def test_instructions_follow_actual_tools_and_limit_queries_to_covered_top
 ) -> None:
     service = DocumentsService(tmp_path / "memory.db", (_document("project"),))
     candidates = await load_context_windows(
-        prompt_renderer=TemplateRenderer(),
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
         memory_service=service,
         namespaces=["project"],
         tool_names=tool_names,
@@ -239,7 +240,7 @@ async def test_missing_overview_keeps_chat_available_without_long_term_queries(
         store, mirror=FileMemoryMirror(tmp_path / "mirror") if with_mirror else None
     )
     full, navigation = await load_context_windows(
-        prompt_renderer=TemplateRenderer(),
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
         memory_service=service,
         namespaces=["project"],
         tool_names=["memory_search", "memory_fetch"],
@@ -263,7 +264,7 @@ async def test_no_service_or_empty_scope_initializes_an_empty_window(tmp_path: P
     service = DocumentsService(tmp_path / "memory.db", (_document("project"),))
     for memory_service, namespaces in ((None, ["project"]), (service, [])):
         full, navigation = await load_context_windows(
-            prompt_renderer=TemplateRenderer(),
+            prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
             memory_service=memory_service,
             namespaces=namespaces,
             tool_names=["memory_search"],
@@ -294,7 +295,7 @@ async def test_window_template_preserves_exact_plain_text_and_document_whitespac
         warning="",
     )
     full, navigation = await load_context_windows(
-        prompt_renderer=TemplateRenderer(),
+        prompt_snapshot=PromptSource.initialize(tmp_path).snapshot(),
         memory_service=DocumentsService(tmp_path / "memory.db", (document, second_document)),
         namespaces=["project", "research"],
         tool_names=[],
@@ -321,14 +322,15 @@ async def test_window_template_preserves_exact_plain_text_and_document_whitespac
 
 @pytest.mark.asyncio
 async def test_window_template_failure_is_a_context_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """读取器错误在窗口模板边界转换为 context 领域异常。"""
-    missing = tmp_path / "missing.j2"
-    monkeypatch.setattr("iris.runtime.memory_context._MEMORY_CONTEXT_PROMPT", missing)
+    source = PromptSource.initialize(tmp_path)
+    missing = source.root / "memory_context.j2"
+    missing.unlink()
     with pytest.raises(IrisContextError) as caught:
         await load_context_windows(
-            prompt_renderer=TemplateRenderer(),
+            prompt_snapshot=source.snapshot(),
             memory_service=DocumentsService(tmp_path / "memory.db", (_document("project"),)),
             namespaces=["project"],
             tool_names=[],
@@ -336,3 +338,34 @@ async def test_window_template_failure_is_a_context_error(
     assert caught.value.runtime_source == "context"
     assert caught.value.context["path"] == str(missing)
     assert isinstance(caught.value.__cause__, IrisTemplateError)
+
+
+@pytest.mark.asyncio
+async def test_memory_context_freezes_body_but_reads_current_overview(tmp_path: Path) -> None:
+    """构造快照保留旧正文，窗口采用继续读取当前概览和工具可用性。"""
+    source = PromptSource.initialize(tmp_path)
+    template = source.root / "memory_context.j2"
+    body = "{{ documents[0].text }}|{{ has_memory_search }}|{{ mode }}"
+    template.write_text("旧正文|" + body, encoding="utf-8")
+    snapshot = source.snapshot()
+    service = DocumentsService(tmp_path / "memory.db", (_document("project"),))
+    initial, _ = await load_context_windows(
+        prompt_snapshot=snapshot, memory_service=service, namespaces=["project"], tool_names=[]
+    )
+    template.write_text("新正文|" + body, encoding="utf-8")
+    service.documents = (replace(service.documents[0], text="新概览"),)
+    changed, _ = await load_context_windows(
+        prompt_snapshot=snapshot,
+        memory_service=service,
+        namespaces=["project"],
+        tool_names=["memory_search"],
+    )
+    refreshed, _ = await load_context_windows(
+        prompt_snapshot=source.snapshot(),
+        memory_service=service,
+        namespaces=["project"],
+        tool_names=["memory_search"],
+    )
+    assert initial.memory_overview.startswith("旧正文|事实 project")
+    assert changed.memory_overview == "旧正文|新概览|True|full"
+    assert refreshed.memory_overview == "新正文|新概览|True|full"

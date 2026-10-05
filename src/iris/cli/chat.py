@@ -53,6 +53,7 @@ from ..message import (
     ModelResponseFailed,
     ModelResponseStarted,
 )
+from ..prompts import PromptSource
 from ..providers import create_provider_client
 from ..runtime import RuntimeStreamEvent
 from ..todo import TodoStatus
@@ -194,6 +195,7 @@ def run_chat(
         )
         config = load_agent_config(options.config_path)
         workspace = (options.config_path.parent / config.permissions.workspace).resolve()
+        prompt_source = PromptSource.initialize(workspace, config.prompts.root)
         provider = create_provider_client(
             config.to_model_route(),
             api_style=config.model.api_style,
@@ -203,6 +205,7 @@ def run_chat(
         memory_service = build_memory_service_from_config(
             config.memory,
             workspace,
+            prompt_source=prompt_source,
             overview_provider=provider,
             overview_model=config.model.name,
         )
@@ -211,6 +214,7 @@ def run_chat(
             config_path=options.config_path,
             provider=provider,
             memory_service=memory_service,
+            prompt_source=prompt_source,
             live_publisher=live_output,
         )
         maintenance = None

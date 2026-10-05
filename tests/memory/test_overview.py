@@ -21,9 +21,9 @@ from iris.memory import (
     MemoryService,
     MemoryWriteInput,
     SQLiteMemoryStore,
-    _prompts,
 )
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.prompts import PromptSource
 
 from .test_search import _flush_observation
 
@@ -60,6 +60,7 @@ def _service(tmp_path: Path, provider: _Provider | None = None) -> MemoryService
         overview_provider=provider,
         overview_model="fake-model" if provider is not None else None,
         overview_config=MemoryOverviewConfig(input_budget_tokens=100),
+        prompt_source=PromptSource.initialize(tmp_path),
     )
 
 
@@ -329,9 +330,7 @@ async def test_generation_behind_items_can_publish_with_stale_warning(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_empty_namespace_publishes_without_calling_provider(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_empty_namespace_publishes_without_calling_provider(tmp_path: Path) -> None:
     provider = _Provider()
     service = _service(tmp_path, provider)
 
@@ -339,7 +338,9 @@ async def test_empty_namespace_publishes_without_calling_provider(
         pytest.fail("空快照不需要构造或估算模型请求")
 
     provider.estimate_input_tokens = unexpected_estimate
-    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path / "missing")
+    (service.prompt_source.root / "memory_overview.j2").write_text(
+        "{% invalid %}", encoding="utf-8"
+    )
     result = await service.refresh_overview("empty")
     assert provider.requests == []
     assert result.published and result.source_revision == 0 and result.item_count == 0
@@ -350,7 +351,7 @@ async def test_empty_namespace_publishes_without_calling_provider(
 
 
 @pytest.mark.asyncio
-async def test_overview_prompt_preserves_plaintext_and_trailing_newline(tmp_path: Path) -> None:
+async def test_overview_prompt_preserves_plaintext_and_fixed_schema(tmp_path: Path) -> None:
     provider = _Provider()
     service = _service(tmp_path, provider)
     original = '<topic> R&D "原文" {{ untouched }}'
@@ -358,23 +359,21 @@ async def test_overview_prompt_preserves_plaintext_and_trailing_newline(tmp_path
     await service.refresh_overview("project")
     request = provider.requests[0]
     assert request.messages[0].text.startswith("根据以下有效长期记忆生成简短概览")
-    assert request.messages[0].text.endswith("也不使用代码围栏。\n")
+    schema = json.loads(request.messages[0].text.rsplit("\n", 1)[1])
+    assert set(schema["properties"]) == {"core_facts", "knowledge_scope"}
     source = json.loads(request.messages[1].text)
     assert source["groups"][0]["items"][0]["text"] == original
 
 
 @pytest.mark.asyncio
-async def test_overview_template_failure_preserves_published_document(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_overview_template_failure_preserves_published_document(tmp_path: Path) -> None:
     provider = _Provider()
     service = _service(tmp_path, provider)
     service.remember(MemoryWriteInput(text="fact", reason="seed"))
     first = await service.refresh_overview("project")
     before = first.path.read_text(encoding="utf-8")
-    template_path = tmp_path / "memory_overview.j2"
+    template_path = service.prompt_source.root / "memory_overview.j2"
     template_path.write_text("{{ missing }}", encoding="utf-8")
-    monkeypatch.setattr(_prompts, "_PROMPT_DIRECTORY", tmp_path)
 
     with pytest.raises(IrisMemoryError) as captured:
         await service.refresh_overview("project")

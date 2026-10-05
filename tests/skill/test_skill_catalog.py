@@ -7,6 +7,7 @@ import pytest
 
 from iris.context import ContextXmlRenderer
 from iris.exceptions import IrisSkillError, IrisTemplateError
+from iris.prompts import PromptSnapshot, PromptSource
 from iris.skill.catalog import (
     CATALOG_SLOT_NAME,
     CATALOG_SLOT_ORDER,
@@ -30,7 +31,12 @@ def _metadata(name: str, description: str, *, root_index: int) -> SkillMetadata:
     )
 
 
-def _catalog() -> SkillCatalog:
+@pytest.fixture
+def prompt_source(tmp_path: Path) -> PromptSource:
+    return PromptSource.initialize(tmp_path)
+
+
+def _catalog(prompt_snapshot: PromptSnapshot) -> SkillCatalog:
     registry = SkillRegistry(
         SkillDiscoveryResult(
             skills=(
@@ -40,11 +46,11 @@ def _catalog() -> SkillCatalog:
             diagnostics=(),
         )
     )
-    return SkillCatalog(registry)
+    return SkillCatalog(registry, prompt_snapshot=prompt_snapshot)
 
 
-def test_catalog_slot_has_exact_structure_and_attributes() -> None:
-    slot = _catalog().build_slot()
+def test_catalog_slot_has_exact_structure_and_attributes(prompt_source: PromptSource) -> None:
+    slot = _catalog(prompt_source.snapshot()).build_slot()
 
     assert slot.name == CATALOG_SLOT_NAME == "available_skills"
     assert slot.order == CATALOG_SLOT_ORDER == 900
@@ -62,8 +68,10 @@ def test_catalog_slot_has_exact_structure_and_attributes() -> None:
     assert "chars" not in slot.attributes
 
 
-def test_catalog_renderer_escapes_special_characters_once_and_sorts_dict_keys() -> None:
-    rendered = ContextXmlRenderer().render_slot(_catalog().build_slot())
+def test_catalog_renderer_escapes_special_characters_once_and_sorts_dict_keys(
+    prompt_source: PromptSource,
+) -> None:
+    rendered = ContextXmlRenderer().render_slot(_catalog(prompt_source.snapshot()).build_slot())
 
     assert "Use &lt;bravo&gt; &amp; helpers" in rendered
     assert "&amp;lt;" not in rendered
@@ -73,13 +81,12 @@ def test_catalog_renderer_escapes_special_characters_once_and_sorts_dict_keys() 
 
 
 def test_catalog_reuses_template_text_and_xml_renderer_escapes_it_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    prompt_source: PromptSource,
 ) -> None:
     """每个 catalog 读取一次 usage，纯文本交给 XML renderer 处理属性转义。"""
-    prompt = tmp_path / "usage.j2"
+    prompt = prompt_source.root / "skill_catalog_usage.j2"
     prompt.write_text('call <load_skill> & "read"', encoding="utf-8")
-    monkeypatch.setattr("iris.skill.catalog._CATALOG_USAGE_PROMPT", prompt)
-    catalog = _catalog()
+    catalog = _catalog(prompt_source.snapshot())
     content_chars = catalog.content_chars()
     prompt.write_text("updated instructions", encoding="utf-8")
 
@@ -87,18 +94,18 @@ def test_catalog_reuses_template_text_and_xml_renderer_escapes_it_once(
     rendered = ContextXmlRenderer().render_slot(catalog.build_slot())
     assert ElementTree.fromstring(rendered).attrib["usage"] == 'call <load_skill> & "read"'
     assert "&amp;lt;" not in rendered
-    replacement = _catalog()
+    replacement = _catalog(prompt_source.snapshot())
     assert replacement.build_slot().attributes["usage"] == "updated instructions"
     assert replacement.content_chars() == content_chars
 
 
 def test_catalog_template_failure_is_a_skill_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    prompt_source: PromptSource,
 ) -> None:
     """catalog 构造失败保留模板路径并抛 Skill 领域异常。"""
-    missing = tmp_path / "missing.j2"
-    monkeypatch.setattr("iris.skill.catalog._CATALOG_USAGE_PROMPT", missing)
+    missing = prompt_source.root / "skill_catalog_usage.j2"
+    missing.unlink()
     with pytest.raises(IrisSkillError) as caught:
-        _catalog()
+        _catalog(prompt_source.snapshot())
     assert caught.value.context["path"] == str(missing)
     assert isinstance(caught.value.__cause__, IrisTemplateError)

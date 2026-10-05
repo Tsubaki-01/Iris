@@ -21,6 +21,7 @@ from iris.harness import AgentRunner, AgentRunRequest
 from iris.lifecycle import RunStopReason
 from iris.memory import FileMemoryMirror, MemoryService, MemoryWriteInput, SQLiteMemoryStore
 from iris.message import ToolUseBlock
+from iris.prompts import PromptSource
 
 from ..harness.fakes import StaticProvider, text_response, tool_batch_response, tool_response
 
@@ -65,6 +66,7 @@ async def test_independent_flags_share_one_evaluator_and_reuse_committed_history
             text_response('{"core_facts":"","knowledge_scope":"Deployment operations"}')
         ),
         overview_model="fake-model",
+        prompt_source=PromptSource.initialize(tmp_path),
     )
     item = service.remember(
         MemoryWriteInput(text="deployment guide: restore the previous release", reason="组合测试")
