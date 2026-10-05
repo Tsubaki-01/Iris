@@ -114,7 +114,7 @@ from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools._paths import safe_path_segment
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ..utils.images import save_image
-from ._capture import MemoryCapture
+from ._capture import RunCapture
 from ._command_lifecycle import (
     ChildCommandTarget,
     CommandLifecycle,
@@ -128,7 +128,12 @@ from ._events import _RunEventCollector
 from ._goal import validate_goal_options
 from ._hooks import HookLifecycle, HookStartControl, run_started
 from ._subagent import ChildProviderFactory, HarnessSubagentController
-from .maintenance import MaintenanceAttachment, MaintenanceCoordinator, MemoryMaintenanceBinding
+from .maintenance import (
+    MaintenanceAttachment,
+    MaintenanceCoordinator,
+    MemoryMaintenanceBinding,
+    ProjectEvolutionBinding,
+)
 from .observer import RunEventObserver
 
 if TYPE_CHECKING:
@@ -158,13 +163,13 @@ def _with_maintenance_foreground[Result, **Parameters](
         maintenance.foreground_enter()
         try:
             await maintenance.coordinator.prepare()
-            if self._memory_capture is not None:
-                await self._memory_capture.prepare()
+            if self._capture is not None:
+                await self._capture.prepare()
             return await operation(self, *args, **kwargs)
         finally:
             try:
-                if self._memory_capture is not None:
-                    await self._memory_capture.capture_pending()
+                if self._capture is not None:
+                    await self._capture.capture_pending()
             finally:
                 maintenance.foreground_exit()
 
@@ -326,7 +331,7 @@ class AgentRunner:
         self._active: dict[str, ActiveActivation] = {}
         self._subagent_controller: HarnessSubagentController | None = None
         self._maintenance: MaintenanceAttachment | None = None
-        self._memory_capture: MemoryCapture | None = None
+        self._capture: RunCapture | None = None
         self._started = False
         environment = runtime.environment
         self._goal_state_readers: dict[str, Callable[[], GoalProcessState]] = {}
@@ -360,6 +365,7 @@ class AgentRunner:
         coordinator: MaintenanceCoordinator,
         *,
         memory: MemoryMaintenanceBinding | None = None,
+        evolution: ProjectEvolutionBinding | None = None,
     ) -> None:
         """首次准备或运行前借用宿主维护资源，不创建私人后台循环。"""
         if self._started or self._closed:
@@ -374,29 +380,42 @@ class AgentRunner:
             or memory.namespace != environment.agent_config.memory.write_namespace
         ):
             raise IrisConfigError("维护绑定必须使用 runner 的 MemoryService 和 write namespace")
-        resource = coordinator._attach(memory, self.store)
-        self._maintenance = MaintenanceAttachment(coordinator, resource)
-        if memory is not None:
-            self._memory_capture = MemoryCapture(
-                service=memory.service,
-                namespace=memory.namespace,
+        if evolution is not None and (
+            evolution.workspace_root.resolve() != environment.workspace_root
+            or evolution.service.workspace_root != environment.workspace_root
+        ):
+            raise IrisConfigError("项目经验绑定必须使用 runner 的实际 workspace")
+        resource, project = coordinator._attach(memory, self.store, evolution=evolution)
+        self._maintenance = MaintenanceAttachment(coordinator, resource, project)
+        if memory is not None or evolution is not None:
+            self._capture = RunCapture(
+                memory_service=memory.service if memory is not None else None,
+                namespace=memory.namespace if memory is not None else "project",
+                evolution_service=evolution.service if evolution is not None else None,
                 lifecycle_store=self.store,
-                on_capture=lambda: coordinator._wake(resource),
+                on_memory_capture=lambda: coordinator._wake(resource),
+                on_evolution_capture=lambda: coordinator._wake(project),
             )
-            environment.memory_capture_port = self._memory_capture
+            environment.capture_port = self._capture
 
     def _check_maintenance_binding(self) -> None:
         """首次公开使用时检查自动功能装配，独立于 MCP/command 已准备状态。"""
         if self._started:
             return
-        config = self.runtime.environment.agent_config.memory
+        config = self.runtime.environment.agent_config
         if (
             self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT
-            and config.enabled
-            and config.generation.enabled
-            and self._memory_capture is None
+            and config.memory.enabled
+            and config.memory.generation.enabled
+            and (self._maintenance is None or self._maintenance.resource is None)
         ):
             raise IrisConfigError("自动记忆维护需要宿主先调用 runner.bind_maintenance()")
+        if (
+            self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT
+            and config.evolution.enabled
+            and (self._maintenance is None or self._maintenance.project is None)
+        ):
+            raise IrisConfigError("自动项目经验维护需要宿主先调用 runner.bind_maintenance()")
         self._started = True
 
     async def aprepare(self) -> None:
@@ -412,8 +431,8 @@ class AgentRunner:
             raise IrisRunStateError("runner 已关闭")
         if self._maintenance is not None:
             await self._maintenance.coordinator.prepare()
-        if self._memory_capture is not None:
-            await self._memory_capture.prepare()
+        if self._capture is not None:
+            await self._capture.prepare()
 
     async def _prepare_owned_environment(self) -> None:
         """Root 拥有共享准备任务；取消等待者不取消准备本身。"""
@@ -489,9 +508,9 @@ class AgentRunner:
     async def _close_owned_resources(self) -> None:
         """前一资源失败也尝试后续关闭，仅全部成功后标记完成。"""
         try:
-            if self._memory_capture is not None:
-                await self._memory_capture.aclose()
-                self.runtime.environment.memory_capture_port = None
+            if self._capture is not None:
+                await self._capture.aclose()
+                self.runtime.environment.capture_port = None
             if self._maintenance is not None:
                 self._maintenance.detach()
         finally:
@@ -722,8 +741,8 @@ class AgentRunner:
         activation_started: asyncio.Event | None = None,
     ) -> RunResult:
         """普通与 Goal start 共用 memory 登记、事件和 live activation 注册。"""
-        if self._memory_capture is not None:
-            await self._memory_capture.register_run(created.run)
+        if self._capture is not None:
+            await self._capture.register_run(created.run)
         events = self._event_collector(durable_event_callback)
         events.record(created.events)
         return await self._run_start_activation(
@@ -940,8 +959,8 @@ class AgentRunner:
         run = self.store.load_run(normalized_run_id)
         if run is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized_run_id)
-        if self._memory_capture is not None:
-            await self._memory_capture.register_run(run)
+        if self._capture is not None:
+            await self._capture.register_run(run)
         interaction = self.store.load_interaction(normalized_interaction_id)
         if interaction is None:
             raise IrisRunNotFoundError(
@@ -1312,8 +1331,8 @@ class AgentRunner:
             and run.current_activation_id == active.activation_id
         ):
             self._interrupt_active(active)
-        if self._memory_capture is not None and run.terminal_session_message_count is not None:
-            self._memory_capture.request_capture(run.run_id, run.terminal_session_message_count)
+        if self._capture is not None and run.terminal_session_message_count is not None:
+            self._capture.request_capture(run.run_id, run.terminal_session_message_count)
         return snapshot_run(run)
 
     @_with_maintenance_foreground
@@ -1353,8 +1372,8 @@ class AgentRunner:
         before = self.store.load_run(normalized)
         if before is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
-        if self._memory_capture is not None:
-            await self._memory_capture.register_run(before)
+        if self._capture is not None:
+            await self._capture.register_run(before)
         snapshot = self.request_cancel(normalized, reason=reason)
         if snapshot.phase is RunPhase.TERMINAL:
             await self._deliver_events(
@@ -1496,8 +1515,8 @@ class AgentRunner:
         run = self.store.load_run(normalized)
         if run is None:
             raise IrisRunNotFoundError("run 不存在", run_id=normalized)
-        if self._memory_capture is not None:
-            await self._memory_capture.register_run(run)
+        if self._capture is not None:
+            await self._capture.register_run(run)
         if run.phase is RunPhase.TERMINAL:
             return self._require_result(normalized)
         if run.phase is RunPhase.WAITING:

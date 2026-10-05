@@ -6,6 +6,29 @@
 builds a `ToolRegistry`; it does not call a model, assemble context, run a tool loop, or persist a
 session. `iris.runtime` consumes the resulting configuration.
 
+## Project experience maintenance
+
+Project experience maintenance is disabled by default and works independently of Memory:
+
+```yaml
+skills:
+  enabled: true
+evolution:
+  enabled: true
+  skill_max_chars: 8000
+  input_budget_tokens: 32000
+  output_budget_tokens: 8000
+maintenance:
+  idle_seconds: 300
+```
+
+`evolution.enabled` requires `skills.enabled=true` and only maintains
+`<skills.root>/project-experience/SKILL.md`. Optional `evolution.policy_skill` selects a policy file
+relative to the workspace; otherwise the bundled policy is used. Configuration loading starts no
+maintenance. SDK hosts explicitly bind a shared coordinator; `iris chat` performs this wiring.
+A new runner discovers a newly created Skill; an already registered Skill reads its current body
+on the next load. There is no registry refresh. See [evolution](../evolution/README.md).
+
 ## Architecture
 
 `AgentConfig.decision` accepts optional `AgentDecisionConfig(path)` (exported from `iris.agents`).

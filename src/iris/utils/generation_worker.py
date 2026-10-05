@@ -1,4 +1,4 @@
-"""仅供后台维护使用的串行同步执行器，不改变前台 Memory IO 的执行位置。"""
+"""后台维护任务各自拥有的串行同步执行器与协作式取消。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class GenerationWorker:
 
     def __init__(self, *, on_idle: Callable[[], None]) -> None:
         """延迟启动线程，空闲回调在事件循环执行。"""
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iris-memory")
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="iris-maintenance")
         self._pending: set[asyncio.Future[object]] = set()
         self._cancelled = Event()
         self._on_idle = on_idle
@@ -79,7 +79,7 @@ class GenerationWorker:
 
 
 generation_worker: ContextVar[GenerationWorker | None] = ContextVar(
-    "iris_memory_generation_worker", default=None
+    "iris_generation_worker", default=None
 )
 
 

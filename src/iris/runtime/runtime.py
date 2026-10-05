@@ -1629,7 +1629,7 @@ class AgentRuntime:
                 "输入超过预算且没有新增可压缩历史", code="CONTEXT_COMPACTION_UNAVAILABLE"
             )
 
-        capture_port = self.environment.memory_capture_port
+        capture_port = self.environment.capture_port
         if capture_port is not None:
             capture_port.request_capture(activation.run_id, snapshot.header.message_count)
         loop = asyncio.get_running_loop()

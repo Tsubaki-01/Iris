@@ -225,6 +225,10 @@ SDK calls do not implicitly create a maintenance worker. `provider.complete()` r
 caller's event loop. Selection checks cancellation between records; no new cycle starts until old
 synchronous jobs have actually exited. Late results do not start another model request or commit.
 Shutdown waits for real IO and computation, then releases the worker.
+
+The execution and cancellation primitive lives in `iris.utils.generation_worker`. Memory and
+project evolution own separate worker instances and resource locks. Evolution neither reads private
+Memory storage nor waits for a particular Memory model call to provide its input.
 Capture reads at most 128 messages per page and yields between pages, sealing only at the full run
 cutoff. SQLite releases its read transaction and lifecycle lock after fetching raw rows, before decoding
 messages. Registration and Capture before a run returns still await durable storage. A dedicated worker

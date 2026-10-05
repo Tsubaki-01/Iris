@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from ...command.config import CommandConfig
+from ...evolution.config import EvolutionConfig
 from ...exceptions import IrisConfigError, IrisValidationError
 from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
@@ -258,6 +259,7 @@ class AgentConfig(BaseModel):
         memory (MemoryConfig): 长期记忆开关、概览预算与读写 namespace。
         prompts (PromptConfig): 相对 root workspace 的项目命名模板目录。
         maintenance (MaintenanceConfig): 宿主共享维护的空闲等待。
+        evolution (EvolutionConfig): 默认关闭的项目经验自动维护。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
         speech (SpeechConfig): 默认关闭的语音输入声明，由宿主装配客户端。
@@ -281,6 +283,7 @@ class AgentConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     prompts: PromptConfig = Field(default_factory=PromptConfig)
     maintenance: MaintenanceConfig = Field(default_factory=MaintenanceConfig)
+    evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
@@ -338,6 +341,13 @@ class AgentConfig(BaseModel):
         """Todo 的当前文件投影要求启用 context policy。"""
         if self.todo.enabled and not self.context_policy.enabled:
             raise ValueError("todo.enabled 要求 context_policy.enabled=true")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_evolution_skills(self) -> AgentConfig:
+        """项目经验自动维护要求已有的 Skill 发现入口。"""
+        if self.evolution.enabled and (self.skills is None or not self.skills.enabled):
+            raise ValueError("evolution.enabled 要求 skills.enabled=true")
         return self
 
     def to_model_route(self) -> ModelRoute:

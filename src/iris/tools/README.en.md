@@ -6,6 +6,10 @@
 model-visible tool definitions and centralizes input validation, permission checks, execution, result
 normalization, large-output artifacts, middleware, and circuit breaking.
 
+`WorkspaceFileService.atomic_write()` and project experience publishing share
+`iris.utils.files.atomic_write_text`. File tools retain their existing path, read-state and concurrent
+mutation checks; the shared utility only performs an atomic replacement of one complete text file.
+
 ## Architecture
 
 Internal `subagent.py` defines the fixed `subagent(prompt, agent?)` schema and immutable routes.

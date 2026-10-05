@@ -53,6 +53,26 @@ registry = build_tool_registry(config.tools)
 
 ## 配置示例
 
+项目经验自动维护默认关闭，可独立于 Memory 启用：
+
+```yaml
+skills:
+  enabled: true
+evolution:
+  enabled: true
+  skill_max_chars: 8000
+  input_budget_tokens: 32000
+  output_budget_tokens: 8000
+maintenance:
+  idle_seconds: 300
+```
+
+`evolution.enabled` 要求 `skills.enabled=true`，只维护
+`<skills.root>/project-experience/SKILL.md`。可用 `evolution.policy_skill` 指定相对 workspace
+的策略文件；省略时读取内置策略。加载配置不启动维护；SDK 宿主必须显式绑定共享协调器，
+`iris chat` 自动完成宿主装配。生成的经验首次进入 catalog 需要新 runner，已登记 Skill
+下次加载会读取当前文件；不自动刷新 registry。见 [evolution](../evolution/README.md)。
+
 ```yaml
 name: notes-agent
 model:

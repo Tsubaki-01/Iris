@@ -8,15 +8,19 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from typing import cast
 
 from filelock import FileLock, Timeout
 
+from ..evolution.models import EvolutionMaintenanceScope, EvolutionResult, EvolutionSource
+from ..evolution.service import EvolutionService
 from ..exceptions import IrisConfigError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
 from ..memory import MemoryService
-from ..memory._generation_worker import GenerationWorker, generation_worker
 from ..memory.generation_models import MemoryMaintenanceScope, MemorySource
+from ..utils.generation_worker import GenerationWorker, generation_worker
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,14 @@ class MemoryMaintenanceBinding:
     service: MemoryService
     database_path: Path
     namespace: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProjectEvolutionBinding:
+    """宿主选定的项目与经验服务，服务固定生成策略及唯一发布目标。"""
+
+    workspace_root: Path
+    service: EvolutionService
 
 
 @dataclass(slots=True)
@@ -43,8 +55,21 @@ class _MemoryResource:
     attachments: int = 0
 
 
+@dataclass(slots=True)
+class _EvolutionResource:
+    """一个项目的经验维护状态，与 Memory 独立占用任务和锁。"""
+
+    binding: ProjectEvolutionBinding
+    lock_path: Path
+    dirty: bool = True
+    revision: int = 0
+    ready_at: float = 0
+    attachments: int = 0
+    request: asyncio.Future[EvolutionResult] | None = None
+
+
 class MaintenanceCoordinator:
-    """一个宿主共享的空闲计时、Memory 任务和生命周期资格 owner。"""
+    """一个宿主共享空闲计时与资格，两类维护分别持有任务、worker 和锁。"""
 
     def __init__(self, *, idle_seconds: float = 300) -> None:
         """创建协调器；实际任务和监听在 runner 准备时启动。"""
@@ -52,12 +77,18 @@ class MaintenanceCoordinator:
             raise IrisConfigError("maintenance.idle_seconds 必须为有限非负数")
         self.idle_seconds = idle_seconds
         self._resources: dict[tuple[str, str], _MemoryResource] = {}
+        self._projects: dict[str, _EvolutionResource] = {}
         self._readers: dict[str, LifecycleStore] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._timer: asyncio.TimerHandle | None = None
         self._task: asyncio.Task[None] | None = None
         self._active_resource: _MemoryResource | None = None
         self._worker = GenerationWorker(on_idle=self._schedule)
+        self._evolution_task: asyncio.Task[EvolutionResult | None] | None = None
+        self._active_project: _EvolutionResource | None = None
+        self._evolution_worker = GenerationWorker(on_idle=self._schedule)
+        self._evolution_cancelling = False
+        self._next_project = 0
         self._foreground = 0
         self._quiet_until = 0.0
         self._next_resource = 0
@@ -65,35 +96,53 @@ class MaintenanceCoordinator:
         self._cancelling = False
 
     def _attach(
-        self, binding: MemoryMaintenanceBinding | None, reader: LifecycleStore
-    ) -> _MemoryResource | None:
+        self,
+        binding: MemoryMaintenanceBinding | None,
+        reader: LifecycleStore,
+        *,
+        evolution: ProjectEvolutionBinding | None = None,
+    ) -> tuple[_MemoryResource | None, _EvolutionResource | None]:
         """注册实际资源和 reader；runner detach 不撤销宿主持有的资格读取能力。"""
         if self._closed:
             raise IrisRunStateError("维护协调器已关闭")
-        if binding is None:
-            self._readers[reader.source_id] = reader
-            for resource in self._resources.values():
-                self._wake(resource)
-            return None
-        path = Path(os.path.normcase(str(binding.database_path.resolve())))
-        key = (str(path), binding.namespace)
-        resource = self._resources.get(key)
-        if resource is not None:
-            if resource.binding.service is not binding.service:
+        resource = None
+        project = None
+        if binding is not None:
+            path = Path(os.path.normcase(str(binding.database_path.resolve())))
+            key = (str(path), binding.namespace)
+            resource = self._resources.get(key)
+            if resource is not None and resource.binding.service is not binding.service:
                 raise IrisConfigError("同一 Memory 资源必须绑定同一宿主持有的 service")
-        else:
-            namespace = binding.namespace.encode("utf-8").hex()
-            resource = _MemoryResource(
-                binding=binding,
-                lock_path=path.with_name(f".{path.name}.iris-memory-{namespace}.lock"),
-            )
-            self._resources[key] = resource
-            if self._loop is not None:
-                self._subscribe(resource)
+        if evolution is not None:
+            project_key = os.path.normcase(str(evolution.workspace_root.resolve()))
+            project = self._projects.get(project_key)
+            if project is not None and project.binding.service is not evolution.service:
+                raise IrisConfigError("同一项目经验资源必须绑定同一宿主持有的 service")
+        if binding is not None:
+            if resource is None:
+                namespace = binding.namespace.encode("utf-8").hex()
+                resource = _MemoryResource(
+                    binding=binding,
+                    lock_path=path.with_name(f".{path.name}.iris-memory-{namespace}.lock"),
+                )
+                self._resources[key] = resource
+                if self._loop is not None:
+                    self._subscribe(resource)
+            resource.attachments += 1
+        if evolution is not None:
+            if project is None:
+                project = _EvolutionResource(
+                    binding=evolution,
+                    lock_path=Path(project_key) / ".iris" / "evolution.lock",
+                )
+                self._projects[project_key] = project
+            project.attachments += 1
         self._readers[reader.source_id] = reader
-        resource.attachments += 1
-        self._wake(resource)
-        return resource
+        for existing in self._resources.values():
+            self._wake(existing)
+        for existing_project in self._projects.values():
+            self._wake(existing_project)
+        return resource, project
 
     async def unbind_memory(self, binding: MemoryMaintenanceBinding) -> None:
         """关闭借用该资源的 runner 后撤销绑定，排空该资源作业但不关闭 service。"""
@@ -107,6 +156,33 @@ class MaintenanceCoordinator:
         if self._active_resource is resource:
             self._cancel_task()
             await asyncio.gather(self._task, return_exceptions=True)
+
+    async def unbind_evolution(self, binding: ProjectEvolutionBinding) -> None:
+        """撤销已无 runner 借用的项目，排空该类作业但不关闭宿主服务。"""
+        key = os.path.normcase(str(binding.workspace_root.resolve()))
+        project = self._projects[key]
+        if project.attachments:
+            raise IrisRunStateError("项目经验资源仍有绑定 runner，请先关闭这些 runner")
+        del self._projects[key]
+        if self._active_project is project:
+            self._cancel_evolution_task()
+            await asyncio.gather(self._evolution_task, return_exceptions=True)
+        self._fail_request(project, IrisRunStateError("项目经验维护绑定已撤销"))
+
+    async def request_project_experience(self, binding: ProjectEvolutionBinding) -> EvolutionResult:
+        """合并同项目主动请求，跳过普通 idle；前台、资格和项目锁仍然有效。"""
+        await self.prepare()
+        project = self._projects[os.path.normcase(str(binding.workspace_root.resolve()))]
+        if project.binding.service is not binding.service:
+            raise IrisConfigError("主动整理必须使用已绑定的项目经验服务")
+        if project.request is None:
+            project.request = asyncio.get_running_loop().create_future()
+            project.request.add_done_callback(_consume_request_error)
+            project.ready_at = 0
+        request = project.request
+        if self._active_project is not project:
+            self._wake(project)
+        return await asyncio.shield(request)
 
     async def prepare(self) -> None:
         """首次使用时订阅所有绑定；资源按统一 idle 进入有界维护。"""
@@ -133,7 +209,7 @@ class MaintenanceCoordinator:
         resource.listener = changed
         resource.binding.service.add_change_listener(changed)
 
-    def _wake(self, resource: _MemoryResource) -> None:
+    def _wake(self, resource: _MemoryResource | _EvolutionResource) -> None:
         """合并原文、服务变化和新 reader 到一个待检查位置。"""
         resource.dirty = True
         resource.revision += 1
@@ -145,10 +221,14 @@ class MaintenanceCoordinator:
         for resource in self._resources.values():
             resource.dirty = True
             resource.revision += 1
+        for project in self._projects.values():
+            project.dirty = True
+            project.revision += 1
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
         self._cancel_task()
+        self._cancel_evolution_task()
 
     def _foreground_exit(self) -> None:
         """完整前台退出后重新计算宿主的安静时间。"""
@@ -164,55 +244,95 @@ class MaintenanceCoordinator:
             self._cancelling = True
             self._task.cancel()
 
+    def _cancel_evolution_task(self) -> None:
+        """仅撤销项目经验 slot，不打断 Memory 或已经开始的本类 IO 收尾。"""
+        self._evolution_worker.cancel()
+        if self._evolution_task is not None and not self._evolution_cancelling:
+            self._evolution_cancelling = True
+            self._evolution_task.cancel()
+
     def _schedule(self) -> None:
         """所有资源共享一个 timer；锁忙的资源延迟后轮流再试。"""
-        if (
-            self._closed
-            or self._loop is None
-            or self._foreground
-            or self._task is not None
-            or self._timer is not None
-        ):
+        if self._closed or self._loop is None or self._foreground:
             return
-        ready = [resource.ready_at for resource in self._resources.values() if resource.dirty]
+        ready = (
+            [
+                max(self._quiet_until, resource.ready_at)
+                for resource in self._resources.values()
+                if resource.dirty
+            ]
+            if self._task is None
+            else []
+        )
+        if self._evolution_task is None:
+            ready.extend(
+                max(project.ready_at, 0 if project.request is not None else self._quiet_until)
+                for project in self._projects.values()
+                if project.dirty
+            )
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
         if ready:
-            self._timer = self._loop.call_at(max(self._quiet_until, min(ready)), self._start)
+            self._timer = self._loop.call_at(min(ready), self._start)
 
     def _start(self) -> None:
-        """轮转选择一个到期资源，保持同宿主最多一项 Memory 作业。"""
+        """两类分别轮转一个到期资源，同宿主最多各一项作业。"""
         self._timer = None
-        resources = tuple(self._resources.values())
+        resources = tuple(self._resources.values()) if self._task is None else ()
         for offset in range(len(resources)):
             index = (self._next_resource + offset) % len(resources)
             resource = resources[index]
-            if resource.dirty and resource.ready_at <= self._loop.time():
+            if resource.dirty and max(resource.ready_at, self._quiet_until) <= self._loop.time():
                 self._next_resource = (index + 1) % len(resources)
                 self._active_resource = resource
                 resource.dirty = False
                 self._cancelling = False
                 self._task = asyncio.create_task(self._run_cycle(resource))
                 self._task.add_done_callback(self._finished)
-                return
+                break
+        projects = tuple(self._projects.values()) if self._evolution_task is None else ()
+        for offset in range(len(projects)):
+            index = (self._next_project + offset) % len(projects)
+            project = projects[index]
+            ready_at = max(
+                project.ready_at, 0 if project.request is not None else self._quiet_until
+            )
+            if project.dirty and ready_at <= self._loop.time():
+                self._next_project = (index + 1) % len(projects)
+                self._active_project = project
+                project.dirty = False
+                self._evolution_cancelling = False
+                self._evolution_task = asyncio.create_task(self._run_project_cycle(project))
+                self._evolution_task.add_done_callback(self._evolution_finished)
+                break
         self._schedule()
 
-    async def _eligible(self, sources: tuple[MemorySource, ...]) -> bool:
+    async def _eligible(
+        self,
+        resource: _MemoryResource | _EvolutionResource,
+        sources: tuple[MemorySource | EvolutionSource, ...],
+    ) -> bool:
         """每次发布前重读权威 Run/lane；WAITING 只排除该来源会话。"""
         if self._closed or self._foreground:
             return False
-        eligible = all(self._source_eligible(source) for source in sources)
+        eligible = all(
+            self._source_eligible(source.lifecycle_source_id, source.run_id, source.session_id)
+            for source in sources
+        )
         if not eligible:
             # 外部进程改变资格不会发本地通知；重选一次以便其他会话继续。
-            self._active_resource.revision += 1
+            resource.revision += 1
         return eligible
 
-    def _source_eligible(self, source: MemorySource) -> bool:
-        reader = self._readers.get(source.lifecycle_source_id)
+    def _source_eligible(self, lifecycle_source_id: str, run_id: str, session_id: str) -> bool:
+        reader = self._readers.get(lifecycle_source_id)
         if reader is None:
             return False
-        run = reader.load_run(source.run_id)
+        run = reader.load_run(run_id)
         if run is None or run.phase is not RunPhase.TERMINAL:
             return False
-        lane = reader.load_session_lane(source.session_id)
+        lane = reader.load_session_lane(session_id)
         current = reader.load_run(lane) if lane is not None else None
         return current is None or current.phase is not RunPhase.WAITING
 
@@ -234,9 +354,11 @@ class MaintenanceCoordinator:
                     allowed_sources=frozenset(
                         (source.lifecycle_source_id, source.run_id)
                         for source in sources
-                        if self._source_eligible(source)
+                        if self._source_eligible(
+                            source.lifecycle_source_id, source.run_id, source.session_id
+                        )
                     ),
-                    check=self._eligible,
+                    check=partial(self._eligible, resource),
                 )
                 more = await service.maintain_cycle(resource.binding.namespace, scope=scope)
                 resource.dirty = more or resource.revision != revision
@@ -259,6 +381,63 @@ class MaintenanceCoordinator:
             logger.error("共享 Memory 维护失败", exc_info=task.exception())
         self._schedule()
 
+    async def _run_project_cycle(self, project: _EvolutionResource) -> EvolutionResult | None:
+        """一个有界 A 持项目锁；真实短 IO 排空前不释放该类位置。"""
+        lock = FileLock(project.lock_path, timeout=0)
+        try:
+            lock.acquire()
+        except Timeout:
+            project.dirty = True
+            project.ready_at = self._loop.time() + max(self.idle_seconds, 1)
+            return None
+        revision = project.revision
+        try:
+            with self._evolution_worker.bind():
+                service = project.binding.service
+                sources = await service.alist_pending_sources()
+                scope = EvolutionMaintenanceScope(
+                    allowed_sources=frozenset(
+                        (source.lifecycle_source_id, source.run_id)
+                        for source in sources
+                        if self._source_eligible(
+                            source.lifecycle_source_id, source.run_id, source.session_id
+                        )
+                    ),
+                    check=partial(self._eligible, project),
+                )
+                result = await service.maintain_cycle(scope=scope)
+                project.dirty = result.has_more or project.revision != revision
+                project.ready_at = self._loop.time() + self.idle_seconds
+                return result
+        except BaseException:
+            project.dirty = project.revision != revision
+            raise
+        finally:
+            await self._evolution_worker.wait_idle()
+            lock.release()
+
+    def _evolution_finished(self, task: asyncio.Task[EvolutionResult | None]) -> None:
+        """项目真实收尾完成后才释放该类任务位置，Memory 独立继续。"""
+        project = cast(_EvolutionResource, self._active_project)
+        self._evolution_task = None
+        self._active_project = None
+        if task.cancelled():
+            self._fail_request(project, asyncio.CancelledError())
+        elif (error := task.exception()) is not None:
+            self._fail_request(project, error)
+            logger.error("项目经验维护失败", exc_info=error)
+        elif (result := task.result()) is not None and project.request is not None:
+            project.request.set_result(result)
+            project.request = None
+        self._schedule()
+
+    @staticmethod
+    def _fail_request(project: _EvolutionResource, error: BaseException) -> None:
+        """结束主动等待者；调用方取消等待不会取消这份共享 future。"""
+        if project.request is not None:
+            project.request.set_exception(error)
+            project.request = None
+
     async def aclose(self) -> None:
         """宿主停止派发、排空实际 IO；服务和 lifecycle reader 仍由宿主关闭。"""
         if self._closed:
@@ -271,20 +450,30 @@ class MaintenanceCoordinator:
             if resource.listener is not None:
                 resource.binding.service.remove_change_listener(resource.listener)
         self._cancel_task()
+        self._cancel_evolution_task()
         if self._task is not None:
             await asyncio.gather(self._task, return_exceptions=True)
+        if self._evolution_task is not None:
+            await asyncio.gather(self._evolution_task, return_exceptions=True)
+        for project in self._projects.values():
+            self._fail_request(project, IrisRunStateError("维护协调器已关闭"))
         await self._worker.aclose()
+        await self._evolution_worker.aclose()
 
 
 class MaintenanceAttachment:
     """runner 的借用关系与本地前台计数，不拥有资源或后台任务。"""
 
     def __init__(
-        self, coordinator: MaintenanceCoordinator, resource: _MemoryResource | None
+        self,
+        coordinator: MaintenanceCoordinator,
+        resource: _MemoryResource | None,
+        project: _EvolutionResource | None,
     ) -> None:
         """建立前台借用关系；Memory 资源可选。"""
         self.coordinator = coordinator
         self.resource = resource
+        self.project = project
         self._foreground = 0
         self._detached = False
 
@@ -305,6 +494,15 @@ class MaintenanceAttachment:
 
     def detach(self) -> None:
         """runner 关闭解除借用；宿主的 reader 与资源注册保持有效。"""
-        if not self._detached and self.resource is not None:
-            self.resource.attachments -= 1
+        if not self._detached:
+            if self.resource is not None:
+                self.resource.attachments -= 1
+            if self.project is not None:
+                self.project.attachments -= 1
             self._detached = True
+
+
+def _consume_request_error(request: asyncio.Future[EvolutionResult]) -> None:
+    """外部等待者全部取消时，也回收最终共享请求的异常。"""
+    if not request.cancelled():
+        request.exception()

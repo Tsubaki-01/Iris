@@ -793,12 +793,24 @@ before each consumption commit. Missing lifecycle readers leave material pending
 lifecycle supports restart continuation, whereas lost in-memory state is never reconstructed
 as a second eligibility database.
 
-A host runs at most one Memory job. Canonical database path plus namespace determines the
+A host runs at most one Memory job and one project evolution job concurrently, each with its own
+worker, cancellation state and resource lock. Canonical database path plus namespace determines the
 native OS lock. Each bounded cycle rereads material under the lock and holds it through real
 IO cleanup, preventing duplicate model calls across independent processes for the same resource.
 A busy lock yields the local slot and retries after `max(idle_seconds, 1 second)` without user
 input. Multiple resources receive bounded turns. MemoryService owns the dream-first or
 flush-then-dream sequence and projection/overview repair; the coordinator does not interpret content.
+
+Hosts construct `build_project_evolution_binding(config, workspace_root=workspace,
+prompt_source=prompt_source, provider=provider)` and share it through
+`runner.bind_maintenance(coordinator, evolution=project_binding)`, optionally alongside
+`memory=binding`. The selected main configuration owns maintenance policy; contributing runners do
+not replace it. Evolution uses a workspace lock that never nests with a Memory lock and can run with
+Memory disabled. `await coordinator.request_project_experience(project_binding)` requests one pass
+without the usual idle delay, while retaining foreground, eligibility and locking rules. No eligible
+material returns empty without a model call. After its borrowing runners close,
+`await coordinator.unbind_evolution(project_binding)` removes only that resource.
+See [evolution](../evolution/README.md) for configuration and artifact adoption.
 
 Maintenance starts only after foreground admission/activation calls fully exit and the idle
 interval passes. New foreground work cancels uncommitted generation without waiting for a
@@ -825,6 +837,7 @@ immediately so later cancellation reads remain valid. Projection commits indepen
 ## Public API
 
 `iris.harness` exports `AgentRunner`, `MaintenanceCoordinator`, `MemoryMaintenanceBinding`,
+`ProjectEvolutionBinding`, `build_project_evolution_binding`,
 `SessionHistory`, `SessionManager`, `SubmitReceipt`,
 `ResumeReceipt`, `SubmissionEvent`,
 `SessionSubmissionEvent`, `SessionEvent`, `LiveFact`, and `LivePublisher`; run

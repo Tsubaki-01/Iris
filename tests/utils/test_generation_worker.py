@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from iris.memory import MemoryIOExecutionMode, MemoryService, SQLiteMemoryStore
-from iris.memory._generation_worker import GenerationWorker
+from iris.utils.generation_worker import GenerationWorker
 
 
 @pytest.mark.asyncio

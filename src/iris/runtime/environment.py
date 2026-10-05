@@ -53,7 +53,7 @@ class RuntimeExecutionScope(StrEnum):
     CHILD = "child"
 
 
-class RuntimeMemoryCapturePort(Protocol):
+class RuntimeCapturePort(Protocol):
     """Runtime 向 harness 通知可捕获原文的轻量端口。"""
 
     def request_capture(self, run_id: str, through_count: int) -> None:
@@ -126,7 +126,7 @@ class RuntimeEnvironment:
         command_environment (CommandEnvironment | None): 本 Agent 注册命令工具时的环境事实。
         host_os (str): Iris 进程所在宿主操作系统。
         command_stop_slots (dict): root/child 共享的当前调用停止事实槽。
-        memory_capture_port (RuntimeMemoryCapturePort | None): root harness 绑定的原文捕获提示端口。
+        capture_port (RuntimeCapturePort | None): root harness 绑定的原文捕获提示端口。
         context_source (ContextSource | None): 宿主每步采集接口，不缓存快照。
         hook_dispatcher (HookDispatcher | None): 当前 Agent 的可选进程内 Hook 派发依赖。
         decision_client (DecisionEvaluator | None): 当前已启用接点共同借用的判断能力。
@@ -151,7 +151,7 @@ class RuntimeEnvironment:
     command_environment: CommandEnvironment | None = None
     host_os: str = field(default_factory=platform.system)
     command_stop_slots: dict[tuple[str, str], CommandStopSlot] = field(default_factory=dict)
-    memory_capture_port: RuntimeMemoryCapturePort | None = None
+    capture_port: RuntimeCapturePort | None = None
     context_source: ContextSource | None = None
     hook_dispatcher: HookDispatcher | None = None
     decision_client: DecisionEvaluator | None = None
@@ -192,7 +192,7 @@ class RuntimeEnvironment:
 __all__ = [
     "RuntimeEnvironment",
     "RuntimeExecutionScope",
-    "RuntimeMemoryCapturePort",
+    "RuntimeCapturePort",
     "StreamingRuntimeProvider",
     "streaming_provider_for",
 ]
