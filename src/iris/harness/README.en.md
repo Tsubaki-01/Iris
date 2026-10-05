@@ -794,7 +794,8 @@ lifecycle supports restart continuation, whereas lost in-memory state is never r
 as a second eligibility database.
 
 A host runs at most one Memory job and one project evolution job concurrently, each with its own
-worker, cancellation state and resource lock. Canonical database path plus namespace determines the
+worker, cancellation state and resource lock. Cancellation requests use each asyncio Task's state
+directly rather than a separate mirrored flag. Canonical database path plus namespace determines the
 native OS lock. Each bounded cycle rereads material under the lock and holds it through real
 IO cleanup, preventing duplicate model calls across independent processes for the same resource.
 A busy lock yields the local slot and retries after `max(idle_seconds, 1 second)` without user

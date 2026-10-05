@@ -137,27 +137,16 @@ class EvolutionCaptureBlock(EvolutionMaterial):
         return self
 
 
-class EvolutionSourceState(BaseModel):
+@dataclass(frozen=True, slots=True)
+class EvolutionSourceState:
     """捕获块和已确认进度的来源投影。"""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
     source: EvolutionSource
-    initial_message_count: int = Field(ge=0)
-    captured_until: int = Field(ge=0)
-    consumed_until: int = Field(ge=0)
-    terminal_message_count: int | None = Field(default=None, ge=0)
+    initial_message_count: int
+    captured_until: int
+    consumed_until: int
+    terminal_message_count: int | None = None
     outcome: str | None = None
-
-    @model_validator(mode="after")
-    def _state_bounds(self) -> EvolutionSourceState:
-        if not self.initial_message_count <= self.consumed_until <= self.captured_until:
-            raise ValueError("消费位置必须位于已捕获的 Run 区间内")
-        if (
-            self.terminal_message_count is not None
-            and self.captured_until != self.terminal_message_count
-        ):
-            raise ValueError("封源必须已完整捕获")
-        return self
 
 
 @dataclass(frozen=True, slots=True)

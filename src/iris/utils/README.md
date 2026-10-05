@@ -10,6 +10,10 @@
 真实作业排空。Memory 与项目学习各持有自己的实例；协调器在 `wait_idle()` 完成后才释放
 对应资源锁。它不决定维护时机、处理内容或 Run 资格，普通前台 IO 不借用这些后台实例。
 
+[`BackgroundIO`](background_io.py) 统一跟踪服务派发的异步 IO 等待任务，处理取消后的短提交回执
+及 `wait_pending()` 排空。Memory 与项目学习各持有一份作业集合；存在当前维护 worker 时借用它，
+否则使用默认线程池。Memory 是否采用 INLINE 仍由 Memory 服务决定。
+
 [`atomic_write_text(path, content)`](files.py) 通过同目录完整临时文件发布 UTF-8 文本。
 文件工具和项目学习复用这一个实现；目标选择、基线比较与跨进程锁由调用领域负责。
 可通过 `temporary_directory` 指定同一文件系统上的暂存目录；prompt 发布在模板根外暂存，

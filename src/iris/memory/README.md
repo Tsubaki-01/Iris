@@ -199,6 +199,8 @@ Capture 仍走原执行路径，不排在后台计算后面；独立 SDK 调用�
 
 同步执行和取消原语来自 `iris.utils.generation_worker`；Memory 与项目学习各持有自己的
 worker 和资源锁。项目学习不读取本包私有存储，也不等待某次 Memory 模型调用作为输入。
+THREAD 作业的等待、取消后收取短提交回执与排空由共享 `BackgroundIO` 实现；每个服务持有
+独立实例，Memory 的 INLINE/THREAD 选择仍由本包负责。
 
 `generation_prompt_descriptions()` 与 `overview_prompt_description()` 提供实际生成请求共用的
 固定协议和代表模板变量。装配层可将这些说明交给有限 prompt 修订，不暴露私有响应模型，

@@ -83,7 +83,7 @@ class EvolutionMaterialStore:
         self, source: EvolutionSource, initial_message_count: int
     ) -> EvolutionSourceState:
         """首条原文前登记来源，重复登记不修改捕获或消费进度。"""
-        states, _ = self._load_sources()
+        states, _ = self._load_sources(self._read_progress())
         if _key(source) in states:
             return states[_key(source)]
         _write(
@@ -92,12 +92,12 @@ class EvolutionMaterialStore:
                 source=source, initial_message_count=initial_message_count
             ),
         )
-        states, _ = self._load_sources()
+        states, _ = self._load_sources(self._read_progress())
         return states[_key(source)]
 
     def list_capture_sources(self, lifecycle_source_id: str) -> tuple[EvolutionSourceState, ...]:
         """只返回同一 reader 仍需补采的来源，已封源项由待处理入口提供。"""
-        states, _ = self._load_sources()
+        states, _ = self._load_sources(self._read_progress())
         return tuple(
             state
             for state in states.values()
@@ -111,7 +111,7 @@ class EvolutionMaterialStore:
         body = self._blocks / name
         _write(body, block)
         _write(self._captures / name, block.model_copy(update={"records": ()}))
-        states, _ = self._load_sources()
+        states, _ = self._load_sources(self._read_progress())
         state = states[_key(block.source)]
         if block.end_message_count <= state.consumed_until:
             self._remove_body(body)
@@ -119,7 +119,7 @@ class EvolutionMaterialStore:
 
     def list_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """列出连续到终态且尚未全部消费的来源，不判断 lifecycle 资格。"""
-        states, _ = self._load_sources()
+        states, _ = self._load_sources(self._read_progress())
         sources = {
             _key(state.source): state.source
             for state in states.values()
@@ -221,7 +221,7 @@ class EvolutionMaterialStore:
         self, *, allowed_sources: frozenset[tuple[str, str]], limit: int = 128
     ) -> PendingMaterials:
         """项目锁内按合格来源读取完整消息，重叠区间只出现一次。"""
-        states, captures = self._load_sources()
+        states, captures = self._load_sources(self._read_progress())
         items: list[EvolutionMaterial] = []
         for key, state in states.items():
             if (
@@ -274,8 +274,8 @@ class EvolutionMaterialStore:
         issue: RevisionItem | None = None,
     ) -> None:
         """项目锁内确认实际选中范围，先保存消费位置再清理完整已读正文。"""
-        states, captures = self._load_sources()
         progress = self._read_progress()
+        states, captures = self._load_sources(progress)
         consumed = dict(progress.consumed)
         for item in selected:
             key = _key(item.source)
@@ -317,9 +317,9 @@ class EvolutionMaterialStore:
 
     def _load_sources(
         self,
+        progress: _Progress,
     ) -> tuple[dict[str, EvolutionSourceState], list[tuple[Path, EvolutionCaptureBlock]]]:
         """仅从不可变登记/收据推导连续捕获位置，正文清理不会改变它。"""
-        progress = self._read_progress()
         captures = [
             (path, _read(path, EvolutionCaptureBlock))
             for path in sorted(self._captures.glob("*.json"))
@@ -344,7 +344,7 @@ class EvolutionMaterialStore:
             if not registration.initial_message_count <= consumed <= position:
                 raise IrisEvolutionError("项目材料消费位置与捕获范围不一致", path=str(path))
             sealed = terminal is not None and position == terminal
-            states[key] = EvolutionSourceState.model_construct(
+            states[key] = EvolutionSourceState(
                 source=registration.source,
                 initial_message_count=registration.initial_message_count,
                 captured_until=position,

@@ -23,7 +23,7 @@ from typing import TypeVar
 from ..exceptions import IrisMemoryError
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
-from ..utils.generation_worker import generation_worker
+from ..utils.background_io import BackgroundIO
 from ._prompts import snapshot_memory_prompts
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
@@ -115,7 +115,7 @@ class MemoryService:
         self.generation_config = generation_config or MemoryGenerationConfig()
         self.prompt_source = prompt_source
         self._io_execution_mode = io_execution_mode
-        self._io_tasks: set[asyncio.Task[object]] = set()
+        self._background_io = BackgroundIO()
         self._change_listeners: list[Callable[[str], None]] = []
 
     @property
@@ -131,30 +131,12 @@ class MemoryService:
         complete_on_cancel 保留当前 task 的取消状态，由阶段在结果落账后继续传播。
         """
         if self._io_execution_mode is MemoryIOExecutionMode.THREAD:
-            worker = generation_worker.get()
-            task = asyncio.create_task(
-                asyncio.to_thread(operation) if worker is None else worker.run(operation)
-            )
-            self._io_tasks.add(task)
-            task.add_done_callback(self._finish_io)
-            while True:
-                try:
-                    return await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    if not complete_on_cancel or task.cancelled():
-                        raise
+            return await self._background_io.run(operation, complete_on_cancel=complete_on_cancel)
         return operation()
-
-    def _finish_io(self, task: asyncio.Task[object]) -> None:
-        """保留取消等待后真实 IO 的生命周期，并回收已完成的结果。"""
-        self._io_tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
 
     async def wait_pending_io(self) -> None:
         """等待已派发同步工作真正结束，供维护关闭时调用。"""
-        while self._io_tasks:
-            await asyncio.gather(*tuple(self._io_tasks), return_exceptions=True)
+        await self._background_io.wait_pending()
 
     def add_change_listener(self, callback: Callable[[str], None]) -> None:
         """订阅新材料和正式写入；回调在实际写入所在线程执行。"""

@@ -23,8 +23,10 @@ maintenance:
 
 `evolution.enabled` 默认关闭，启用要求 `skills.enabled=true`。`policy_skill` 可指定策略文件，
 相对 root workspace 解析；省略时每轮明确读取包内
-[`self-evolution/SKILL.md`](self-evolution/SKILL.md)。策略指导经验整理方法，不拥有输出 schema、
-进度或调度，也不被自动改写。输入/输出预算独立于业务 Run，必须为正数。
+[`self-evolution/SKILL.md`](self-evolution/SKILL.md)。Skill 统一规定承载位置、依据标准和适用范围；
+`project_skill_update` prompt 负责经验合并与问题提炼，`evolution_review` prompt 负责当前目标检查
+及各类字段的修订步骤。两份 prompt 不再重复整份策略；输出 schema、进度和调度由代码拥有。
+策略 Skill 不被自动改写，输入/输出预算独立于业务 Run，必须为正数。
 策略正文区分长期项目约定、临时要求和具体机制问题：偶发故障或笼统差评不直接触发参数调整，
 明确的持续行为要求可以成为修订依据。修订保留未要求改变的角色、无关规则和适用条件；依据不足、
 当前内容已满足要求或必要依赖无法确定时返回 no-change。它指导模型判断，不替代代码的目标、
@@ -155,8 +157,8 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 实际消费区间、usage、`has_more` 和生效说明；`stage` 区分 experience/revision，B 结果另有
 `revision_id` 与目标。A 错误与取消记录后抛出；B 返回对应请求的 failed/cancelled 结果，
 保持 pending，不误结束其它请求。协调器按既有规则等待外部活动、资格恢复或重启。
-服务的 `wait_pending_io()` 用于等待已派发短工作真正
-结束，协调器在此之前保留本类 worker/锁。
+服务通过独立的 `BackgroundIO` 实例跟踪已派发短工作，与 Memory 共享等待和取消收尾算法，
+不共享作业集合。`wait_pending_io()` 等待实际结束，协调器在此之前保留本类 worker/锁。
 
 ## 后续如何采用
 

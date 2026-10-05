@@ -16,8 +16,9 @@ from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill.frontmatter import split_frontmatter
+from ..utils.background_io import BackgroundIO
 from ..utils.files import atomic_write_text
-from ..utils.generation_worker import check_generation_cancelled, generation_worker
+from ..utils.generation_worker import check_generation_cancelled
 from .config import EvolutionConfig
 from .materials import EvolutionMaterialStore
 from .models import (
@@ -136,34 +137,17 @@ class EvolutionService:
             [("prompt", name) for name in config.prompt_targets]
             + [("config", name) for name in config.config_targets]
         )
-        self._io_tasks: set[asyncio.Task[object]] = set()
+        self._background_io = BackgroundIO()
 
     async def run_async_io(
         self, operation: Callable[[], ResultT], *, complete_on_cancel: bool = False
     ) -> ResultT:
         """捕获使用普通线程，后台维护借用本类任务绑定的独立 worker。"""
-        worker = generation_worker.get()
-        task = asyncio.create_task(
-            asyncio.to_thread(operation) if worker is None else worker.run(operation)
-        )
-        self._io_tasks.add(task)
-        task.add_done_callback(self._finish_io)
-        while True:
-            try:
-                return await asyncio.shield(task)
-            except asyncio.CancelledError:
-                if not complete_on_cancel or task.cancelled():
-                    raise
-
-    def _finish_io(self, task: asyncio.Task[object]) -> None:
-        self._io_tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
+        return await self._background_io.run(operation, complete_on_cancel=complete_on_cancel)
 
     async def wait_pending_io(self) -> None:
         """等待已经派发的同步工作真正结束。"""
-        while self._io_tasks:
-            await asyncio.gather(*tuple(self._io_tasks), return_exceptions=True)
+        await self._background_io.wait_pending()
 
     async def alist_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """列出已捕获完整且未消费的来源，由宿主再判断生命周期资格。"""
@@ -176,10 +160,10 @@ class EvolutionService:
     async def enqueue_revision(self, request: RevisionRequest) -> RevisionItem:
         """在宿主入口校验开放目标，完整保存显式请求而不伪造经历。"""
         check_targets(request.targets, self.config)
-        item = RevisionItem(
+        item = RevisionItem.model_construct(
             description=request.description,
             targets=request.targets,
-            origin=HostOrigin(session=request.session),
+            origin=HostOrigin.model_construct(session=request.session),
         )
         await self.run_async_io(lambda: self.store.enqueue_revision(item), complete_on_cancel=True)
         return item
@@ -296,7 +280,7 @@ class EvolutionService:
                 )
             if current[0] not in sources:
                 sources.append(current[0])
-        return RevisionItem(
+        return RevisionItem.model_construct(
             description=proposal.description,
             targets=proposal.targets,
             evidence=proposal.evidence,
@@ -453,7 +437,6 @@ class EvolutionService:
         self, item: RevisionItem, candidate: PreparedRevision, usage: dict[str, int]
     ) -> EvolutionResult:
         """短 IO 发布候选并独立结算 B，不重新提交 A 进度。"""
-        check_generation_cancelled()
         published = publish_revision(candidate)
         result = EvolutionResult(
             stage="revision",

@@ -229,6 +229,9 @@ Shutdown waits for real IO and computation, then releases the worker.
 The execution and cancellation primitive lives in `iris.utils.generation_worker`. Memory and
 project evolution own separate worker instances and resource locks. Evolution neither reads private
 Memory storage nor waits for a particular Memory model call to provide its input.
+The shared `BackgroundIO` implementation tracks THREAD jobs, collects short-commit receipts after
+cancellation, and drains pending work. Each service owns a separate instance; Memory still owns the
+INLINE/THREAD choice.
 
 `generation_prompt_descriptions()` and `overview_prompt_description()` expose fixed contracts shared
 with actual requests, plus representative template variables. Assembly can bind these to finite prompt
