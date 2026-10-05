@@ -21,6 +21,16 @@ iris chat agent.yaml --session-id work --max-steps 8
 - 人工交互：permission 输入 `y/yes/n/no`，空输入为拒绝；question 输入答案或选项编号。
 - `/help` 显示命令；`/exit`、`/quit`、EOF 退出；Ctrl-C 取消当前执行并退出，退出码为 130。
 
+## 自动维护
+
+启用 `memory.generation.enabled` 后，CLI 显式创建 Memory 服务和一个共享
+`MaintenanceCoordinator`，在接收输入前绑定 runner。`maintenance.idle_seconds` 控制安静时间，
+默认 300 秒；Memory 的生成预算继续位于 `memory.generation`。
+
+自动维护仅消费已结束且完整捕获的 Run。等待用户回答时，该会话的材料保留 pending；
+新前台输入取消未提交的生成。退出时先停止 SessionManager，再排空维护的实际 IO，
+最后关闭 runner 自有资源和后台 event loop，不在退出阶段补跑模型。
+
 ## 查看 Todo 工作清单
 
 在现有 Agent 配置中设置 `todo.enabled: true`，并保持 `context_policy.enabled: true`，

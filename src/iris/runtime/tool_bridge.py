@@ -45,6 +45,7 @@ class ToolBridge:
         """
         self.tool_view = tool_view
         self.tool_executor = tool_executor
+        self.lifecycle_source_id: str | None = None
         self._read_states: dict[str, ReadFileState] = {}
         self.command_stop_slots: dict[tuple[str, str], CommandStopSlot] = {}
 
@@ -272,12 +273,15 @@ class ToolBridge:
             if tool_call_id is None
             else self.command_stop_slots.setdefault((run_id, tool_call_id), CommandStopSlot())
         )
+        tool_metadata = {**dict(metadata or {}), "run_id": run_id}
+        if self.lifecycle_source_id is not None:
+            tool_metadata["lifecycle_source_id"] = self.lifecycle_source_id
         return ToolExecutionContext(
             workspace_root=workspace_root,
             session_id=session_id,
             agent_id=agent_id,
             permission_mode=permission_mode,
-            metadata={**dict(metadata or {}), "run_id": run_id},
+            metadata=tool_metadata,
             read_state=self._read_states.get(session_id),
             cancellation=cancellation,
             tool_timeout_seconds=tool_timeout_seconds,

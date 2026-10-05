@@ -599,35 +599,82 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 聊天但暂不使用长期记忆。静态 `context.yaml` memory 仍为独立固定上下文，不进入会话历史。
 BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的恢复使用新 revision 和同一 pending 步。
 
-`memory.generation.enabled: true` 另外启用 root runner 的自动取材和空闲维护，默认关闭。
-构造仅绑定依赖；需要完整的 flush/dream、overview provider/model 和 mirror。配置构造的服务
-复用已经解析的 provider，注入的服务保留自己的生成依赖与预算。后台只写当前 Agent 的
-`write_namespace`，child 不重复学习内部轨迹，仍可使用自己的读取和显式写工具。
+`memory.generation.enabled: true` 开启 root runner 的自动取材与维护，默认关闭。
+宿主显式创建一个 [`MaintenanceCoordinator`](maintenance.py)，多个 root runner 通过
+`bind_maintenance()` 借用它。`from_config*` 不创建私人维护循环；启用功能却没有绑定时，
+首次准备或运行会报告配置错误。协调器的 `idle_seconds` 来自宿主选定的
+`config.maintenance.idle_seconds`，默认 300 秒。
+未启用 Memory 的 runner 也可调用 `runner.bind_maintenance(coordinator)`，只贡献前台状态，
+使同宿主其他 runner 的维护及时让位；不会创建 Memory 资源或捕获材料。
 
-私有 [`_memory_maintenance.py`](_memory_maintenance.py) 独占后台生命周期。
-`aprepare()` 即使没有 MCP 也会恢复同源未封口来源、重新评估预算已变化的 blocked 输入。
-root run 首条消息提交前登记来源，以 lifecycle `source_id` 和 run ID 定位；压缩提示、
-WAITING/终态退出和关闭保存尚未捕获的原文后缀。WAITING 不封口，完成、失败、取消及无需
-runtime 的恢复终态都保留真实 outcome。BCI、system/reasoning 不作为材料；Search/Fetch
-读回只保留条目引用，工具调用及结果保留稳定来源；结果正文和记忆条目 JSON 均从 `.text`
-文字投影取得。重复提示通过持久水位避免重复经历。
-自动 Episode 的顶层 `source_id` 保存 run ID，metadata 保存 lifecycle `source_id` 与会话边界。
+宿主先构造完整的 `MemoryService`（flush/dream、overview provider/model 和 mirror），
+把同一实例注入 runner 和 `MemoryMaintenanceBinding`，并传入实际 SQLite 数据库路径、
+write namespace。注入服务保留自己的 provider、预算和 IO 模式。以下函数展示共享装配与关闭：
 
-Capture 每页至多 128 条消息，逐页提交并让出事件循环，只有到达完整终态计数才封源。
-SQLite 在同一事务取原始消息行后释放共享锁，再解码；原文转换不持有 lifecycle 事务。
+```python
+from pathlib import Path
 
-只有前台 admission 和 activation 完整退出后，安静达到 `idle_seconds`（默认 300 秒）才运行
-flush → dream → overview；已有观察优先 dream。新 start/resume/recover 或 managed follow-up
-立即取消计时和后台模型，不等待模型退出才接纳前台。
-THREAD 服务的维护同步工作使用专用单线程 worker，前台 IO 和 Capture 保持原路径。
-宿主选择 INLINE 时仍在调用线程执行。选材在记录间协作取消，旧同步作业实际退出前不启动新周期。
-已排队 follow-up 在前一 run 的 terminal 事件到自身 admission 之间持有短前台交接凭证，
-避免零空闲等待时被维护抢先；admission 成功、失败或 manager 关闭均释放凭证。
-关闭会等待已派发数据库 IO 与计算真正结束并释放维护 worker，但不要求全部 pending 生成完，
-也不关闭宿主注入的 provider、memory 或 store。
-失败停止本轮，待新活动或下次启动续作；已消费输入的投影失败只补投影，不重复生成知识。
-SQLite lifecycle 可补捕获重启前已提交尾部；InMemory lifecycle 丢失后只能继续处理已经捕获的材料。
-维护 usage 独立记录在 memory 生成结果，不计入 `RunUsage`；新发布概览仍等新窗口或成功压缩采用。
+from iris.agents import AgentConfig
+from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
+from iris.lifecycle import AgentRunRequest
+from iris.memory import MemoryService
+from iris.providers import CompletionProvider
+
+
+async def run_sessions(
+    config: AgentConfig,
+    provider: CompletionProvider,
+    memory: MemoryService,
+    database_path: Path,
+) -> None:
+    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    binding = MemoryMaintenanceBinding(
+        service=memory,
+        database_path=database_path,
+        namespace=config.memory.write_namespace,
+    )
+    runners = [
+        AgentRunner.from_config(config, provider=provider, memory_service=memory)
+        for _ in range(2)
+    ]
+    try:
+        for runner in runners:
+            runner.bind_maintenance(coordinator, memory=binding)
+        for index, runner in enumerate(runners):
+            await runner.start(AgentRunRequest(input="处理项目任务", session_id=f"session-{index}"))
+    finally:
+        for runner in runners:
+            await runner.aclose()
+        await coordinator.aclose()
+```
+
+[`_capture.py`](_capture.py) 只保存原始材料，独立于维护调度。
+root Run 首条消息提交前登记 lifecycle `source_id`、run 和 session；压缩提示、WAITING/终态退出
+及关闭保存尚未捕获的后缀。每页至多 128 条消息，逐页提交，只到达完整终态计数后封源。
+WAITING 不封源；完成、失败、取消及无 runtime 的恢复终态保留真实 outcome。
+BCI、system/reasoning 和记忆读回正文不成为新证据；Search/Fetch 保留条目引用，工具调用与结果
+保留稳定 call_id。持久捕获水位避免重复经历。
+
+自动学习只消费终态且完整捕获的 Run。某 session WAITING 时，其旧终态材料也排除，其他会话
+仍可维护。Memory 工具的变更先通过 call_id 关联捕获来源；尚未关联时保持 pending。
+每次消费提交前重读生命周期资格；缺少 reader 时保留 pending。SQLite lifecycle 支持重启续作，
+纯内存 lifecycle 丢失后不自动猜测旧材料资格。
+
+一个宿主最多一项 Memory 维护。规范化实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
+执行有界领域周期并排空真实 IO，同库同 namespace 的独立进程不会重复调用模型。
+锁忙让出本地位置，至少等待 `max(idle_seconds, 1 秒)` 后自动再试，多资源按有界周期轮转。
+Memory 服务拥有 dream 优先、flush 后 dream、投影与 overview 修复的顺序，协调器不解释内容。
+
+前台 admission/activation 全部退出并安静达到 idle 后才维护。新前台立即撤销未提交生成，
+不等待模型或资源锁；Goal/follow-up 的短交接保留同一前台计数。
+THREAD 服务使用专用 worker，INLINE 保持调用线程执行；已派发同步工作真实退出前保留锁和任务位置。
+模型失败等待外部新活动或重启，自身维护写入不构成新活动；no-change 正常推进消费位置。
+
+`runner.aclose()` 只排空自己的捕获、解除借用并关闭原有自有资源，不关闭共享协调器、服务或 reader，
+也不受其他 runner 前台计数阻碍。关闭所有借用该资源的 runner 后，宿主可调用
+`await coordinator.unbind_memory(binding)` 单独撤销资源；它会取消并排空该资源维护，其他资源继续。
+宿主退出时 `await coordinator.aclose()` 停止并排空维护，随后自行关闭共享 provider/service/store；
+这些关闭路径都不会临时补跑学习模型。维护 usage 独立于 `RunUsage`，新概览仍在新窗口或成功压缩时采用。
 
 `RunUsage` 的 input/output/total 只统计主模型；摘要调用累计在 `usage.compaction`，总消耗由两者
 逐字段相加。摘要 usage-only 提交只推进 run revision，不产生 durable event；commit port 立即
@@ -635,7 +682,8 @@ SQLite lifecycle 可补捕获重启前已提交尾部；InMemory lifecycle 丢�
 
 ## 公开接口
 
-`iris.harness` 导出 `AgentRunner`、`SessionHistory`、`SessionManager`、`SubmitReceipt`、
+`iris.harness` 导出 `AgentRunner`、`MaintenanceCoordinator`、`MemoryMaintenanceBinding`、
+`SessionHistory`、`SessionManager`、`SubmitReceipt`、
 `ResumeReceipt`、`SubmissionEvent`、
 `SessionSubmissionEvent`、`SessionEvent`、`LiveFact`、`LivePublisher`，以及 run
 request/options/limits/runtime options、phase/stop reason/usage/error/snapshot/result 和 run

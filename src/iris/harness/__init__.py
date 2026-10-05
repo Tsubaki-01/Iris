@@ -17,6 +17,7 @@ from ..lifecycle import (
     RunUsage,
 )
 from ._subagent import ChildProviderFactory
+from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding
 from .observer import RunEventObserver
 from .runner import AgentRunner
 from .session_history import SessionHistory
@@ -41,6 +42,8 @@ __all__ = [
     "CommandCleanupFailed",
     "LiveFact",
     "LivePublisher",
+    "MaintenanceCoordinator",
+    "MemoryMaintenanceBinding",
     "ResumeReceipt",
     "RunEvent",
     "RunEventKind",

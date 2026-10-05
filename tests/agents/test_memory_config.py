@@ -16,6 +16,31 @@ def test_agent_memory_is_disabled_by_default() -> None:
     assert config.memory.read_namespaces == ["project"]
 
 
+def test_maintenance_idle_belongs_to_host_config(tmp_path: Path) -> None:
+    """宿主安静时间独立于 Memory 生成参数，加载没有副作用。"""
+    defaults = AgentConfig.model_validate({"name": "a", "model": "openai/test", "system": "a"})
+    assert defaults.maintenance.idle_seconds == 300
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        "name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n  idle_seconds: 0\n",
+        encoding="utf-8",
+    )
+    assert load_agent_config(path).maintenance.idle_seconds == 0
+    assert not (tmp_path / ".iris").exists()
+
+
+@pytest.mark.parametrize("idle", ["-1", ".inf", ".nan"])
+def test_maintenance_idle_rejects_invalid_duration(tmp_path: Path, idle: str) -> None:
+    """计时器的原始配置只接受有限非负时间。"""
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        f"name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n  idle_seconds: {idle}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(IrisConfigError, match="Agent 配置校验失败"):
+        load_agent_config(path)
+
+
 def test_agent_yaml_loads_memory_options_without_creating_files(tmp_path: Path) -> None:
     path = tmp_path / "agent.yaml"
     path.write_text(

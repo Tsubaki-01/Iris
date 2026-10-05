@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from iris.harness._memory_maintenance import MemoryMaintenance
+from iris.harness._capture import MemoryCapture
 from iris.lifecycle import FinishRun, RunStopReason
 from iris.memory import MemoryEpisode, MemoryService, SQLiteMemoryStore
 from iris.memory.generation_models import MemoryCaptureSource
@@ -43,7 +43,7 @@ async def test_long_terminal_capture_commits_pages_and_seals_only_last(
         )
     )
     memory = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
-    maintenance = MemoryMaintenance(service=memory, namespace="project", lifecycle_store=lifecycle)
+    maintenance = MemoryCapture(service=memory, namespace="project", lifecycle_store=lifecycle)
     pages: list[tuple[int, int | None]] = []
     original = memory.store.commit_capture
 

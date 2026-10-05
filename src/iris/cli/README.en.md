@@ -24,6 +24,17 @@ be used when creating an automatic Goal.
 - `/help` lists commands. `/exit`, `/quit`, and EOF exit. Ctrl-C cancels current execution and exits
   with code 130.
 
+## Automatic maintenance
+
+With `memory.generation.enabled`, the CLI explicitly creates the Memory service and one shared
+`MaintenanceCoordinator`, then binds the runner before accepting input. `maintenance.idle_seconds`
+sets the quiet interval (300 seconds by default); generation budgets remain under `memory.generation`.
+
+Automatic learning consumes only terminal, fully captured Runs. A session waiting for a human response
+keeps its materials pending. New foreground work cancels uncommitted generation. On exit, the host
+stops SessionManager, drains actual maintenance IO, then closes runner-owned resources and the event
+loop. Shutdown never starts extra model generation.
+
 ## Viewing a Todo checklist
 
 Set `todo.enabled: true` in the Agent configuration and keep `context_policy.enabled: true`, then

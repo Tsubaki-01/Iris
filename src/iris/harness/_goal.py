@@ -271,13 +271,13 @@ class _GoalControl:
             intent = self.driver.intent or self.driver.offer(
                 source_run_id, goal_id, self.manager._new_run_id()
             )
-            self.manager._reserve_memory_handoff(intent.run_id)
+            self.manager._reserve_maintenance_handoff(intent.run_id)
 
     def cancel_candidate(self) -> None:
         """仅取消本 Goal 尚未准入的意图和预留。"""
         intent = self.driver.invalidate()
         if intent is not None:
-            self.manager._release_memory_handoff(intent.run_id)
+            self.manager._release_maintenance_handoff(intent.run_id)
             if self.manager._event_buffer is not None:
                 self.manager._event_buffer.discard_run(intent.run_id)
             task = self._intent_task
@@ -452,7 +452,7 @@ class _GoalControl:
                             logger.exception("Goal 启动失败后无法保存暂停状态")
                 self.fail(exc)
         finally:
-            manager._release_memory_handoff(intent.run_id)
+            manager._release_maintenance_handoff(intent.run_id)
             if not admitted:
                 if execution is not None:
                     if not execution.done():

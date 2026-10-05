@@ -141,7 +141,9 @@ guarantee semantic correctness.
 An Item's `evidence` supports its current text; observation resolutions and MemoryEvents retain the
 historical explanation. A semantic text update replaces current support with this write event and
 evidence explicitly supplied by this call. Classification or metadata-only updates keep existing
-support. Write tools record the actual Agent and call ID without claiming user confirmation.
+support. Write tools encode `[lifecycle_source_id, run_id, call_id]` as compact JSON in the existing
+`source_id`, distinguishing repeated provider call IDs across runs and lifecycle sources without
+claiming user confirmation.
 
 Omitted patch fields remain unchanged. Use `[]` and `{}` to clear artifacts and metadata; all patch
 fields reject explicit `null`. Updates and soft deletes acquire a `BEGIN IMMEDIATE` write lock before
@@ -172,7 +174,8 @@ memory:
   write_namespace: project
   generation:
     enabled: true
-    idle_seconds: 300
+maintenance:
+  idle_seconds: 300
 ```
 
 `generation.enabled` defaults to false. Configured services reuse the Agent's resolved provider and
@@ -180,14 +183,28 @@ model. Injected services retain their own generation dependencies and budgets. A
 requires generation provider/model, overview provider/model, and a mirror; constructing the runner
 without these dependencies raises `IrisConfigError`.
 
-`AgentRunner` owns one maintenance pipeline for root runs. It registers a source after admission and
-before the first new message, then captures committed suffixes at actual compaction and run boundaries.
-No maintenance model runs while foreground admission or activation remains alive. After all foreground
-work exits and the configured idle interval passes, it processes observations, flushes new material,
-dreams, and publishes an overview. New foreground input cancels uncommitted generation. A dispatched
-short database commit finishes as one unit. `aclose()` captures remaining committed material and waits
-for real IO, retaining pending work for restart. There is no polling, external cron, or daemon.
+The host owns one shared `MaintenanceCoordinator` and explicitly binds each root runner's lifecycle
+reader and `MemoryMaintenanceBinding`; factories do not create private maintenance schedulers.
+`maintenance.idle_seconds` defaults to 300 and accepts zero. The old
+`memory.generation.idle_seconds` field is removed. See [harness](../harness/README.en.md) for host wiring.
+An automatic-maintenance runner without a binding fails at its first preparation/run boundary.
 
+Capture records committed source text without learning. Automatic learning selects only terminal,
+fully captured runs. A WAITING session excludes its own earlier material, while other sessions can
+continue. Tool changes resolve complete call identities through captured records; incomplete or unmatched changes
+remain pending. Explicit SDK content without a Run keeps its existing semantics.
+`list_pending_sources()` exposes source references. The host supplies `MemoryMaintenanceScope` with
+allowed source/run pairs and an async eligibility check. The store filters before limits, including
+reselection and counts; generation checks actual batch sources before model calls and input commits.
+Published knowledge remains available for comparisons, projections, and overview repair.
+
+After the quiet interval, the coordinator acquires the database/namespace OS lock and calls
+`maintain_cycle(namespace, scope=...)`: dream existing observations or changes first; otherwise flush,
+then dream, then repair projections and the overview. Each cycle is bounded and returns whether
+eligible work remains. New foreground input cancels uncommitted generation without waiting for the
+model; the task slot and lock remain held until actual synchronous work finishes. Closing one runner
+detaches only its binding and captures remaining text. The host drains the coordinator before closing
+shared resources; close never starts learning.
 Automatic maintenance owns a dedicated single-thread worker for THREAD services. Only the maintenance
 task sends synchronous work there: background IO, prompt rendering, flush selection, dream/overview request construction,
 token estimation, and response parsing. Foreground reads/writes, source registration, and Capture
@@ -203,8 +220,9 @@ isolates the background queue, but does not eliminate database locks or CPU cont
 zero foreground overhead.
 
 SQLite lifecycle sources have a persistent UUID and bounded run-message ranges, so restart can capture
-missing suffixes without learning fork history twice. InMemory lifecycle can recover only material
-already captured in the memory store. Child agents retain reading and explicit writes, but their
+missing suffixes without learning fork history twice. Without the original lifecycle reader after an
+InMemory restart, captured material remains pending; automatic continuation requires SQLite lifecycle.
+Child agents retain reading and explicit writes, but their
 internal traces are not automatically collected. BCI, reasoning, and memory readback text are excluded
 from new evidence; observations reference stable records and half-open character ranges.
 An automatically captured Episode keeps the run ID in top-level `source_id` and the lifecycle source
@@ -510,8 +528,8 @@ a complete active read for mirror projections and direct semantic recall.
 ## Current limitations
 
 - no vector database, embeddings, semantic reranker, or remote backend;
-- InMemory lifecycle cannot recover uncaptured source text after exit; captured Episodes can still
-  be recovered from a persistent memory store;
+- InMemory lifecycle cannot recover source eligibility after exit; captured material remains pending.
+  Automatic continuation across restarts requires SQLite lifecycle;
 - namespaces are database-local grouping strings, not a separate management service.
 
 ## Maintenance

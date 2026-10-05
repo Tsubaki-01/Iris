@@ -18,12 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from ..agents import load_agent_config
 from ..config import init_config, is_config_initialized
 from ..exceptions import HITLCheckpointInvalidError, IrisError
 from ..goal.models import GoalChanged, GoalControlResult, GoalView
 from ..harness import (
     AgentRunner,
     AgentRunOptions,
+    MaintenanceCoordinator,
+    MemoryMaintenanceBinding,
     RunEventKind,
     RunLimits,
     RunResult,
@@ -41,6 +44,8 @@ from ..hitl import (
     QuestionInteractionResponse,
     QuestionPrompt,
 )
+from ..memory import build_memory_service_from_config
+from ..memory.config import resolve_memory_path
 from ..message import (
     ModelBlockDelta,
     ModelResponseCancelled,
@@ -48,6 +53,7 @@ from ..message import (
     ModelResponseFailed,
     ModelResponseStarted,
 )
+from ..providers import create_provider_client
 from ..runtime import RuntimeStreamEvent
 from ..todo import TodoStatus
 
@@ -186,10 +192,38 @@ def run_chat(
         live_output = _ChatLiveOutput(
             output_func or (lambda fragment: print(fragment, end="", flush=True))
         )
-        runner = AgentRunner.from_config_path(
-            options.config_path,
+        config = load_agent_config(options.config_path)
+        workspace = (options.config_path.parent / config.permissions.workspace).resolve()
+        provider = create_provider_client(
+            config.to_model_route(),
+            api_style=config.model.api_style,
+            base_url=config.model.base_url,
+            timeout=config.model.timeout,
+        )
+        memory_service = build_memory_service_from_config(
+            config.memory,
+            workspace,
+            overview_provider=provider,
+            overview_model=config.model.name,
+        )
+        runner = AgentRunner.from_config(
+            config,
+            config_path=options.config_path,
+            provider=provider,
+            memory_service=memory_service,
             live_publisher=live_output,
         )
+        maintenance = None
+        if memory_service is not None and config.memory.generation.enabled:
+            maintenance = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+            runner.bind_maintenance(
+                maintenance,
+                memory=MemoryMaintenanceBinding(
+                    service=memory_service,
+                    database_path=resolve_memory_path(config.memory.path, workspace),
+                    namespace=config.memory.write_namespace,
+                ),
+            )
     except IrisError as exc:
         write_error(_format_iris_error(exc))
         return 1
@@ -198,6 +232,7 @@ def run_chat(
         runner=runner,
         options=options,
         live_output=live_output,
+        maintenance=maintenance,
         input_func=input_func,
         output_func=output_func,
         error_func=write_error,
@@ -209,6 +244,7 @@ def run_chat_loop(
     runner: AgentRunner,
     options: ChatOptions,
     live_output: _ChatLiveOutput | None = None,
+    maintenance: MaintenanceCoordinator | None = None,
     input_func: Callable[[str], str] | None = None,
     output_func: Callable[[str], None] | None = None,
     error_func: Callable[[str], None] | None = None,
@@ -222,6 +258,7 @@ def run_chat_loop(
         runner (AgentRunner): complete-run SDK facade。
         options (ChatOptions): chat 命令选项。
         live_output (_ChatLiveOutput | None): 与 runner 共享的可选同步文本输出。
+        maintenance: 由本宿主拥有并已绑定 runner 的维护协调器，退出时先排空它。
         input_func (Callable[[str], str] | None): 可选输入回调。
         output_func (Callable[[str], None] | None): 可选标准输出回调。
         error_func (Callable[[str], None] | None): 可选标准错误回调。
@@ -236,13 +273,14 @@ def run_chat_loop(
         runner=runner,
         options=options,
         live_output=live_output,
+        maintenance=maintenance,
         output_func=write_output,
         error_func=write_error,
     )
-    host.start()
     close_reason = "chat 结束"
     exit_code = 0
     try:
+        host.start()
         while True:
             try:
                 user_input = read_input("iris> ").strip()
@@ -417,11 +455,13 @@ class _ChatSessionHost:
         live_output: _ChatLiveOutput | None,
         output_func: Callable[[str], None],
         error_func: Callable[[str], None],
+        maintenance: MaintenanceCoordinator | None = None,
     ) -> None:
         """保存 host 依赖；异步资源由后台线程创建。"""
         self._runner = runner
         self._options = options
         self._live_output = live_output
+        self._maintenance = maintenance
         self._output_func = output_func
         self._error_func = error_func
         self._thread = threading.Thread(target=self._run, name="iris-chat-host")
@@ -450,6 +490,7 @@ class _ChatSessionHost:
         self._thread.start()
         self._ready.wait()
         if self._thread_error is not None:
+            self._thread.join()
             raise self._thread_error
 
     def submit(self, input: str, *, mode: Literal["follow_up"] | None = None) -> None:
@@ -499,15 +540,18 @@ class _ChatSessionHost:
             self._options.session_id,
         )
         consumer = asyncio.create_task(self._consume_events())
-        self._ready.set()
         try:
+            if self._maintenance is not None:
+                await self._runner.aprepare()
+            self._ready.set()
             await self._stop.wait()
         finally:
             failure = sys.exception()
             try:
-                # 三步依次完成；manager 等原调用结束后才允许关闭 root MCP 资源。
+                # 先收口前台与维护，再关闭 runner 自有资源和事件消费者。
                 for operation in (
                     self._manager.close(cancel_run=True, reason=self._close_reason),
+                    *(() if self._maintenance is None else (self._maintenance.aclose(),)),
                     self._runner.aclose(),
                     consumer,
                 ):

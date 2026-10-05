@@ -64,13 +64,17 @@ class GenerationWorker:
         if not self._pending:
             self._on_idle()
 
-    async def aclose(self) -> None:
-        """等待实际作业退出后释放线程，不占用默认线程池执行 shutdown。"""
+    async def wait_idle(self) -> None:
+        """等待真实同步作业完成，调用方在此之前保留维护锁。"""
         while self._pending:
             await asyncio.gather(
                 *(asyncio.shield(future) for future in tuple(self._pending)),
                 return_exceptions=True,
             )
+
+    async def aclose(self) -> None:
+        """等待实际作业退出后释放线程，不占用默认线程池执行 shutdown。"""
+        await self.wait_idle()
         self._executor.shutdown(wait=False)
 
 

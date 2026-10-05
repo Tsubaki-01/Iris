@@ -26,6 +26,8 @@ from .generation_models import (
     GenerationResult,
     MemoryConsumedRange,
     MemoryGenerationConfig,
+    MemoryMaintenanceScope,
+    MemorySource,
     ObservationResolution,
 )
 from .models import (
@@ -139,6 +141,15 @@ def raise_if_generation_cancelled() -> None:
     """短提交收口后继续传播已请求的取消，不再启动下一阶段或派生工作。"""
     task = asyncio.current_task()
     if task is not None and task.cancelling():
+        raise asyncio.CancelledError
+
+
+async def _check_sources(
+    scope: MemoryMaintenanceScope | None, sources: tuple[MemorySource, ...]
+) -> None:
+    """在模型和输入消费边界由宿主重读本批资格；失效保留材料。"""
+    raise_if_generation_cancelled()
+    if scope is not None and not await scope.check(sources):
         raise asyncio.CancelledError
 
 
@@ -287,7 +298,9 @@ def _select_flush(
     return tuple(slices), build(slices)
 
 
-async def flush(service: MemoryService, namespace: str) -> GenerationResult:
+async def flush(
+    service: MemoryService, namespace: str, *, scope: MemoryMaintenanceScope | None = None
+) -> GenerationResult:
     """消费一批固定原文片段，原子保存观察和处理位置。"""
     provider, model = _dependencies(service)
     started = perf_counter()
@@ -296,7 +309,11 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
     result_recorded = False
     try:
         progresses = tuple(
-            await service.run_async_io(lambda: service.store.list_pending_episodes(namespace))
+            await service.run_async_io(
+                lambda: service.store.list_pending_episodes(
+                    namespace, allowed_sources=None if scope is None else scope.allowed_sources
+                )
+            )
         )
         if not progresses:
             return GenerationResult(namespace=namespace, stage="flush", status="empty")
@@ -319,6 +336,13 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
             )
         )
         input_ids = tuple(dict.fromkeys(piece.episode_id for piece in slices))
+        sources = tuple(
+            dict.fromkeys(
+                progress.source
+                for progress in progresses
+                if progress.episode.id in input_ids and progress.source is not None
+            )
+        )
         records = {
             (progress.episode.id, record.id): record
             for progress in progresses
@@ -336,6 +360,7 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
             if piece.text
             and records[piece.episode_id, piece.record_id].metadata.get("evidence_allowed", True)
         }
+        await _check_sources(scope, sources)
         if refs:
             response = await provider.complete(request)
             usage = _usage(response)
@@ -369,6 +394,7 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
                 )
             )
         await before_generation_commit()
+        await _check_sources(scope, sources)
         result = GenerationResult(
             namespace=namespace,
             stage="flush",
@@ -400,7 +426,7 @@ async def flush(service: MemoryService, namespace: str) -> GenerationResult:
             )
         result_recorded = True
         raise_if_generation_cancelled()
-        state = await service.ageneration_state(namespace)
+        state = await service.ageneration_state(namespace, scope=scope)
         return result.model_copy(update={"has_more": bool(state.pending_episodes)})
     except (Exception, asyncio.CancelledError) as exc:
         if not result_recorded:
@@ -629,6 +655,7 @@ async def dream(
     namespace: str,
     *,
     retry_blocked: bool = False,
+    scope: MemoryMaintenanceScope | None = None,
 ) -> GenerationResult:
     """按完整比较包预算选材，原子整理一批观察及显式变更。"""
     provider, model = _dependencies(service)
@@ -641,10 +668,16 @@ async def dream(
     try:
         await service.run_async_io(
             lambda: service.store.retry_blocked(
-                namespace, budget=None if retry_blocked else config.dream_input_budget_tokens
+                namespace,
+                budget=None if retry_blocked else config.dream_input_budget_tokens,
+                allowed_sources=None if scope is None else scope.allowed_sources,
             )
         )
-        snapshot = await service.run_async_io(lambda: service.store.read_dream_snapshot(namespace))
+        snapshot = await service.run_async_io(
+            lambda: service.store.read_dream_snapshot(
+                namespace, allowed_sources=None if scope is None else scope.allowed_sources
+            )
+        )
         if not snapshot.observations and not snapshot.changes:
             return GenerationResult(
                 namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
@@ -680,6 +713,8 @@ async def dream(
                     *(("change", item.event_id) for item in snapshot.changes),
                 ]
                 if len(inputs) == 1:
+                    await before_generation_commit()
+                    await _check_sources(scope, snapshot.sources)
                     marked = await service.run_async_io(
                         partial(
                             service.store.block_dream,
@@ -687,13 +722,28 @@ async def dream(
                             reason="完整比较材料超过 dreaming 输入预算",
                             budget=config.dream_input_budget_tokens,
                             dependency_item_ids=tuple(item.id for item in snapshot.items),
-                        )
+                        ),
+                        complete_on_cancel=True,
                     )
                     if not marked:
                         return GenerationResult(
                             namespace=namespace, stage="dream", status="conflict"
                         )
                     blocked += 1
+                    raise_if_generation_cancelled()
+                    if blocked == 16:
+                        state = await service.ageneration_state(namespace, scope=scope)
+                        result = GenerationResult(
+                            namespace=namespace,
+                            stage="dream",
+                            status="blocked",
+                            counts={"blocked": blocked},
+                            has_more=bool(state.pending_observations or state.pending_changes),
+                        )
+                        await service.run_async_io(
+                            partial(service.store.record_generation_result, result)
+                        )
+                        return result
                     break
                 selected = inputs[: max(1, len(inputs) // 2)]
                 snapshot = await service.run_async_io(
@@ -704,23 +754,28 @@ async def dream(
                             key for kind, key in selected if kind == "observation"
                         ),
                         change_ids=tuple(key for kind, key in selected if kind == "change"),
+                        allowed_sources=None if scope is None else scope.allowed_sources,
                     )
                 )
             if estimated_tokens <= config.dream_input_budget_tokens:
                 break
             snapshot = await service.run_async_io(
-                lambda: service.store.read_dream_snapshot(namespace)
+                lambda: service.store.read_dream_snapshot(
+                    namespace, allowed_sources=None if scope is None else scope.allowed_sources
+                )
             )
         input_ids = tuple(
             [item.id for item in snapshot.observations]
             + [item.event_id for item in snapshot.changes]
         )
+        await _check_sources(scope, snapshot.sources)
         response = await provider.complete(request)
         usage = _usage(response)
         plan = await service.run_async_io(
             lambda: _bind_plan(_parse(response, _DreamResponse), snapshot, refs)
         )
         await before_generation_commit()
+        await _check_sources(scope, snapshot.sources)
         counts: dict[str, int] = dict(Counter(operation.action for operation in plan.operations))
         counts.update(
             blocked=blocked, ignored=sum(item.item_id is None for item in plan.resolutions)
@@ -763,10 +818,10 @@ async def dream(
         result_recorded = True
         raise_if_generation_cancelled()
         if committed:
-            state = await service.ageneration_state(namespace)
+            state = await service.ageneration_state(namespace, scope=scope)
             if state.item_revision != snapshot.item_revision:
                 await service.run_async_io(lambda: service._rebuild_committed(namespace))
-        state = await service.ageneration_state(namespace)
+        state = await service.ageneration_state(namespace, scope=scope)
         return result.model_copy(
             update={
                 "item_revision": state.item_revision,

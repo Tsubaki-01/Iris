@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from iris.exceptions import IrisConfigError, IrisRunPersistenceError
-from iris.harness import AgentRunner, SessionManager
+from iris.harness import (
+    AgentRunner,
+    MaintenanceCoordinator,
+    MemoryMaintenanceBinding,
+    SessionManager,
+)
 from iris.harness._memory_capture import capture_episode, capture_source
 from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import (
@@ -53,6 +58,7 @@ def _runner(
     store: LifecycleStore | None = None,
     service: MemoryService | None = None,
     registry: ToolRegistry | None = None,
+    idle_seconds: float = 100,
 ) -> tuple[AgentRunner, MemoryService]:
     """绑定完整自动依赖，长 idle 让本测试只验证本地捕获。"""
     if service is None:
@@ -62,7 +68,7 @@ def _runner(
             mirror=FileMemoryMirror(tmp_path / "mirror", workspace_root=tmp_path),
             generation_provider=generation_provider,
             generation_model="generation",
-            generation_config=MemoryGenerationConfig(idle_seconds=100),
+            generation_config=MemoryGenerationConfig(),
             overview_provider=generation_provider,
             overview_model="overview",
         )
@@ -73,13 +79,27 @@ def _runner(
             "memory": config.memory.model_copy(
                 update={
                     "enabled": True,
-                    "generation": MemoryGenerationConfig(enabled=True, idle_seconds=100),
+                    "generation": MemoryGenerationConfig(enabled=True),
                 }
             )
         }
     )
     runtime.environment.memory_service = service
-    return AgentRunner(runtime=runtime, store=store or InMemoryLifecycleStore()), service
+    runner = AgentRunner(runtime=runtime, store=store or InMemoryLifecycleStore())
+    runner.bind_maintenance(
+        MaintenanceCoordinator(idle_seconds=idle_seconds),
+        memory=MemoryMaintenanceBinding(
+            service=service, database_path=tmp_path / "memory.db", namespace="project"
+        ),
+    )
+    return runner, service
+
+
+async def _close_runner(runner: AgentRunner) -> None:
+    """测试宿主先关闭 runner，再排空自己的协调器。"""
+    await runner.aclose()
+    if runner._maintenance is not None:
+        await runner._maintenance.coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -108,7 +128,7 @@ async def test_no_mcp_registers_before_main_model_and_captures_terminal(
     assert episodes[0].episode.metadata["outcome"] == result.run.stop_reason.value
     assert service.store.list_capture_sources(runner.store.source_id, "project") == []
     assert result.run.usage.total_tokens == (0 if fails else 5)
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -138,7 +158,7 @@ async def test_waiting_capture_stays_open_and_cancel_seals_without_duplicate(
     record_ids = [record.id for progress in episodes for record in progress.episode.records]
     assert len(record_ids) == len(set(record_ids))
     assert episodes[-1].episode.metadata["outcome"] == "cancelled"
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -165,7 +185,7 @@ async def test_resume_keeps_one_source_and_captures_only_suffix(tmp_path: Path) 
     ids = [record.id for progress in episodes for record in progress.episode.records]
     assert len(ids) == len(set(ids))
     assert service.store.list_capture_sources(runner.store.source_id, "project") == []
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 def test_capture_excludes_bci_and_memory_readback_but_keeps_write_targets() -> None:
@@ -229,7 +249,7 @@ def test_capture_excludes_bci_and_memory_readback_but_keeps_write_targets() -> N
     assert json.loads(records[4].text) == {"item": {"id": "new", "text": "项目使用 uv"}}
 
 
-def test_child_does_not_install_automatic_memory_maintenance(tmp_path: Path) -> None:
+def test_child_does_not_install_automatic_maintenance(tmp_path: Path) -> None:
     """Child 范围明确禁用自动生成，独立的显式读写服务继续可用。"""
     runtime = build_runtime(tmp_path, provider=StaticProvider())
     runtime.environment.execution_scope = RuntimeExecutionScope.CHILD
@@ -246,7 +266,7 @@ def test_child_does_not_install_automatic_memory_maintenance(tmp_path: Path) -> 
     )
     runtime.environment.memory_service = MemoryService(SQLiteMemoryStore(tmp_path / "child.db"))
     runner = AgentRunner(runtime=runtime, store=InMemoryLifecycleStore())
-    assert runner._memory_maintenance is None
+    assert runner._maintenance is None
     assert runtime.environment.memory_capture_port is None
 
 
@@ -285,7 +305,7 @@ async def test_recovery_terminal_without_activation_seals_memory_source(
     with pytest.raises(IrisRunPersistenceError):
         await first.start(AgentRunRequest(input="捕获恢复", run_id="crash"))
     crashed = store.load_run("crash")
-    await first.aclose()
+    await _close_runner(first)
     sources = service.store.list_capture_sources(store.source_id, "project")
     assert len(sources) == 1
     resumed, _ = _runner(
@@ -296,17 +316,22 @@ async def test_recovery_terminal_without_activation_seals_memory_source(
         RunStopReason.COMPLETED if disposition == "finalize" else RunStopReason.OUTCOME_UNKNOWN
     )
     assert service.store.list_capture_sources(store.source_id, "project") == []
-    await resumed.aclose()
+    await _close_runner(resumed)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("budget_changed", [False, True])
-async def test_prepare_reopens_only_changed_budget_blocked_input(
+async def test_automatic_cycle_reopens_only_changed_budget_blocked_input(
     tmp_path: Path,
     budget_changed: bool,
 ) -> None:
-    """只有 blocked 输入时也在装配准备重评预算变化，原预算保持 blocked。"""
-    runner, service = _runner(tmp_path, StaticProvider())
+    """预算变化由持锁的领域周期处理，准备阶段不写生成状态。"""
+    runner, service = _runner(tmp_path, StaticProvider(), idle_seconds=0)
+    generation = BlockingProvider()
+    service.generation_provider = generation
+    service.overview_provider = StaticProvider(
+        text_response('{"core_facts":"项目使用 uv","knowledge_scope":"项目约定"}')
+    )
     item = service.remember(MemoryWriteInput(text="项目使用 uv", reason="项目约定"))
     snapshot = service.store.read_dream_snapshot("project")
     budget = service.generation_config.dream_input_budget_tokens
@@ -317,10 +342,14 @@ async def test_prepare_reopens_only_changed_budget_blocked_input(
         dependency_item_ids=[item.id],
     )
     await runner.aprepare()
+    if budget_changed:
+        await asyncio.wait_for(generation.started.wait(), 2)
+    else:
+        await asyncio.sleep(0.05)
     state = service.generation_state("project")
     assert state.pending_changes == int(budget_changed)
     assert state.blocked_changes == int(not budget_changed)
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -328,7 +357,7 @@ async def test_long_active_run_blocks_generation_past_idle(tmp_path: Path) -> No
     """真实 runner 的完整调用范围覆盖长期 provider 等待，不能仅依据最近输入时间。"""
     provider = BlockingProvider()
     runner, service = _runner(tmp_path, provider)
-    service.generation_config = service.generation_config.model_copy(update={"idle_seconds": 0.01})
+    runner._maintenance.coordinator.idle_seconds = 0.01
     service.observe(MemoryObserveInput(text="已有待处理经历"))
     running = asyncio.create_task(runner.start(AgentRunRequest(input="等待主任务")))
     await asyncio.wait_for(provider.started.wait(), 1)
@@ -336,7 +365,7 @@ async def test_long_active_run_blocks_generation_past_idle(tmp_path: Path) -> No
     assert service.generation_provider.requests == []
     provider.release.set()
     await running
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -360,7 +389,7 @@ async def test_capture_failure_does_not_change_run_result_and_close_retries(
         service.store.list_capture_sources(runner.store.source_id, "project")[0].captured_until == 0
     )
     monkeypatch.setattr(service.store, "commit_capture", commit)
-    await runner.aclose()
+    await _close_runner(runner)
     assert service.store.list_capture_sources(runner.store.source_id, "project") == []
     assert len(service.store.list_pending_episodes("project")) == 1
 
@@ -392,7 +421,7 @@ async def test_prepare_recovers_terminal_capture_without_later_session_messages(
     records = service.store.list_pending_episodes("project")[0].episode.records
     assert [record.text for record in records] == ["旧输入", "旧结果"]
     assert service.store.list_capture_sources(store.source_id, "project") == []
-    await restarted.aclose()
+    await _close_runner(restarted)
 
 
 @pytest.mark.asyncio
@@ -402,7 +431,7 @@ async def test_external_service_revision_during_overview_schedules_republication
 ) -> None:
     """共享库的独立服务没有本地通知，陈旧概览仍留下一次发布工作。"""
     runner, service = _runner(tmp_path, StaticProvider())
-    service.generation_config = service.generation_config.model_copy(update={"idle_seconds": 0.01})
+    runner._maintenance.coordinator.idle_seconds = 0.01
     item = service.remember(MemoryWriteInput(text="旧事实", reason="初始化"))
 
     def consume_explicit(target: MemoryService) -> None:
@@ -444,7 +473,7 @@ async def test_external_service_revision_during_overview_schedules_republication
     assert len(provider.requests) == 2
     assert service.generation_provider.requests == []
     assert service.generation_state("project").overview_revision == 2
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -474,7 +503,7 @@ async def test_sqlite_restart_captures_terminal_tail_once(tmp_path: Path) -> Non
     )
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert memory_store.list_pending_episodes("project") == []
-    await original.aclose()
+    await _close_runner(original)
 
     reopened_store = SQLiteStore(lifecycle_path)
     assert reopened_store.source_id == first_store.source_id
@@ -485,14 +514,14 @@ async def test_sqlite_restart_captures_terminal_tail_once(tmp_path: Path) -> Non
     assert first_episode.metadata["outcome"] == "completed"
     assert memory.store.list_capture_sources(reopened_store.source_id, "project") == []
     await restarted.aprepare()
-    await restarted.aclose()
+    await _close_runner(restarted)
 
     again, memory_again = _runner(tmp_path, StaticProvider(), store=SQLiteStore(lifecycle_path))
     await again.aprepare()
     assert [entry.episode.id for entry in memory_again.store.list_pending_episodes("project")] == [
         first_episode.id
     ]
-    await again.aclose()
+    await _close_runner(again)
 
 
 @pytest.mark.parametrize(
@@ -544,10 +573,10 @@ async def test_disabled_memory_ignores_incomplete_injected_generation_service(
         memory_service=service,
     )
     assert runner.runtime.environment.memory_service is None
-    assert runner._memory_maintenance is None
+    assert runner._maintenance is None
     await runner.aprepare()
     await runner.start(AgentRunRequest(input="正常聊天"))
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -613,7 +642,7 @@ async def test_root_run_idle_generation_publishes_memory_without_refreshing_old_
         mirror=FileMemoryMirror(tmp_path / "mirror", workspace_root=tmp_path),
         generation_provider=background_provider,
         generation_model="generation",
-        generation_config=MemoryGenerationConfig(idle_seconds=0.01),
+        generation_config=MemoryGenerationConfig(),
         overview_provider=background_provider,
         overview_model="overview",
     )
@@ -625,6 +654,7 @@ async def test_root_run_idle_generation_publishes_memory_without_refreshing_old_
         main_provider,
         service=service,
         store=SQLiteStore(tmp_path / "lifecycle.db"),
+        idle_seconds=0.01,
     )
     published = asyncio.Event()
     refresh = service.refresh_overview
@@ -658,7 +688,7 @@ async def test_root_run_idle_generation_publishes_memory_without_refreshing_old_
     await runner.start(AgentRunRequest(input="新会话", session_id="fresh", run_id="fresh"))
     assert "本项目使用 uv" in main_provider.requests[2].messages[0].text
     assert runner.store.load_session("fresh").context_window.sources[0].source_revision == 1
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -676,7 +706,7 @@ async def test_waiting_activation_cleanup_finishes_before_idle_generation(
         StaticProvider(tool_response(ToolUseBlock(id="write", name="write"))),
         registry=registry,
     )
-    service.generation_config = service.generation_config.model_copy(update={"idle_seconds": 0.01})
+    runner._maintenance.coordinator.idle_seconds = 0.01
     service.observe(MemoryObserveInput(text="已有材料"))
     generation_started = asyncio.Event()
 
@@ -710,7 +740,7 @@ async def test_waiting_activation_cleanup_finishes_before_idle_generation(
     await running
     assert not runner._active
     await asyncio.wait_for(generation_started.wait(), 1)
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
@@ -734,16 +764,14 @@ async def test_managed_follow_up_has_priority_over_idle_generation(
             return text_response()
 
     runner, service = _runner(tmp_path, MainProvider())
-    service.generation_config = service.generation_config.model_copy(
-        update={"idle_seconds": idle_seconds}
-    )
+    runner._maintenance.coordinator.idle_seconds = idle_seconds
     service.observe(MemoryObserveInput(text="已有材料"))
     generation_started = asyncio.Event()
 
     class FlushProvider(StaticProvider):
         async def complete(self, request: LLMRequest) -> LLMResponse:
             self.requests.append(request)
-            timeline.append(f"flush-foreground-{runner._memory_maintenance._foreground}")
+            timeline.append(f"flush-foreground-{runner._maintenance._foreground}")
             generation_started.set()
             return text_response('{"observations": []}')
 
@@ -763,18 +791,18 @@ async def test_managed_follow_up_has_priority_over_idle_generation(
     await asyncio.wait_for(generation_started.wait(), 1)
     assert runner.store.load_result(follow_up.run_id).run.stop_reason is RunStopReason.COMPLETED
     await manager.close()
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
-async def test_follow_up_admission_failure_releases_memory_handoff(
+async def test_follow_up_admission_failure_releases_maintenance_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """后继create失败后释放交接凭证，已捕获材料仍能进入空闲维护。"""
     main = BlockingProvider()
     runner, service = _runner(tmp_path, main)
-    service.generation_config = service.generation_config.model_copy(update={"idle_seconds": 0})
+    runner._maintenance.coordinator.idle_seconds = 0
     create = runner.store.create_run
 
     def fail_follow_up(command: CreateRun) -> RunCommit:
@@ -799,14 +827,14 @@ async def test_follow_up_admission_failure_releases_memory_handoff(
     main.release.set()
     await asyncio.wait_for(generated.wait(), 1)
     assert runner.store.load_run(follow_up.run_id) is None
-    assert manager._memory_handoffs == set()
-    assert not runner._memory_maintenance.foreground_active
+    assert manager._maintenance_handoffs == set()
+    assert not runner._maintenance.foreground_active
     await manager.close()
-    await runner.aclose()
+    await _close_runner(runner)
 
 
 @pytest.mark.asyncio
-async def test_manager_close_releases_ready_follow_up_memory_handoff(
+async def test_manager_close_releases_ready_follow_up_maintenance_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -829,12 +857,12 @@ async def test_manager_close_releases_ready_follow_up_memory_handoff(
     follow_up = await manager.submit("不再启动的后继", mode="follow_up")
     main.release.set()
     await asyncio.wait_for(cleanup_started.wait(), 1)
-    assert manager._memory_handoffs == {follow_up.run_id}
+    assert manager._maintenance_handoffs == {follow_up.run_id}
     closing = asyncio.create_task(manager.close(cancel_run=True))
     await asyncio.sleep(0)
-    assert manager._memory_handoffs == set()
+    assert manager._maintenance_handoffs == set()
     assert runner.store.load_run(follow_up.run_id) is None
     cleanup_release.set()
     await asyncio.wait_for(closing, 1)
-    assert not runner._memory_maintenance.foreground_active
-    await runner.aclose()
+    assert not runner._maintenance.foreground_active
+    await _close_runner(runner)

@@ -129,7 +129,8 @@ Flush/dream 请求使用 `temperature=0` 和 `response_format={"type": "json_obj
 `MemoryEvidenceRef` 指向 Episode 内的记录片段或真实显式写入事件。Item 的 `evidence` 表示
 当前正文的支持依据；Observation 的处理结果与 MemoryEvent 保留历史解释。显式修改正文时，
 本次写入事件及本次明确提供的证据替换旧的当前支持；仅改分类或 metadata 时保留原支持。
-写工具记录真实 Agent 和 call ID，不将 Agent 写入声明标为用户确认。
+写工具以既有 `source_id` 保存 `[lifecycle_source_id, run_id, call_id]` 的紧凑 JSON，
+完整区分跨来源、跨 Run 的同名调用；不将 Agent 写入声明标为用户确认。
 
 部分更新中，省略字段表示不修改，artifacts / metadata 用 `[]` / `{}` 清空；所有 patch 字段
 不接受显式 `null`。更新和软删除在读取当前条目前取得 `BEGIN IMMEDIATE` 写锁；正文、当前
@@ -155,19 +156,32 @@ memory:
   write_namespace: project
   generation:
     enabled: true
-    idle_seconds: 300
+maintenance:
+  idle_seconds: 300
 ```
 
 `generation.enabled` 默认 false。配置构造的服务复用 Agent 已解析的 provider/model，
 无需另一套凭据。注入服务保留自己的生成依赖和预算；自动运行要求 generation provider/model、
 overview provider/model 和 mirror 均已绑定，否则构造 runner 时报告 `IrisConfigError`。
 
-`AgentRunner` 为 root run 管理唯一后台维护任务。admission 成功后、第一条新原文提交前登记
-来源；真实压缩和运行边界捕获新增已提交消息。持续运行的 activation 或 admission 会阻止模型维护；
-它们全部退出且安静达到 `idle_seconds` 后，处理观察、flush 新经历、dreaming 并发布概览。
-新前台输入取消未提交的生成；已经派发的短数据库提交完整收口。`aclose()` 补捕获并等待真实 IO
-完成，保留未处理材料供下次启动。没有轮询、外部 cron 或独立 daemon。
+宿主创建一个共享 `MaintenanceCoordinator`，显式把各 root runner 的 lifecycle reader 与
+`MemoryMaintenanceBinding` 绑定；工厂不创建私人维护器。统一 `maintenance.idle_seconds`
+默认 300 秒，允许 0；旧 `memory.generation.idle_seconds` 已删除。完整接线见
+[harness README](../harness/README.md)。未绑定的自动维护 runner 在首次运行时报配置错误。
 
+admission 成功后登记来源，真实压缩与运行边界只捕获原文。自动学习仅选已结束且完整捕获的
+Run；当前 WAITING 的会话连同其旧材料暂不维护，其他会话正常推进。工具写入通过已有
+完整调用身份与捕获记录关联，缺来源字段或未关联的变更保持 pending；
+没有 Run 的显式 SDK 内容保持原语义。
+`list_pending_sources()` 提供材料来源；宿主给 `MemoryMaintenanceScope` 的允许集合及异步
+资格检查。Memory 在查询层先过滤后限量，并在模型前及每次消费/阻塞提交前重查实际来源。
+范围只限制待消费输入，已发布知识仍可用于比较、投影和概览。
+
+协调器在安静期后持对应数据库/namespace 的跨进程 OS 锁，调用
+`maintain_cycle(namespace, scope=...)`：已有观察或变更优先 dream，否则 flush 后 dream，
+最后修复必要投影与概览。每轮有界，返回是否仍有合格积压；生成失败保留输入。
+新前台取消尚未提交的生成但不等待模型；锁和维护位置保留到真实同步作业结束。
+runner 关闭只解除自身绑定并补捕获，宿主先关闭协调器再关闭共享资源，不在 close 生成。
 自动维护为 THREAD 服务持有独立的单线程 worker，只有维护 task 的同步工作进入该队列：
 后台 IO、提示词模板渲染、flush 选材、dream/overview 请求构造、token 估算和响应解析。前台读写、来源登记和
 Capture 仍走原执行路径，不排在后台计算后面；独立 SDK 调用也不隐式创建维护 worker。
@@ -179,7 +193,7 @@ Capture 每页最多 128 条消息，页间让出事件循环；游标到达完�
 专用 worker 隔离后台队列，不消除数据库锁和 CPU 竞争，也不承诺前台零额外延迟。
 
 SQLite lifecycle 用持久 source UUID 和本 run 消息范围补捕获，fork 继承前缀不重新学习；
-InMemory lifecycle 只能恢复已写入 memory 库的材料。child 不自动收集内部轨迹，仍可读取和显式写入。
+InMemory lifecycle 重启后缺少来源 reader 时，已捕获材料保留 pending，不自动消费；跨重启继续维护使用 SQLite lifecycle。child 不自动收集内部轨迹，仍可读取和显式写入。
 BCI、reasoning 和记忆读回正文不作为新证据；观察引用具体原文记录及半开字符区间。
 自动采集的 Episode 以顶层 `source_id` 保存 run ID，metadata 保存 lifecycle 来源 ID；
 待处理经历读取用这两个字段关联来源的最终 outcome。
@@ -440,7 +454,7 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 ## 限制与非目标
 
 - 不提供向量数据库、embedding、语义 reranker 或远程后端。
-- InMemory lifecycle 退出后无法补读未捕获原文；已经捕获的 Episode 仍可由持久 memory store 恢复。
+- InMemory lifecycle 退出后无法补读原文或证明旧材料资格；已捕获材料保留 pending，自动续作需要 SQLite lifecycle。
 - namespace 只是库内分组，不另建空间管理服务；不同项目不混在同一个库中。
 
 ## 维护与验证

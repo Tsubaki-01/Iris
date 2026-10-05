@@ -26,7 +26,13 @@ from ..utils import TemplateRenderer
 from ._generation_worker import generation_worker
 from .files import MemoryFileAccess, freshness_warning
 from .generation import before_generation_commit, dream, flush, raise_if_generation_cancelled
-from .generation_models import GenerationResult, GenerationState, MemoryGenerationConfig
+from .generation_models import (
+    GenerationResult,
+    GenerationState,
+    MemoryGenerationConfig,
+    MemoryMaintenanceScope,
+    MemorySource,
+)
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
@@ -164,25 +170,90 @@ class MemoryService:
             except Exception:
                 logger.warning("memory 维护通知失败 namespace=%s", namespace, exc_info=True)
 
-    def generation_state(self, namespace: str) -> GenerationState:
+    def list_pending_sources(self, namespace: str) -> tuple[MemorySource, ...]:
+        """向宿主提供待消费材料的来源，生命周期资格由宿主判断。"""
+        return self.store.list_pending_sources(namespace)
+
+    async def alist_pending_sources(self, namespace: str) -> tuple[MemorySource, ...]:
+        """在一次 IO 中读取自动维护来源投影。"""
+        return await self.run_async_io(lambda: self.list_pending_sources(namespace))
+
+    def generation_state(
+        self, namespace: str, *, scope: MemoryMaintenanceScope | None = None
+    ) -> GenerationState:
         """读取生成积压、受阻输入及最近阶段结果。"""
-        state = self.store.generation_state(namespace)
+        state = self.store.generation_state(
+            namespace, allowed_sources=None if scope is None else scope.allowed_sources
+        )
         if self.mirror is None:
             return state
         overview = self.mirror.read_overview(namespace)
         return replace(state, overview_revision=overview[0] if overview is not None else None)
 
-    async def ageneration_state(self, namespace: str) -> GenerationState:
+    async def ageneration_state(
+        self, namespace: str, *, scope: MemoryMaintenanceScope | None = None
+    ) -> GenerationState:
         """在一次 IO 内读取生成状态。"""
-        return await self.run_async_io(lambda: self.generation_state(namespace))
+        return await self.run_async_io(lambda: self.generation_state(namespace, scope=scope))
 
-    async def flush(self, namespace: str) -> GenerationResult:
+    async def flush(
+        self, namespace: str, *, scope: MemoryMaintenanceScope | None = None
+    ) -> GenerationResult:
         """从已捕获经历提炼一批观察；正式知识在 dreaming 后才可读取。"""
-        return await flush(self, namespace)
+        return await flush(self, namespace, scope=scope)
 
-    async def dream(self, namespace: str, *, retry_blocked: bool = False) -> GenerationResult:
+    async def dream(
+        self,
+        namespace: str,
+        *,
+        retry_blocked: bool = False,
+        scope: MemoryMaintenanceScope | None = None,
+    ) -> GenerationResult:
         """将一批观察和显式修改原子整理到正式知识，不隐式执行 flush。"""
-        return await dream(self, namespace, retry_blocked=retry_blocked)
+        return await dream(self, namespace, retry_blocked=retry_blocked, scope=scope)
+
+    async def maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> bool:
+        """执行一轮有界学习与投影修复，返回本范围是否仍有可执行积压。"""
+        await self.run_async_io(
+            lambda: self.store.retry_blocked(
+                namespace,
+                budget=self.generation_config.dream_input_budget_tokens,
+                allowed_sources=scope.allowed_sources,
+            )
+        )
+        state = await self.ageneration_state(namespace, scope=scope)
+        if state.pending_observations or state.pending_changes:
+            result = await self.dream(namespace, scope=scope)
+            if result.status in {"failed", "cancelled", "conflict"}:
+                return False
+        elif state.pending_episodes:
+            result = await self.flush(namespace, scope=scope)
+            if result.status in {"failed", "cancelled", "conflict"}:
+                return False
+            state = await self.ageneration_state(namespace, scope=scope)
+            if state.pending_observations or state.pending_changes:
+                result = await self.dream(namespace, scope=scope)
+                if result.status in {"failed", "cancelled", "conflict"}:
+                    return False
+        state = await self.ageneration_state(namespace, scope=scope)
+        if self.mirror is not None:
+            if state.projection_revision != state.item_revision:
+                await self.run_async_io(
+                    lambda: self.mirror.rebuild_from_store(self.store, namespace)
+                )
+            if state.item_revision and state.overview_revision != state.item_revision:
+                await self.refresh_overview(namespace)
+        state = await self.ageneration_state(namespace, scope=scope)
+        return bool(
+            state.pending_episodes
+            or state.pending_observations
+            or state.pending_changes
+            or (
+                self.mirror is not None
+                and state.item_revision
+                and state.overview_revision != state.item_revision
+            )
+        )
 
     # endregion
 

@@ -123,6 +123,7 @@ model: openai/gpt-4o-mini
 - `compaction`: 默认构造的 `CompactionConfig`，声明自动压缩的预算、超时与摘要指令文件。
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
+- `maintenance`: 宿主共享维护的 `idle_seconds`，默认 300 秒，允许 0；不属于 Memory 生成预算。
 - `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
 - `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单的 SDK 读取与每步动态投影；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
 - `speech`: 复用 `iris.speech.SpeechConfig`，默认关闭；启用时声明 adapter、endpoint 和语音 model。宿主通过 `create_speech_client(config.speech)` 装配转录客户端，Runner 不自动录音或连接。豆包与阿里完整 YAML、专属凭据和最终文字提交见 [语音 SDK](../speech/README.md)。
@@ -328,6 +329,25 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 
 开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。静态
 `context.yaml` memory 与已有历史不受关闭影响；`include_tools=False` 仍控制当次请求是否包含工具定义。
+
+### `MaintenanceConfig`
+
+```yaml
+maintenance:
+  idle_seconds: 300
+memory:
+  enabled: true
+  generation:
+    enabled: true
+```
+
+`maintenance.idle_seconds` 是唯一的空闲计时入口，`memory.generation` 不接受计时字段。
+CLI 自动创建并绑定宿主协调器；SDK 宿主须在首次 prepare/run 前显式绑定
+`MaintenanceCoordinator` 和 `MemoryMaintenanceBinding`，多个 runner 借用同一协调器。
+见 [harness](../harness/README.md) 的装配与关闭示例。
+
+自动维护只消费已结束且捕获完整的 Run，WAITING 仅排除该会话的未处理材料。
+纯内存 lifecycle 重启丢失来源状态后保留 pending；跨重启自动继续维护需使用 SQLite lifecycle。
 
 ### `ModelConfig`
 

@@ -9,11 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from iris.harness._memory_maintenance import MemoryMaintenance
 from iris.memory import MemoryIOExecutionMode, MemoryService, SQLiteMemoryStore
 from iris.memory._generation_worker import GenerationWorker
-from iris.memory.generation_models import GenerationState
-from iris.store import InMemoryLifecycleStore
 
 
 @pytest.mark.asyncio
@@ -49,52 +46,47 @@ async def test_background_worker_does_not_use_saturated_default_executor(tmp_pat
 
 @pytest.mark.asyncio
 async def test_cancelled_background_read_delays_next_cycle_but_not_foreground_io(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """旧同步读取仍运行时不排新维护；前台 IO 和关闭保持各自生命周期。"""
     service = MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"),
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
-    service.generation_config = service.generation_config.model_copy(update={"idle_seconds": 0})
-    maintenance = MemoryMaintenance(
-        service=service, namespace="project", lifecycle_store=InMemoryLifecycleStore()
-    )
+    worker = GenerationWorker(on_idle=lambda: None)
     loop = asyncio.get_running_loop()
     started = asyncio.Event()
     release = threading.Event()
-    original = service.store.generation_state
-    calls = 0
 
-    def slow_state(namespace: str) -> GenerationState:
-        nonlocal calls
-        calls += 1
+    def slow_state() -> int:
         loop.call_soon_threadsafe(started.set)
         assert release.wait(5)
-        return original(namespace)
+        return threading.get_ident()
 
-    monkeypatch.setattr(service.store, "generation_state", slow_state)
+    async def read() -> int:
+        with worker.bind():
+            return await service.run_async_io(slow_state)
+
+    task = asyncio.create_task(read())
     try:
-        await maintenance.prepare()
         await asyncio.wait_for(started.wait(), 2)
-        maintenance.foreground_enter()
-        task = maintenance._task
-        assert task is not None
+        worker.cancel()
+        task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        assert worker.busy
         foreground_thread = await asyncio.wait_for(service.run_async_io(threading.get_ident), 1)
         assert foreground_thread != threading.get_ident()
-        maintenance.foreground_exit()
-        await asyncio.sleep(0)
-        assert calls == 1
-        assert maintenance._task is None and maintenance._timer is None
-        closing = asyncio.create_task(maintenance.aclose())
+        closing = asyncio.create_task(worker.wait_idle())
         await asyncio.sleep(0)
         assert not closing.done()
         release.set()
         await asyncio.wait_for(closing, 2)
+        assert not worker.busy
+        with worker.bind():
+            assert await service.run_async_io(lambda: 42) == 42
     finally:
         release.set()
-        await maintenance.aclose()
+        await worker.aclose()
 
 
 @pytest.mark.asyncio

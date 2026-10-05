@@ -69,15 +69,20 @@ Docker 命令服务内部拥有 [`DockerSandbox`](../sandbox/README.md) 资源�
 即使传入 `memory_service` 也不挂载；开启时优先复用注入对象，否则将同一 provider、
 `model.name`、`memory.overview` 与 `memory.generation` 配置绑定到新建的 SQLite service。
 有效服务自动提供 Search/Fetch，写工具仍显式配置。构造过程不调用模型；宿主可以显式调用
-`refresh_overview()`，开启自动 generation 的 root runner 也会在空闲时生成。注入服务保留自己的
+`refresh_overview()`；开启自动 generation 的 root runner 须显式绑定宿主维护协调器，由它统一安排空闲生成。注入服务保留自己的
 生成依赖。开关在构建时确定，改配置后重建 Agent 并使用新会话。
 
-`RuntimeEnvironment.execution_scope` 明确保留 ROOT/CHILD，自动维护由 root harness 独占。
+`RuntimeEnvironment.execution_scope` 明确保留 ROOT/CHILD，child 不注册自动维护。
+多个 root runner 共享宿主创建的 `MaintenanceCoordinator`；runtime 不创建或持有调度器。
 Runtime 只在 `_compact_request()` 已经选出实际压缩范围后，通过可选
 `RuntimeMemoryCapturePort.request_capture(run_id, through_count)` 通知已提交原文范围。
 普通请求与没有可压缩前缀的早退不会提示；该同步端口不等待 IO 或记忆模型，不改变
 `RuntimeCommitPort` 的持久运行事实职责。后台 capture/flush/dream 和关闭均由 harness 管理，
 当前压缩无需等待新记忆，成功后仍只采用当时已经发布的概览。
+
+Runner 把 lifecycle `source_id` 交给 ToolBridge，后者只将该值放入已有工具 metadata，
+不查询 lifecycle。Memory 写工具以来源、Run 与 call ID 的组合标识事件，避免不同会话
+或独立 lifecycle store 的同名调用被误关联；未绑定来源的低层调用不自动冒充已捕获 Run。
 
 ## 依赖方向
 

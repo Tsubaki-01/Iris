@@ -9,7 +9,12 @@ import pytest
 
 from iris.exceptions import IrisRunPersistenceError
 from iris.goal.models import GoalAdmission, GoalRef
-from iris.harness import AgentRunner, SessionManager
+from iris.harness import (
+    AgentRunner,
+    MaintenanceCoordinator,
+    MemoryMaintenanceBinding,
+    SessionManager,
+)
 from iris.harness.runner import ActiveActivation
 from iris.lifecycle import RunCommit, RunEventKind, RunPhase
 from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
@@ -79,7 +84,7 @@ def _runner(
     """沿用 memory capture 的真实服务装配，额外开启 Goal。"""
     store = InMemoryLifecycleStore()
     main, generation = _Main(store), _Generation()
-    settings = MemoryGenerationConfig(enabled=True, idle_seconds=idle_seconds)
+    settings = MemoryGenerationConfig(enabled=True)
     memory = MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"),
         mirror=FileMemoryMirror(tmp_path / "mirror", workspace_root=tmp_path),
@@ -96,6 +101,12 @@ def _runner(
         }
     )
     runner = AgentRunner.from_config(config, provider=main, store=store, memory_service=memory)
+    runner.bind_maintenance(
+        MaintenanceCoordinator(idle_seconds=idle_seconds),
+        memory=MemoryMaintenanceBinding(
+            service=memory, database_path=tmp_path / "memory.db", namespace="project"
+        ),
+    )
     memory.observe(MemoryObserveInput(text="已有待整理材料"))
     return runner, main, generation
 
@@ -126,6 +137,7 @@ async def _close(
         event.set()
     await asyncio.wait_for(manager.close(cancel_run=cancel_run), 5)
     await runner.aclose()
+    await runner._maintenance.coordinator.aclose()
 
 
 @pytest.mark.asyncio
@@ -156,8 +168,8 @@ async def test_continuous_goal_handoff_is_single_and_waits_for_activation_starte
         await asyncio.wait_for(cleanup.wait(), 5)
         candidate = manager._goal_control.driver.intent
         assert candidate is not None
-        assert manager._memory_handoffs == {candidate.run_id}
-        before = runner._memory_maintenance._foreground
+        assert manager._maintenance_handoffs == {candidate.run_id}
+        before = runner._maintenance._foreground
         terminal = next(
             event
             for event in runner.store.list_events(candidate.source_run_id)
@@ -166,29 +178,29 @@ async def test_continuous_goal_handoff_is_single_and_waits_for_activation_starte
         manager._relay_run_event(terminal)
         manager._relay_run_event(terminal)
         assert manager._goal_control.driver.intent is candidate
-        assert runner._memory_maintenance._foreground == before == 2
+        assert runner._maintenance._foreground == before == 2
         await asyncio.sleep(0.03)
         assert runner.store.load_run(candidate.run_id) is None
         release_cleanup.set()
         await asyncio.wait_for(registered.wait(), 5)
         assert runner.store.get_goal_run(candidate.run_id).round_no == 2
         assert manager._goal_control.driver.intent is None
-        assert manager._memory_handoffs == {candidate.run_id}
-        assert runner._memory_maintenance._foreground == 2
+        assert manager._maintenance_handoffs == {candidate.run_id}
+        assert runner._maintenance._foreground == 2
         await asyncio.sleep(0.03)
         assert generation.requests == []
         release_registration.set()
         await asyncio.wait_for(main.entered[1].wait(), 5)
         await asyncio.sleep(0.03)
-        assert manager._memory_handoffs == set()
-        assert runner._memory_maintenance._foreground == 1
+        assert manager._maintenance_handoffs == set()
+        assert runner._maintenance._foreground == 1
         assert generation.requests == []
         main.release[1].set()
         completed = await goal_state(manager.events(), "completed")
         assert completed.goal.rounds_started == 2
         await asyncio.wait_for(generation.started.wait(), 5)
-        assert manager._memory_handoffs == set()
-        assert not runner._memory_maintenance.foreground_active
+        assert manager._maintenance_handoffs == set()
+        assert not runner._maintenance.foreground_active
     finally:
         release_cleanup.set()
         release_registration.set()
@@ -212,7 +224,7 @@ async def test_stopping_goal_candidate_releases_only_temporary_foreground(
         main.release[0].set()
         await asyncio.wait_for(cleanup.wait(), 5)
         candidate = manager._goal_control.driver.intent
-        assert candidate is not None and manager._memory_handoffs == {candidate.run_id}
+        assert candidate is not None and manager._maintenance_handoffs == {candidate.run_id}
         if control == "close":
             closing = asyncio.create_task(manager.close(cancel_run=True))
             await asyncio.sleep(0)
@@ -220,9 +232,9 @@ async def test_stopping_goal_candidate_releases_only_temporary_foreground(
             await manager.goal.pause(reason="用户暂停")
         else:
             await manager.goal.complete(reason="用户验收")
-        assert manager._memory_handoffs == set()
+        assert manager._maintenance_handoffs == set()
         if control != "close":
-            assert runner._memory_maintenance._foreground == 1
+            assert runner._maintenance._foreground == 1
         assert runner.store.load_run(candidate.run_id) is None
         release_cleanup.set()
         if closing is not None:
@@ -230,7 +242,7 @@ async def test_stopping_goal_candidate_releases_only_temporary_foreground(
         await asyncio.wait_for(generation.started.wait(), 5)
         assert runner.store.get_goal(created.view.goal.goal_id).rounds_started == 1
         assert len(main.requests) == 1
-        assert not runner._memory_maintenance.foreground_active
+        assert not runner._maintenance.foreground_active
     finally:
         release_cleanup.set()
         await _close(manager, runner, main)
@@ -246,12 +258,12 @@ async def test_goal_pause_does_not_release_user_follow_up_handoff(
         created = await manager.goal.create("用户仍可排队", max_rounds=3)
         await asyncio.wait_for(main.entered[0].wait(), 5)
         follow_up = await manager.submit("优先处理用户后继", mode="follow_up")
-        manager._reserve_memory_handoff(follow_up.run_id)
-        assert manager._memory_handoffs == {follow_up.run_id}
+        manager._reserve_maintenance_handoff(follow_up.run_id)
+        assert manager._maintenance_handoffs == {follow_up.run_id}
         assert manager._goal_control.driver.intent is None
         await manager.goal.pause(reason="暂停目标，保留用户输入")
-        assert manager._memory_handoffs == {follow_up.run_id}
-        assert runner._memory_maintenance._foreground == 2
+        assert manager._maintenance_handoffs == {follow_up.run_id}
+        assert runner._maintenance._foreground == 2
         main.release[0].set()
         await asyncio.wait_for(main.entered[1].wait(), 5)
         assert runner.store.get_goal_run(follow_up.run_id) is None
@@ -260,7 +272,7 @@ async def test_goal_pause_does_not_release_user_follow_up_handoff(
         main.release[1].set()
         await asyncio.wait_for(generation.started.wait(), 5)
         assert runner.store.get_goal(created.view.goal.goal_id).rounds_started == 1
-        assert manager._memory_handoffs == set()
+        assert manager._maintenance_handoffs == set()
     finally:
         await _close(manager, runner, main)
 
@@ -294,8 +306,8 @@ async def test_goal_successor_failure_releases_handoff_without_refunding_admissi
         await asyncio.wait_for(main.entered[0].wait(), 5)
         main.release[0].set()
         await asyncio.wait_for(generation.started.wait(), 5)
-        assert manager._memory_handoffs == set()
-        assert not runner._memory_maintenance.foreground_active
+        assert manager._maintenance_handoffs == set()
+        assert not runner._maintenance.foreground_active
         view = await manager.goal.get()
         assert view.driver_error is not None and not view.armed
         expected_rounds = 2 if after_admission else 1
@@ -321,8 +333,8 @@ async def test_tracker_backpressure_releases_handoff_and_allows_idle_memory(tmp_
         await asyncio.wait_for(main.entered[0].wait(), 5)
         main.release[0].set()
         await asyncio.wait_for(generation.started.wait(), 5)
-        assert manager._memory_handoffs == set()
-        assert not runner._memory_maintenance.foreground_active
+        assert manager._maintenance_handoffs == set()
+        assert not runner._maintenance.foreground_active
         assert (await manager.goal.get()).goal.rounds_started == 1
         assert len(main.requests) == 1
         completed = asyncio.create_task(goal_state(manager.events(), "completed"))

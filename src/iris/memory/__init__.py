@@ -10,6 +10,8 @@ from .generation_models import (
     GenerationResult,
     GenerationState,
     MemoryGenerationConfig,
+    MemoryMaintenanceScope,
+    MemorySource,
 )
 from .mirror import FileMemoryMirror
 from .models import (
@@ -64,6 +66,8 @@ __all__ = [
     "GenerationResult",
     "GenerationState",
     "MemoryGenerationConfig",
+    "MemoryMaintenanceScope",
+    "MemorySource",
     "FileMemoryMirror",
     "MemoryActor",
     "MemoryArtifactRef",
