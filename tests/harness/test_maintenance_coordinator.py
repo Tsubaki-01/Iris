@@ -99,12 +99,12 @@ async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
     observation.end_span(host)
     token = marker.set("memory-host-value")
     try:
-        with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
-            await coordinator.prepare()
-            assert trace.get_current_span() is host
-    finally:
-        marker.reset(token)
-    try:
+        try:
+            with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+                await coordinator.prepare()
+                assert trace.get_current_span() is host
+        finally:
+            marker.reset(token)
         await asyncio.wait_for(generated.wait(), 2)
     finally:
         await coordinator.aclose()
@@ -283,35 +283,44 @@ async def test_real_worker_drain_retains_slot_and_os_lock(
         service=service, database_path=tmp_path / "memory.db", namespace="project"
     )
     runner.bind_maintenance(coordinator, memory=binding)
-    await runner.aprepare()
-    assert await asyncio.to_thread(entered.wait, 2)
-    task = coordinator._task
-    result = await asyncio.wait_for(runner.start(AgentRunRequest(input="前台继续")), 2)
-    assert result.assistant_message is not None
-    assert coordinator._task is task and not task.done()
-    resource = runner._maintenance.resource
-    peer_lock = FileLock(resource.lock_path, timeout=0)
-    with pytest.raises(Timeout):
-        peer_lock.acquire()
-    await runner.aclose()
-    closing = asyncio.create_task(
-        coordinator.unbind_memory(binding) if remove_resource else coordinator.aclose()
-    )
-    await asyncio.sleep(0)
-    assert not closing.done()
-    assert not any(span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans())
-    with pytest.raises(Timeout):
-        peer_lock.acquire()
-    release.set()
-    await asyncio.wait_for(closing, 2)
-    with peer_lock:
-        assert not coordinator._worker.busy
-    cycle = next(
-        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
-    )
-    assert len(released_at) == 1 and cycle.end_time >= released_at[0]
-    assert cycle.attributes["iris.driver.outcome"] == "cancelled"
-    await coordinator.aclose()
+    closing: asyncio.Task[None] | None = None
+    try:
+        await runner.aprepare()
+        assert await asyncio.to_thread(entered.wait, 2)
+        task = coordinator._task
+        result = await asyncio.wait_for(runner.start(AgentRunRequest(input="前台继续")), 2)
+        assert result.assistant_message is not None
+        assert coordinator._task is task and not task.done()
+        resource = runner._maintenance.resource
+        peer_lock = FileLock(resource.lock_path, timeout=0)
+        with pytest.raises(Timeout):
+            peer_lock.acquire()
+        await runner.aclose()
+        closing = asyncio.create_task(
+            coordinator.unbind_memory(binding) if remove_resource else coordinator.aclose()
+        )
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert not any(
+            span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans()
+        )
+        with pytest.raises(Timeout):
+            peer_lock.acquire()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(closing), 2)
+        with peer_lock:
+            assert not coordinator._worker.busy
+        cycle = next(
+            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        )
+        assert len(released_at) == 1 and cycle.end_time >= released_at[0]
+        assert cycle.attributes["iris.driver.outcome"] == "cancelled"
+    finally:
+        release.set()
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
+        await runner.aclose()
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio

@@ -15,12 +15,13 @@ def _response() -> LLMResponse:
     return LLMResponse(provider="fake", content=[TextBlock(text="完成")])
 
 
-def test_factory_preserves_compaction_in_agent_config() -> None:
+def test_factory_preserves_compaction_in_agent_config(tmp_path: Path) -> None:
     config = AgentConfig.model_validate(
         {
             "name": "agent",
             "model": "openai/test",
             "system": "instructions",
+            "permissions": {"workspace": str(tmp_path)},
             "context_policy": {"enabled": False},
             "compaction": {"input_budget_tokens": 32000, "summary_ratio": 0.1},
         }
@@ -29,6 +30,7 @@ def test_factory_preserves_compaction_in_agent_config() -> None:
     runtime = RuntimeFactory.from_config(config, provider=FakeProvider([]))
 
     assert runtime.environment.agent_config is config
+    assert runtime.environment.workspace_root == tmp_path
     assert runtime.environment.agent_config.compaction == CompactionConfig(
         input_budget_tokens=32000, summary_ratio=0.1
     )

@@ -54,6 +54,7 @@ async def test_initial_memory_budget_includes_discovery_covered_by_summary(
     registry.register_function(lambda: "ok", name="lookup", description="检索", deferred=True)
     provider = Provider()
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(
             name="window-discovery",
             model="openai/test",
@@ -159,6 +160,7 @@ async def test_memory_allowance_cannot_use_body_savings_triggered_only_by_full_w
         memory={"overview": {"system_budget_ratio": 0.05}},
     )
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=config,
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="rules", content="rules")])

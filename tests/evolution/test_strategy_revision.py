@@ -454,11 +454,14 @@ async def test_revision_cancelled_after_commit_reports_original_result_once(
     with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
         task = asyncio.create_task(service.maintain_cycle(scope=scope))
         try:
-            await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1)
+            assert await asyncio.to_thread(entered.wait, 5)
             task.cancel()
+            release.set()
+            result = await task
         finally:
             release.set()
-        result = await task
+            await asyncio.gather(task, return_exceptions=True)
+            await service.wait_pending_io()
     assert result is committed[0]
     assert result.status == status and result.revision_id == item.id
     assert service.store.revision_result(item.id) is not None

@@ -29,10 +29,12 @@ from iris.observability.provider import observe_provider
 from iris.observability.service import Observability
 from iris.providers.protocols import streaming_provider_for
 
+pytestmark = pytest.mark.usefixtures("otel_test_environment")
+
 
 @pytest.fixture
 def telemetry() -> Iterator[tuple[Observability, InMemorySpanExporter, TracerProvider]]:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     service = Observability.from_config(
@@ -263,7 +265,6 @@ async def test_nonrecording_model_preserves_context_business_and_children(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, exporter, child_provider = telemetry
-    child_provider.sampler = ALWAYS_ON
     provider = TracerProvider(sampler=ALWAYS_OFF)
     service = Observability.from_config(
         AgentObservabilityConfig(enabled=True, capture_content=True),

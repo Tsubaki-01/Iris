@@ -10,13 +10,15 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, ALWAYS_ON
 from opentelemetry.trace import INVALID_SPAN, StatusCode
 
 from iris.exceptions import IrisCancellationRequestedError
 from iris.message import LLMRequest
 from iris.observability import AgentObservabilityConfig, ObservabilityExportConfig
 from iris.observability.service import Observability
+
+pytestmark = pytest.mark.usefixtures("otel_test_environment")
 
 
 def service(provider: TracerProvider, *, capture: bool = False) -> Observability:
@@ -28,7 +30,7 @@ def service(provider: TracerProvider, *, capture: bool = False) -> Observability
 
 
 def test_scope_restores_context_and_records_business_exception() -> None:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     obs = service(provider)
@@ -47,7 +49,7 @@ def test_scope_restores_context_and_records_business_exception() -> None:
 
 
 def test_disabled_does_not_change_host_context() -> None:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     obs = Observability.from_config(AgentObservabilityConfig(), ObservabilityExportConfig())
     with provider.get_tracer("host").start_as_current_span("host") as host:
         with obs.scope("off") as span, obs.bind({"iris.run.id": "off"}), obs.detached():
@@ -57,7 +59,7 @@ def test_disabled_does_not_change_host_context() -> None:
 
 
 def test_detached_clears_only_otel_and_bind_replaces_identity() -> None:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     obs = service(provider)
@@ -77,45 +79,59 @@ def test_detached_clears_only_otel_and_bind_replaces_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_borrowed_provider_is_never_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     obs = service(provider)
     shutdown = Mock()
+    flush = Mock()
     monkeypatch.setattr(provider, "shutdown", shutdown)
+    monkeypatch.setattr(provider, "force_flush", flush)
     await obs.aclose()
     shutdown.assert_not_called()
+    flush.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_owned_provider_shutdown_runs_off_loop_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-
-    monkeypatch.setattr(OTLPSpanExporter, "export", Mock())
+    exporter = InMemorySpanExporter()
+    create_exporter = Mock(return_value=exporter)
+    monkeypatch.setattr(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter", create_exporter
+    )
     before = trace.get_tracer_provider()
     obs = Observability.from_config(
         AgentObservabilityConfig(enabled=True),
         ObservabilityExportConfig(traces_endpoint="http://localhost:5000/v1/traces"),
     )
-    assert trace.get_tracer_provider() is before
-    sdk = obs._owned_provider
-    original = sdk.shutdown
-    threads: list[int] = []
+    try:
+        assert trace.get_tracer_provider() is before
+        sdk = obs._owned_provider
+        original = sdk.shutdown
+        threads: list[int] = []
 
-    def shutdown() -> None:
-        threads.append(threading.get_ident())
-        original()
+        def shutdown() -> None:
+            threads.append(threading.get_ident())
+            original()
 
-    monkeypatch.setattr(sdk, "shutdown", shutdown)
-    await obs.aclose()
-    await obs.aclose()
-    assert len(threads) == 1
-    assert threads[0] != threading.get_ident()
+        monkeypatch.setattr(sdk, "shutdown", shutdown)
+        with obs.scope("queued-before-close"):
+            pass
+        await obs.aclose()
+        await obs.aclose()
+        assert len(threads) == 1
+        assert threads[0] != threading.get_ident()
+        assert [span.name for span in exporter.get_finished_spans()] == ["queued-before-close"]
+        create_exporter.assert_called_once_with(
+            endpoint="http://localhost:5000/v1/traces", headers={}, timeout=5.0
+        )
+    finally:
+        await obs.aclose()
 
 
 @pytest.mark.asyncio
 async def test_shutdown_failure_keeps_original_business_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = TracerProvider(shutdown_on_exit=False)
+    provider = TracerProvider(sampler=ALWAYS_ON, shutdown_on_exit=False)
     original_shutdown = provider.shutdown
     obs = Observability(
         AgentObservabilityConfig(enabled=True),
@@ -143,7 +159,7 @@ def test_observation_failures_do_not_escape_or_leak_context(
 ) -> None:
     from iris.observability import content
 
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     obs = service(provider, capture=True)
     broken = Mock(side_effect=RuntimeError("telemetry"))
     original_context = trace.get_current_span()
@@ -174,7 +190,7 @@ def test_content_gate_skips_projection(
 ) -> None:
     from iris.observability import content
 
-    provider = TracerProvider() if recording else TracerProvider(sampler=ALWAYS_OFF)
+    provider = TracerProvider(sampler=ALWAYS_ON if recording else ALWAYS_OFF)
     obs = service(provider, capture=capture)
     project = Mock(side_effect=AssertionError("must not project"))
     monkeypatch.setattr(content, "request_attributes", project)
@@ -190,7 +206,7 @@ def test_content_gate_skips_projection(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cooperative", [False, True])
 async def test_cancelled_scope_propagates_without_error_status(cooperative: bool) -> None:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     obs = service(provider)

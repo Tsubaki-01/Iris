@@ -11,6 +11,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace import StatusCode
 
 from iris.exceptions import IrisProviderError
@@ -32,10 +33,12 @@ from iris.observability.provider import observe_provider
 from iris.observability.service import Observability
 from iris.providers.protocols import streaming_provider_for
 
+pytestmark = pytest.mark.usefixtures("otel_test_environment")
+
 
 @pytest.fixture
 def telemetry() -> Iterator[tuple[Observability, InMemorySpanExporter, TracerProvider]]:
-    provider = TracerProvider()
+    provider = TracerProvider(sampler=ALWAYS_ON)
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     service = Observability.from_config(

@@ -122,12 +122,12 @@ async def test_evolution_worker_resets_ended_trace_but_keeps_business_context(
     observation.end_span(host)
     token = marker.set("evolution-host-value")
     try:
-        with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
-            await coordinator.prepare()
-            assert trace.get_current_span() is host
-    finally:
-        marker.reset(token)
-    try:
+        try:
+            with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+                await coordinator.prepare()
+                assert trace.get_current_span() is host
+        finally:
+            marker.reset(token)
         await asyncio.wait_for(evolution.entered.wait(), 2)
     finally:
         await coordinator.aclose()
@@ -237,7 +237,8 @@ async def test_memory_and_evolution_run_concurrently_and_cancel_independently(
     evolution_cycle = next(span for span in cycles if span is not memory_cycle)
     assert all(span.parent is None for span in cycles)
     assert memory_cycle.context.trace_id != evolution_cycle.context.trace_id
-    assert max(span.start_time for span in cycles) < min(span.end_time for span in cycles)
+    # 两个进入屏障已确认并发；相邻边界可能落在同一个时钟刻度。
+    assert max(span.start_time for span in cycles) <= min(span.end_time for span in cycles)
     assert memory_cycle.attributes["iris.driver.outcome"] == "returned"
     assert evolution_cycle.attributes["iris.driver.outcome"] == "cancelled"
 
@@ -572,27 +573,37 @@ async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close
     binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
     coordinator._attach(None, InMemoryLifecycleStore(), evolution=binding)
     requested = asyncio.create_task(coordinator.request_project_experience(binding))
-    assert await asyncio.to_thread(entered.wait, 2)
-    task = coordinator._evolution_task
-    coordinator._foreground_enter()
-    lock = FileLock(tmp_path / ".iris" / "evolution.lock", timeout=0)
-    with pytest.raises(Timeout):
-        lock.acquire()
-    closing = asyncio.create_task(coordinator.aclose())
-    await asyncio.sleep(0)
-    assert not closing.done() and coordinator._evolution_task is task
-    assert not any(span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans())
-    release.set()
-    await asyncio.wait_for(closing, 2)
-    with pytest.raises(asyncio.CancelledError):
-        await requested
-    with lock:
-        assert not coordinator._evolution_worker.busy
-    cycle = next(
-        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
-    )
-    assert len(released_at) == 1 and cycle.end_time >= released_at[0]
-    assert cycle.attributes["iris.driver.outcome"] == "cancelled"
+    closing: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task = coordinator._evolution_task
+        coordinator._foreground_enter()
+        lock = FileLock(tmp_path / ".iris" / "evolution.lock", timeout=0)
+        with pytest.raises(Timeout):
+            lock.acquire()
+        closing = asyncio.create_task(coordinator.aclose())
+        await asyncio.sleep(0)
+        assert not closing.done() and coordinator._evolution_task is task
+        assert not any(
+            span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans()
+        )
+        release.set()
+        await asyncio.wait_for(asyncio.shield(closing), 2)
+        with pytest.raises(asyncio.CancelledError):
+            await requested
+        with lock:
+            assert not coordinator._evolution_worker.busy
+        cycle = next(
+            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        )
+        assert len(released_at) == 1 and cycle.end_time >= released_at[0]
+        assert cycle.attributes["iris.driver.outcome"] == "cancelled"
+    finally:
+        release.set()
+        if closing is not None:
+            await asyncio.gather(closing, return_exceptions=True)
+        await coordinator.aclose()
+        await asyncio.gather(requested, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -100,6 +100,7 @@ async def test_frozen_schema_selection_survives_summary_and_new_memory_window(
     raw = [Msg.assistant("archived" * 2000), *_search("a", "b", "c"), Msg.assistant("finished")]
     provider = Provider()
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(
             name="budget",
             model="openai/test",

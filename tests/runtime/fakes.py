@@ -745,7 +745,7 @@ def build_runtime(
     tool_registry: ToolRegistry | None = None,
     tool_view: ToolRegistryView | None = None,
     tool_executor: ToolExecutor | None = None,
-    workspace_root: Path | None = None,
+    workspace_root: Path,
     permission_policy: PermissionPolicy | None = None,
     memory_service: MemoryService | None = None,
     observability: Observability | None = None,
@@ -758,7 +758,7 @@ def build_runtime(
         registry,
         permission_policy=resolved_policy,
     )
-    prompt_source = PromptSource.initialize(workspace_root or Path.cwd(), agent_config.prompts.root)
+    prompt_source = PromptSource.initialize(workspace_root, agent_config.prompts.root)
     observability = observability if observability is not None else Observability()
     environment = RuntimeEnvironment(
         agent_config=agent_config,
@@ -772,7 +772,7 @@ def build_runtime(
             tool_view=resolved_tool_view,
             tool_executor=resolved_tool_executor,
         ),
-        workspace_root=workspace_root or Path.cwd(),
+        workspace_root=workspace_root,
         memory_service=memory_service,
         observability=observability,
     )

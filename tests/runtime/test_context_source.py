@@ -38,8 +38,9 @@ class Source:
         return ContextSnapshot((ContextContribution("active", "current-state"),))
 
 
-def _runtime(source: Source, provider: CountingProvider) -> AgentRuntime:
+def _runtime(tmp_path: Path, source: Source, provider: CountingProvider) -> AgentRuntime:
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(name="source", model="openai/test", system="stable"),
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="rules", content="stable")])
@@ -51,7 +52,7 @@ def _runtime(source: Source, provider: CountingProvider) -> AgentRuntime:
 
 
 @pytest.mark.asyncio
-async def test_collect_after_reservation_and_recollect_on_recovery() -> None:
+async def test_collect_after_reservation_and_recollect_on_recovery(tmp_path: Path) -> None:
     class CheckedSource(Source):
         port: FakeRuntimeCommitPort
 
@@ -60,7 +61,7 @@ async def test_collect_after_reservation_and_recollect_on_recovery() -> None:
             return await super().collect(scope)
 
     source, provider = CheckedSource(), CountingProvider()
-    runtime = _runtime(source, provider)
+    runtime = _runtime(tmp_path, source, provider)
     activation = start_activation(
         input="original", options=RuntimeExecutionOptions(include_tools=False)
     )
@@ -98,9 +99,9 @@ async def test_collect_after_reservation_and_recollect_on_recovery() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("control", ["budget", "cancel", "deadline"])
-async def test_unadmitted_model_step_does_not_collect(control: str) -> None:
+async def test_unadmitted_model_step_does_not_collect(tmp_path: Path, control: str) -> None:
     source, provider = Source(), CountingProvider()
-    runtime = _runtime(source, provider)
+    runtime = _runtime(tmp_path, source, provider)
     activation = start_activation()
     port = FakeRuntimeCommitPort(activation)
     signal = MutableCancellationSignal(requested=control == "cancel")
@@ -120,13 +121,15 @@ async def test_unadmitted_model_step_does_not_collect(control: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
-async def test_ordinary_collect_failure_is_context_error(error_type: type[Exception]) -> None:
+async def test_ordinary_collect_failure_is_context_error(
+    tmp_path: Path, error_type: type[Exception]
+) -> None:
     class Broken(Source):
         async def collect(self, scope: ContextBuildScope) -> ContextSnapshot:
             raise error_type("host unavailable")
 
     provider = CountingProvider()
-    runtime = _runtime(Broken(), provider)
+    runtime = _runtime(tmp_path, Broken(), provider)
     activation = start_activation()
     result = await runtime.execute(
         activation,
@@ -141,6 +144,7 @@ async def test_ordinary_collect_failure_is_context_error(error_type: type[Except
 @pytest.mark.asyncio
 @pytest.mark.parametrize("expired", [False, True])
 async def test_collect_consumes_deadline_before_provider(
+    tmp_path: Path,
     expired: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -161,7 +165,7 @@ async def test_collect_consumes_deadline_before_provider(
         return await original_wait(operation, timeout=timeout)
 
     monkeypatch.setattr(asyncio, "wait_for", record_wait)
-    runtime = _runtime(Delayed(), provider)
+    runtime = _runtime(tmp_path, Delayed(), provider)
     result = await runtime.execute(
         activation, commits=port, cancellation=MutableCancellationSignal()
     )
@@ -175,7 +179,7 @@ async def test_collect_consumes_deadline_before_provider(
 
 
 @pytest.mark.asyncio
-async def test_collect_task_cancellation_propagates_without_context_error() -> None:
+async def test_collect_task_cancellation_propagates_without_context_error(tmp_path: Path) -> None:
     entered = asyncio.Event()
 
     class Waiting(Source):
@@ -185,7 +189,7 @@ async def test_collect_task_cancellation_propagates_without_context_error() -> N
             return ContextSnapshot()
 
     provider = CountingProvider()
-    runtime = _runtime(Waiting(), provider)
+    runtime = _runtime(tmp_path, Waiting(), provider)
     activation = start_activation()
     task = asyncio.create_task(
         runtime.execute(
@@ -202,7 +206,9 @@ async def test_collect_task_cancellation_propagates_without_context_error() -> N
 
 
 @pytest.mark.asyncio
-async def test_source_wait_is_bounded_by_reserved_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_source_wait_is_bounded_by_reserved_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     entered = asyncio.Event()
     budgets: list[asyncio.Timeout] = []
     original_timeout = asyncio.timeout
@@ -220,7 +226,7 @@ async def test_source_wait_is_bounded_by_reserved_deadline(monkeypatch: pytest.M
 
     monkeypatch.setattr(asyncio, "timeout", track_budget)
     provider = CountingProvider()
-    runtime = _runtime(Waiting(), provider)
+    runtime = _runtime(tmp_path, Waiting(), provider)
     activation = start_activation()
     port = FakeRuntimeCommitPort(activation, remaining_deadline_seconds=100)
     task = asyncio.create_task(

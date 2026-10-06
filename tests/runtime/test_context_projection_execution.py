@@ -111,6 +111,7 @@ async def test_images_remain_visible_across_ordinary_tool_steps(tmp_path: Path) 
     registry = ToolRegistry()
     registry.register_function(capture)
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(name="images", model="openai/test", system="rules"),
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="rules", content="rules")])
@@ -143,7 +144,9 @@ async def test_images_remain_visible_across_ordinary_tool_steps(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_remaining_pressure_summarizes_raw_body_and_accepts_final_projection() -> None:
+async def test_remaining_pressure_summarizes_raw_body_and_accepts_final_projection(
+    tmp_path: Path,
+) -> None:
     provider = CountingProvider()
     raw = [
         *_batch("result-A-full-prefix" + "A" * 3000, "a"),
@@ -151,6 +154,7 @@ async def test_remaining_pressure_summarizes_raw_body_and_accepts_final_projecti
         *_batch("result-C-full-prefix" + "C" * 3000, "c"),
     ]
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig.model_validate(
             {
                 "name": "summary",
@@ -216,6 +220,7 @@ async def test_memory_delta_uses_unpruned_history_then_final_window_is_reduced(
         }
     )
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=config,
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="rules", content="fixed")])

@@ -62,6 +62,7 @@ async def test_once_collect_across_summary_retry_frozen_selection_and_new_memory
 
     provider, source = RetryProvider(), Source()
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(
             name="source-budget",
             model="openai/test",
@@ -134,13 +135,14 @@ async def test_once_collect_across_summary_retry_frozen_selection_and_new_memory
 
 
 @pytest.mark.asyncio
-async def test_required_snapshot_cannot_be_removed_to_fit_hard_budget() -> None:
+async def test_required_snapshot_cannot_be_removed_to_fit_hard_budget(tmp_path: Path) -> None:
     class Source:
         async def collect(self, scope: ContextBuildScope) -> ContextSnapshot:
             return ContextSnapshot((ContextContribution("required", "must keep" * 1500),))
 
     provider = CountingProvider()
     runtime = build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(
             name="required",
             model="openai/test",

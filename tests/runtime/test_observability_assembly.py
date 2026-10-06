@@ -13,6 +13,7 @@ import yaml
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 
 import iris.config as global_config
 from iris.agents import AgentConfig
@@ -35,8 +36,8 @@ from .test_streaming import RecordingSink, _stream_events
 
 
 @pytest.fixture
-def telemetry() -> Iterator[tuple[Observability, InMemorySpanExporter]]:
-    sdk = TracerProvider()
+def telemetry(otel_test_environment: None) -> Iterator[tuple[Observability, InMemorySpanExporter]]:
+    sdk = TracerProvider(sampler=ALWAYS_ON, shutdown_on_exit=False)
     exporter = InMemorySpanExporter()
     sdk.add_span_processor(SimpleSpanProcessor(exporter))
     obs = Observability.from_config(

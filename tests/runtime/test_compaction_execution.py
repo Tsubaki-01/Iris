@@ -66,12 +66,14 @@ class _ThresholdProvider(FakeProvider):
 
 
 def _runtime(
+    tmp_path: Path,
     provider: CompletionProvider,
     *,
     builder: ContextBuilder | None = None,
     observability: Observability | None = None,
 ) -> AgentRuntime:
     return build_runtime(
+        workspace_root=tmp_path,
         agent_config=AgentConfig(name="compact", model="openai/gpt-4o-mini", system="规则"),
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="rules", content="业务规则")]),
@@ -89,12 +91,14 @@ def _runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("triggered", [False, True])
 @pytest.mark.parametrize("covered", [0, 1])
-async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool, covered: int) -> None:
+async def test_memory_capture_hint_only_on_actual_compaction(
+    tmp_path: Path, triggered: bool, covered: int
+) -> None:
     """真实压缩提示引用全部已提交原文，普通模型请求不触发捕获。"""
     provider = _ThresholdProvider(95000 if triggered else 1, 70000)
     if not triggered:
         provider._responses = [_response("主回答")]
-    runtime = _runtime(provider)
+    runtime = _runtime(tmp_path, provider)
     hints: list[tuple[str, int]] = []
 
     class CapturePort:
@@ -129,6 +133,7 @@ async def test_memory_capture_hint_only_on_actual_compaction(triggered: bool, co
     ],
 )
 async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
+    tmp_path: Path,
     before: int,
     after: int,
     accepted: bool,
@@ -139,7 +144,7 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
     activation = start_activation(input="当前任务", initial_session_message_count=len(raw))
     port = FakeRuntimeCommitPort(activation, messages=raw)
     obs, exporter = observability
-    result = await _runtime(provider, observability=obs).execute(
+    result = await _runtime(tmp_path, provider, observability=obs).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -218,7 +223,7 @@ async def test_protected_images_over_budget_do_not_commit_failed_compaction(tmp_
     )
     port = FakeRuntimeCommitPort(activation, messages=raw)
 
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation, commits=port, cancellation=MutableCancellationSignal()
     )
 
@@ -249,12 +254,12 @@ async def test_protected_images_over_budget_do_not_commit_failed_compaction(tmp_
 
 
 @pytest.mark.asyncio
-async def test_below_trigger_does_not_compact_available_history() -> None:
+async def test_below_trigger_does_not_compact_available_history(tmp_path: Path) -> None:
     provider = _ThresholdProvider(76799, 1)
     provider._responses = [_response("主回答")]
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("已有历史")])
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -267,6 +272,7 @@ async def test_below_trigger_does_not_compact_available_history() -> None:
 
 @pytest.mark.asyncio
 async def test_actual_main_provider_overflow_does_not_add_compaction_retry(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ThresholdProvider(76799, 1)
@@ -279,7 +285,7 @@ async def test_actual_main_provider_overflow_does_not_add_compaction_retry(
     monkeypatch.setattr(provider, "complete", fail)
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("已有历史")])
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -292,6 +298,7 @@ async def test_actual_main_provider_overflow_does_not_add_compaction_retry(
 
 @pytest.mark.asyncio
 async def test_model_failure_usage_from_summary_is_only_compaction(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ThresholdProvider(95000, 70000)
@@ -306,7 +313,7 @@ async def test_model_failure_usage_from_summary_is_only_compaction(
     monkeypatch.setattr(provider, "complete", fail)
     activation = start_activation(initial_session_message_count=2)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务"), Msg.assistant("旧结果")])
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation, commits=port, cancellation=MutableCancellationSignal()
     )
     assert result.outcome is RuntimeActivationOutcome.FAILED
@@ -318,6 +325,7 @@ async def test_model_failure_usage_from_summary_is_only_compaction(
 
 @pytest.mark.asyncio
 async def test_steer_queued_during_summary_waits_for_main_response_boundary(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _ThresholdProvider(95000, 70000)
@@ -337,7 +345,7 @@ async def test_steer_queued_during_summary_waits_for_main_response_boundary(
         return await complete(request)
 
     monkeypatch.setattr(provider, "complete", observe)
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -352,12 +360,14 @@ async def test_steer_queued_during_summary_waits_for_main_response_boundary(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("before", [76800, 96000, 96001])
-async def test_no_new_prefix_uses_input_budget_without_summary_call(before: int) -> None:
+async def test_no_new_prefix_uses_input_budget_without_summary_call(
+    tmp_path: Path, before: int
+) -> None:
     provider = _ThresholdProvider(before, 1)
     provider._responses = [_response("主回答")]
     activation = start_activation()
     port = FakeRuntimeCommitPort(activation)
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -373,14 +383,14 @@ async def test_no_new_prefix_uses_input_budget_without_summary_call(before: int)
 
 
 @pytest.mark.asyncio
-async def test_existing_fully_covered_history_is_not_summarized_again() -> None:
+async def test_existing_fully_covered_history_is_not_summarized_again(tmp_path: Path) -> None:
     provider = _ThresholdProvider(80000, 1)
     provider._responses = [_response("主回答")]
     raw = [Msg.user("旧任务")]
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=raw)
     port.compaction = SessionCompaction(summary="已有摘要", covered_message_count=1)
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -395,11 +405,11 @@ async def test_existing_fully_covered_history_is_not_summarized_again() -> None:
 
 
 @pytest.mark.asyncio
-async def test_budget_denial_prevents_any_summary_generation() -> None:
+async def test_budget_denial_prevents_any_summary_generation(tmp_path: Path) -> None:
     provider = _ThresholdProvider(95000, 10000)
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务")], max_model_steps=0)
-    result = await _runtime(provider).execute(
+    result = await _runtime(tmp_path, provider).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -424,7 +434,7 @@ class _CountingBuilder(ContextBuilder):
 
 
 @pytest.mark.asyncio
-async def test_candidate_reuses_context_and_effective_main_options() -> None:
+async def test_candidate_reuses_context_and_effective_main_options(tmp_path: Path) -> None:
     provider = _ThresholdProvider(95000, 70000)
     builder = _CountingBuilder()
     options = RuntimeExecutionOptions(
@@ -437,7 +447,7 @@ async def test_candidate_reuses_context_and_effective_main_options() -> None:
     )
     activation = start_activation(initial_session_message_count=1, options=options)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务")])
-    result = await _runtime(provider, builder=builder).execute(
+    result = await _runtime(tmp_path, provider, builder=builder).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -460,6 +470,7 @@ async def test_candidate_reuses_context_and_effective_main_options() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
@@ -506,7 +517,7 @@ async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务")])
     obs, exporter = observability
-    result = await _runtime(provider, observability=obs).execute(
+    result = await _runtime(tmp_path, provider, observability=obs).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),

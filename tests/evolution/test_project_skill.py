@@ -381,12 +381,15 @@ async def test_experience_cancelled_after_commit_keeps_committed_result_event(
     with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
         task = asyncio.create_task(service.maintain_cycle(scope=scope))
         try:
-            await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1)
+            assert await asyncio.to_thread(entered.wait, 5)
             task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
         finally:
             release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+            await asyncio.gather(task, return_exceptions=True)
+            await service.wait_pending_io()
     assert committed[0].status == status
     assert service.store.list_pending_sources() == ()
     assert service.skill_path.exists() is (status == "updated")

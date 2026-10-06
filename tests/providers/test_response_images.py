@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import importlib
 from collections.abc import AsyncIterator
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,13 @@ from iris.message import (
 )
 from iris.providers import ProviderClient
 from iris.providers.responses import ResponsesAdapter, ResponsesMapper
+
+
+@pytest.fixture
+def offline_text_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只替换文字 tokenizer，保留真实图片解码、尺寸和数量计量。"""
+    counter = importlib.import_module("litellm.litellm_core_utils.token_counter")
+    monkeypatch.setattr(counter, "_get_count_function", lambda model, custom_tokenizer: len)
 
 
 def _image(
@@ -171,6 +179,7 @@ def test_count_projection_preserves_images_and_plain_text_shape(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("tool_result", [False, True])
+@pytest.mark.usefixtures("offline_text_counter")
 def test_image_cost_depends_on_dimensions_and_count_once(tmp_path: Path, tool_result: bool) -> None:
     small = _image(tmp_path, "small", size=(64, 64))
     large = _image(tmp_path, "large", size=(1024, 1024))
@@ -192,6 +201,7 @@ def test_image_cost_depends_on_dimensions_and_count_once(tmp_path: Path, tool_re
     assert count([small, small]) - base == 2 * single
 
 
+@pytest.mark.usefixtures("offline_text_counter")
 def test_base64_padding_and_encrypted_reasoning_do_not_add_text_cost(tmp_path: Path) -> None:
     small = _image(tmp_path, "small")
     padded = _image(tmp_path, "padded", padding=b"\x00" * 16000)
