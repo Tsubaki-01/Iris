@@ -9,10 +9,11 @@ SDK/CLI、子 Agent、Memory 和 Evolution 已接入普通与流式模型记录�
 
 ## 配置与使用
 
-API 是直接依赖，导出 SDK 按需安装：
+API 是直接依赖，导出 SDK 按需安装。在本仓库执行：
 
 ```powershell
-uv add "iris[observability]"
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+uv sync --extra observability
 ```
 
 Agent YAML 的采集策略默认关闭：
@@ -101,3 +102,46 @@ empty、blocked、no_change、conflict 保持非错误；failed 标记维护失�
 上层 owner 决定业务范围和结果，本包不定义第二套事件总线、Span 类型或状态模型。
 
 内容格式采用 [GenAI schema 固定快照](https://github.com/open-telemetry/semantic-conventions-genai/tree/e07f4ebacb08f56db8c4c882d117720333fbca04)。
+
+## 本地 MLflow 看板
+
+MLflow 独立运行，不加入 Iris 依赖。本地验收使用 3.14.0；在仓库根目录的单独
+PowerShell 终端启动：
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+$env:NO_PROXY = '127.0.0.1,localhost'
+$env:MLFLOW_MODEL_CATALOG_URI = ''
+New-Item -ItemType Directory -Path 'tmp\observability-mlflow' -Force | Out-Null
+uv tool run --from 'mlflow==3.14.0' mlflow server --backend-store-uri 'sqlite:///tmp/observability-mlflow/mlflow.db' --host 127.0.0.1 --port 5000
+```
+
+在 [本地 UI](http://127.0.0.1:5000) 创建 experiment 并取得 ID。第二个终端执行：
+
+```powershell
+$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
+$env:NO_PROXY = '127.0.0.1,localhost'
+$observabilityExperimentId = Read-Host '输入 MLflow experiment ID'
+uv run --extra observability python examples/observability/basic.py --experiment-id "$observabilityExperimentId"
+uv run --extra observability python examples/observability/streaming_child.py --experiment-id "$observabilityExperimentId"
+```
+
+示例使用确定性模型，通过公开 SDK 执行真实工具和恢复流程。打开 experiment 的 Traces
+查看实际父子树，在模型与工具节点查看 Inputs/Outputs、耗时和 Tokens；用 Sessions
+查看同一会话的不同 activation。等待前后的 trace 不会自动合并。一个 trace 含父子多个
+会话时，MLflow 的 trace 级 Session 可能归到 child；父 Session 列表不保证包含全部恢复
+控制 trace。可在 Traces 打开调用树，并用 span 的 run/parent ID 核对关联。更多示例选项见
+[示例说明](../../../examples/observability/README.md)。
+
+`NO_PROXY` 仅让该终端的 localhost 请求直连，避免本机代理转发。MLflow 首次接收模型用量
+可能同步读取远程模型目录；`MLFLOW_MODEL_CATALOG_URI=''` 使用其官方离线选项避免这项
+网络等待。这些是验收进程的环境设置，不改用户持久环境，也不由 Iris 解析。
+
+看板显示的 token 总量可能由已知输入/输出派生。判断“未知”与“真实零”时查看原始
+`gen_ai.usage.*` 属性；总量不是完整账单。超限正文在自定义 preview 字段查看，标准 I/O
+字段保持省略；本地图片仅保留 URI/MIME，浏览器不保证能展示像素。后端离线时业务继续，
+导出器通过标准 logging 报告失败；正常关闭会排空 SDK，不需要逐 Run 强制 flush。
+
+参考：[OTLP 接收](https://mlflow.org/docs/latest/genai/tracing/opentelemetry/ingest/)、
+[属性映射](https://mlflow.org/docs/latest/genai/tracing/opentelemetry/attribute-mapping/)、
+[模型目录开关](https://mlflow.org/docs/latest/api_reference/python_api/mlflow.environment_variables.html#mlflow.environment_variables.MLFLOW_MODEL_CATALOG_URI)。

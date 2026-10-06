@@ -3,6 +3,7 @@
 import builtins
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -58,7 +59,7 @@ def test_missing_extra_is_configuration_error(monkeypatch: pytest.MonkeyPatch) -
         )
 
 
-def test_disabled_import_and_configuration_do_not_require_extra() -> None:
+def test_disabled_import_and_configuration_do_not_require_extra(tmp_path: Path) -> None:
     code = """
 import sys
 from importlib.abc import MetaPathFinder
@@ -74,6 +75,32 @@ obs = Observability.from_config(AgentObservabilityConfig(), Config().observabili
 with obs.scope("disabled") as span:
     assert not span.is_recording()
 assert not obs.enabled
+import asyncio
+from pathlib import Path
+from iris.agents import AgentConfig
+from iris.harness import AgentRunRequest, AgentRunner
+from iris.message import LLMRequest, LLMResponse, TextBlock
+class Provider:
+    def estimate_input_tokens(self, request: LLMRequest) -> int:
+        return 1
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        return LLMResponse(provider="fake", content=[TextBlock(text="done")])
+async def run() -> None:
+    raw = Provider()
+    runner = AgentRunner.from_config(
+        AgentConfig(name="disabled", model="openai/test", system="test",
+                    permissions={"workspace": str(Path.cwd())}),
+        provider=raw,
+    )
+    assert runner.runtime.environment.provider is raw
+    try:
+        result = await runner.start(AgentRunRequest(input="test"))
+        assert result.assistant_message.text == "done"
+    finally:
+        await runner.aclose()
+asyncio.run(run())
 """
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, capture_output=True, text=True
+    )
     assert result.returncode == 0, result.stderr

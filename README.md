@@ -222,6 +222,16 @@ Memory 与自进化可并行，各自持有对应资源的跨进程锁；共享�
 前台取消。完整配置、单/多 runner 接线与有限修订入口见
 [`iris.evolution`](src/iris/evolution/README.md)。文件更新表示维护完成，不代表已验证学习收益。
 
+## 可选运行观测
+
+`observability.enabled` 默认关闭。启用后通过标准 OpenTelemetry/OTLP 记录 activation、
+模型、工具、恢复控制和独立维护周期；可选正文采集保留实际输入输出和已知 token。
+观测不接管 lifecycle/store，也不驱动业务重试。
+
+本仓库使用 `uv sync --extra observability` 安装导出依赖。配置、宿主共享注入、关闭责任
+和独立 MLflow 看板见 [`iris.observability`](src/iris/observability/README.md)；
+不调用真实模型的运行示例见 [`examples/observability`](examples/observability/README.md)。
+
 ## 可选 Decision
 
 [`iris.decision`](src/iris/decision/README.md) 提供独立 Choice/Boolean/Score SDK，首个后端为 Jev。
