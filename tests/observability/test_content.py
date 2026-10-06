@@ -221,3 +221,9 @@ def test_empty_request_and_response_are_valid_message_arrays() -> None:
     assert json.loads(
         str(response_attributes(LLMResponse(provider="test"), 65536)["gen_ai.output.messages"])
     ) == [{"role": "assistant", "parts": []}]
+
+
+def test_tool_without_final_result_records_only_known_arguments() -> None:
+    assert tool_attributes({"prompt": "task"}, None, 65536) == {
+        "gen_ai.tool.call.arguments": '{"prompt":"task"}',
+    }

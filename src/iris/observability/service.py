@@ -15,7 +15,7 @@ from opentelemetry.context import Context
 from opentelemetry.trace import INVALID_SPAN, Span, SpanKind, Status, StatusCode, TracerProvider
 from opentelemetry.util.types import AttributeValue
 
-from ..exceptions import IrisConfigError
+from ..exceptions import IrisCancellationRequestedError, IrisConfigError
 from . import content
 from .config import AgentObservabilityConfig, ObservabilityExportConfig
 
@@ -117,11 +117,7 @@ class Observability:
         if self._tracer is None:
             return INVALID_SPAN
         try:
-            association = cast(
-                Mapping[str, AttributeValue] | None,
-                otel_context.get_value(_ASSOCIATION, context),
-            )
-            values = dict(association or {})
+            values = dict(self.association(context=context))
             values.update(attributes or {})
             return self._tracer.start_span(name, context=context, kind=kind, attributes=values)
         except Exception:
@@ -161,6 +157,8 @@ class Observability:
             with self.use_span(span):
                 try:
                     yield span
+                except IrisCancellationRequestedError:
+                    raise
                 except Exception as exc:
                     self.error(span, exc)
                     raise
@@ -178,11 +176,18 @@ class Observability:
         if not self.enabled:
             yield
             return
-        previous = cast(Mapping[str, AttributeValue] | None, otel_context.get_value(_ASSOCIATION))
-        values = {} if replace else dict(previous or {})
+        values = {} if replace else dict(self.association())
         values.update(attributes)
         with _attached(otel_context.set_value(_ASSOCIATION, MappingProxyType(values))):
             yield
+
+    def association(self, *, context: Context | None = None) -> Mapping[str, AttributeValue]:
+        """读取已有不可变关联，供 owner 识别当前区间，不另存执行状态。"""
+        if not self.enabled:
+            return {}
+        return cast(
+            Mapping[str, AttributeValue], otel_context.get_value(_ASSOCIATION, context) or {}
+        )
 
     @contextmanager
     def detached(self) -> Iterator[None]:
@@ -248,8 +253,13 @@ class Observability:
         except Exception:
             _logger.exception("观测响应正文投影失败")
 
-    def record_tool(self, span: Span, arguments: dict[str, Any], result: ToolResult) -> None:
-        """在 gate 后读取最终 model_blocks，包括错误替换与 Hook 反馈。"""
+    def record_tool(
+        self,
+        span: Span,
+        arguments: dict[str, Any],
+        result: ToolResult | None = None,
+    ) -> None:
+        """在 gate 后读取参数和已有最终结果；等待或异常时不伪造输出。"""
         try:
             if self._config.capture_content and span.is_recording():
                 self.attributes(

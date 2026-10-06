@@ -18,12 +18,16 @@ import asyncio
 import logging
 import math
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
+
+from opentelemetry.trace import INVALID_SPAN, Span
+from opentelemetry.util.types import AttributeValue
 
 from ..agents import AgentConfig, load_agent_config
 from ..agents.config.subagent import load_subagent_catalog
@@ -54,7 +58,7 @@ from ..hitl import (
     HumanInteractionService,
     InteractionStatus,
 )
-from ..hitl.models import SubagentExpiryOwner
+from ..hitl.models import SubagentExpiryOwner, ToolCallSnapshot
 from ..lifecycle import (
     ActivationKind,
     AgentRunOptions,
@@ -1129,15 +1133,34 @@ class AgentRunner:
         activation_started: asyncio.Event | None = None,
     ) -> RunResult:
         """Response 已 durable 后推进 child，WAITING adapter 独占 parent rebind/finalize。"""
-        controller = cast(HarnessSubagentController, self._subagent_controller)
-        if activation_started is not None:
-            activation_started.set()
-        try:
-            outcome = await controller.resume_proxy(parent_run=parent_run, proxy=proxy)
-        except asyncio.CancelledError:
+        with ExitStack() as control:
+            control_span = control.enter_context(
+                self._observe_run(
+                    parent_run, operation="subagent_continue", tool_call=proxy.request.tool_call
+                )
+            )
+            controller = cast(HarnessSubagentController, self._subagent_controller)
+            if activation_started is not None:
+                activation_started.set()
+            try:
+                outcome = await controller.resume_proxy(parent_run=parent_run, proxy=proxy)
+            except asyncio.CancelledError:
+                current = cast(RunRecord, self.store.load_run(parent_run.run_id))
+                if current.cancellation_requested_at is None:
+                    raise
+                settled = await self._settle_waiting_if_due(
+                    current,
+                    proxy,
+                    now=self._now(),
+                    event_collector=event_collector,
+                    steering=steering,
+                    activation_started=activation_started,
+                )
+                return cast(RunResult, settled)
             current = cast(RunRecord, self.store.load_run(parent_run.run_id))
-            if current.cancellation_requested_at is None:
-                raise
+            if current.phase is RunPhase.TERMINAL:
+                await self._deliver_events(event_collector.take_pending_events())
+                return self._require_result(current.run_id)
             settled = await self._settle_waiting_if_due(
                 current,
                 proxy,
@@ -1146,30 +1169,19 @@ class AgentRunner:
                 steering=steering,
                 activation_started=activation_started,
             )
-            return cast(RunResult, settled)
-        current = cast(RunRecord, self.store.load_run(parent_run.run_id))
-        if current.phase is RunPhase.TERMINAL:
-            await self._deliver_events(event_collector.take_pending_events())
-            return self._require_result(current.run_id)
-        settled = await self._settle_waiting_if_due(
-            current,
-            proxy,
-            now=self._now(),
-            event_collector=event_collector,
-            steering=steering,
-            activation_started=activation_started,
-        )
-        if settled is not None:
-            return settled
-        return await self._complete_subagent_proxy(
-            parent_run=current,
-            proxy=proxy,
-            parent_checkpoint=parent_checkpoint,
-            cursor=cursor,
-            outcome=outcome,
-            event_collector=event_collector,
-            steering=steering,
-        )
+            if settled is not None:
+                return settled
+            return await self._complete_subagent_proxy(
+                parent_run=current,
+                proxy=proxy,
+                parent_checkpoint=parent_checkpoint,
+                cursor=cursor,
+                outcome=outcome,
+                control=control,
+                control_span=control_span,
+                event_collector=event_collector,
+                steering=steering,
+            )
 
     async def _complete_subagent_proxy(
         self,
@@ -1179,6 +1191,8 @@ class AgentRunner:
         parent_checkpoint: RunCheckpoint,
         cursor: RuntimeCursor,
         outcome: SubagentExecutionOutcome,
+        control: ExitStack,
+        control_span: Span,
         event_collector: _RunEventCollector,
         steering: RuntimeSteeringPort | None = None,
     ) -> RunResult:
@@ -1198,8 +1212,23 @@ class AgentRunner:
             rebound = adapter.rebind(
                 parent_run=parent_run, call=call, replaced_proxy=proxy, waiting=outcome
             )
+            observation = self.runtime.environment.observability
+            observation.record_tool(control_span, proxy.request.tool_call.arguments)
+            waiting_result = cast(RunResult, rebound.result)
+            interaction = cast(HumanInteraction, waiting_result.pending_interaction)
+            observation.event(
+                control_span,
+                "iris.tool.decision",
+                {
+                    "gen_ai.tool.call.id": proxy.tool_call_id,
+                    "gen_ai.tool.name": proxy.request.tool_call.tool_name,
+                    "iris.tool.decision": "suspended",
+                    "iris.interaction.id": interaction.interaction_id,
+                    "iris.interaction.kind": interaction.request.prompt.kind.value,
+                },
+            )
             await self._deliver_events(event_collector.take_pending_events())
-            return cast(RunResult, rebound.result)
+            return waiting_result
         result = await self.runtime.environment.tool_bridge._normalize_subagent_result(
             cursor.tool_calls[cursor.next_tool_index],
             outcome,
@@ -1209,6 +1238,12 @@ class AgentRunner:
             workspace_root=self.runtime.environment.workspace_root,
             permission_mode=self.runtime.environment.agent_config.permissions.writes,
         )
+        observation = self.runtime.environment.observability
+        observation.record_tool(control_span, proxy.request.tool_call.arguments, result)
+        if result.is_error:
+            observation.error(
+                control_span, result.error.code if result.error is not None else "tool_error"
+            )
         parent_run = cast(RunRecord, self.store.load_run(parent_run.run_id))
         if parent_run.phase is RunPhase.TERMINAL:
             await self._deliver_events(event_collector.take_pending_events())
@@ -1278,6 +1313,7 @@ class AgentRunner:
             options=parent_run.options.runtime,
         )
         self._register(active, resumed.activation_id)
+        control.close()
         return await self._run_activation(active, activation=activation, port=port)
 
     def request_cancel(
@@ -1634,30 +1670,35 @@ class AgentRunner:
             if disposition is RecoveryDisposition.FINALIZE
             else None
         )
-        try:
-            recovered = self.store.recover_active_run(
-                RecoverActiveRun(
-                    run_id=run.run_id,
-                    expected_run_revision=run.revision,
-                    expected_activation_id=expected,
-                    expected_checkpoint_sequence=checkpoint.sequence,
-                    recovery_disposition=disposition,
-                    new_activation_id=new_activation_id,
-                    now=self._now(),
+        with (
+            self._observe_run(run, operation="finalize")
+            if disposition is RecoveryDisposition.FINALIZE
+            else nullcontext()
+        ):
+            try:
+                recovered = self.store.recover_active_run(
+                    RecoverActiveRun(
+                        run_id=run.run_id,
+                        expected_run_revision=run.revision,
+                        expected_activation_id=expected,
+                        expected_checkpoint_sequence=checkpoint.sequence,
+                        recovery_disposition=disposition,
+                        new_activation_id=new_activation_id,
+                        now=self._now(),
+                    )
                 )
-            )
-        except BaseException:
-            self._hook_lifecycle.withdraw_finished(finished)
-            raise
-        recovered_events = self._event_collector(durable_event_callback)
-        recovered_events.record(recovered.events)
-        if recovered.run.phase is RunPhase.TERMINAL:
-            self._command_lifecycle.terminal(run.run_id)
-            result = self._require_result(run.run_id)
-            self._hook_lifecycle.publish_finished(finished, result)
-            await self._hook_lifecycle.join_finished(run.run_id)
-            await self._deliver_events(recovered_events.take_pending_events())
-            return result
+            except BaseException:
+                self._hook_lifecycle.withdraw_finished(finished)
+                raise
+            recovered_events = self._event_collector(durable_event_callback)
+            recovered_events.record(recovered.events)
+            if recovered.run.phase is RunPhase.TERMINAL:
+                self._command_lifecycle.terminal(run.run_id)
+                result = self._require_result(run.run_id)
+                self._hook_lifecycle.publish_finished(finished, result)
+                await self._hook_lifecycle.join_finished(run.run_id)
+                await self._deliver_events(recovered_events.take_pending_events())
+                return result
         if disposition is RecoveryDisposition.OUTCOME_UNKNOWN:
             result = await self._settle_command(
                 recovered.run,
@@ -1996,30 +2037,39 @@ class AgentRunner:
             if activation_started is not None:
                 activation_started.set()
             controller = cast(HarnessSubagentController, self._subagent_controller)
-            outcome = await controller.expire_proxy(parent_run=run, proxy=interaction)
-            current = cast(RunRecord, self.store.load_run(run.run_id))
-            if current.cancellation_requested_at is not None or (
-                deadline is not None and self._now() >= deadline
-            ):
-                return await self._settle_waiting_if_due(
-                    current,
-                    interaction,
-                    now=self._now(),
-                    stop_receipt=stop_receipt,
-                    steering=steering,
-                    durable_event_callback=durable_event_callback,
-                    activation_started=activation_started,
-                    event_collector=event_collector,
+            with ExitStack() as control:
+                control_span = control.enter_context(
+                    self._observe_run(
+                        run, operation="subagent_continue", tool_call=interaction.request.tool_call
+                    )
                 )
-            return await self._complete_subagent_proxy(
-                parent_run=current,
-                proxy=interaction,
-                parent_checkpoint=checkpoint,
-                cursor=cursor,
-                outcome=outcome,
-                event_collector=event_collector or self._event_collector(durable_event_callback),
-                steering=steering,
-            )
+                outcome = await controller.expire_proxy(parent_run=run, proxy=interaction)
+                current = cast(RunRecord, self.store.load_run(run.run_id))
+                if current.cancellation_requested_at is not None or (
+                    deadline is not None and self._now() >= deadline
+                ):
+                    return await self._settle_waiting_if_due(
+                        current,
+                        interaction,
+                        now=self._now(),
+                        stop_receipt=stop_receipt,
+                        steering=steering,
+                        durable_event_callback=durable_event_callback,
+                        activation_started=activation_started,
+                        event_collector=event_collector,
+                    )
+                return await self._complete_subagent_proxy(
+                    parent_run=current,
+                    proxy=interaction,
+                    parent_checkpoint=checkpoint,
+                    cursor=cursor,
+                    outcome=outcome,
+                    control=control,
+                    control_span=control_span,
+                    event_collector=event_collector
+                    or self._event_collector(durable_event_callback),
+                    steering=steering,
+                )
         stop_reason: RunStopReason | None = None
         close_reason: str | None = None
         if run.cancellation_requested_at is not None:
@@ -2142,6 +2192,111 @@ class AgentRunner:
     #          Activation Settlement
     # ==========================================
     # region
+    @contextmanager
+    def _observe_run(
+        self,
+        run: RunRecord,
+        *,
+        activation_id: str | None = None,
+        operation: str | None = None,
+        tool_call: ToolCallSnapshot | None = None,
+    ) -> Iterator[Span]:
+        """记录本次真实驱动区间；观测读取失败不参与业务结算。"""
+        observation = self.runtime.environment.observability
+        if not observation.enabled:
+            yield INVALID_SPAN
+            return
+        attributes: dict[str, AttributeValue] = {
+            "iris.lifecycle.source_id": self.store.source_id,
+            "iris.run.id": run.run_id,
+            "gen_ai.conversation.id": run.session_id,
+            "gen_ai.agent.name": run.agent_id,
+        }
+        association = observation.association()
+        for name in ("iris.parent.run_id", "iris.parent.tool_call_id"):
+            if name in association:
+                attributes[name] = association[name]
+        if activation_id is not None:
+            attributes["iris.activation.id"] = activation_id
+        if operation is not None:
+            attributes["iris.control.operation"] = operation
+        if tool_call is not None:
+            attributes["gen_ai.tool.call.id"] = tool_call.tool_call_id
+            attributes["gen_ai.tool.name"] = tool_call.tool_name
+        if self._goal_service is not None:
+            try:
+                binding = self._goal_service.store.get_goal_run(run.run_id)
+                if binding is not None:
+                    attributes["iris.goal.id"] = binding.goal_id
+            except Exception:
+                logger.exception("观测 Goal 关联读取失败")
+        name = "iris.run.control" if operation is not None else f"invoke_agent {run.agent_id}"
+        with (
+            observation.bind(attributes, replace=True),
+            observation.scope(
+                name,
+                attributes={"gen_ai.operation.name": "invoke_agent"} if operation is None else None,
+            ) as span,
+        ):
+            outcome = "returned"
+            try:
+                yield span
+            except (asyncio.CancelledError, IrisCancellationRequestedError):
+                outcome = "cancelled"
+                raise
+            except BaseException:
+                outcome = "failed"
+                raise
+            finally:
+                observation.attributes(span, {"iris.driver.outcome": outcome})
+                try:
+                    current = self.store.load_run(run.run_id)
+                    if current is not None:
+                        observation.attributes(
+                            span,
+                            {"iris.run.status": (current.stop_reason or current.phase).value},
+                        )
+                        if current.stop_reason in {
+                            RunStopReason.FAILED,
+                            RunStopReason.OUTCOME_UNKNOWN,
+                        }:
+                            observation.error(span, current.error.message)
+                except Exception:
+                    logger.exception("观测 Run 结果读取失败")
+
+    @contextmanager
+    def _observe_command_attempt(self, pending: PendingSettlement) -> Iterator[None]:
+        """既有 activation 或同 Run 控制区间已覆盖时，不重复建立结算区间。"""
+        observation = self.runtime.environment.observability
+        association = observation.association()
+        if (
+            not observation.enabled
+            or pending.run_id in self._active
+            or (
+                association.get("iris.run.id") == pending.run_id
+                and "iris.control.operation" in association
+            )
+        ):
+            yield
+            return
+        try:
+            run = self.store.load_run(pending.run_id)
+        except Exception:
+            logger.exception("观测控制关联读取失败")
+            run = None
+        if run is None:
+            yield
+            return
+        operation = (
+            "cancel"
+            if pending.stop_reason is RunStopReason.CANCELLED
+            else "deadline"
+            if pending.stop_reason is RunStopReason.DEADLINE_EXCEEDED
+            else "finalize"
+        )
+        with self._observe_run(run, activation_id=pending.activation_id, operation=operation):
+            yield
+
     async def _run_activation(
         self,
         active: ActiveActivation,
@@ -2168,98 +2323,99 @@ class AgentRunner:
             IrisRunPersistenceError: 当 durable 写入失败时。
             IrisRunStateError: 当出现不可解释的 phase/outcome 组合，或缺少 durable result 时。
         """
-        # --- 1. 注册跨 activation 的 deadline，并驱动 engine ---
-        try:
-            deadline = port.run.options.limits.deadline_at
-            if deadline is not None and self._now() >= deadline:
-                await self._settle_command(
-                    port.run,
-                    activation_id=active.activation_id,
-                    stop_reason=RunStopReason.DEADLINE_EXCEEDED,
-                    events=active.event_collector,
-                )
-                return self._require_result(active.run_id)
-            self._command_lifecycle.register_deadline(port.run, self._command_target)
-            active.task = asyncio.create_task(self._run_engine(active, activation, port))
-            # --- 2. 把每种退出路径映射为 durable outcome ---
-            start_control: HookStartControl | None = None
+        with self._observe_run(port.run, activation_id=active.activation_id):
+            # --- 1. 注册跨 activation 的 deadline，并驱动 engine ---
             try:
-                engine_result = await active.task
-                if isinstance(engine_result, HookStartControl):
-                    start_control = engine_result
-                    await self._settle_start_control(active, engine_result, port)
-                else:
-                    await self._settle_engine_result(active, engine_result, port)
-            except asyncio.CancelledError:
-                # 终态已提交时，结束处理由共享 owner 收口，不能再创建第二份结算。
-                if self.get_run(active.run_id).phase is RunPhase.TERMINAL:
-                    await self._hook_lifecycle.cancel_run(active.run_id)
-                    raise
-                # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
-                if not active.signal.requested:
-                    call_id, failed_slot = next(
-                        (
-                            (call_id, slot)
-                            for (run_id, call_id), slot in (
-                                self.runtime.environment.command_stop_slots.items()
-                            )
-                            if run_id == active.run_id and slot.cleanup_error is not None
-                        ),
-                        (None, None),
+                deadline = port.run.options.limits.deadline_at
+                if deadline is not None and self._now() >= deadline:
+                    await self._settle_command(
+                        port.run,
+                        activation_id=active.activation_id,
+                        stop_reason=RunStopReason.DEADLINE_EXCEEDED,
+                        events=active.event_collector,
                     )
-                    if start_control is not None:
-                        call_id = start_control.control.call_id
-                        failed_slot = start_control.control.stop_slot
-                    cleanup = asyncio.create_task(
-                        self._settle_command(
-                            port.run,
-                            activation_id=active.activation_id,
-                            stop_reason=None,
-                            events=active.event_collector,
-                            call_id=call_id,
-                            receipt=failed_slot.receipt if failed_slot is not None else None,
-                            initial_cleanup_error=(
-                                failed_slot.cleanup_error if failed_slot is not None else None
+                    return self._require_result(active.run_id)
+                self._command_lifecycle.register_deadline(port.run, self._command_target)
+                active.task = asyncio.create_task(self._run_engine(active, activation, port))
+                # --- 2. 把每种退出路径映射为 durable outcome ---
+                start_control: HookStartControl | None = None
+                try:
+                    engine_result = await active.task
+                    if isinstance(engine_result, HookStartControl):
+                        start_control = engine_result
+                        await self._settle_start_control(active, engine_result, port)
+                    else:
+                        await self._settle_engine_result(active, engine_result, port)
+                except asyncio.CancelledError:
+                    # 终态已提交时，结束处理由共享 owner 收口，不能再创建第二份结算。
+                    if self.get_run(active.run_id).phase is RunPhase.TERMINAL:
+                        await self._hook_lifecycle.cancel_run(active.run_id)
+                        raise
+                    # 未经 signal 的取消来自外部调用方，不能被解释为 run 的 cancellation。
+                    if not active.signal.requested:
+                        call_id, failed_slot = next(
+                            (
+                                (call_id, slot)
+                                for (run_id, call_id), slot in (
+                                    self.runtime.environment.command_stop_slots.items()
+                                )
+                                if run_id == active.run_id and slot.cleanup_error is not None
                             ),
+                            (None, None),
                         )
-                    )
-                    while not cleanup.done():
-                        try:
-                            await asyncio.shield(cleanup)
-                        except asyncio.CancelledError:
-                            continue
-                    cleanup.result()
+                        if start_control is not None:
+                            call_id = start_control.control.call_id
+                            failed_slot = start_control.control.stop_slot
+                        cleanup = asyncio.create_task(
+                            self._settle_command(
+                                port.run,
+                                activation_id=active.activation_id,
+                                stop_reason=None,
+                                events=active.event_collector,
+                                call_id=call_id,
+                                receipt=failed_slot.receipt if failed_slot is not None else None,
+                                initial_cleanup_error=(
+                                    failed_slot.cleanup_error if failed_slot is not None else None
+                                ),
+                            )
+                        )
+                        while not cleanup.done():
+                            try:
+                                await asyncio.shield(cleanup)
+                            except asyncio.CancelledError:
+                                continue
+                        cleanup.result()
+                        raise
+                    await self._finish_cancelled_task(active, port)
+                except IrisCommandCleanupError as exc:
+                    if active.run_id not in self._command_lifecycle.pending:
+                        await self._finish_unexpected(active, exc, port, initial_cleanup_error=exc)
                     raise
-                await self._finish_cancelled_task(active, port)
-            except IrisCommandCleanupError as exc:
-                if active.run_id not in self._command_lifecycle.pending:
-                    await self._finish_unexpected(active, exc, port, initial_cleanup_error=exc)
-                raise
-            except (
-                IrisRunConflictError,
-                IrisRunNotFoundError,
-                IrisRunPersistenceError,
-                IrisRunRecoveryError,
-                IrisRunStateError,
-            ):
-                # lifecycle 一致性错误说明 durable 事实已不可信，不再尝试写入 terminal。
-                raise
-            except Exception as exc:
-                await self._finish_unexpected(active, exc, port)
-        # --- 3. 收口 live resources 并投递事件 ---
-        finally:
-            # 先 revoke 再释放资源，阻止迟到的 child 继续写入本 activation 的事实。
-            port.revoke()
-            try:
-                await self._settle_live_resources(active)
+                except (
+                    IrisRunConflictError,
+                    IrisRunNotFoundError,
+                    IrisRunPersistenceError,
+                    IrisRunRecoveryError,
+                    IrisRunStateError,
+                ):
+                    # lifecycle 一致性错误说明 durable 事实已不可信，不再尝试写入 terminal。
+                    raise
+                except Exception as exc:
+                    await self._finish_unexpected(active, exc, port)
+            # --- 3. 收口 live resources 并投递事件 ---
             finally:
-                # 只有仍属于自己的注册项才可摘除，避免误删已换代 activation。
-                current = self._active.get(active.run_id)
-                if current is active:
-                    self._active.pop(active.run_id, None)
-                active.settled.set()
-            await self._deliver_events(active.event_collector.take_pending_events())
-        return self._require_result(active.run_id)
+                # 先 revoke 再释放资源，阻止迟到的 child 继续写入本 activation 的事实。
+                port.revoke()
+                try:
+                    await self._settle_live_resources(active)
+                finally:
+                    # 只有仍属于自己的注册项才可摘除，避免误删已换代 activation。
+                    current = self._active.get(active.run_id)
+                    if current is active:
+                        self._active.pop(active.run_id, None)
+                    active.settled.set()
+                await self._deliver_events(active.event_collector.take_pending_events())
+            return self._require_result(active.run_id)
 
     async def _run_engine(
         self,
@@ -2627,55 +2783,60 @@ class AgentRunner:
             投递是 best-effort：observer 抛出的异常只记录日志，不影响 durable 事实，也不
             中断后续 observer 与后续事件。
         """
-        events_by_run: dict[str, dict[int, RunEvent]] = {}
-        for event in events:
-            events_by_run.setdefault(event.run_id, {}).setdefault(event.sequence, event)
-        ordered = [
-            event
-            for run_events in events_by_run.values()
-            for _, event in sorted(run_events.items())
-        ]
+        if not events or not self.observers:
+            return
+        with self.runtime.environment.observability.scope("iris.observer.delivery") as span:
+            events_by_run: dict[str, dict[int, RunEvent]] = {}
+            for event in events:
+                events_by_run.setdefault(event.run_id, {}).setdefault(event.sequence, event)
+            ordered = [
+                event
+                for run_events in events_by_run.values()
+                for _, event in sorted(run_events.items())
+            ]
 
-        async def deliver_lane(
-            observer: RunEventObserver,
-            lock: asyncio.Lock,
-        ) -> None:
-            async with lock:
-                for event in ordered:
-                    try:
-                        await asyncio.wait_for(
-                            observer.on_event(event),
-                            timeout=self.observer_event_timeout_s,
-                        )
-                    except TimeoutError:
-                        logger.warning(
-                            "observer event 超时",
-                            extra={
-                                "observer": type(observer).__qualname__,
-                                "run_id": event.run_id,
-                                "sequence": event.sequence,
-                                "timeout_s": self.observer_event_timeout_s,
-                            },
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        logger.warning(
-                            "run event observer 处理失败",
-                            exc_info=True,
-                            extra={
-                                "observer": type(observer).__qualname__,
-                                "run_id": event.run_id,
-                                "sequence": event.sequence,
-                            },
-                        )
+            async def deliver_lane(
+                observer: RunEventObserver,
+                lock: asyncio.Lock,
+            ) -> None:
+                async with lock:
+                    for event in ordered:
+                        try:
+                            await asyncio.wait_for(
+                                observer.on_event(event),
+                                timeout=self.observer_event_timeout_s,
+                            )
+                        except TimeoutError as exc:
+                            self.runtime.environment.observability.error(span, exc)
+                            logger.warning(
+                                "observer event 超时",
+                                extra={
+                                    "observer": type(observer).__qualname__,
+                                    "run_id": event.run_id,
+                                    "sequence": event.sequence,
+                                    "timeout_s": self.observer_event_timeout_s,
+                                },
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            self.runtime.environment.observability.error(span, exc)
+                            logger.warning(
+                                "run event observer 处理失败",
+                                exc_info=True,
+                                extra={
+                                    "observer": type(observer).__qualname__,
+                                    "run_id": event.run_id,
+                                    "sequence": event.sequence,
+                                },
+                            )
 
-        await asyncio.gather(
-            *(
-                deliver_lane(observer, lock)
-                for observer, lock in zip(self.observers, self._observer_locks, strict=True)
+            await asyncio.gather(
+                *(
+                    deliver_lane(observer, lock)
+                    for observer, lock in zip(self.observers, self._observer_locks, strict=True)
+                )
             )
-        )
 
     # endregion
 

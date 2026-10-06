@@ -149,6 +149,21 @@ async def test_provider_exception_is_preserved_with_sparse_usage(
 
 
 @pytest.mark.asyncio
+async def test_provider_exception_with_no_usage_is_preserved(
+    telemetry: tuple[Observability, InMemorySpanExporter, TracerProvider],
+) -> None:
+    service, exporter, _ = telemetry
+    error = IrisProviderError("failed without reported usage", usage=None)
+    raw = CompletionOnly(error)
+    with pytest.raises(IrisProviderError) as caught:
+        await observe_provider(raw, service).complete(LLMRequest(model="test"))
+    assert caught.value is error
+    [span] = exporter.get_finished_spans()
+    assert span.attributes["iris.model.outcome"] == "failed"
+    assert "gen_ai.usage.input_tokens" not in span.attributes
+
+
+@pytest.mark.asyncio
 async def test_cancellation_is_preserved_without_provider_error(
     telemetry: tuple[Observability, InMemorySpanExporter, TracerProvider],
 ) -> None:

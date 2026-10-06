@@ -25,6 +25,8 @@ from iris.lifecycle import (
 from iris.lifecycle.models import SubagentRunLink
 from iris.memory import MemoryService
 from iris.message import LLMRequest, LLMResponse, ModelStreamEvent, Msg, ToolUseBlock
+from iris.observability.provider import observe_provider
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
@@ -746,6 +748,7 @@ def build_runtime(
     workspace_root: Path | None = None,
     permission_policy: PermissionPolicy | None = None,
     memory_service: MemoryService | None = None,
+    observability: Observability | None = None,
 ) -> AgentRuntime:
     """为测试构造包含一致依赖图的 runtime。"""
     registry = tool_registry or (tool_view.registry if tool_view is not None else ToolRegistry())
@@ -756,10 +759,11 @@ def build_runtime(
         permission_policy=resolved_policy,
     )
     prompt_source = PromptSource.initialize(workspace_root or Path.cwd(), agent_config.prompts.root)
+    observability = observability if observability is not None else Observability()
     environment = RuntimeEnvironment(
         agent_config=agent_config,
         context_input=context_input,
-        provider=provider,
+        provider=observe_provider(provider, observability),
         prompt_source=prompt_source,
         prompt_snapshot=prompt_source.snapshot(),
         context_builder=context_builder or ContextBuilder(),
@@ -770,5 +774,6 @@ def build_runtime(
         ),
         workspace_root=workspace_root or Path.cwd(),
         memory_service=memory_service,
+        observability=observability,
     )
     return AgentRuntime(environment)

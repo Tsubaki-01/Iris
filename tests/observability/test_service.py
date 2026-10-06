@@ -13,6 +13,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
 from opentelemetry.trace import INVALID_SPAN, StatusCode
 
+from iris.exceptions import IrisCancellationRequestedError
 from iris.message import LLMRequest
 from iris.observability import AgentObservabilityConfig, ObservabilityExportConfig
 from iris.observability.service import Observability
@@ -187,12 +188,15 @@ def test_content_gate_skips_projection(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_scope_propagates_without_error_status() -> None:
+@pytest.mark.parametrize("cooperative", [False, True])
+async def test_cancelled_scope_propagates_without_error_status(cooperative: bool) -> None:
     provider = TracerProvider()
     exporter = InMemorySpanExporter()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     obs = service(provider)
-    with pytest.raises(asyncio.CancelledError), obs.scope("cancelled"):
-        raise asyncio.CancelledError()
+    error = IrisCancellationRequestedError("cancel") if cooperative else asyncio.CancelledError()
+    with pytest.raises(type(error)) as caught, obs.scope("cancelled"):
+        raise error
+    assert caught.value is error
     assert exporter.get_finished_spans()[0].status.status_code == StatusCode.UNSET
     provider.shutdown()

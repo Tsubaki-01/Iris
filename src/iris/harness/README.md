@@ -16,8 +16,15 @@ child。显式注入优先于各 Agent 的采集配置，child 仍读取当前 Y
 增加 `init_config()` 要求。构造与准备失败同样收口自建 SDK。
 
 共享维护、Goal 自动续跑和 deadline 的延后任务清空 OTel parent，但保留业务
-ContextVars。当前已接通普通/流式模型记录，activation、工具和维护区间后续接入。
-详见 [observability](../observability/README.md)。
+ContextVars。`invoke_agent <agent>` 覆盖一次真实 activation 的开始/结束 Hook、engine、
+结算、清理和实际 observer 等待；WAITING 后结束，恢复时开启新区间。模型与工具位于它的
+调用树下，关联当前 Run、activation、session 与模型步骤；child 使用自己的身份和单独的父级字段。
+
+没有普通 activation 覆盖的取消、期限与最终结算使用 `iris.run.control`。子 Agent 等待后
+继续的控制区间包含 child、结果归一化及 finalize/rebind，在父后续 activation 前结束；
+outcome-ready 恢复只有真实 finalize，没有虚构模型调用。`iris.driver.outcome` 与持久化
+`iris.run.status` 分开记录，已提交 completed 不因驱动随后取消而变成 failed。
+当前尚未接通维护 cycle 区间，详见 [observability](../observability/README.md)。
 
 ```python
 from iris.harness import AgentRunRequest, AgentRunner
@@ -513,6 +520,8 @@ Store-backed commit port 与 runner-owned create/resolve/begin/cancel/finish mut
 公开 `RunEventObserver` 签名不变：同一 observer 内按 run sequence 串行保序，不同 observer lane
 并行；每个 event 默认最多等待 30 秒，可用 `observer_event_timeout_s` 覆盖。Timeout 或普通异常只
 记录 warning 并继续，不改变 durable result；同步 callback 不是新的 public observer registry。
+启用观测后，非空实际投递显示为 `iris.observer.delivery`。其错误只标记投递区间；等待者取消
+时，原有 shield 结算任务仍可能继续投递，驱动区间按实际退出时间结束，不为了追踪延长等待。
 
 每次 activation 中，runner 与 commit port 共享私有 `_RunEventCollector`，由它唯一持有累计
 事件与 `(run_id, sequence)` 去重键。新增批次只检查本批事件；取消事件即使被两条路径观察，

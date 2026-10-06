@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from PIL import Image
 from pydantic import BaseModel
 
@@ -25,6 +28,7 @@ from iris.exceptions import (
 from iris.hooks import HookRegistration, ToolAfterEvent, ToolAfterResult, ToolBeforeResult
 from iris.hooks.dispatcher import HookDispatcher
 from iris.message import ImageBlock, Msg, TextBlock, ToolUseBlock
+from iris.observability.service import Observability
 from iris.providers.chat_completions import ChatCompletionsMapper
 from iris.providers.responses import ResponsesMapper
 from iris.tools import (
@@ -80,6 +84,7 @@ def _executor(
     middleware: list[ToolMiddleware] | None = None,
     binding: CommandBinding | None = None,
     breaker: CircuitBreaker | None = None,
+    observability: Observability | None = None,
 ) -> ToolExecutor:
     registry = ToolRegistry()
     registry.register(_Body(body))
@@ -89,6 +94,7 @@ def _executor(
         middleware=middleware,
         command_binding=binding,
         circuit_breaker=breaker,
+        observability=observability,
     )
 
 
@@ -145,8 +151,11 @@ async def test_before_runs_after_refresh_and_claim_then_skips_body(tmp_path: Pat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_image", [False, True])
 async def test_after_real_feedback_overrides_middleware_and_keeps_body(
-    tmp_path: Path, with_image: bool
+    tmp_path: Path,
+    with_image: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    observation, exporter = observability
     source = tmp_path / "image.png"
     with Image.new("RGB", (40, 20), "red") as picture:
         picture.save(source)
@@ -172,12 +181,21 @@ async def test_after_real_feedback_overrides_middleware_and_keeps_body(
             body,
             HookDispatcher([HookRegistration(event="tool.after", name="after", handler=after)]),
             middleware=[_Wrapper(wrapper)],
+            observability=observation,
         ),
         context,
     )
     assert result.hook_feedback == ("real",)
     assert result.to_msg().tool_results[0].text == "body\n[Hook feedback]\nreal"
     assert result.content == content
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.UNSET
+    recorded = json.loads(span.attributes["gen_ai.tool.call.result"])["parts"]
+    assert recorded[-1] == {"type": "text", "content": "[Hook feedback]\nreal"}
+    assert recorded[0] == {"type": "text", "content": "body"}
+    assert [part["uri"] for part in recorded if part["type"] == "uri"] == (
+        [image.model.path.as_uri()] if with_image else []
+    )
     messages = [Msg.assistant([ToolUseBlock(id="call", name="body")]), result.to_msg()]
     chat = ChatCompletionsMapper().format_messages(messages)
     responses = ResponsesMapper().format_messages(messages)

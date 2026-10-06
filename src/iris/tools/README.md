@@ -4,7 +4,14 @@
 
 `ToolExecutor(..., observability=service)` 借用宿主观测依赖，默认使用禁用服务。Runtime 环境
 会统一接入本 Agent 的同一实例；执行器不读取导出配置、不拥有 SDK 或服务的关闭责任。
-当前仅完成依赖接线，工具区间记录随后接入。
+启用后，普通调用与 Sub Agent 专用入口分别记录 `execute_tool <name>` 区间。普通区间从
+当前执行裁决开始，覆盖 Hooks、middleware、body 和最终 artifact 归一化；此前的 lookup、
+输入预检与权限刷新不计入。并行调用各自在实际处理结束时收口，后续持久化仍由 runtime 负责。
+
+工具状态采用最终交付的 `ToolResult.is_error`：middleware 恢复后的成功不误记为失败，
+`ChildWaiting` 与取消也不标成工具故障。开启正文采集时记录有效参数与最终 `model_blocks`，
+保留错误替换、图片引用和真实 Hook 反馈；等待中的 Sub Agent 只有已知输入，不伪造输出。
+关闭采集保持原业务流程，正文投影统一由观测服务的开关与采样结果控制。
 
 `iris.tools` 是 Iris 的工具内核，负责把 Python 函数或 `BaseTool` 子类包装成模型可见的逻辑工具定义，并在执行时统一处理参数校验、权限、结果归一化、超长输出落盘、middleware 和熔断。
 

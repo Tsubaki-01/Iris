@@ -7,7 +7,7 @@ import logging
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
-from contextlib import asynccontextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -104,6 +104,19 @@ class HarnessSubagentController:
         # root 在 assembly 完成后交接同一实例，此前 controller 不执行 child。
         self.observability: Observability
         self._live_children: dict[str, tuple[AgentRunner, asyncio.Task[RunResult]]] = {}
+
+    def _parent_observation(
+        self, parent_run_id: str, parent_tool_call_id: str
+    ) -> AbstractContextManager[None]:
+        """仅启用时构造已知父级关联，child 会重新绑定自身业务身份。"""
+        if not self.observability.enabled:
+            return nullcontext()
+        return self.observability.bind(
+            {
+                "iris.parent.run_id": parent_run_id,
+                "iris.parent.tool_call_id": parent_tool_call_id,
+            }
+        )
 
     async def execute(self, invocation: SubagentInvocation) -> SubagentExecutionOutcome:
         """Fresh admission 或按 exact link 继续，返回 child WAITING/TERMINAL。"""
@@ -369,7 +382,8 @@ class HarnessSubagentController:
             return _error_result(
                 route.selector, "SUBAGENT_TIMEOUT", "Child agent timed out", child.run_id
             )
-        task = asyncio.create_task(operation())
+        with self._parent_observation(parent.run_id, parent_tool_call_id):
+            task = asyncio.create_task(operation())
         self._live_children[child.run_id] = (runner, task)
         try:
             try:
@@ -411,29 +425,30 @@ class HarnessSubagentController:
         self, *, parent_run_id: str, parent_tool_call_id: str, reason: str
     ) -> None:
         """Exact child 先收到普通取消；本地等待原 task，非本地 ACTIVE 使用原 fence 恢复。"""
-        link = self.store.load_subagent_link(parent_run_id, parent_tool_call_id)
-        if link is None:
-            return
-        child = self._load_run(link.child_run_id)
-        live = self._live_children.get(child.run_id)
-        if live is not None:
-            runner, task = live
-            await runner.cancel(child.run_id, reason=reason)
-            await asyncio.gather(task, return_exceptions=True)
-        elif child.phase is not RunPhase.TERMINAL:
-            tool = self.store.load_tool_call(parent_run_id, parent_tool_call_id)
-            route = self.routes.routes[
-                cast(str, tool.arguments.get("agent") or self.routes.default)
-            ]
-            async with self._owned_child_runner(self._assemble_child(route)) as runner:
-                cancelled = runner.request_cancel(child.run_id, reason=reason)
-                if cancelled.phase is RunPhase.ACTIVE:
-                    await runner.recover(
-                        child.run_id, expected_activation_id=cancelled.current_activation_id
-                    )
-                elif cancelled.phase is RunPhase.WAITING:
-                    await runner.cancel(child.run_id, reason=reason)
-        self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child.run_id)
+        with self._parent_observation(parent_run_id, parent_tool_call_id):
+            link = self.store.load_subagent_link(parent_run_id, parent_tool_call_id)
+            if link is None:
+                return
+            child = self._load_run(link.child_run_id)
+            live = self._live_children.get(child.run_id)
+            if live is not None:
+                runner, task = live
+                await runner.cancel(child.run_id, reason=reason)
+                await asyncio.gather(task, return_exceptions=True)
+            elif child.phase is not RunPhase.TERMINAL:
+                tool = self.store.load_tool_call(parent_run_id, parent_tool_call_id)
+                route = self.routes.routes[
+                    cast(str, tool.arguments.get("agent") or self.routes.default)
+                ]
+                async with self._owned_child_runner(self._assemble_child(route)) as runner:
+                    cancelled = runner.request_cancel(child.run_id, reason=reason)
+                    if cancelled.phase is RunPhase.ACTIVE:
+                        await runner.recover(
+                            child.run_id, expected_activation_id=cancelled.current_activation_id
+                        )
+                    elif cancelled.phase is RunPhase.WAITING:
+                        await runner.cancel(child.run_id, reason=reason)
+            self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child.run_id)
 
     async def expire_proxy(self, *, parent_run: RunRecord, proxy: HumanInteraction) -> ToolResult:
         """消费 durable child-owned expiry；不伪造回答或改写 canonical owner。"""
@@ -456,27 +471,30 @@ class HarnessSubagentController:
         owner: SubagentExpiryOwner | None,
     ) -> ToolResult:
         """ACTIVE recovery 与 durable proxy 共用 child 到期执行。"""
-        if owner in {
-            SubagentExpiryOwner.OUTER_TOOL_TIMEOUT,
-            SubagentExpiryOwner.PARENT_RUN_DEADLINE,
-            SubagentExpiryOwner.PARENT_INTERACTION_TIMEOUT,
-        }:
-            await self.cancel_linked(
-                parent_run_id=parent_run_id,
-                parent_tool_call_id=parent_tool_call_id,
-                reason="subagent timeout",
+        with self._parent_observation(parent_run_id, parent_tool_call_id):
+            if owner in {
+                SubagentExpiryOwner.OUTER_TOOL_TIMEOUT,
+                SubagentExpiryOwner.PARENT_RUN_DEADLINE,
+                SubagentExpiryOwner.PARENT_INTERACTION_TIMEOUT,
+            }:
+                await self.cancel_linked(
+                    parent_run_id=parent_run_id,
+                    parent_tool_call_id=parent_tool_call_id,
+                    reason="subagent timeout",
+                )
+            else:
+                child = self._load_run(child_run_id)
+                if child.phase is not RunPhase.TERMINAL:
+                    async with self._owned_child_runner(
+                        self._assemble_child(self.routes.routes[selector])
+                    ) as runner:
+                        await runner.recover(
+                            child.run_id, expected_activation_id=child.current_activation_id
+                        )
+                self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child_run_id)
+            return _error_result(
+                selector, "SUBAGENT_TIMEOUT", "Child agent timed out", child_run_id
             )
-        else:
-            child = self._load_run(child_run_id)
-            if child.phase is not RunPhase.TERMINAL:
-                async with self._owned_child_runner(
-                    self._assemble_child(self.routes.routes[selector])
-                ) as runner:
-                    await runner.recover(
-                        child.run_id, expected_activation_id=child.current_activation_id
-                    )
-            self._handoff_settlement_receipt(parent_run_id, parent_tool_call_id, child_run_id)
-        return _error_result(selector, "SUBAGENT_TIMEOUT", "Child agent timed out", child_run_id)
 
     def _load_run(self, run_id: str) -> RunRecord:
         """读取必须存在的 durable run；缺失不创建替代。"""

@@ -10,6 +10,8 @@ from iris.agents import AgentConfig
 from iris.context import ContextBuildInput, ContextSection, ContextSlot
 from iris.harness.streaming import LiveFact
 from iris.message import LLMRequest, LLMResponse, TextBlock, ToolUseBlock
+from iris.observability.provider import observe_provider
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.runtime import (
     AgentRuntime,
@@ -170,8 +172,10 @@ def build_runtime(
     permission_policy: PermissionPolicy | None = None,
     provider: StaticProvider | None = None,
     agent_name: str = "runner-agent",
+    observability: Observability | None = None,
 ) -> AgentRuntime:
     """构造用于 runner 集成测试的真实 ``AgentRuntime``。"""
+    observation = observability if observability is not None else Observability()
     resolved_registry = registry or ToolRegistry()
     executor = ToolExecutor(
         resolved_registry,
@@ -188,7 +192,8 @@ def build_runtime(
         context_input=ContextBuildInput(
             system=ContextSection(slots=[ContextSlot(name="instructions", content=system_text)])
         ),
-        provider=provider or StaticProvider(text_response()),
+        provider=observe_provider(provider or StaticProvider(text_response()), observation),
+        observability=observation,
         assembler=RuntimeMessageAssembler(),
         tool_bridge=ToolBridge(
             tool_view=resolved_registry.view(),

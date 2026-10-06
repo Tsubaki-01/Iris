@@ -14,6 +14,8 @@ from fakes import (
     build_runtime,
     start_activation,
 )
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from iris.agents import AgentConfig
 from iris.context import (
@@ -26,6 +28,7 @@ from iris.context import (
 from iris.exceptions import IrisProviderError
 from iris.lifecycle import RuntimeExecutionOptions, SessionCompaction, TokenUsage
 from iris.message import ImageBlock, ImageFileRef, LLMRequest, LLMResponse, Msg, TextBlock
+from iris.observability.service import Observability
 from iris.providers import ProviderClient
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import AgentRuntime, RuntimeActivationOutcome, SteeringInput
@@ -63,7 +66,10 @@ class _ThresholdProvider(FakeProvider):
 
 
 def _runtime(
-    provider: CompletionProvider, *, builder: ContextBuilder | None = None
+    provider: CompletionProvider,
+    *,
+    builder: ContextBuilder | None = None,
+    observability: Observability | None = None,
 ) -> AgentRuntime:
     return build_runtime(
         agent_config=AgentConfig(name="compact", model="openai/gpt-4o-mini", system="规则"),
@@ -76,6 +82,7 @@ def _runtime(
         ),
         provider=provider,
         context_builder=builder,
+        observability=observability,
     )
 
 
@@ -125,12 +132,14 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
     before: int,
     after: int,
     accepted: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     provider = _ThresholdProvider(before, after)
     raw = [Msg.user("旧任务"), Msg.assistant("旧结果")]
     activation = start_activation(input="当前任务", initial_session_message_count=len(raw))
     port = FakeRuntimeCommitPort(activation, messages=raw)
-    result = await _runtime(provider).execute(
+    obs, exporter = observability
+    result = await _runtime(provider, observability=obs).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -141,7 +150,19 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
     assert port.events.count("reserve_model_step") == 1
     assert len(provider.requests) == (2 if accepted else 1)
     assert len(port.compaction_commits) == int(accepted)
+    spans = exporter.get_finished_spans()
+    [prepare] = [span for span in spans if span.name == "iris.context.prepare"]
+    [summary] = [
+        span for span in spans if span.attributes.get("iris.model.purpose") == "compaction"
+    ]
+    assert summary.parent.span_id == prepare.context.span_id
+    assert summary.attributes["iris.step.index"] == prepare.attributes["iris.step.index"] == 0
+    assert prepare.status.status_code is (StatusCode.UNSET if accepted else StatusCode.ERROR)
     if accepted:
+        [main] = [span for span in spans if span.attributes.get("iris.model.purpose") == "main"]
+        assert main.parent is None
+        assert main.start_time >= prepare.end_time
+        assert main.attributes["iris.step.index"] == 0
         assert result.outcome == RuntimeActivationOutcome.COMPLETED
         assert provider.requests[-1].messages[-1].text == "当前任务"
         assert port.compaction_commits[0].after_input_tokens == after
@@ -440,6 +461,7 @@ async def test_candidate_reuses_context_and_effective_main_options() -> None:
 @pytest.mark.asyncio
 async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
     monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """结合真实kwargs映射，runtime仅重试失败摘要一次，主调用不加重试覆盖。"""
     import iris.providers.client as client_module
@@ -483,7 +505,8 @@ async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
     provider = ProviderClient(provider="openai", api_key="test")
     activation = start_activation(initial_session_message_count=1)
     port = FakeRuntimeCommitPort(activation, messages=[Msg.user("旧任务")])
-    result = await _runtime(provider).execute(
+    obs, exporter = observability
+    result = await _runtime(provider, observability=obs).execute(
         activation,
         commits=port,
         cancellation=MutableCancellationSignal(),
@@ -493,3 +516,13 @@ async def test_runtime_retry_reaches_provider_client_as_explicit_zero(
     assert calls[0]["num_retries"] == calls[1]["num_retries"] == 0
     assert "num_retries" not in calls[2]
     assert len(port.compaction_usages) == 1
+    spans = exporter.get_finished_spans()
+    [prepare] = [span for span in spans if span.name == "iris.context.prepare"]
+    summaries = [
+        span for span in spans if span.attributes.get("iris.model.purpose") == "compaction"
+    ]
+    assert len(summaries) == 2
+    assert all(span.parent.span_id == prepare.context.span_id for span in summaries)
+    assert [span.status.status_code for span in summaries] == [StatusCode.ERROR, StatusCode.UNSET]
+    [main] = [span for span in spans if span.attributes.get("iris.model.purpose") == "main"]
+    assert main.start_time >= prepare.end_time

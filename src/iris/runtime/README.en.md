@@ -10,7 +10,15 @@ raw provider once; the environment and executor share the same observability ser
 `owned_observability` is closed after MCP, command, and decision resources, including when those
 closures fail. Synchronous assembly failure releases the service before ownership is transferred.
 Direct factory users call `await runtime.environment.aclose()`; injected services remain host-owned.
-Model complete/stream recording is connected; tool and other business intervals follow separately.
+Each cursor iteration binds its current `cursor.step_index` across preparation, main model calls,
+and tools; recovery uses the restored index and leaving the scope restores host associations.
+No step span is created. `iris.context.prepare` covers dynamic context/Todo collection, request
+selection, and compaction, and ends before the main model call. Actual summary requests carry
+`compaction` purpose; main complete/stream calls carry `main`. Existing business owners retain retries.
+Preflight results, projected human answers/rejections, and HITL suspension that bypass the executor
+emit only `iris.tool.decision`, with existing call identity, actual error code, and an interaction ID
+when available. Executor owns tool intervals; harness owns activations and recovery control.
+Runtime adds no state store or observability scheduler.
 
 Source capture uses `RuntimeCapturePort.request_capture(run_id, through_count)`, injected through
 `RuntimeEnvironment.capture_port`. Runtime does not choose Memory or project experience consumers.

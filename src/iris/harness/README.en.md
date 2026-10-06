@@ -18,8 +18,17 @@ Hosts close injected services last. Disabled observation adds no `init_config()`
 custom provider. Construction and preparation failures also close a self-created SDK.
 
 Delayed maintenance, automatic Goal continuation, and deadline tasks clear the OTel parent while
-preserving business ContextVars. Complete/stream model calls are connected; activation, tool, and
-maintenance scopes are not connected yet. See [observability](../observability/README.md).
+preserving business ContextVars. `invoke_agent <agent>` covers an actual activation's start/finish
+hooks, engine, settlement, cleanup, and observer waiting. It ends at WAITING; resumption starts a new
+interval. Model and tool calls inherit the current Run, activation, session, and model step. Children
+bind their own identity and separate parent fields.
+
+Cancellation, deadlines, and finalization without an ordinary activation use `iris.run.control`.
+A waiting child continuation includes the child call, result normalization, and finalize/rebind,
+then ends before the parent's next activation. Outcome-ready recovery records finalization without
+inventing a model call. `iris.driver.outcome` and durable `iris.run.status` remain separate: cancelling
+the driver after a committed completion does not relabel the durable result as failed. Maintenance
+cycle scopes are not connected yet. See [observability](../observability/README.md).
 
 Both `from_config*()` entry points accept optional `decision_client=` and borrow only its `evaluate`
 capability. Runner shutdown never closes an injected evaluator. A client created from configuration
@@ -599,6 +608,9 @@ observer lane is sequence-ordered, different observers run in parallel, and each
 30-second timeout by default, configurable with `observer_event_timeout_s`. A timeout or ordinary
 exception is logged and the lane continues without changing the durable result. The synchronous
 callback is not a new public observer registry.
+With observation enabled, actual nonempty delivery uses `iris.observer.delivery`; a delivery error
+marks only that interval. After a waiter is cancelled, the existing shielded settlement task may
+continue delivery. The driver span ends when the driver exits; tracing does not prolong that wait.
 
 Within each activation, the runner and commit port share a private `_RunEventCollector`, which
 alone owns accumulated events and `(run_id, sequence)` deduplication keys. A new batch checks

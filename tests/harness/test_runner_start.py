@@ -6,11 +6,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.agents import AgentConfig
 from iris.config import Config
-from iris.exceptions import IrisProviderError, IrisRunConflictError
+from iris.exceptions import IrisProviderError, IrisRunConflictError, IrisRunPersistenceError
 from iris.harness import AgentRunner
 from iris.lifecycle import (
     AgentRunOptions,
@@ -18,6 +19,7 @@ from iris.lifecycle import (
     RunEvent,
     RunEventKind,
     RunPhase,
+    RunRecord,
     RunStopReason,
     RuntimeExecutionOptions,
     ToolCallPhase,
@@ -95,6 +97,79 @@ async def test_runner_start_returns_reloaded_terminal_result(tmp_path: Path) -> 
     ]
     assert runner.get_run("run-1") == result.run
     assert runner.get_result("run-1") == result
+
+
+@pytest.mark.asyncio
+async def test_activation_spans_rebind_each_run_and_keep_host_parent(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    """连续 Run 不继承旧业务身份；空 observer/普通结算没有重复区间。"""
+    observation, exporter = observability
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            provider=StaticProvider(text_response(), text_response()),
+            observability=observation,
+        ),
+        store=InMemoryLifecycleStore(),
+    )
+    with observation.bind({"iris.run.id": "old", "iris.step.index": 999}):
+        with observation.scope("host") as host:
+            for index in (1, 2):
+                await runner.start(
+                    AgentRunRequest(input="input", session_id=f"s{index}", run_id=f"r{index}")
+                )
+                assert trace.get_current_span() is host
+    spans = exporter.get_finished_spans()
+    drivers = [span for span in spans if span.name == "invoke_agent runner-agent"]
+    assert len(drivers) == 2
+    for index, driver in enumerate(drivers, 1):
+        assert driver.parent.span_id == host.get_span_context().span_id
+        assert driver.attributes["iris.run.id"] == f"r{index}"
+        assert driver.attributes["gen_ai.conversation.id"] == f"s{index}"
+        assert driver.attributes["iris.lifecycle.source_id"] == runner.store.source_id
+        assert driver.attributes["iris.activation.id"]
+        assert "iris.step.index" not in driver.attributes
+        assert driver.attributes["iris.run.status"] == "completed"
+        assert driver.attributes["iris.driver.outcome"] == "returned"
+        model = next(
+            span
+            for span in spans
+            if span.name.startswith("chat ") and span.attributes["iris.run.id"] == f"r{index}"
+        )
+        assert model.parent.span_id == driver.context.span_id
+        assert model.attributes["iris.step.index"] != 999
+    assert not any(span.name in {"iris.run.control", "iris.observer.delivery"} for span in spans)
+
+
+@pytest.mark.asyncio
+async def test_observation_result_read_failure_keeps_committed_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    """仅为观测补读状态失败时，已完成驱动仍返回原 durable result。"""
+    observation, exporter = observability
+    store = InMemoryLifecycleStore()
+    runner = AgentRunner(runtime=build_runtime(tmp_path, observability=observation), store=store)
+    load_run = store.load_run
+
+    def fail_after_driver_cleanup(run_id: str) -> RunRecord | None:
+        if run_id not in runner._active and store.load_result(run_id) is not None:
+            raise IrisRunPersistenceError("观测补读失败")
+        return load_run(run_id)
+
+    monkeypatch.setattr(store, "load_run", fail_after_driver_cleanup)
+    result = await runner.start(AgentRunRequest(input="input", run_id="observed"))
+    assert result == store.load_result("observed")
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert "观测 Run 结果读取失败" in caplog.text
+    driver = next(
+        span for span in exporter.get_finished_spans() if span.name.startswith("invoke_agent ")
+    )
+    assert driver.attributes["iris.driver.outcome"] == "returned"
+    assert "iris.run.status" not in driver.attributes
 
 
 @pytest.mark.asyncio

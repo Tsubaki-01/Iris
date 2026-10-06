@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from PIL import Image
 
 from iris.command import CommandStopSlot
@@ -34,6 +35,7 @@ from iris.lifecycle import (
     RunStopReason,
 )
 from iris.message import DataBlock, TextBlock, ToolUseBlock
+from iris.observability.service import Observability
 from iris.runtime import AgentRuntime
 from iris.store import InMemoryLifecycleStore
 from iris.tools import AskQuestionTool, CancellationSignal, ToolRegistry
@@ -53,8 +55,9 @@ def _runner(
     *registrations: HookRegistration | CommandHookRegistration,
     store: InMemoryLifecycleStore | None = None,
     provider: StaticProvider | None = None,
+    observability: Observability | None = None,
 ) -> AgentRunner:
-    runtime = build_runtime(tmp_path, provider=provider)
+    runtime = build_runtime(tmp_path, provider=provider, observability=observability)
     runtime = AgentRuntime(
         replace(runtime.environment, hook_dispatcher=HookDispatcher(registrations))
     )
@@ -349,7 +352,13 @@ async def test_cancel_terminal_driver_ends_finished_without_second_settlement(
 
 
 @pytest.mark.asyncio
-async def test_finished_runs_before_slow_observer_delivery(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cancel_delivery", [False, True])
+async def test_finished_runs_before_slow_observer_delivery(
+    tmp_path: Path,
+    cancel_delivery: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
     hook_entered = asyncio.Event()
     observer_entered = asyncio.Event()
     observer_release = asyncio.Event()
@@ -363,15 +372,40 @@ async def test_finished_runs_before_slow_observer_delivery(tmp_path: Path) -> No
             await observer_release.wait()
 
     runner = _runner(
-        tmp_path, HookRegistration(event="run.finished", name="finish", handler=finish)
+        tmp_path,
+        HookRegistration(event="run.finished", name="finish", handler=finish),
+        observability=observation,
     )
     runner.observers = [Observer()]
     runner._observer_locks = [asyncio.Lock()]
     task = asyncio.create_task(runner.start(AgentRunRequest(input="input")))
     await observer_entered.wait()
     assert hook_entered.is_set()
-    observer_release.set()
-    await task
+    assert not any(span.name.startswith("invoke_agent ") for span in exporter.get_finished_spans())
+    if cancel_delivery:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # 原 settlement attempt 使用 shield，调用者取消后仍可完成已开始的 observer 投递。
+        observer_release.set()
+        async with asyncio.timeout(1):
+            while not any(
+                span.name == "iris.observer.delivery" for span in exporter.get_finished_spans()
+            ):
+                await asyncio.sleep(0)
+    else:
+        observer_release.set()
+        await task
+    spans = exporter.get_finished_spans()
+    driver = next(span for span in spans if span.name.startswith("invoke_agent "))
+    observer = next(span for span in spans if span.name == "iris.observer.delivery")
+    assert observer.parent.span_id == driver.context.span_id
+    if not cancel_delivery:
+        assert driver.end_time >= observer.end_time
+    assert driver.attributes["iris.run.status"] == "completed"
+    assert driver.attributes["iris.driver.outcome"] == (
+        "cancelled" if cancel_delivery else "returned"
+    )
 
 
 @pytest.mark.asyncio

@@ -1,14 +1,28 @@
 """SubagentTool 的模型输入与专用调用契约。"""
 
+import json
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
-from iris.exceptions import IrisToolExecutionError, IrisToolValidationError
+from iris.exceptions import IrisRunPersistenceError, IrisToolExecutionError, IrisToolValidationError
 from iris.hitl.models import HumanInteraction
-from iris.tools.base import ToolCapability, ToolExecutionContext, ToolResult
+from iris.message import TextBlock, ToolUseBlock
+from iris.observability.service import Observability
+from iris.tools import (
+    CircuitBreaker,
+    ToolCall,
+    ToolExecutor,
+    ToolMiddleware,
+    ToolNext,
+    ToolRegistry,
+)
+from iris.tools.base import ToolCapability, ToolErrorInfo, ToolExecutionContext, ToolResult
 from iris.tools.subagent import (
     ChildWaiting,
     SubagentExecutionOutcome,
@@ -99,13 +113,8 @@ class RequestedCancellation:
         raise IrisToolExecutionError("cancelled")
 
 
-@pytest.mark.asyncio
-async def test_waiting_outcome_and_cancellation_flow_through_dedicated_port(
-    configured_tool: tuple[SubagentTool, RecordingPort],
-    tmp_path: Path,
-) -> None:
-    tool, port = configured_tool
-    interaction = HumanInteraction.model_validate(
+def _child_interaction(tmp_path: Path) -> HumanInteraction:
+    return HumanInteraction.model_validate(
         {
             "session_id": "child-session",
             "run_id": "child",
@@ -123,6 +132,15 @@ async def test_waiting_outcome_and_cancellation_flow_through_dedicated_port(
             },
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_waiting_outcome_and_cancellation_flow_through_dedicated_port(
+    configured_tool: tuple[SubagentTool, RecordingPort],
+    tmp_path: Path,
+) -> None:
+    tool, port = configured_tool
+    interaction = _child_interaction(tmp_path)
     port.outcome = ChildWaiting("child", interaction, None, None)
     outcome = await tool.execute_subagent(
         tool.validate_input({"prompt": "investigate"}),
@@ -133,6 +151,109 @@ async def test_waiting_outcome_and_cancellation_flow_through_dedicated_port(
     assert len(port.calls) == 1
     assert port.calls[0].call.route.selector == "researcher"
     assert port.calls[0].cancellation.requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["waiting", "completed", "failed"])
+async def test_dedicated_executor_observes_final_outcome_without_ordinary_pipeline(
+    configured_tool: tuple[SubagentTool, RecordingPort],
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    status: str,
+) -> None:
+    observation, exporter = observability
+    tool, port = configured_tool
+    if status == "waiting":
+        port.outcome = ChildWaiting("child", _child_interaction(tmp_path), None, None)
+    else:
+        port.outcome = ToolResult(
+            tool_use_id="",
+            tool_name="subagent",
+            content=[TextBlock(text="child result")],
+            is_error=status == "failed",
+            error=ToolErrorInfo(code="CHILD_FAILED", message="child failed")
+            if status == "failed"
+            else None,
+        )
+
+    class MustNotRun(ToolMiddleware):
+        async def wrap_tool_call(self, call: ToolCall, call_next: ToolNext) -> ToolResult:
+            pytest.fail("subagent 专用入口不能进入普通 middleware")
+
+    breaker = CircuitBreaker(failure_threshold=1)
+    breaker.after_result(
+        "subagent", ToolResult(tool_use_id="old", tool_name="subagent", is_error=True)
+    )
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ToolExecutor(
+        registry,
+        middleware=[MustNotRun()],
+        circuit_breaker=breaker,
+        observability=observation,
+    )
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    prepared = executor.prepare_many(
+        [ToolUseBlock(id="call", name="subagent", input={"prompt": "  investigate  "})], context
+    ).calls[0]
+    with observation.scope("parent") as parent:
+        outcome = await executor.execute_subagent_prepared(
+            prepared, context, parent_call=SubagentParentCall("parent-run", "call")
+        )
+        assert trace.get_current_span() is parent
+    assert len(port.calls) == 1
+    tool_span, parent_span = exporter.get_finished_spans()
+    assert tool_span.name == "execute_tool subagent"
+    assert tool_span.parent.span_id == parent_span.context.span_id
+    assert tool_span.attributes["gen_ai.operation.name"] == "execute_tool"
+    assert tool_span.attributes["gen_ai.tool.call.id"] == "call"
+    assert json.loads(tool_span.attributes["gen_ai.tool.call.arguments"]) == prepared.arguments
+    assert tool_span.status.status_code is (
+        StatusCode.ERROR if status == "failed" else StatusCode.UNSET
+    )
+    if status == "waiting":
+        assert outcome is port.outcome
+        assert "gen_ai.tool.call.result" not in tool_span.attributes
+    else:
+        assert isinstance(outcome, ToolResult)
+        assert outcome.tool_use_id == "call"
+        assert outcome.is_error is (status == "failed")
+        assert json.loads(tool_span.attributes["gen_ai.tool.call.result"]) == {
+            "parts": [{"type": "text", "content": outcome.model_content}]
+        }
+
+
+@pytest.mark.asyncio
+async def test_dedicated_executor_keeps_controller_failure_and_request(
+    configured_tool: tuple[SubagentTool, RecordingPort],
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation, exporter = observability
+    tool, port = configured_tool
+    original = IrisRunPersistenceError("child settlement failed")
+
+    async def fail(invocation: SubagentInvocation) -> SubagentExecutionOutcome:
+        raise original
+
+    monkeypatch.setattr(port, "execute", fail)
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ToolExecutor(registry, observability=observation)
+    context = ToolExecutionContext(workspace_root=tmp_path)
+    prepared = executor.prepare_many(
+        [ToolUseBlock(id="call", name="subagent", input={"prompt": "investigate"})], context
+    ).calls[0]
+    with pytest.raises(IrisRunPersistenceError) as caught:
+        await executor.execute_subagent_prepared(
+            prepared, context, parent_call=SubagentParentCall("parent", "call")
+        )
+    assert caught.value is original
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.ERROR
+    assert json.loads(span.attributes["gen_ai.tool.call.arguments"]) == prepared.arguments
+    assert "gen_ai.tool.call.result" not in span.attributes
 
 
 @pytest.mark.asyncio

@@ -135,9 +135,14 @@ async def test_runtime_calls_generate_one_model_span(
         stream_sink=RecordingSink() if streaming else None,
     )
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
-    [span] = exporter.get_finished_spans()
+    spans = exporter.get_finished_spans()
+    [span] = [span for span in spans if span.attributes.get("gen_ai.operation.name") == "chat"]
+    [prepare] = [span for span in spans if span.name == "iris.context.prepare"]
     assert span.attributes["gen_ai.operation.name"] == "chat"
     assert span.attributes["iris.model.outcome"] == "completed"
+    assert span.attributes["iris.model.purpose"] == "main"
+    assert span.attributes["iris.step.index"] == prepare.attributes["iris.step.index"] == 0
+    assert prepare.end_time <= span.start_time
     assert len(raw.stream_requests if streaming else raw.requests) == 1
     await runtime.environment.aclose()
 

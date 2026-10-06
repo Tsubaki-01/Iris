@@ -1,6 +1,7 @@
 """真实 child Runner 与 shared-store 委派的确定性集成测试。"""
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator
 from datetime import timedelta
@@ -77,13 +78,13 @@ from .fakes import (
 )
 
 
-def _parent_provider() -> StaticProvider:
+def _parent_provider(*, prompt: str = "Child task") -> StaticProvider:
     return StaticProvider(
         tool_response(
             ToolUseBlock(
                 id="delegate",
                 name="subagent",
-                input={"prompt": "Child task"},
+                input={"prompt": prompt},
             )
         ),
         text_response("Parent complete"),
@@ -128,6 +129,16 @@ async def test_child_borrows_observability_and_current_yaml(
         "child-model",
         "parent-model",
     ]
+    drivers = [
+        span for span in exporter.get_finished_spans() if span.name.startswith("invoke_agent ")
+    ]
+    parent = next(span for span in drivers if span.attributes["iris.run.id"] == "parent")
+    child = next(span for span in drivers if span is not parent)
+    assert child.attributes["iris.parent.run_id"] == "parent"
+    assert child.attributes["iris.parent.tool_call_id"] == "delegate"
+    assert "iris.step.index" not in child.attributes
+    assert models[1].attributes["iris.run.id"] == child.attributes["iris.run.id"]
+    assert models[1].attributes["iris.step.index"] == 0
     assert exporter.get_finished_spans()[-1].name == "still usable after borrowers close"
 
 
@@ -508,8 +519,12 @@ async def test_repeated_active_cancel_does_not_interrupt_child_cleanup(
     "owner", ["deadline", "parent_interaction", "outer", "child_interaction", "child_deadline"]
 )
 async def test_proxy_due_owner_settles_child_before_parent_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    observation, exporter = observability
     clock = FrozenClock()
     build_start = AgentRunner._build_start_facts
 
@@ -534,6 +549,7 @@ async def test_proxy_due_owner_settles_child_before_parent_result(
         provider=_parent_provider(),
         store=store,
         clock=clock,
+        observability=observation,
         child_provider_factory=ChildProviders(
             StaticProvider(
                 tool_response(
@@ -574,6 +590,17 @@ async def test_proxy_due_owner_settles_child_before_parent_result(
             if owner == "child_interaction"
             else RunStopReason.DEADLINE_EXCEEDED
         )
+    controls = [span for span in exporter.get_finished_spans() if span.name == "iris.run.control"]
+    parent_control = next(span for span in controls if span.attributes["iris.run.id"] == "parent")
+    if owner in {"outer", "child_interaction", "child_deadline"}:
+        assert parent_control.attributes["iris.control.operation"] == "subagent_continue"
+        resumed = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.name.startswith("invoke_agent ") and span.attributes["iris.run.id"] == "parent"
+        ][-1]
+        assert resumed.start_time >= parent_control.end_time
+        assert resumed.parent is None
 
 
 @pytest.mark.asyncio
@@ -970,7 +997,9 @@ async def test_subagent_unadmitted_config_error_is_committed_without_claim(tmp_p
 async def test_subagent_repeated_waiting_rebinds_proxy_without_advancing_parent_cursor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    observation, exporter = observability
     child_provider = StaticProvider(
         tool_response(ToolUseBlock(id="ask-1", name="ask_question", input={"question": "First?"})),
         tool_response(ToolUseBlock(id="ask-2", name="ask_question", input={"question": "Second?"})),
@@ -980,6 +1009,7 @@ async def test_subagent_repeated_waiting_rebinds_proxy_without_advancing_parent_
         _write_configs(tmp_path),
         provider=_parent_provider(),
         child_provider_factory=ChildProviders(child_provider),
+        observability=observation,
     )
     first = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
     resume_waiting = runner.store.resume_waiting_run
@@ -1018,6 +1048,30 @@ async def test_subagent_repeated_waiting_rebinds_proxy_without_advancing_parent_
     assert completed.run.usage.tool_calls_committed == 1
     assert runner.store.load_tool_call("parent", "delegate").result.model_content == "Child done"
     assert runner.store.load_run(child_id).usage.tool_calls_committed == 2
+    spans = exporter.get_finished_spans()
+    controls = [span for span in spans if span.name == "iris.run.control"]
+    assert len(controls) == 2
+    assert [span.attributes["iris.run.status"] for span in controls] == ["waiting", "active"]
+    assert all(
+        span.attributes["iris.control.operation"] == "subagent_continue" for span in controls
+    )
+    assert all(span.attributes["gen_ai.tool.call.id"] == "delegate" for span in controls)
+    assert all(span.attributes["gen_ai.tool.name"] == "subagent" for span in controls)
+    assert json.loads(controls[0].attributes["gen_ai.tool.call.arguments"]) == (
+        first_proxy.request.tool_call.arguments
+    )
+    assert "gen_ai.tool.call.result" not in controls[0].attributes
+    decision = next(event for event in controls[0].events if event.name == "iris.tool.decision")
+    assert decision.attributes["iris.tool.decision"] == "suspended"
+    assert decision.attributes["iris.interaction.id"] == second.pending_interaction.interaction_id
+    parent_drivers = [
+        span
+        for span in spans
+        if span.name.startswith("invoke_agent ") and span.attributes["iris.run.id"] == "parent"
+    ]
+    assert len(parent_drivers) == 2
+    assert parent_drivers[1].start_time >= controls[-1].end_time
+    assert parent_drivers[1].parent is None
 
 
 @pytest.mark.asyncio
@@ -1445,13 +1499,18 @@ async def test_parent_active_recovery_reuses_linked_child(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "child", "artifact"])
 async def test_waiting_final_uses_parent_artifact_and_publishes_before_continuing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
-    provider = _parent_provider()
+    observation, exporter = observability
+    provider = _parent_provider(prompt="  Child task  ")
     child_text = "Long child answer " * 3000
     runner = AgentRunner.from_config_path(
         _write_configs(tmp_path),
         provider=provider,
+        observability=observation,
         child_provider_factory=ChildProviders(
             StaticProvider(
                 tool_response(
@@ -1518,6 +1577,18 @@ async def test_waiting_final_uses_parent_artifact_and_publishes_before_continuin
             tmp_path / ".iris" / "tool-results" / safe_path_segment("parent-session")
         )
     assert call.result.tool_use_id == "delegate" and call.claim_activation_id is None
+    controls = [
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == "iris.run.control" and span.attributes["iris.run.id"] == "parent"
+    ]
+    assert len(controls) == 1
+    assert controls[0].attributes["iris.control.operation"] == "subagent_continue"
+    assert json.loads(controls[0].attributes["gen_ai.tool.call.arguments"]) == (
+        waiting.pending_interaction.request.tool_call.arguments
+    )
+    if failure is not None:
+        assert controls[0].attributes["iris.run.status"] == "failed"
 
 
 @pytest.mark.asyncio

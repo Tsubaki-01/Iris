@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from pydantic import BaseModel
 
 from iris.command.models import CommandStatus, CommandStopReceipt, CommandStopSlot
 from iris.exceptions import IrisCancellationRequestedError, IrisToolExecutionError
 from iris.message import TextBlock, ToolUseBlock
+from iris.observability.service import Observability
 from iris.tools import (
     BaseTool,
     CircuitBreaker,
@@ -58,11 +62,15 @@ def _executor(
     body: Callable[[ToolExecutionContext], Awaitable[ToolResult]],
     *wrappers: Callable[[ToolCall, ToolNext], Awaitable[ToolResult]],
     breaker: CircuitBreaker | None = None,
+    observability: Observability | None = None,
 ) -> ToolExecutor:
     registry = ToolRegistry()
     registry.register(_Body(body))
     return ToolExecutor(
-        registry, middleware=[_Wrapper(w) for w in wrappers], circuit_breaker=breaker
+        registry,
+        middleware=[_Wrapper(w) for w in wrappers],
+        circuit_breaker=breaker,
+        observability=observability,
     )
 
 
@@ -95,7 +103,11 @@ async def test_onion_order_and_identity(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_short_circuit_has_no_body_or_breaker_count(tmp_path: Path) -> None:
+async def test_short_circuit_has_no_body_or_breaker_count(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
+
     async def body(context: ToolExecutionContext) -> ToolResult:
         pytest.fail("短路不进入body")
 
@@ -104,10 +116,18 @@ async def test_short_circuit_has_no_body_or_breaker_count(tmp_path: Path) -> Non
 
     breaker = CircuitBreaker(failure_threshold=1)
     result = await _execute(
-        _executor(body, short, breaker=breaker), ToolExecutionContext(workspace_root=tmp_path)
+        _executor(body, short, breaker=breaker, observability=observation),
+        ToolExecutionContext(workspace_root=tmp_path),
     )
     assert result.model_content == "cached"
     assert breaker._states == {}
+    [span] = exporter.get_finished_spans()
+    assert span.name == "execute_tool body"
+    assert span.status.status_code is StatusCode.UNSET
+    assert span.attributes["gen_ai.tool.call.id"] == "current"
+    assert json.loads(span.attributes["gen_ai.tool.call.result"]) == {
+        "parts": [{"type": "text", "content": "cached"}]
+    }
 
 
 @pytest.mark.asyncio
@@ -228,7 +248,11 @@ async def test_duplicate_continuation_cannot_hide_violation(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_body_failure_recovery_keeps_real_breaker_failure(tmp_path: Path) -> None:
+async def test_body_failure_recovery_keeps_real_breaker_failure(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
+
     async def body(context: ToolExecutionContext) -> ToolResult:
         raise IrisToolExecutionError("body failed")
 
@@ -239,10 +263,15 @@ async def test_body_failure_recovery_keeps_real_breaker_failure(tmp_path: Path) 
             return _result("recovered")
 
     breaker = CircuitBreaker(failure_threshold=1)
-    executor = _executor(body, recover, breaker=breaker)
+    executor = _executor(body, recover, breaker=breaker, observability=observation)
     context = ToolExecutionContext(workspace_root=tmp_path)
     assert (await _execute(executor, context)).model_content == "recovered"
     assert (await _execute(executor, context)).error.code == "CIRCUIT_OPEN"
+    recovered, blocked = exporter.get_finished_spans()
+    assert recovered.status.status_code is StatusCode.UNSET
+    assert blocked.status.status_code is StatusCode.ERROR
+    assert "recovered" in recovered.attributes["gen_ai.tool.call.result"]
+    assert "CIRCUIT_OPEN" in blocked.attributes["gen_ai.tool.call.result"]
 
 
 @pytest.mark.asyncio
@@ -362,6 +391,50 @@ async def test_batch_calls_get_separate_slots(tmp_path: Path, parallel: bool) ->
     assert base.model_copy(deep=True).execution_control is base.execution_control
 
 
+@pytest.mark.asyncio
+async def test_parallel_spans_end_when_each_tool_finishes(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
+    slow_started, release_slow, fast_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def body(context: ToolExecutionContext) -> ToolResult:
+        if context.call_id == "slow":
+            slow_started.set()
+            await release_slow.wait()
+        else:
+            await slow_started.wait()
+            fast_finished.set()
+        return _result(context.call_id)
+
+    executor = _executor(body, observability=observation)
+    executor.registry.get("body").is_concurrency_safe = lambda params: True
+    with observation.scope("parent") as parent:
+        task = asyncio.create_task(
+            executor.execute_many(
+                [ToolUseBlock(id=name, name="body", input={}) for name in ("slow", "fast")],
+                ToolExecutionContext(workspace_root=tmp_path),
+            )
+        )
+        try:
+            await asyncio.wait_for(fast_finished.wait(), 5)
+            # final artifact 归一化沿既有异步IO完成，而不是只等 body 返回。
+            async with asyncio.timeout(5):
+                while not exporter.get_finished_spans():
+                    await asyncio.sleep(0)
+            [fast] = exporter.get_finished_spans()
+            assert fast.attributes["gen_ai.tool.call.id"] == "fast"
+            assert not task.done()
+        finally:
+            release_slow.set()
+            results = await task
+    fast, slow, parent_span = exporter.get_finished_spans()
+    assert [result.tool_use_id for result in results] == ["slow", "fast"]
+    assert fast.end_time <= slow.end_time
+    assert fast.parent == slow.parent == parent.get_span_context()
+    assert parent_span.context == parent.get_span_context()
+
+
 def test_middleware_requires_current_abstract_method() -> None:
     class OldMiddleware(ToolMiddleware):
         pass
@@ -371,7 +444,11 @@ def test_middleware_requires_current_abstract_method() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_arguments_snapshot_cannot_change_body_input(tmp_path: Path) -> None:
+async def test_call_arguments_snapshot_cannot_change_body_input(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
+
     class ArgumentTool(_Body):
         async def arun(
             self, params: BaseModel | dict[str, Any], context: ToolExecutionContext
@@ -388,12 +465,16 @@ async def test_call_arguments_snapshot_cannot_change_body_input(tmp_path: Path) 
 
     registry = ToolRegistry()
     registry.register(ArgumentTool(unused))
-    executor = ToolExecutor(registry, middleware=[_Wrapper(mutate)])
+    executor = ToolExecutor(registry, middleware=[_Wrapper(mutate)], observability=observation)
     result = await executor.execute_one(
         ToolUseBlock(id="current", name="body", input={"nested": {"value": "original"}}),
         ToolExecutionContext(workspace_root=tmp_path),
     )
     assert result.model_content == "original"
+    [span] = exporter.get_finished_spans()
+    assert json.loads(span.attributes["gen_ai.tool.call.arguments"]) == {
+        "nested": {"value": "original"}
+    }
 
 
 def test_command_success_does_not_erase_pending_receipt() -> None:

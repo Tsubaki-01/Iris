@@ -54,16 +54,13 @@ def response_attributes(response: LLMResponse, max_chars: int) -> dict[str, Attr
 
 
 def tool_attributes(
-    arguments: dict[str, Any], result: ToolResult, max_chars: int
+    arguments: dict[str, Any], result: ToolResult | None, max_chars: int
 ) -> dict[str, AttributeValue]:
     """记录实际参数与最终模型结果，保留错误替换、图片和 Hook 反馈。"""
-    return _serialize(
-        {
-            "gen_ai.tool.call.arguments": arguments,
-            "gen_ai.tool.call.result": {"parts": _parts(result.model_blocks)},
-        },
-        max_chars,
-    )
+    values: dict[str, Any] = {"gen_ai.tool.call.arguments": arguments}
+    if result is not None:
+        values["gen_ai.tool.call.result"] = {"parts": _parts(result.model_blocks)}
+    return _serialize(values, max_chars)
 
 
 def _parts(content: str | Sequence[ContentBlock]) -> list[dict[str, Any]]:

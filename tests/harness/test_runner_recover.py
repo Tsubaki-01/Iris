@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.exceptions import (
     IrisRunConflictError,
@@ -31,6 +32,7 @@ from iris.lifecycle import (
     ToolCallPhase,
 )
 from iris.message import ToolUseBlock
+from iris.observability.service import Observability
 from iris.providers.responses import ResponsesMapper
 from iris.runtime import RuntimeCompactionCommit, RuntimeCursor
 from iris.store import InMemoryLifecycleStore, SQLiteStore
@@ -153,7 +155,11 @@ async def test_sqlite_restart_discovers_active_lane_and_recovers_with_exact_fenc
 
 
 @pytest.mark.asyncio
-async def test_outcome_ready_recovery_finalizes_without_provider_call(tmp_path: Path) -> None:
+async def test_outcome_ready_recovery_finalizes_without_provider_call(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
+
     class FailFinishOnceStore(InMemoryLifecycleStore):
         failed = False
 
@@ -172,7 +178,7 @@ async def test_outcome_ready_recovery_finalizes_without_provider_call(tmp_path: 
     provider = StaticProvider()
 
     result = await AgentRunner(
-        runtime=build_runtime(tmp_path, provider=provider),
+        runtime=build_runtime(tmp_path, provider=provider, observability=observation),
         store=store,
     ).recover(
         "run-outcome-ready",
@@ -182,6 +188,11 @@ async def test_outcome_ready_recovery_finalizes_without_provider_call(tmp_path: 
     assert result.run.stop_reason is RunStopReason.COMPLETED
     assert result.assistant_message is not None
     assert provider.requests == []
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "iris.run.control"
+    assert spans[0].attributes["iris.control.operation"] == "finalize"
+    assert spans[0].attributes["iris.run.status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -244,9 +255,7 @@ async def test_recovery_marks_unresolved_claim_unknown_without_replaying_tool(
 
     assert follow_up.run.stop_reason is RunStopReason.COMPLETED
     wire_messages = ResponsesMapper().format_messages(follow_up_provider.requests[0].messages)
-    tool_call_ids = [
-        item["call_id"] for item in wire_messages if item["type"] == "function_call"
-    ]
+    tool_call_ids = [item["call_id"] for item in wire_messages if item["type"] == "function_call"]
     tool_result_ids = [
         item["call_id"] for item in wire_messages if item["type"] == "function_call_output"
     ]

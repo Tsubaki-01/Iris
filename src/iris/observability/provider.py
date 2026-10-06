@@ -116,8 +116,11 @@ class _CompletionProvider:
         except Exception as error:
             obs.attributes(span, {"iris.model.outcome": "failed"})
             obs.error(span, error)
-            if isinstance(error, IrisProviderError) and "usage" in error.context:
-                _usage(obs, span, cast(Mapping[str, int], error.context["usage"]))
+            if (
+                isinstance(error, IrisProviderError)
+                and (reported_usage := error.context.get("usage")) is not None
+            ):
+                _usage(obs, span, cast(Mapping[str, int], reported_usage))
             raise
         finally:
             obs.end_span(span)
@@ -200,8 +203,11 @@ class _StreamingProvider(_CompletionProvider):
             if outcome is None:
                 outcome = "failed"
                 obs.error(span, error)
-            if isinstance(error, IrisProviderError) and "usage" in error.context:
-                usage = cast(Mapping[str, int], error.context["usage"])
+            if (
+                isinstance(error, IrisProviderError)
+                and (reported_usage := error.context.get("usage")) is not None
+            ):
+                usage = cast(Mapping[str, int], reported_usage)
             raise
         finally:
             try:

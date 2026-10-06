@@ -4,7 +4,8 @@
 它不拥有 Run 状态、恢复、业务重试或存储；lifecycle/store 仍是权威来源。
 
 SDK/CLI、子 Agent、Memory 和 Evolution 已接入普通与流式模型记录和正文投影。
-当前尚未增加 activation、工具与维护 cycle 区间。
+前台 trace 包含每次 activation、请求准备、模型、真实工具、控制与 observer 区间；
+后台维护 cycle 尚未接入。
 
 ## 配置与使用
 
@@ -58,6 +59,21 @@ Memory/Evolution 的构造器同样接受借用服务并包装自己的 raw prov
 `iris chat` 自动创建宿主共享实例，并在正常退出及构造、准备失败时清理。禁用采集不因
 观测读取全局配置。Maintenance、Goal successor 和 deadline 只重置 OTel 上下文，
 保留原有业务 ContextVars 和调度逻辑。
+
+## 前台调用关系
+
+一次 logical Run 可以经过多次等待与恢复；每次真实驱动建立独立 activation，使用已有
+run/session IDs 关联。模型步骤通过 `iris.step.index` 关联 prepare、main 和工具，不建立
+额外 step 节点。压缩模型是 prepare 的子节点，purpose 为 `compaction`。
+
+工具节点包含实际处理和最终结果，middleware 恢复后按最终 `is_error` 判定；并行工具
+各自完成时结束。未进入执行器的 preflight/人工决定只留下 `iris.tool.decision` 事件。
+subagent 的等待正常结束本次区间；继续执行的 control 覆盖 child 与结果归一化，并在
+父 Agent 下一 activation 前结束。恢复不会重放旧模型或旧工具节点。
+
+`iris.driver.outcome` 描述实际驱动返回、失败或取消；`iris.run.status` 描述权威 Run 状态。
+例如结果已提交 completed 后 observer 等待被取消，Run 仍为 completed。遥测不会修改
+权威结果、触发业务重试或成为恢复依据。
 
 ## 边界与记录语义
 

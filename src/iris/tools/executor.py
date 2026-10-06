@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, cast
 
+from opentelemetry.trace import Span
 from pydantic import BaseModel, ValidationError
 
 from ..command.models import CommandStatus, CommandStopSlot
@@ -275,25 +277,28 @@ class ToolExecutor:
     ) -> SubagentExecutionOutcome:
         """专用委派入口；不进入 middleware、breaker 或 parent effect claim。"""
         current = prepared if linked_continuation else self._refresh_permission(prepared, context)
-        permission_error = self._permission_error(
-            current,
-            approved_tool_call_id=approved_tool_call_id,
-        )
-        if permission_error is not None:
-            return permission_error
-        tool = cast(SubagentTool, current.tool)
-        params = cast(SubagentCallInput, current.validated_input)
-        context.call_id = current.tool_use.id
-        context.tool_name = current.tool_use.name
-        if context.cancellation is not None:
-            context.cancellation.raise_if_requested()
-        outcome = await tool.execute_subagent(params, context, parent_call=parent_call)
-        if isinstance(outcome, ChildWaiting):
-            return outcome
-        # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
-        return await self._finalize_result(
-            tool_use=current.tool_use, tool=tool, result=outcome, context=context
-        )
+        with self._observe_call(current) as span:
+            result = self._permission_error(
+                current,
+                approved_tool_call_id=approved_tool_call_id,
+            )
+            if result is None:
+                tool = cast(SubagentTool, current.tool)
+                params = cast(SubagentCallInput, current.validated_input)
+                context.call_id = current.tool_use.id
+                context.tool_name = current.tool_use.name
+                if context.cancellation is not None:
+                    context.cancellation.raise_if_requested()
+                outcome = await tool.execute_subagent(params, context, parent_call=parent_call)
+                if isinstance(outcome, ChildWaiting):
+                    self.observability.record_tool(span, current.arguments)
+                    return outcome
+                # Controller 的 lifecycle/recovery 错误不属于模型可见工具失败。
+                result = await self._finalize_result(
+                    tool_use=current.tool_use, tool=tool, result=outcome, context=context
+                )
+            self._record_observed_result(span, current, result)
+            return result
 
     async def _finalize_result(
         self,
@@ -330,17 +335,19 @@ class ToolExecutor:
         effect_guard: ToolEffectGuard | None = None,
     ) -> ToolResult:
         """执行当前阶段已完成 lookup、校验与鉴权的调用。"""
-        permission_error = self._permission_error(
-            prepared,
-            approved_tool_call_id=approved_tool_call_id,
-        )
-        if permission_error is not None:
-            return permission_error
-        return await self._execute_authorized(
-            prepared,
-            context,
-            effect_guard=effect_guard,
-        )
+        with self._observe_call(prepared) as span:
+            result = self._permission_error(
+                prepared,
+                approved_tool_call_id=approved_tool_call_id,
+            )
+            if result is None:
+                result = await self._execute_authorized(
+                    prepared,
+                    context,
+                    effect_guard=effect_guard,
+                )
+            self._record_observed_result(span, prepared, result)
+            return result
 
     # endregion
 
@@ -348,6 +355,38 @@ class ToolExecutor:
     #               Helper Methods
     # ==========================================
     # region
+    @contextmanager
+    def _observe_call(self, prepared: PreparedToolCall) -> Iterator[Span]:
+        """两个真实执行入口共用薄 scope，取消不冒充工具错误。"""
+        call = prepared.tool_use
+        with self.observability.scope(
+            f"execute_tool {call.name}",
+            attributes={
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": call.name,
+                "gen_ai.tool.call.id": call.id,
+            },
+        ) as span:
+            try:
+                yield span
+            except (IrisCancellationRequestedError, asyncio.CancelledError):
+                self.observability.record_tool(span, prepared.arguments)
+                self.observability.attributes(span, {"iris.driver.outcome": "cancelled"})
+                raise
+            except Exception:
+                self.observability.record_tool(span, prepared.arguments)
+                raise
+
+    def _record_observed_result(
+        self, span: Span, prepared: PreparedToolCall, result: ToolResult
+    ) -> None:
+        """按最终模型可见结果记录正文与失败，不采用被 middleware 替换的 body 状态。"""
+        self.observability.record_tool(span, prepared.arguments, result)
+        if result.is_error:
+            self.observability.error(
+                span, result.error.message if result.error is not None else "Tool execution failed"
+            )
+
     def _prepare_call(
         self,
         tool_use: ToolUseBlock,

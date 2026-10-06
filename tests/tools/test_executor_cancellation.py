@@ -8,9 +8,12 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from iris.exceptions import IrisCancellationRequestedError
 from iris.message import ToolUseBlock
+from iris.observability.service import Observability
 from iris.tools import (
     CallableExecutionMode,
     ToolCall,
@@ -40,11 +43,12 @@ def _start(
     body: Callable[[], str | Awaitable[str]],
     *,
     middleware: Sequence[ToolMiddleware] = (),
+    observability: Observability | None = None,
 ) -> asyncio.Task[ToolResult]:
     """通过普通 executor 入口运行受控工具。"""
     registry = ToolRegistry()
     registry.register_function(body, name="body", description="受控工具")
-    executor = ToolExecutor(registry, middleware=middleware)
+    executor = ToolExecutor(registry, middleware=middleware, observability=observability)
     return asyncio.create_task(
         executor.execute_one(
             ToolUseBlock(id="call", name="body", input={}),
@@ -54,9 +58,12 @@ def _start(
 
 
 @pytest.mark.asyncio
-async def test_completed_body_signal_propagates_without_runtime_owner(tmp_path: Path) -> None:
+async def test_completed_body_signal_propagates_without_runtime_owner(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
     """低层调用没有延迟提交 owner，已知结果不能吞掉取消请求。"""
     signal = Cancellation()
+    observation, exporter = observability
 
     async def body() -> str:
         """返回结果前同步设置取消，不留时间竞争。"""
@@ -64,7 +71,10 @@ async def test_completed_body_signal_propagates_without_runtime_owner(tmp_path: 
         return "known"
 
     with pytest.raises(IrisCancellationRequestedError):
-        await _start(tmp_path, signal, body)
+        await _start(tmp_path, signal, body, observability=observation)
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.UNSET
+    assert span.attributes["iris.driver.outcome"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -174,15 +184,22 @@ async def test_outer_cancellation_drains_body_without_recancelling_cleanup(
 
 
 @pytest.mark.asyncio
-async def test_body_self_cancellation_is_not_an_iris_request(tmp_path: Path) -> None:
+async def test_body_self_cancellation_is_not_an_iris_request(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
     """没有 signal 请求的 body 自取消不归一化为普通错误或领域取消。"""
+
+    observation, exporter = observability
 
     async def body() -> str:
         """模拟工具自身的程序中断。"""
         raise asyncio.CancelledError("body stopped")
 
     with pytest.raises(asyncio.CancelledError, match="body stopped"):
-        await _start(tmp_path, Cancellation(), body)
+        await _start(tmp_path, Cancellation(), body, observability=observation)
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is StatusCode.UNSET
+    assert span.attributes["iris.driver.outcome"] == "cancelled"
 
 
 @pytest.mark.asyncio

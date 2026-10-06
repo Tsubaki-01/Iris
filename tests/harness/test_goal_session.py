@@ -95,6 +95,16 @@ async def test_goal_continues_two_rounds_then_committed_report_completes(
     finally:
         await manager.close(cancel_run=True)
         await runner.aclose()
+    drivers = [
+        span
+        for span in exporter.get_finished_spans()
+        if span.attributes.get("gen_ai.operation.name") == "invoke_agent"
+    ]
+    assert len(drivers) == 2
+    assert all(span.parent is None for span in drivers)
+    assert all(span.attributes["iris.goal.id"] == view.goal.goal_id for span in drivers)
+    assert all(span.attributes["iris.goal.id"] == view.goal.goal_id for span in models)
+    assert {span.context.span_id for span in drivers} == {span.parent.span_id for span in models}
 
 
 @pytest.mark.asyncio

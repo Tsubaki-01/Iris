@@ -7,9 +7,12 @@ from typing import Any
 
 import httpx2 as httpx
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 from pydantic import BaseModel
 
 from iris.message import ImageBlock, ImageFileRef, TextBlock, ToolUseBlock, image_reference_text
+from iris.observability.service import Observability
 from iris.tools import (
     BaseTool,
     PermissionDecision,
@@ -32,9 +35,12 @@ from iris.tools.artifacts import ToolArtifactStore, truncate_tool_result
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error_mode", ["success", "unstructured", "structured"])
 async def test_middleware_expanded_images_survive_artifact_and_error_projection(
-    tmp_path: Path, error_mode: str
+    tmp_path: Path,
+    error_mode: str,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """最终外置只短化文字，图片引用留在可读正文首部，原生结果保持独立。"""
+    observation, exporter = observability
     first = ImageBlock(
         original=ImageFileRef(
             path=tmp_path / "first-original.png", mime_type="image/png", width=3000, height=1500
@@ -88,7 +94,9 @@ async def test_middleware_expanded_images_survive_artifact_and_error_projection(
     tool = registry.register_function(produce)
     tool.definition.max_result_chars = 1600
     tool.definition.preview_chars = 32
-    result = await ToolExecutor(registry, middleware=[ExpandImages()]).execute_one(
+    result = await ToolExecutor(
+        registry, middleware=[ExpandImages()], observability=observation
+    ).execute_one(
         ToolUseBlock(id="image-result", name="produce", input={}),
         ToolExecutionContext(workspace_root=tmp_path, session_id="images"),
     )
@@ -114,6 +122,19 @@ async def test_middleware_expanded_images_survive_artifact_and_error_projection(
     message = result.to_msg().tool_results[0]
     assert [block for block in message.content if isinstance(block, ImageBlock)] == [first, second]
     assert message.text == result.model_content
+    [span] = exporter.get_finished_spans()
+    assert span.status.status_code is (
+        StatusCode.UNSET if error_mode == "success" else StatusCode.ERROR
+    )
+    parts = json.loads(span.attributes["gen_ai.tool.call.result"])["parts"]
+    assert [part["uri"] for part in parts if part["type"] == "uri"] == [
+        first.model.path.as_uri(),
+        second.model.path.as_uri(),
+    ]
+    assert (
+        "\n".join(part["content"] for part in parts if part["type"] == "text")
+        == result.model_content
+    )
 
 
 def test_error_with_only_images_retains_images_when_text_is_truncated(tmp_path: Path) -> None:

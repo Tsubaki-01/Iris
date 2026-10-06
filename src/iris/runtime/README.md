@@ -9,7 +9,13 @@ Agent YAML；未注入且 `observability.enabled=true` 时，唯一共享装配�
 执行器借用同一服务。`owned_observability` 仅记录自建者，MCP、command、decision 收尾后关闭，
 既有资源关闭失败仍会执行；同步装配失败也释放未交接的自建服务。直接使用 factory 的宿主
 须调用 `await runtime.environment.aclose()`；外部注入服务由宿主最后关闭。
-当前已接通模型 complete/stream 记录；工具等业务区间的观测由后续实现补齐。
+每次 cursor 推进都以当前 `cursor.step_index` 绑定步骤关联，覆盖请求准备、主模型与工具，
+恢复直接采用恢复后的索引；退出时还原宿主关联，不新增 step span。`iris.context.prepare`
+覆盖动态 context/Todo 收集、请求选择和压缩，在主模型网络调用前结束。实际摘要调用使用
+`compaction` purpose，主模型 complete/stream 使用 `main`；重试仍由现有业务 owner 决定。
+未进入 executor 的预检结果、人工回答/拒绝和 HITL 挂起只记录 `iris.tool.decision` 事件，
+携带已有调用身份、实际错误 code 和可用 interaction ID，不创建工具执行 span。工具区间
+由 executor、activation 与恢复控制由 harness 负责；runtime 不新增状态存储或观测调度器。
 
 原文捕获通过 `RuntimeCapturePort` 的 `request_capture(run_id, through_count)` 提示宿主，
 由 `RuntimeEnvironment.capture_port` 注入。Runtime 不知道该事实提示会写入 Memory、

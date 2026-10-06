@@ -101,11 +101,12 @@ class CommandLifecycle:
         """一次失败只报告一次；保留原意图供下一次显式重试。"""
         try:
             async with pending.target.open(pending.run_id) as runner:
-                if pending.initial_error is not None:
-                    error = pending.initial_error
-                    pending.initial_error = None
-                    raise error
-                return await runner._perform_command_settlement(pending)
+                with runner._observe_command_attempt(pending):
+                    if pending.initial_error is not None:
+                        error = pending.initial_error
+                        pending.initial_error = None
+                        raise error
+                    return await runner._perform_command_settlement(pending)
         except IrisCommandCleanupError as exc:
             # 后终态 Hook 已移除 pending，其资源错误由共享 Hook owner 报告。
             if pending.run_id in self.pending:

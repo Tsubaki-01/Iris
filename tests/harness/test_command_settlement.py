@@ -177,10 +177,14 @@ async def test_failure_keeps_lane_until_stop_and_drain(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry", ["cancel", "recover", "resume"])
-async def test_cleanup_retry_preserves_original_result(tmp_path: Path, retry: str) -> None:
+async def test_cleanup_retry_preserves_original_result(
+    tmp_path: Path, retry: str, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
     provider = FailedProvider()
     runner = AgentRunner(
-        runtime=build_runtime(tmp_path, provider=provider), store=InMemoryLifecycleStore()
+        runtime=build_runtime(tmp_path, provider=provider, observability=observation),
+        store=InMemoryLifecycleStore(),
     )
     service = ControlledService()
     service.fail = True
@@ -206,6 +210,13 @@ async def test_cleanup_retry_preserves_original_result(tmp_path: Path, retry: st
     assert result.error.code == "PROVIDER_ERROR"
     assert result.run.cancellation_requested_at is None
     assert provider.calls == 1
+    spans = exporter.get_finished_spans()
+    controls = [span for span in spans if span.name == "iris.run.control"]
+    assert len(controls) == 1
+    assert controls[0].attributes["iris.control.operation"] == "finalize"
+    assert controls[0].attributes["iris.run.status"] == "failed"
+    assert controls[0].attributes["iris.driver.outcome"] == "returned"
+    assert controls[0].parent is None
 
 
 @pytest.mark.asyncio

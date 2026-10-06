@@ -17,6 +17,8 @@ from fakes import (
     resume_activation,
     start_activation,
 )
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import BaseModel
 
 from iris.agents import AgentConfig
@@ -31,6 +33,7 @@ from iris.memory import (
     MemoryService,
 )
 from iris.message import LLMRequest, LLMResponse, Msg, Role, TextBlock, ToolUseBlock
+from iris.observability.service import Observability
 from iris.runtime import (
     AgentRuntime,
     RuntimeActivationOutcome,
@@ -156,6 +159,7 @@ def _runtime(
     permission_policy: PermissionPolicy | None = None,
     memory_service: MemoryService | None = None,
     writes: str = "allow",
+    observability: Observability | None = None,
 ) -> AgentRuntime:
     resolved_registry = registry or ToolRegistry()
     return build_runtime(
@@ -171,6 +175,7 @@ def _runtime(
         ),
         workspace_root=tmp_path,
         memory_service=memory_service,
+        observability=observability,
     )
 
 
@@ -184,6 +189,161 @@ def _approved_projection(waiting: RuntimeActivationResult) -> RuntimeApprovedToo
         tool_name=call.tool_name,
         fingerprint=call.fingerprint,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_observed_steps_cover_model_and_tools_and_restore_parent(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    recovered: bool,
+) -> None:
+    obs, exporter = observability
+    tool_steps: list[int] = []
+
+    def echo() -> str:
+        with obs.scope("tool-body") as span:
+            tool_steps.append(span.attributes["iris.step.index"])
+        return "echo"
+
+    registry = ToolRegistry()
+    registry.register_function(echo, description="回显")
+    call = ToolUseBlock(id="echo-1", name="echo", input={})
+    response = _tool_response(call)
+    raw = FakeProvider(
+        [_text_response("完成")] if recovered else [response, _text_response("完成")]
+    )
+    runtime = _runtime(provider=raw, tmp_path=tmp_path, registry=registry, observability=obs)
+    if recovered:
+        activation = resume_activation(
+            RuntimeCursor(
+                position="tool_batch",
+                step_index=4,
+                todo_reminder_step=None,
+                visible_tool_names=("echo",),
+                assistant_message=response.to_msg(),
+                tool_calls=(call,),
+            ),
+            kind="recover",
+        )
+        commits = FakeRuntimeCommitPort(activation, messages=[response.to_msg()])
+    else:
+        activation = start_activation()
+        commits = FakeRuntimeCommitPort(activation)
+    with obs.bind({"iris.step.index": 99}), obs.scope("activation") as parent:
+        result = await runtime.execute(
+            activation, commits=commits, cancellation=MutableCancellationSignal()
+        )
+        assert trace.get_current_span() is parent
+        with obs.scope("after-runtime"):
+            pass
+    assert result.outcome is RuntimeActivationOutcome.COMPLETED
+    assert tool_steps == [4 if recovered else 0]
+    spans = exporter.get_finished_spans()
+    models = [span for span in spans if span.attributes.get("gen_ai.operation.name") == "chat"]
+    assert [span.attributes["iris.step.index"] for span in models] == ([5] if recovered else [0, 1])
+    assert all(span.attributes["iris.model.purpose"] == "main" for span in models)
+    assert all(span.parent.span_id == parent.get_span_context().span_id for span in models)
+    prepares = [span for span in spans if span.name == "iris.context.prepare"]
+    assert [span.attributes["iris.step.index"] for span in prepares] == (
+        [5] if recovered else [0, 1]
+    )
+    assert all(
+        prepare.end_time <= model.start_time
+        for prepare, model in zip(prepares, models, strict=True)
+    )
+    [after] = [span for span in spans if span.name == "after-runtime"]
+    assert after.attributes["iris.step.index"] == 99
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["invisible", "invalid", "denied", "question", "rejected"])
+async def test_observed_bypass_records_decision_without_tool_span(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    mode: str,
+) -> None:
+    obs, exporter = observability
+    effects: list[str] = []
+
+    def write(value: str) -> str:
+        effects.append(value)
+        return value
+
+    registry = ToolRegistry()
+    registry.register_function(write, description="写入", capabilities={ToolCapability.WRITE})
+    registry.register(AskQuestionTool())
+    call = ToolUseBlock(
+        id="bypass-1",
+        name="missing"
+        if mode == "invisible"
+        else "ask_question"
+        if mode == "question"
+        else "write",
+        input={"question": "继续？"}
+        if mode == "question"
+        else {}
+        if mode == "invalid"
+        else {"value": "x"},
+    )
+    raw = FakeProvider([_tool_response(call), _text_response("完成")])
+    runtime = _runtime(
+        provider=raw,
+        tmp_path=tmp_path,
+        registry=registry,
+        writes="deny" if mode == "denied" else "allow",
+        permission_policy=DefaultPermissionPolicy(
+            write_mode="deny" if mode == "denied" else "confirm" if mode == "rejected" else "allow"
+        ),
+        observability=obs,
+    )
+    activation = start_activation()
+    commits = FakeRuntimeCommitPort(activation)
+    with obs.scope("activation"):
+        result = await runtime.execute(
+            activation, commits=commits, cancellation=MutableCancellationSignal()
+        )
+    assert effects == []
+    spans = exporter.get_finished_spans()
+    assert not [
+        span for span in spans if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+    ]
+    [event] = [
+        event for span in spans for event in span.events if event.name == "iris.tool.decision"
+    ]
+    assert event.attributes["gen_ai.tool.call.id"] == "bypass-1"
+    assert event.attributes["gen_ai.tool.name"] == call.name
+    if mode in {"question", "rejected"}:
+        assert result.outcome is RuntimeActivationOutcome.SUSPENDED
+        assert event.attributes["iris.tool.decision"] == "suspended"
+        assert event.attributes["iris.interaction.kind"] == (
+            "question" if mode == "question" else "permission"
+        )
+        assert event.attributes["iris.interaction.id"] == result.suspension.interaction_id
+        resumed = resume_activation(
+            result.cursor,
+            interaction_projection=_interaction_result(
+                result, answer="继续" if mode == "question" else None
+            ),
+        )
+        commits.activation = resumed
+        with obs.scope("resumed"):
+            completed = await runtime.execute(
+                resumed, commits=commits, cancellation=MutableCancellationSignal()
+            )
+        assert completed.outcome is RuntimeActivationOutcome.COMPLETED
+        [continued] = [span for span in exporter.get_finished_spans() if span.name == "resumed"]
+        [decision] = continued.events
+        assert decision.attributes["iris.tool.decision"] == "interaction"
+        assert decision.attributes["gen_ai.tool.call.id"] == "bypass-1"
+        if mode == "question":
+            assert "iris.tool.code" not in decision.attributes
+        else:
+            assert decision.attributes["iris.tool.code"] == "USER_REJECTED"
+    else:
+        assert result.outcome is RuntimeActivationOutcome.COMPLETED
+        assert event.attributes["iris.tool.decision"] == "preflight"
+        assert event.attributes["iris.tool.code"] == commits.tool_commits[0].result.error.code
 
 
 def _interaction_result(

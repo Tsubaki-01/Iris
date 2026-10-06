@@ -11,6 +11,8 @@ from math import floor
 from pathlib import Path
 from typing import Any, cast
 
+from opentelemetry import trace
+
 from ..command.models import CommandStopReceipt, CommandStopSlot
 from ..context import ContextBuildOutput, ContextBuildScope, ContextSnapshot
 from ..context.source import render_context_snapshot
@@ -204,265 +206,192 @@ class AgentRuntime:
         plan: ToolBatchPlan | None = None
 
         while True:
-            # --- 2. 收口 activation 状态 ---
-            # 先兑现已提交的最终结果；未完成时再检查取消与截止时间。
-            if cursor.position == "outcome_ready":
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.COMPLETED,
-                    cursor=cursor,
-                    assistant_message=cursor.assistant_message,
-                )
-            if _activation_cancelled(commits, cancellation):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.CANCELLED,
-                    cursor=cursor,
-                    assistant_message=cursor.assistant_message,
-                )
-            if _deadline_expired(commits):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
-                    cursor=cursor,
-                    assistant_message=cursor.assistant_message,
-                )
-
-            # --- 3. 归档本轮输入 ---
-            # 读取与渲染只发生在输入阶段；提交后的恢复直接沿历史继续。
-            if cursor.position == "before_input":
-                input_outcome = await self._prepare_run_input(
-                    activation=activation,
-                    cursor=cursor,
-                    commits=commits,
-                    cancellation=cancellation,
-                )
-                if isinstance(input_outcome, RuntimeActivationResult):
-                    return input_outcome
-                cursor = input_outcome
-                continue
-
-            # --- 4. 执行模型阶段 ---
-            # before_model 只推进一次模型调用，成功后转入工具批次或结果终态。
-            if cursor.position == "before_model":
-                model_outcome = await self._execute_model_step(
-                    activation=activation,
-                    cursor=cursor,
-                    commits=commits,
-                    cancellation=cancellation,
-                    steering=steering,
-                    stream_sink=stream_sink,
-                )
-                if isinstance(model_outcome, RuntimeActivationResult):
-                    return model_outcome
-                cursor = model_outcome.cursor
-                plan = model_outcome.plan
-                continue
-
-            # --- 4. 预检工具批次 ---
-            # 为当前 assistant 消息重建执行计划，并校验恢复投影与 cursor 是否一致。
-            if plan is None:
-                _emit_tool_preparing(
-                    stream_sink,
-                    activation=activation,
-                    cursor=cursor,
-                    tool_calls=cursor.tool_calls[cursor.next_tool_index :],
-                    start_ordinal=cursor.next_tool_index + 1,
-                )
-                plan = self._prepare_tool_plan(
-                    assistant_message=cast(Msg, cursor.assistant_message),
-                    commits=commits,
-                    interaction_projection=interaction_projection,
-                    session_id=activation.session_id,
-                    run_id=activation.run_id,
-                    agent_id=self.environment.agent_config.name,
-                    workspace_root=self.environment.workspace_root,
-                    permission_mode=self.environment.agent_config.permissions.writes,
-                    metadata={"activation_id": activation.activation_id},
-                    visible_tool_names=cursor.visible_tool_names,
-                    cancellation=cancellation,
-                )
-            if interaction_projection is not None:
-                prepared_subject = plan.calls[cursor.next_tool_index]
-                _validate_interaction_projection(
-                    interaction_projection,
-                    build_runtime_tool_call(
-                        activation=activation,
+            with self.environment.observability.bind({"iris.step.index": cursor.step_index}):
+                # --- 2. 收口 activation 状态 ---
+                # 先兑现已提交的最终结果；未完成时再检查取消与截止时间。
+                if cursor.position == "outcome_ready":
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.COMPLETED,
                         cursor=cursor,
-                        prepared=prepared_subject,
-                        workspace_root=self.environment.workspace_root,
-                    ),
-                    prepared_subject.human_request,
-                )
-
-            # --- 5. 执行安全并发窗口 ---
-            # RETURN_TO_MODEL 仅并发连续安全调用，结果仍按模型原始顺序提交。
-            if (
-                interaction_projection is None
-                and activation.options.tool_error_policy is ToolErrorPolicy.RETURN_TO_MODEL
-            ):
-                window = _parallel_tool_window(
-                    start=cursor.next_tool_index,
-                    calls=plan.calls,
-                    tool_bridge=self.environment.tool_bridge,
-                )
-                if window:
-                    window_outcome = await self._execute_parallel_tool_window(
-                        activation=activation,
-                        cursor=cursor,
-                        window=window,
-                        commits=commits,
-                        cancellation=cancellation,
-                        steering=steering,
-                        stream_sink=stream_sink,
+                        assistant_message=cursor.assistant_message,
                     )
-                    if isinstance(window_outcome, RuntimeActivationResult):
-                        return window_outcome
-                    cursor = window_outcome
-                    continue
-
-            # --- 6. 处理当前工具交互 ---
-            # 串行路径先消费 HITL 投影；缺少人工决定时在当前批次挂起。
-            prepared = plan.calls[cursor.next_tool_index]
-            approved_projection: RuntimeApprovedToolCall | None = None
-            projected_result: ToolResult | None = None
-            # projection 已绑定当前 durable subject；刷新后的 ALLOW/DENY 不再产生 gate。
-            if isinstance(interaction_projection, ToolResult):
-                projected_result = interaction_projection
-                interaction_projection = None
-            elif isinstance(interaction_projection, RuntimeApprovedToolCall):
-                approved_projection = interaction_projection
-                interaction_projection = None
-            elif prepared.human_request is not None:
-                return self._suspend_existing_batch(
-                    activation=activation,
-                    cursor=cursor,
-                    plan=plan.calls,
-                    prepared=prepared,
-                    commits=commits,
-                )
-
-            # --- 7. 取得当前工具结果 ---
-            # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
-            subagent_call: SubagentParentCall | None = None
-            tool_timed_out = False
-            execution_control = ToolExecutionControlSlot()
-            if projected_result is not None:
-                result = projected_result
-                claim = None
-                tool_call = build_runtime_tool_call(
-                    activation=activation,
-                    cursor=cursor,
-                    prepared=prepared,
-                    workspace_root=self.environment.workspace_root,
-                )
-            elif prepared.preflight_result is not None:
-                result = prepared.preflight_result
-                claim = None
-                tool_call = build_runtime_tool_call(
-                    activation=activation,
-                    cursor=cursor,
-                    prepared=prepared,
-                    workspace_root=self.environment.workspace_root,
-                )
-            elif isinstance(prepared.tool, SubagentTool):
-                call = SubagentParentCall(activation.run_id, prepared.tool_use.id)
-                linked = commits.load_subagent_link(tool_call_id=prepared.tool_use.id)
-                if stream_sink is not None and linked is None:
-                    stream_sink.emit(
-                        _runtime_stream_event(
-                            "tool.started",
-                            run_id=activation.run_id,
-                            session_id=activation.session_id,
-                            activation_id=activation.activation_id,
-                            step_index=cursor.step_index,
-                            tool_call_id=prepared.tool_use.id,
-                            tool_name=prepared.tool_use.name,
-                            tool_ordinal=cursor.next_tool_index + 1,
-                        )
-                    )
-                outcome = await self.environment.tool_bridge.execute_subagent_prepared(
-                    prepared,
-                    session_id=activation.session_id,
-                    run_id=activation.run_id,
-                    agent_id=self.environment.agent_config.name,
-                    workspace_root=self.environment.workspace_root,
-                    permission_mode=self.environment.agent_config.permissions.writes,
-                    metadata={"activation_id": activation.activation_id},
-                    cancellation=cancellation,
-                    approved_tool_call_id=prepared.tool_use.id
-                    if approved_projection is not None
-                    else None,
-                    linked_continuation=linked is not None,
-                )
                 if _activation_cancelled(commits, cancellation):
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.CANCELLED,
                         cursor=cursor,
                         assistant_message=cursor.assistant_message,
-                        stop_receipt=self._stop_receipt(activation.run_id, prepared.tool_use.id),
-                        stop_call_id=prepared.tool_use.id,
                     )
                 if _deadline_expired(commits):
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
                         cursor=cursor,
                         assistant_message=cursor.assistant_message,
-                        stop_receipt=self._stop_receipt(activation.run_id, prepared.tool_use.id),
-                        stop_call_id=prepared.tool_use.id,
                     )
-                if isinstance(outcome, ChildWaiting):
-                    self.environment.command_stop_slots.pop(
-                        (activation.run_id, prepared.tool_use.id), None
-                    )
-                    suspended = commits.rebind_subagent_proxy(
-                        call=call, waiting=outcome, cursor=cursor
-                    )
-                    return RuntimeActivationResult(
-                        outcome=RuntimeActivationOutcome.SUSPENDED,
-                        cursor=suspended.cursor,
-                        assistant_message=cursor.assistant_message,
-                        suspension=suspended.interaction,
-                    )
-                result = outcome
-                claim = None
-                tool_call = build_runtime_tool_call(
-                    activation=activation,
-                    cursor=cursor,
-                    prepared=prepared,
-                    workspace_root=self.environment.workspace_root,
-                )
-                if commits.load_subagent_link(tool_call_id=prepared.tool_use.id) is not None:
-                    subagent_call = call
-            else:
-                if _activation_cancelled(commits, cancellation):
-                    return RuntimeActivationResult(
-                        outcome=RuntimeActivationOutcome.CANCELLED,
-                        cursor=cursor,
-                        assistant_message=cursor.assistant_message,
-                    )
-                durable_guard = CommitPortToolEffectGuard(
-                    activation=activation,
-                    cursor=cursor,
-                    commits=commits,
-                    workspace_root=self.environment.workspace_root,
-                    interaction_id=(
-                        approved_projection.interaction_id
-                        if approved_projection is not None
-                        else None
-                    ),
-                )
-                guard = (
-                    _LiveToolEffectGuard(
-                        guard=durable_guard,
-                        sink=stream_sink,
+
+                # --- 3. 归档本轮输入 ---
+                # 读取与渲染只发生在输入阶段；提交后的恢复直接沿历史继续。
+                if cursor.position == "before_input":
+                    input_outcome = await self._prepare_run_input(
                         activation=activation,
-                        step_index=cursor.step_index,
-                        tool_ordinal=cursor.next_tool_index + 1,
+                        cursor=cursor,
+                        commits=commits,
+                        cancellation=cancellation,
                     )
-                    if stream_sink is not None
-                    else durable_guard
-                )
-                timeout = _tool_timeout_seconds(activation, commits)
-                try:
-                    operation = self.environment.tool_bridge.execute_prepared(
+                    if isinstance(input_outcome, RuntimeActivationResult):
+                        return input_outcome
+                    cursor = input_outcome
+                    continue
+
+                # --- 4. 执行模型阶段 ---
+                # before_model 只推进一次模型调用，成功后转入工具批次或结果终态。
+                if cursor.position == "before_model":
+                    model_outcome = await self._execute_model_step(
+                        activation=activation,
+                        cursor=cursor,
+                        commits=commits,
+                        cancellation=cancellation,
+                        steering=steering,
+                        stream_sink=stream_sink,
+                    )
+                    if isinstance(model_outcome, RuntimeActivationResult):
+                        return model_outcome
+                    cursor = model_outcome.cursor
+                    plan = model_outcome.plan
+                    continue
+
+                # --- 4. 预检工具批次 ---
+                # 为当前 assistant 消息重建执行计划，并校验恢复投影与 cursor 是否一致。
+                if plan is None:
+                    _emit_tool_preparing(
+                        stream_sink,
+                        activation=activation,
+                        cursor=cursor,
+                        tool_calls=cursor.tool_calls[cursor.next_tool_index :],
+                        start_ordinal=cursor.next_tool_index + 1,
+                    )
+                    plan = self._prepare_tool_plan(
+                        assistant_message=cast(Msg, cursor.assistant_message),
+                        commits=commits,
+                        interaction_projection=interaction_projection,
+                        session_id=activation.session_id,
+                        run_id=activation.run_id,
+                        agent_id=self.environment.agent_config.name,
+                        workspace_root=self.environment.workspace_root,
+                        permission_mode=self.environment.agent_config.permissions.writes,
+                        metadata={"activation_id": activation.activation_id},
+                        visible_tool_names=cursor.visible_tool_names,
+                        cancellation=cancellation,
+                    )
+                if interaction_projection is not None:
+                    prepared_subject = plan.calls[cursor.next_tool_index]
+                    _validate_interaction_projection(
+                        interaction_projection,
+                        build_runtime_tool_call(
+                            activation=activation,
+                            cursor=cursor,
+                            prepared=prepared_subject,
+                            workspace_root=self.environment.workspace_root,
+                        ),
+                        prepared_subject.human_request,
+                    )
+
+                # --- 5. 执行安全并发窗口 ---
+                # RETURN_TO_MODEL 仅并发连续安全调用，结果仍按模型原始顺序提交。
+                if (
+                    interaction_projection is None
+                    and activation.options.tool_error_policy is ToolErrorPolicy.RETURN_TO_MODEL
+                ):
+                    window = _parallel_tool_window(
+                        start=cursor.next_tool_index,
+                        calls=plan.calls,
+                        tool_bridge=self.environment.tool_bridge,
+                    )
+                    if window:
+                        window_outcome = await self._execute_parallel_tool_window(
+                            activation=activation,
+                            cursor=cursor,
+                            window=window,
+                            commits=commits,
+                            cancellation=cancellation,
+                            steering=steering,
+                            stream_sink=stream_sink,
+                        )
+                        if isinstance(window_outcome, RuntimeActivationResult):
+                            return window_outcome
+                        cursor = window_outcome
+                        continue
+
+                # --- 6. 处理当前工具交互 ---
+                # 串行路径先消费 HITL 投影；缺少人工决定时在当前批次挂起。
+                prepared = plan.calls[cursor.next_tool_index]
+                approved_projection: RuntimeApprovedToolCall | None = None
+                projected_result: ToolResult | None = None
+                # projection 已绑定当前 durable subject；刷新后的 ALLOW/DENY 不再产生 gate。
+                if isinstance(interaction_projection, ToolResult):
+                    projected_result = interaction_projection
+                    interaction_projection = None
+                elif isinstance(interaction_projection, RuntimeApprovedToolCall):
+                    approved_projection = interaction_projection
+                    interaction_projection = None
+                elif prepared.human_request is not None:
+                    return self._suspend_existing_batch(
+                        activation=activation,
+                        cursor=cursor,
+                        plan=plan.calls,
+                        prepared=prepared,
+                        commits=commits,
+                    )
+
+                # --- 7. 取得当前工具结果 ---
+                # 优先复用投影或预检结果，否则在 effect guard 保护下执行真实工具。
+                subagent_call: SubagentParentCall | None = None
+                tool_timed_out = False
+                execution_control = ToolExecutionControlSlot()
+                if projected_result is not None:
+                    result = projected_result
+                    self._record_tool_decision(
+                        prepared,
+                        "interaction",
+                        code=result.error.code if result.error is not None else None,
+                    )
+                    claim = None
+                    tool_call = build_runtime_tool_call(
+                        activation=activation,
+                        cursor=cursor,
+                        prepared=prepared,
+                        workspace_root=self.environment.workspace_root,
+                    )
+                elif prepared.preflight_result is not None:
+                    result = prepared.preflight_result
+                    self._record_tool_decision(
+                        prepared,
+                        "preflight",
+                        code=result.error.code if result.error is not None else None,
+                    )
+                    claim = None
+                    tool_call = build_runtime_tool_call(
+                        activation=activation,
+                        cursor=cursor,
+                        prepared=prepared,
+                        workspace_root=self.environment.workspace_root,
+                    )
+                elif isinstance(prepared.tool, SubagentTool):
+                    call = SubagentParentCall(activation.run_id, prepared.tool_use.id)
+                    linked = commits.load_subagent_link(tool_call_id=prepared.tool_use.id)
+                    if stream_sink is not None and linked is None:
+                        stream_sink.emit(
+                            _runtime_stream_event(
+                                "tool.started",
+                                run_id=activation.run_id,
+                                session_id=activation.session_id,
+                                activation_id=activation.activation_id,
+                                step_index=cursor.step_index,
+                                tool_call_id=prepared.tool_use.id,
+                                tool_name=prepared.tool_use.name,
+                                tool_ordinal=cursor.next_tool_index + 1,
+                            )
+                        )
+                    outcome = await self.environment.tool_bridge.execute_subagent_prepared(
                         prepared,
                         session_id=activation.session_id,
                         run_id=activation.run_id,
@@ -471,122 +400,216 @@ class AgentRuntime:
                         permission_mode=self.environment.agent_config.permissions.writes,
                         metadata={"activation_id": activation.activation_id},
                         cancellation=cancellation,
-                        effect_guard=guard,
-                        approved_tool_call_id=(
-                            prepared.tool_use.id if approved_projection is not None else None
-                        ),
-                        tool_timeout_seconds=activation.options.tool_timeout_seconds,
-                        execution_control=execution_control,
+                        approved_tool_call_id=prepared.tool_use.id
+                        if approved_projection is not None
+                        else None,
+                        linked_continuation=linked is not None,
                     )
-                    completion = await _execute_tool_with_timeout(
-                        operation, timeout, prepared.timeout_owner
-                    )
-                    result, tool_timed_out = completion.result, completion.timed_out
-                except IrisToolOutcomeUnknownError as error:
-                    return _unknown_tool_outcome(
-                        cursor,
-                        prepared,
-                        error.message,
-                        stop_receipt=error.stop_receipt,
-                        stop_slot=self.environment.command_stop_slots.get(
-                            (activation.run_id, prepared.tool_use.id)
-                        ),
-                    )
-                except IrisCancellationRequestedError:
-                    if guard.claim_for(prepared.tool_use.id) is not None:
-                        return _unknown_tool_outcome(
-                            cursor,
-                            prepared,
-                            "工具 claim 后收到取消",
-                            stop_slot=self.environment.command_stop_slots.get(
-                                (activation.run_id, prepared.tool_use.id)
+                    if _activation_cancelled(commits, cancellation):
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.CANCELLED,
+                            cursor=cursor,
+                            assistant_message=cursor.assistant_message,
+                            stop_receipt=self._stop_receipt(
+                                activation.run_id, prepared.tool_use.id
                             ),
-                        )
-                    return RuntimeActivationResult(
-                        outcome=RuntimeActivationOutcome.CANCELLED,
-                        cursor=cursor,
-                        assistant_message=cursor.assistant_message,
-                    )
-                except TimeoutError:
-                    if guard.claim_for(prepared.tool_use.id) is not None:
-                        return _unknown_tool_outcome(
-                            cursor,
-                            prepared,
-                            "工具 claim 后执行超时",
-                            stop_slot=self.environment.command_stop_slots.get(
-                                (activation.run_id, prepared.tool_use.id)
-                            ),
+                            stop_call_id=prepared.tool_use.id,
                         )
                     if _deadline_expired(commits):
                         return RuntimeActivationResult(
                             outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
                             cursor=cursor,
                             assistant_message=cursor.assistant_message,
+                            stop_receipt=self._stop_receipt(
+                                activation.run_id, prepared.tool_use.id
+                            ),
+                            stop_call_id=prepared.tool_use.id,
                         )
+                    if isinstance(outcome, ChildWaiting):
+                        self.environment.command_stop_slots.pop(
+                            (activation.run_id, prepared.tool_use.id), None
+                        )
+                        suspended = commits.rebind_subagent_proxy(
+                            call=call, waiting=outcome, cursor=cursor
+                        )
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.SUSPENDED,
+                            cursor=suspended.cursor,
+                            assistant_message=cursor.assistant_message,
+                            suspension=suspended.interaction,
+                        )
+                    result = outcome
+                    claim = None
+                    tool_call = build_runtime_tool_call(
+                        activation=activation,
+                        cursor=cursor,
+                        prepared=prepared,
+                        workspace_root=self.environment.workspace_root,
+                    )
+                    if commits.load_subagent_link(tool_call_id=prepared.tool_use.id) is not None:
+                        subagent_call = call
+                else:
+                    if _activation_cancelled(commits, cancellation):
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.CANCELLED,
+                            cursor=cursor,
+                            assistant_message=cursor.assistant_message,
+                        )
+                    durable_guard = CommitPortToolEffectGuard(
+                        activation=activation,
+                        cursor=cursor,
+                        commits=commits,
+                        workspace_root=self.environment.workspace_root,
+                        interaction_id=(
+                            approved_projection.interaction_id
+                            if approved_projection is not None
+                            else None
+                        ),
+                    )
+                    guard = (
+                        _LiveToolEffectGuard(
+                            guard=durable_guard,
+                            sink=stream_sink,
+                            activation=activation,
+                            step_index=cursor.step_index,
+                            tool_ordinal=cursor.next_tool_index + 1,
+                        )
+                        if stream_sink is not None
+                        else durable_guard
+                    )
+                    timeout = _tool_timeout_seconds(activation, commits)
+                    try:
+                        operation = self.environment.tool_bridge.execute_prepared(
+                            prepared,
+                            session_id=activation.session_id,
+                            run_id=activation.run_id,
+                            agent_id=self.environment.agent_config.name,
+                            workspace_root=self.environment.workspace_root,
+                            permission_mode=self.environment.agent_config.permissions.writes,
+                            metadata={"activation_id": activation.activation_id},
+                            cancellation=cancellation,
+                            effect_guard=guard,
+                            approved_tool_call_id=(
+                                prepared.tool_use.id if approved_projection is not None else None
+                            ),
+                            tool_timeout_seconds=activation.options.tool_timeout_seconds,
+                            execution_control=execution_control,
+                        )
+                        completion = await _execute_tool_with_timeout(
+                            operation, timeout, prepared.timeout_owner
+                        )
+                        result, tool_timed_out = completion.result, completion.timed_out
+                    except IrisToolOutcomeUnknownError as error:
+                        return _unknown_tool_outcome(
+                            cursor,
+                            prepared,
+                            error.message,
+                            stop_receipt=error.stop_receipt,
+                            stop_slot=self.environment.command_stop_slots.get(
+                                (activation.run_id, prepared.tool_use.id)
+                            ),
+                        )
+                    except IrisCancellationRequestedError:
+                        if guard.claim_for(prepared.tool_use.id) is not None:
+                            return _unknown_tool_outcome(
+                                cursor,
+                                prepared,
+                                "工具 claim 后收到取消",
+                                stop_slot=self.environment.command_stop_slots.get(
+                                    (activation.run_id, prepared.tool_use.id)
+                                ),
+                            )
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.CANCELLED,
+                            cursor=cursor,
+                            assistant_message=cursor.assistant_message,
+                        )
+                    except TimeoutError:
+                        if guard.claim_for(prepared.tool_use.id) is not None:
+                            return _unknown_tool_outcome(
+                                cursor,
+                                prepared,
+                                "工具 claim 后执行超时",
+                                stop_slot=self.environment.command_stop_slots.get(
+                                    (activation.run_id, prepared.tool_use.id)
+                                ),
+                            )
+                        if _deadline_expired(commits):
+                            return RuntimeActivationResult(
+                                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED,
+                                cursor=cursor,
+                                assistant_message=cursor.assistant_message,
+                            )
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.FAILED,
+                            cursor=cursor,
+                            assistant_message=cursor.assistant_message,
+                            error=RunErrorInfo(
+                                code="TOOL_TIMEOUT",
+                                message="工具执行超时",
+                                source="tool",
+                            ),
+                        )
+                    claim = guard.claim_for(prepared.tool_use.id)
+                    tool_call = guard.call_for(prepared.tool_use.id) or build_runtime_tool_call(
+                        activation=activation,
+                        cursor=cursor,
+                        prepared=prepared,
+                        workspace_root=self.environment.workspace_root,
+                    )
+
+                # --- 8. 提交工具结果并收口 ---
+                # durable commit 成功后才推进 cursor，再处理取消或 STOP 失败策略。
+                batch_assistant = cursor.assistant_message
+                stop_slot = self.environment.command_stop_slots.get(
+                    (activation.run_id, prepared.tool_use.id)
+                )
+                control_error = _tool_completion_control(
+                    tool_timed_out, execution_control, stop_slot
+                )
+                cursor = await self._commit_tool_result(
+                    activation=activation,
+                    cursor=cursor,
+                    commits=commits,
+                    tool_call=tool_call,
+                    claim=claim,
+                    result=result,
+                    cancellation=cancellation,
+                    steering=None if control_error is not None else steering,
+                    stream_sink=stream_sink,
+                    subagent_call=subagent_call,
+                )
+                receipt = None if stop_slot is None else stop_slot.receipt
+                cleanup_error = None if stop_slot is None else stop_slot.cleanup_error
+                receipt_call_id = (
+                    prepared.tool_use.id
+                    if receipt is not None or cleanup_error is not None
+                    else None
+                )
+                control_outcome = _post_tool_control_outcome(
+                    cursor=cursor,
+                    assistant_message=batch_assistant,
+                    run_cancelled=_activation_cancelled(commits, cancellation),
+                    deadline_expired=_deadline_expired(commits),
+                    error=control_error,
+                    stop_receipt=receipt,
+                    stop_call_id=prepared.tool_use.id,
+                    cleanup_error=cleanup_error,
+                )
+                if control_outcome is not None:
+                    return control_outcome
+                if _stops_on_tool_error(result, activation.options.tool_error_policy):
                     return RuntimeActivationResult(
                         outcome=RuntimeActivationOutcome.FAILED,
                         cursor=cursor,
-                        assistant_message=cursor.assistant_message,
-                        error=RunErrorInfo(
-                            code="TOOL_TIMEOUT",
-                            message="工具执行超时",
-                            source="tool",
-                        ),
+                        assistant_message=batch_assistant,
+                        error=_tool_run_error(result),
+                        stop_receipt=receipt,
+                        stop_call_id=receipt_call_id,
                     )
-                claim = guard.claim_for(prepared.tool_use.id)
-                tool_call = guard.call_for(prepared.tool_use.id) or build_runtime_tool_call(
-                    activation=activation,
-                    cursor=cursor,
-                    prepared=prepared,
-                    workspace_root=self.environment.workspace_root,
+                self.environment.command_stop_slots.pop(
+                    (activation.run_id, prepared.tool_use.id), None
                 )
-
-            # --- 8. 提交工具结果并收口 ---
-            # durable commit 成功后才推进 cursor，再处理取消或 STOP 失败策略。
-            batch_assistant = cursor.assistant_message
-            stop_slot = self.environment.command_stop_slots.get(
-                (activation.run_id, prepared.tool_use.id)
-            )
-            control_error = _tool_completion_control(tool_timed_out, execution_control, stop_slot)
-            cursor = await self._commit_tool_result(
-                activation=activation,
-                cursor=cursor,
-                commits=commits,
-                tool_call=tool_call,
-                claim=claim,
-                result=result,
-                cancellation=cancellation,
-                steering=None if control_error is not None else steering,
-                stream_sink=stream_sink,
-                subagent_call=subagent_call,
-            )
-            receipt = None if stop_slot is None else stop_slot.receipt
-            cleanup_error = None if stop_slot is None else stop_slot.cleanup_error
-            receipt_call_id = (
-                prepared.tool_use.id if receipt is not None or cleanup_error is not None else None
-            )
-            control_outcome = _post_tool_control_outcome(
-                cursor=cursor,
-                assistant_message=batch_assistant,
-                run_cancelled=_activation_cancelled(commits, cancellation),
-                deadline_expired=_deadline_expired(commits),
-                error=control_error,
-                stop_receipt=receipt,
-                stop_call_id=prepared.tool_use.id,
-                cleanup_error=cleanup_error,
-            )
-            if control_outcome is not None:
-                return control_outcome
-            if _stops_on_tool_error(result, activation.options.tool_error_policy):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.FAILED,
-                    cursor=cursor,
-                    assistant_message=batch_assistant,
-                    error=_tool_run_error(result),
-                    stop_receipt=receipt,
-                    stop_call_id=receipt_call_id,
-                )
-            self.environment.command_stop_slots.pop((activation.run_id, prepared.tool_use.id), None)
 
     def _stop_receipt(self, run_id: str, call_id: str) -> CommandStopReceipt | None:
         """只读取当前调用的进程内停止事实，不从历史结果推断。"""
@@ -1221,158 +1244,167 @@ class AgentRuntime:
                 cursor=cursor,
             )
 
-        context_snapshot = None
-        todo_snapshot: TodoSnapshot | None = None
-        source = self.environment.context_source
-        todo_enabled = self.environment.agent_config.todo.enabled
-        if source is not None or todo_enabled:
-            budget = asyncio.timeout(remaining)
-            try:
-                async with budget:
-                    context_snapshot = ContextSnapshot()
-                    if source is not None:
-                        context_snapshot = await source.collect(
-                            ContextBuildScope(
-                                session_id=activation.session_id,
-                                run_id=activation.run_id,
-                                step_index=cursor.step_index,
-                                workspace_root=self.environment.workspace_root,
-                                run_input=data_text(activation.run_input),
+        with self.environment.observability.scope("iris.context.prepare") as prepare_span:
+            context_snapshot = None
+            todo_snapshot: TodoSnapshot | None = None
+            source = self.environment.context_source
+            todo_enabled = self.environment.agent_config.todo.enabled
+            if source is not None or todo_enabled:
+                budget = asyncio.timeout(remaining)
+                try:
+                    async with budget:
+                        context_snapshot = ContextSnapshot()
+                        if source is not None:
+                            context_snapshot = await source.collect(
+                                ContextBuildScope(
+                                    session_id=activation.session_id,
+                                    run_id=activation.run_id,
+                                    step_index=cursor.step_index,
+                                    workspace_root=self.environment.workspace_root,
+                                    run_input=data_text(activation.run_input),
+                                )
                             )
-                        )
-                    if todo_enabled:
-                        if any(item.key == "iris.todo" for item in context_snapshot.contributions):
-                            raise IrisContextError("context_source 占用了保留 key iris.todo")
-                        todo_snapshot = await read_todo(
-                            self.environment.workspace_root, activation.session_id
-                        )
-                        context_snapshot = ContextSnapshot(
-                            contributions=(
-                                *context_snapshot.contributions,
-                                render_todo_context(
-                                    todo_snapshot,
-                                    prompt_snapshot=self.environment.prompt_snapshot,
-                                    remind=cursor.step_index == cursor.todo_reminder_step,
-                                ),
+                        if todo_enabled:
+                            if any(
+                                item.key == "iris.todo" for item in context_snapshot.contributions
+                            ):
+                                raise IrisContextError("context_source 占用了保留 key iris.todo")
+                            todo_snapshot = await read_todo(
+                                self.environment.workspace_root, activation.session_id
                             )
+                            context_snapshot = ContextSnapshot(
+                                contributions=(
+                                    *context_snapshot.contributions,
+                                    render_todo_context(
+                                        todo_snapshot,
+                                        prompt_snapshot=self.environment.prompt_snapshot,
+                                        remind=cursor.step_index == cursor.todo_reminder_step,
+                                    ),
+                                )
+                            )
+                except IrisCancellationRequestedError:
+                    return RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                    )
+                except Exception as exc:
+                    if budget.expired():
+                        return RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
                         )
-            except IrisCancellationRequestedError:
+                    self.environment.observability.error(prepare_span, exc)
+                    if isinstance(exc, IrisTodoError):
+                        return _failed_activation(cursor, exc)
+                    return _failed_activation(
+                        cursor, IrisContextError(f"context_source 采集失败：{exc}")
+                    )
+            if _activation_cancelled(commits, cancellation):
                 return RuntimeActivationResult(
                     outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
                 )
+            if _deadline_expired(commits):
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                )
+
+            snapshot = commits.load_model_context(
+                include_tool_discovery=self._include_tool_discovery(activation.options)
+            )
+            if snapshot.header.session_id != activation.session_id:
+                raise IrisRunConflictError("commit port 返回了跨 session history")
+            try:
+                model_snapshot = self._context_messages(snapshot)
+                start = snapshot.compaction.covered_message_count if snapshot.compaction else 0
+                source_indices = {
+                    id(message): index
+                    for index, message in enumerate(model_snapshot.raw_tail, start=start)
+                }
+                source_indices.update(
+                    (id(message), index)
+                    for index, message in model_snapshot.protected_prefix_messages
+                )
+                tool_selection = self._select_tools(snapshot, activation.options)
+                request, context_output = self._build_model_request(
+                    history=project_history(model_snapshot, snapshot.compaction),
+                    options=activation.options,
+                    context_window=cast(SessionContextWindow, snapshot.header.context_window),
+                    tool_selection=tool_selection,
+                )
+
+                def project_request(
+                    candidate: MeasuredRequest, *, select_optional: bool = False
+                ) -> MeasuredRequest:
+                    nonlocal context_snapshot
+                    projected, context_snapshot = project_context_request(
+                        candidate,
+                        source_indices=source_indices,
+                        config=self.environment.agent_config.context_policy,
+                        trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
+                        estimate_input_tokens=self.environment.provider.estimate_input_tokens,
+                        snapshot=context_snapshot,
+                        select_optional=select_optional,
+                        optional_tool_names=tool_selection.optional_names,
+                    )
+                    return projected
+
+                def build_request(history: list[Msg]) -> MeasuredRequest:
+                    messages = self.environment.assembler.build_conversation(
+                        context_output=context_output,
+                        history=history,
+                        current_input=None,
+                    ).messages
+                    return project_request(
+                        self._measure_model_request(
+                            request.model_copy(update={"messages": messages}), context_snapshot
+                        )
+                    )
+
+                measured = project_request(
+                    self._measure_model_request(request, context_snapshot), select_optional=True
+                )
+                request = measured.request
+                tool_selection = ToolContextSelection(
+                    tuple(tool.name for tool in request.tools),
+                    (),
+                    request.tool_choice,
+                )
             except Exception as exc:
-                if budget.expired():
-                    return RuntimeActivationResult(
-                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
-                    )
-                if isinstance(exc, IrisTodoError):
-                    return _failed_activation(cursor, exc)
-                return _failed_activation(
-                    cursor, IrisContextError(f"context_source 采集失败：{exc}")
+                self.environment.observability.error(prepare_span, exc)
+                return _failed_activation(cursor, exc)
+
+            try:
+                compacted = await self._compact_request(
+                    measured=measured,
+                    build_request=build_request,
+                    project_request=project_request,
+                    model_snapshot=model_snapshot,
+                    context_snapshot=context_snapshot,
+                    tool_selection=tool_selection,
+                    snapshot=snapshot,
+                    activation=activation,
+                    cursor=cursor,
+                    commits=commits,
+                    cancellation=cancellation,
+                    stream_sink=stream_sink,
                 )
-        if _activation_cancelled(commits, cancellation):
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
-            )
-        if _deadline_expired(commits):
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
-            )
-
-        snapshot = commits.load_model_context(
-            include_tool_discovery=self._include_tool_discovery(activation.options)
-        )
-        if snapshot.header.session_id != activation.session_id:
-            raise IrisRunConflictError("commit port 返回了跨 session history")
-        try:
-            model_snapshot = self._context_messages(snapshot)
-            start = snapshot.compaction.covered_message_count if snapshot.compaction else 0
-            source_indices = {
-                id(message): index
-                for index, message in enumerate(model_snapshot.raw_tail, start=start)
-            }
-            source_indices.update(
-                (id(message), index) for index, message in model_snapshot.protected_prefix_messages
-            )
-            tool_selection = self._select_tools(snapshot, activation.options)
-            request, context_output = self._build_model_request(
-                history=project_history(model_snapshot, snapshot.compaction),
-                options=activation.options,
-                context_window=cast(SessionContextWindow, snapshot.header.context_window),
-                tool_selection=tool_selection,
-            )
-
-            def project_request(
-                candidate: MeasuredRequest, *, select_optional: bool = False
-            ) -> MeasuredRequest:
-                nonlocal context_snapshot
-                projected, context_snapshot = project_context_request(
-                    candidate,
-                    source_indices=source_indices,
-                    config=self.environment.agent_config.context_policy,
-                    trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
-                    estimate_input_tokens=self.environment.provider.estimate_input_tokens,
-                    snapshot=context_snapshot,
-                    select_optional=select_optional,
-                    optional_tool_names=tool_selection.optional_names,
+            except Exception as exc:
+                self.environment.observability.error(prepare_span, exc)
+                return _failed_activation(cursor, exc)
+            if isinstance(compacted, RuntimeActivationResult):
+                if compacted.error is not None:
+                    self.environment.observability.error(prepare_span, compacted.error.message)
+                return compacted
+            request = compacted.request
+            visible_tool_names = tool_selection.names
+            # 摘要与重试已消耗原 run 的绝对 deadline，不沿用 reservation 的旧剩余额度。
+            remaining = commits.remaining_deadline_seconds()
+            if remaining is not None and remaining <= 0:
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
                 )
-                return projected
-
-            def build_request(history: list[Msg]) -> MeasuredRequest:
-                messages = self.environment.assembler.build_conversation(
-                    context_output=context_output,
-                    history=history,
-                    current_input=None,
-                ).messages
-                return project_request(
-                    self._measure_model_request(
-                        request.model_copy(update={"messages": messages}), context_snapshot
-                    )
+            if _activation_cancelled(commits, cancellation):
+                return RuntimeActivationResult(
+                    outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
                 )
-
-            measured = project_request(
-                self._measure_model_request(request, context_snapshot), select_optional=True
-            )
-            request = measured.request
-            tool_selection = ToolContextSelection(
-                tuple(tool.name for tool in request.tools),
-                (),
-                request.tool_choice,
-            )
-        except Exception as exc:
-            return _failed_activation(cursor, exc)
-
-        try:
-            compacted = await self._compact_request(
-                measured=measured,
-                build_request=build_request,
-                project_request=project_request,
-                model_snapshot=model_snapshot,
-                context_snapshot=context_snapshot,
-                tool_selection=tool_selection,
-                snapshot=snapshot,
-                activation=activation,
-                cursor=cursor,
-                commits=commits,
-                cancellation=cancellation,
-                stream_sink=stream_sink,
-            )
-        except Exception as exc:
-            return _failed_activation(cursor, exc)
-        if isinstance(compacted, RuntimeActivationResult):
-            return compacted
-        request = compacted.request
-        visible_tool_names = tool_selection.names
-        # 摘要与重试已消耗原 run 的绝对 deadline，不沿用 reservation 的旧剩余额度。
-        remaining = commits.remaining_deadline_seconds()
-        if remaining is not None and remaining <= 0:
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
-            )
-        if _activation_cancelled(commits, cancellation):
-            return RuntimeActivationResult(
-                outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
-            )
 
         if stream_sink is not None:
             stream_sink.emit(
@@ -1677,9 +1709,12 @@ class AgentRuntime:
                         timeout = min(timeout, batch.request.timeout)
                     summary_request = batch.request.model_copy(update={"timeout": timeout})
                     try:
-                        response = await asyncio.wait_for(
-                            provider.complete(summary_request), timeout=timeout
-                        )
+                        with self.environment.observability.bind(
+                            {"iris.model.purpose": "compaction"}
+                        ):
+                            response = await asyncio.wait_for(
+                                provider.complete(summary_request), timeout=timeout
+                            )
                     except (IrisProviderError, TimeoutError) as exc:
                         if isinstance(exc, IrisProviderError):
                             usage = _provider_error_usage(exc)
@@ -1802,66 +1837,67 @@ class AgentRuntime:
         stream_sink: RuntimeEventSink | None,
     ) -> LLMResponse | RuntimeActivationResult:
         """执行 complete 或 direct-pull stream，并只返回完整响应。"""
-        if stream_sink is None:
-            return await self.environment.provider.complete(
-                request.model_copy(update={"stream": False})
-            )
+        with self.environment.observability.bind({"iris.model.purpose": "main"}):
+            if stream_sink is None:
+                return await self.environment.provider.complete(
+                    request.model_copy(update={"stream": False})
+                )
 
-        provider = streaming_provider_for(self.environment.provider)
-        if provider is None:
+            provider = streaming_provider_for(self.environment.provider)
+            if provider is None:
+                return _failed_activation(
+                    cursor,
+                    IrisProviderStreamError(
+                        "Provider 不支持 runtime streaming capability",
+                        provider=self.environment.agent_config.model.provider,
+                    ),
+                )
+
+            stream_request = request.model_copy(update={"stream": True})
+            event_stream = provider.stream(stream_request)
+            usage: TokenUsage | None = None
+            try:
+                async for model_event in event_stream:
+                    if isinstance(model_event, ModelUsageUpdated):
+                        usage = TokenUsage.model_construct(
+                            input_tokens=model_event.usage.input_tokens,
+                            output_tokens=model_event.usage.output_tokens,
+                            total_tokens=model_event.usage.total_tokens,
+                        )
+                    try:
+                        stream_sink.emit(
+                            _runtime_stream_event(
+                                "model.event",
+                                run_id=activation.run_id,
+                                session_id=activation.session_id,
+                                activation_id=activation.activation_id,
+                                step_index=cursor.step_index,
+                                model_event=model_event,
+                            )
+                        )
+                    except Exception as exc:
+                        raise _RuntimeSinkEmissionError(exc) from exc
+                    if isinstance(model_event, ModelResponseCompleted):
+                        return model_event.response
+                    if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
+                        return _provider_stream_failure(cursor, model_event, usage)
+            finally:
+                # Terminal 会提前结束 async for，仍需释放 provider iterator 及其底层连接。
+                close = getattr(event_stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception:
+                        _logger.warning("关闭 provider typed stream 失败", exc_info=True)
+
             return _failed_activation(
                 cursor,
-                IrisProviderStreamError(
-                    "Provider 不支持 runtime streaming capability",
+                IrisProviderStreamInterruptedError(
+                    "Provider stream 在合法终态前结束",
                     provider=self.environment.agent_config.model.provider,
                 ),
+                model_failure_usage=usage,
             )
-
-        stream_request = request.model_copy(update={"stream": True})
-        event_stream = provider.stream(stream_request)
-        usage: TokenUsage | None = None
-        try:
-            async for model_event in event_stream:
-                if isinstance(model_event, ModelUsageUpdated):
-                    usage = TokenUsage.model_construct(
-                        input_tokens=model_event.usage.input_tokens,
-                        output_tokens=model_event.usage.output_tokens,
-                        total_tokens=model_event.usage.total_tokens,
-                    )
-                try:
-                    stream_sink.emit(
-                        _runtime_stream_event(
-                            "model.event",
-                            run_id=activation.run_id,
-                            session_id=activation.session_id,
-                            activation_id=activation.activation_id,
-                            step_index=cursor.step_index,
-                            model_event=model_event,
-                        )
-                    )
-                except Exception as exc:
-                    raise _RuntimeSinkEmissionError(exc) from exc
-                if isinstance(model_event, ModelResponseCompleted):
-                    return model_event.response
-                if isinstance(model_event, (ModelResponseFailed, ModelResponseCancelled)):
-                    return _provider_stream_failure(cursor, model_event, usage)
-        finally:
-            # Terminal 会提前结束 async for，仍需释放 provider iterator 及其底层连接。
-            close = getattr(event_stream, "aclose", None)
-            if close is not None:
-                try:
-                    await close()
-                except Exception:
-                    _logger.warning("关闭 provider typed stream 失败", exc_info=True)
-
-        return _failed_activation(
-            cursor,
-            IrisProviderStreamInterruptedError(
-                "Provider stream 在合法终态前结束",
-                provider=self.environment.agent_config.model.provider,
-            ),
-            model_failure_usage=usage,
-        )
 
     def _suspend_existing_batch(
         self,
@@ -1903,12 +1939,44 @@ class AgentRuntime:
             interaction_request=prepared.human_request,
             suspended=suspended,
         )
+        self._record_tool_decision(
+            prepared,
+            "suspended",
+            interaction_id=suspended.interaction.interaction_id,
+            interaction_kind=prepared.human_request.prompt.kind.value,
+        )
         return RuntimeActivationResult(
             outcome=RuntimeActivationOutcome.SUSPENDED,
             cursor=suspended.cursor,
             assistant_message=cursor.assistant_message,
             suspension=suspended.interaction,
         )
+
+    def _record_tool_decision(
+        self,
+        prepared: PreparedToolCall,
+        decision: str,
+        *,
+        code: str | None = None,
+        interaction_id: str | None = None,
+        interaction_kind: str | None = None,
+    ) -> None:
+        """记录未进入执行器的已知裁决，不创建虚假的工具区间。"""
+        obs = self.environment.observability
+        if not obs.enabled:
+            return
+        attributes = {
+            "gen_ai.tool.call.id": prepared.tool_use.id,
+            "gen_ai.tool.name": prepared.tool_use.name,
+            "iris.tool.decision": decision,
+        }
+        if code is not None:
+            attributes["iris.tool.code"] = code
+        if interaction_id is not None:
+            attributes["iris.interaction.id"] = interaction_id
+        if interaction_kind is not None:
+            attributes["iris.interaction.kind"] = interaction_kind
+        obs.event(trace.get_current_span(), "iris.tool.decision", attributes)
 
 
 def _project_tool_result_cursor(
