@@ -264,3 +264,4 @@ docs/superpowers/
 
 # Example runtime state
 examples/**/.iris/
+.iris/
