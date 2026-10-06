@@ -1,8 +1,10 @@
 """按宿主选定的主 Agent 配置构造项目学习资源。"""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from ..agents import AgentConfig, AgentSkillsConfig, parse_agent_config
 from ..evolution.materials import EvolutionMaterialStore
@@ -15,6 +17,9 @@ from ..providers import CompletionProvider
 from ..runtime import compaction_prompt_descriptions
 from ..skill import resolve_skills_root
 from .maintenance import ProjectEvolutionBinding
+
+if TYPE_CHECKING:
+    from ..observability.service import Observability
 
 _FIELD_DESCRIPTIONS = {
     "context_policy.preserve_recent_tool_groups": "近期工具组保留数；context policy 开启时生效。",
@@ -51,6 +56,7 @@ def build_project_evolution_binding(
     prompt_source: PromptSource,
     provider: CompletionProvider,
     config_path: Path | None = None,
+    observability: Observability | None = None,
 ) -> ProjectEvolutionBinding | None:
     """构造宿主持有的项目学习服务，不启动后台任务或业务 Run。
 
@@ -60,6 +66,7 @@ def build_project_evolution_binding(
         prompt_source: 宿主初始化后共享给实际消费者的来源。
         provider: 主配置已经解析的模型连接，也可由宿主明确注入。
         config_path: 开放 config 修订时必须显式指定的主 YAML 路径。
+        observability: 由宿主创建并关闭、服务仅借用的观测依赖。
 
     Returns:
         启用时返回待绑定资源；关闭时不创建项目学习存储。
@@ -99,5 +106,6 @@ def build_project_evolution_binding(
             prompt_source=prompt_source,
             prompt_targets=prompt_targets,
             config_target=config_target,
+            observability=observability,
         ),
     )

@@ -49,12 +49,12 @@ class Observability:
 
     def __init__(
         self,
-        capture_config: AgentObservabilityConfig,
+        capture_config: AgentObservabilityConfig | None = None,
         tracer_provider: TracerProvider | None = None,
         *,
         owned_provider: SDKTracerProvider | None = None,
     ) -> None:
-        self._config = capture_config
+        self._config = capture_config if capture_config is not None else AgentObservabilityConfig()
         self._tracer = tracer_provider.get_tracer("iris") if tracer_provider else None
         self._owned_provider = owned_provider
 

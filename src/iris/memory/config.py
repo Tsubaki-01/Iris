@@ -12,7 +12,7 @@ Example:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -24,6 +24,9 @@ from .mirror import FileMemoryMirror
 from .models import MemoryOverviewConfig
 from .service import MemoryIOExecutionMode, MemoryService
 from .sqlite import SQLiteMemoryStore
+
+if TYPE_CHECKING:
+    from ..observability.service import Observability
 
 # endregion
 
@@ -52,6 +55,7 @@ def build_memory_service_from_config(
     overview_provider: CompletionProvider | None = None,
     overview_model: str | None = None,
     prompt_source: PromptSource | None = None,
+    observability: Observability | None = None,
 ) -> MemoryService | None:
     """按 memory 开关选择宿主服务或构造 SQLite 服务。
 
@@ -62,6 +66,7 @@ def build_memory_service_from_config(
         overview_provider: 宿主显式生成概览时使用的模型调用边界。
         overview_model: 显式概览请求使用的模型名称。
         prompt_source: 已初始化的项目提示来源；纯读写服务可不提供。
+        observability: 新建服务借用的观测依赖；不改写已注入的完整服务。
 
     Returns:
         MemoryService | None: 关闭返回 None；开启时复用注入对象或创建 SQLite 服务。
@@ -88,6 +93,7 @@ def build_memory_service_from_config(
         generation_model=overview_model,
         generation_config=config.generation,
         prompt_source=prompt_source,
+        observability=observability,
         io_execution_mode=MemoryIOExecutionMode.THREAD,
     )
 

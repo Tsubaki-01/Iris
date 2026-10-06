@@ -2,6 +2,10 @@
 
 # `iris.tools`
 
+`ToolExecutor(..., observability=service)` 借用宿主观测依赖，默认使用禁用服务。Runtime 环境
+会统一接入本 Agent 的同一实例；执行器不读取导出配置、不拥有 SDK 或服务的关闭责任。
+当前仅完成依赖接线，工具区间记录随后接入。
+
 `iris.tools` 是 Iris 的工具内核，负责把 Python 函数或 `BaseTool` 子类包装成模型可见的逻辑工具定义，并在执行时统一处理参数校验、权限、结果归一化、超长输出落盘、middleware 和熔断。
 
 本文只覆盖 `src/iris/tools` 当前代码中的公共 API。常用导入路径为：

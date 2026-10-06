@@ -3,7 +3,8 @@
 本包把 Iris 已有的执行事实转为标准 OpenTelemetry spans，通过 OTLP HTTP/protobuf 导出。
 它不拥有 Run 状态、恢复、业务重试或存储；lifecycle/store 仍是权威来源。
 
-当前已提供采集内核、普通与流式 provider 包装和正文投影，SDK/CLI 装配尚未接通。
+SDK/CLI、子 Agent、Memory 和 Evolution 已接入普通与流式模型记录和正文投影。
+当前尚未增加 activation、工具与维护 cycle 区间。
 
 ## 配置与使用
 
@@ -46,6 +47,17 @@ def make_observability(host_tracer_provider: TracerProvider) -> Observability:
 不传 `tracer_provider` 时，启用采集必须提供 endpoint 和可选依赖。自建服务由创建者
 `await observability.aclose()`，在线程中排空和关闭 SDK；借用 provider 不 flush/shutdown。
 本包不会替换进程全局 TracerProvider。
+
+`AgentRunner.from_config*()` 和 `RuntimeFactory.from_config*()` 接受 `observability=`。
+完整实例注入优先于 YAML，所有消费者借用；宿主在 runner、共享协调器与真实 worker
+结束后最后关闭服务。未注入时，runtime 装配按 Agent 开关创建服务，environment 拥有其
+关闭责任；直接 RuntimeFactory 调用者使用 `await runtime.environment.aclose()`。
+Memory/Evolution 的构造器同样接受借用服务并包装自己的 raw provider，工厂只转发依赖。
+完整服务注入 runner 时保留构建策略，不再重包。
+
+`iris chat` 自动创建宿主共享实例，并在正常退出及构造、准备失败时清理。禁用采集不因
+观测读取全局配置。Maintenance、Goal successor 和 deadline 只重置 OTel 上下文，
+保留原有业务 ContextVars 和调度逻辑。
 
 ## 边界与记录语义
 

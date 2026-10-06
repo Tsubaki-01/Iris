@@ -12,6 +12,7 @@ from iris.decision import DecisionRequest, DecisionResponse
 from iris.exceptions import IrisConfigError, IrisMemoryError, IrisToolValidationError
 from iris.harness import AgentRunner
 from iris.memory import MemoryConfig, MemoryService, MemoryWriteInput, SQLiteMemoryStore
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.providers import CompletionProvider, ModelRoute
 from iris.runtime import RuntimeFactory
@@ -159,6 +160,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
     ) -> MemoryService | None:
         captured.append(memory_service)
         return original(
@@ -168,6 +170,7 @@ def test_injected_service_is_resolved_by_the_memory_switch(
             overview_provider=overview_provider,
             overview_model=overview_model,
             prompt_source=prompt_source,
+            observability=observability,
         )
 
     monkeypatch.setattr(assembly, "build_memory_service_from_config", resolve_service)
@@ -220,6 +223,7 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
     ) -> MemoryService | None:
         captured.append((overview_provider, overview_model, memory_service))
         assert prompt_source is not None
@@ -231,6 +235,7 @@ def test_config_service_receives_resolved_provider_before_runtime_is_built(
             overview_provider=overview_provider,
             overview_model=overview_model,
             prompt_source=prompt_source,
+            observability=observability,
         )
 
     monkeypatch.setattr(assembly, "create_provider_client", create_provider)
@@ -322,6 +327,7 @@ def test_memory_initialization_error_propagates_from_assembly(
         overview_provider: CompletionProvider | None = None,
         overview_model: str | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
     ) -> None:
         raise IrisMemoryError("memory 初始化失败")
 

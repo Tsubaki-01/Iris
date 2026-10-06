@@ -139,6 +139,7 @@ from .observer import RunEventObserver
 if TYPE_CHECKING:
     from ..decision import DecisionEvaluator
     from ..hooks import HookRegistration
+    from ..observability.service import Observability
     from ..tools import ToolMiddleware
     from .streaming import CommandCleanupFailed, LiveFact, LivePublisher
 
@@ -527,6 +528,7 @@ class AgentRunner:
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
         decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -548,6 +550,7 @@ class AgentRunner:
             child_provider_factory=child_provider_factory,
             memory_service=memory_service,
             prompt_source=prompt_source,
+            observability=observability,
             decision_client=decision_client,
             context_source=context_source,
             hooks=hooks,
@@ -571,6 +574,7 @@ class AgentRunner:
         child_provider_factory: ChildProviderFactory | None = None,
         memory_service: MemoryService | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
         decision_client: DecisionEvaluator | None = None,
         context_source: ContextSource | None = None,
         hooks: Sequence[HookRegistration] = (),
@@ -623,6 +627,7 @@ class AgentRunner:
             provider=provider,
             memory_service=memory_service,
             prompt_source=prompt_source,
+            observability=observability,
             decision_client=decision_client,
             api_key=api_key,
             execution_scope=RuntimeExecutionScope.ROOT,
@@ -634,17 +639,23 @@ class AgentRunner:
             tool_middlewares=tool_middlewares,
             goal_service=goal_service,
         )
-        runner = cls(
-            runtime=runtime,
-            store=resolved_store,
-            observers=observers,
-            observer_event_timeout_s=observer_event_timeout_s,
-            clock=resolved_clock,
-            live_publisher=live_publisher,
-        )
+        try:
+            runner = cls(
+                runtime=runtime,
+                store=resolved_store,
+                observers=observers,
+                observer_event_timeout_s=observer_event_timeout_s,
+                clock=resolved_clock,
+                live_publisher=live_publisher,
+            )
+        except BaseException:
+            if runtime.environment.owned_observability is not None:
+                runtime.environment.owned_observability._shutdown()
+            raise
         runner._subagent_controller = controller
         if controller is not None:
             controller.command_lifecycle = runner._command_lifecycle
+            controller.observability = runtime.environment.observability
         return runner
 
     # endregion

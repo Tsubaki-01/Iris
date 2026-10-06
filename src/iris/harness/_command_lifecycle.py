@@ -158,7 +158,8 @@ class CommandLifecycle:
             except Exception:
                 logger.exception("run 期限结算失败 run=%s", run.run_id)
 
-        entry.task = asyncio.create_task(fire())
+        with self.root.runtime.environment.observability.detached():
+            entry.task = asyncio.create_task(fire())
 
     def terminal(self, run_id: str) -> None:
         """终态撤销未触发 timer，当前结算任务不取消自己。"""

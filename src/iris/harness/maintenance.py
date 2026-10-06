@@ -26,6 +26,7 @@ from ..exceptions import IrisConfigError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
 from ..memory import MemoryService
 from ..memory.generation_models import MemoryMaintenanceScope, MemorySource
+from ..observability.service import Observability
 from ..utils.generation_worker import GenerationWorker, generation_worker
 
 logger = logging.getLogger(__name__)
@@ -86,11 +87,14 @@ class _EvolutionResource:
 class MaintenanceCoordinator:
     """一个宿主共享空闲计时与资格，两类维护分别持有任务、worker 和锁。"""
 
-    def __init__(self, *, idle_seconds: float = 300) -> None:
+    def __init__(
+        self, *, idle_seconds: float = 300, observability: Observability | None = None
+    ) -> None:
         """创建协调器；实际任务和监听在 runner 准备时启动。"""
         if not 0 <= idle_seconds < math.inf:
             raise IrisConfigError("maintenance.idle_seconds 必须为有限非负数")
         self.idle_seconds = idle_seconds
+        self.observability = observability if observability is not None else Observability()
         self._resources: dict[tuple[str, str], _MemoryResource] = {}
         self._projects: dict[str, _EvolutionResource] = {}
         self._readers: dict[str, LifecycleStore] = {}
@@ -412,7 +416,7 @@ class MaintenanceCoordinator:
             return
         revision = resource.revision
         try:
-            with self._worker.bind():
+            with self.observability.detached(), self._worker.bind():
                 service = resource.binding.service
                 sources = await service.alist_pending_sources(resource.binding.namespace)
                 scope = MemoryMaintenanceScope(
@@ -454,7 +458,7 @@ class MaintenanceCoordinator:
             return None
         revision = project.revision
         try:
-            with self._evolution_worker.bind():
+            with self.observability.detached(), self._evolution_worker.bind():
                 service = project.binding.service
                 for item_id in tuple(project.revision_requests):
                     settled = await service.run_async_io(

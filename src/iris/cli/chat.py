@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ..agents import load_agent_config
-from ..config import init_config, is_config_initialized
+from ..config import get_config, init_config, is_config_initialized
 from ..exceptions import HITLCheckpointInvalidError, IrisError
 from ..goal.models import GoalChanged, GoalControlResult, GoalView
 from ..harness import (
@@ -54,6 +54,7 @@ from ..message import (
     ModelResponseFailed,
     ModelResponseStarted,
 )
+from ..observability.service import Observability
 from ..prompts import PromptSource
 from ..providers import create_provider_client
 from ..runtime import RuntimeStreamEvent
@@ -188,6 +189,7 @@ def run_chat(
         int: 进程退出码。
     """
     write_error = error_func or (lambda message: print(message, file=sys.stderr))
+    observability: Observability | None = None
     try:
         if not is_config_initialized():
             init_config(env_file=str(options.env_file) if options.env_file is not None else None)
@@ -197,6 +199,11 @@ def run_chat(
         config = load_agent_config(options.config_path)
         workspace = (options.config_path.parent / config.permissions.workspace).resolve()
         prompt_source = PromptSource.initialize(workspace, config.prompts.root)
+        observability = (
+            Observability.from_config(config.observability, get_config().observability)
+            if config.observability.enabled
+            else Observability()
+        )
         provider = create_provider_client(
             config.to_model_route(),
             api_style=config.model.api_style,
@@ -209,6 +216,7 @@ def run_chat(
             prompt_source=prompt_source,
             overview_provider=provider,
             overview_model=config.model.name,
+            observability=observability,
         )
         evolution = build_project_evolution_binding(
             config,
@@ -216,6 +224,7 @@ def run_chat(
             prompt_source=prompt_source,
             provider=provider,
             config_path=options.config_path,
+            observability=observability,
         )
         runner = AgentRunner.from_config(
             config,
@@ -224,6 +233,7 @@ def run_chat(
             memory_service=memory_service,
             prompt_source=prompt_source,
             live_publisher=live_output,
+            observability=observability,
         )
         maintenance = None
         memory_binding = (
@@ -236,21 +246,29 @@ def run_chat(
             else None
         )
         if memory_binding is not None or evolution is not None:
-            maintenance = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+            maintenance = MaintenanceCoordinator(
+                idle_seconds=config.maintenance.idle_seconds, observability=observability
+            )
             runner.bind_maintenance(
                 maintenance,
                 memory=memory_binding,
                 evolution=evolution,
             )
-    except IrisError as exc:
-        write_error(_format_iris_error(exc))
-        return 1
+    except BaseException as exc:
+        # 同步构造尚未交给 chat loop；保留原错误并关闭刚创建的 SDK。
+        if observability is not None:
+            observability._shutdown()
+        if isinstance(exc, IrisError):
+            write_error(_format_iris_error(exc))
+            return 1
+        raise
 
     return run_chat_loop(
         runner=runner,
         options=options,
         live_output=live_output,
         maintenance=maintenance,
+        observability=observability,
         input_func=input_func,
         output_func=output_func,
         error_func=write_error,
@@ -263,6 +281,7 @@ def run_chat_loop(
     options: ChatOptions,
     live_output: _ChatLiveOutput | None = None,
     maintenance: MaintenanceCoordinator | None = None,
+    observability: Observability | None = None,
     input_func: Callable[[str], str] | None = None,
     output_func: Callable[[str], None] | None = None,
     error_func: Callable[[str], None] | None = None,
@@ -277,6 +296,7 @@ def run_chat_loop(
         options (ChatOptions): chat 命令选项。
         live_output (_ChatLiveOutput | None): 与 runner 共享的可选同步文本输出。
         maintenance: 由本宿主拥有并已绑定 runner 的维护协调器，退出时先排空它。
+        observability: 显式交给本宿主关闭的共享服务；省略时不接管 runner 借用的对象。
         input_func (Callable[[str], str] | None): 可选输入回调。
         output_func (Callable[[str], None] | None): 可选标准输出回调。
         error_func (Callable[[str], None] | None): 可选标准错误回调。
@@ -287,17 +307,19 @@ def run_chat_loop(
     read_input = input_func or builtins.input
     write_output = output_func or builtins.print
     write_error = error_func or (lambda message: print(message, file=sys.stderr))
-    host = _ChatSessionHost(
-        runner=runner,
-        options=options,
-        live_output=live_output,
-        maintenance=maintenance,
-        output_func=write_output,
-        error_func=write_error,
-    )
+    host: _ChatSessionHost | None = None
     close_reason = "chat 结束"
     exit_code = 0
     try:
+        host = _ChatSessionHost(
+            runner=runner,
+            options=options,
+            live_output=live_output,
+            maintenance=maintenance,
+            observability=observability,
+            output_func=write_output,
+            error_func=write_error,
+        )
         host.start()
         while True:
             try:
@@ -356,10 +378,15 @@ def run_chat_loop(
         exit_code = 1
     finally:
         try:
-            host.close(reason=close_reason)
+            if host is not None:
+                host.close(reason=close_reason)
         except IrisError as exc:
             write_error(_format_iris_error(exc))
             exit_code = 1
+        finally:
+            # 正常 _serve 已异步关闭；这里覆盖 host/manager 构造等未接手窗口。
+            if observability is not None:
+                observability._shutdown()
     return exit_code
 
 
@@ -474,12 +501,14 @@ class _ChatSessionHost:
         output_func: Callable[[str], None],
         error_func: Callable[[str], None],
         maintenance: MaintenanceCoordinator | None = None,
+        observability: Observability | None = None,
     ) -> None:
         """保存 host 依赖；异步资源由后台线程创建。"""
         self._runner = runner
         self._options = options
         self._live_output = live_output
         self._maintenance = maintenance
+        self._observability = observability
         self._output_func = output_func
         self._error_func = error_func
         self._thread = threading.Thread(target=self._run, name="iris-chat-host")
@@ -572,6 +601,7 @@ class _ChatSessionHost:
                     *(() if self._maintenance is None else (self._maintenance.aclose(),)),
                     self._runner.aclose(),
                     consumer,
+                    *(() if self._observability is None else (self._observability.aclose(),)),
                 ):
                     try:
                         await operation

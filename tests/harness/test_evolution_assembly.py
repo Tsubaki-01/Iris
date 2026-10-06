@@ -3,10 +3,16 @@
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.agents import AgentConfig
 from iris.exceptions import IrisConfigError
 from iris.harness.evolution import build_project_evolution_binding
+from iris.message import LLMRequest, LLMResponse, Msg
+from iris.observability import AgentObservabilityConfig, ObservabilityExportConfig
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 
 from .fakes import StaticProvider
@@ -50,6 +56,43 @@ def test_project_binding_uses_explicit_host_resources(tmp_path: Path) -> None:
     assert binding.service.config is config.evolution
     assert binding.service.skill_path == tmp_path / "knowledge/skills/project-experience/SKILL.md"
     assert not (tmp_path / ".iris" / "memory").exists()
+
+
+@pytest.mark.asyncio
+async def test_project_binding_wraps_raw_provider_once_and_borrows_service(tmp_path: Path) -> None:
+    """绑定工厂不先包装 provider，服务不接管宿主的 exporter。"""
+    sdk = TracerProvider(shutdown_on_exit=False)
+    exporter = InMemorySpanExporter()
+    sdk.add_span_processor(SimpleSpanProcessor(exporter))
+    observability = Observability.from_config(
+        AgentObservabilityConfig(enabled=True), ObservabilityExportConfig(), tracer_provider=sdk
+    )
+    config = AgentConfig.model_validate(
+        {
+            "name": "learner",
+            "model": "openai/test",
+            "system": "help",
+            "skills": {"enabled": True},
+            "evolution": {"enabled": True},
+        }
+    )
+    raw = StaticProvider(LLMResponse(provider="test"))
+    binding = build_project_evolution_binding(
+        config,
+        workspace_root=tmp_path,
+        prompt_source=PromptSource.initialize(tmp_path),
+        provider=raw,
+        observability=observability,
+    )
+    assert binding is not None
+    assert binding.service.observability is observability
+    request = LLMRequest(model="test", messages=[Msg.user("inspect")])
+    try:
+        await binding.service.provider.complete(request)
+        assert raw.requests == [request]
+        assert len(exporter.get_finished_spans()) == 1
+    finally:
+        sdk.shutdown()
 
 
 def test_config_targets_require_explicit_primary_path(tmp_path: Path) -> None:

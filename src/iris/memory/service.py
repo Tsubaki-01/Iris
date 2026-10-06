@@ -21,6 +21,8 @@ from time import perf_counter
 from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
+from ..observability.provider import observe_provider
+from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..utils.background_io import BackgroundIO
@@ -102,15 +104,25 @@ class MemoryService:
         generation_model: str | None = None,
         generation_config: MemoryGenerationConfig | None = None,
         prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
         io_execution_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
     ) -> None:
         """初始化记忆服务。"""
         self.store = store
         self.mirror = mirror
-        self.overview_provider = overview_provider
+        self.observability = observability if observability is not None else Observability()
+        self.overview_provider = (
+            observe_provider(overview_provider, self.observability)
+            if overview_provider is not None
+            else None
+        )
         self.overview_model = overview_model
         self.overview_config = overview_config or MemoryOverviewConfig()
-        self.generation_provider = generation_provider
+        self.generation_provider = (
+            observe_provider(generation_provider, self.observability)
+            if generation_provider is not None
+            else None
+        )
         self.generation_model = generation_model
         self.generation_config = generation_config or MemoryGenerationConfig()
         self.prompt_source = prompt_source

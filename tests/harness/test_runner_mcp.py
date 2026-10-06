@@ -5,7 +5,9 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from iris.config import Config
 from iris.exceptions import (
     IrisMCPError,
     IrisRunConflictError,
@@ -29,6 +31,8 @@ from iris.lifecycle import (
     ToolCallPhase,
 )
 from iris.message import ToolUseBlock
+from iris.observability import AgentObservabilityConfig
+from iris.observability.service import Observability
 from iris.store import InMemoryLifecycleStore
 
 from ..mcp.fixtures.runtime import MCPPeer, mcp_agent
@@ -72,15 +76,31 @@ async def test_prepare_precedes_create_and_reuses_catalog(
 async def test_required_prepare_failure_creates_no_run_and_closes_runner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    from iris.runtime import _assembly
+
+    service, _ = observability
+    closed: list[str] = []
+
+    async def close_observability() -> None:
+        closed.append("observability")
+
+    monkeypatch.setattr(Observability, "from_config", lambda *args, **kwargs: service)
+    monkeypatch.setattr(service, "aclose", close_observability)
+    monkeypatch.setattr(_assembly, "get_config", lambda: Config())
     peer = MCPPeer(monkeypatch)
     peer.fail_open = True
     store = InMemoryLifecycleStore()
-    runner = AgentRunner.from_config(mcp_agent(tmp_path), store=store, provider=StaticProvider())
+    config = mcp_agent(tmp_path).model_copy(
+        update={"observability": AgentObservabilityConfig(enabled=True)}
+    )
+    runner = AgentRunner.from_config(config, store=store, provider=StaticProvider())
     with pytest.raises(IrisMCPError):
         await runner.start(AgentRunRequest(input="call", run_id="failed"))
     assert store.load_run("failed") is None
     assert peer.events == ["open", "close"]
+    assert closed == ["observability"]
     with pytest.raises(IrisRunStateError):
         await runner.aprepare()
 

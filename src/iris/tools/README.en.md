@@ -2,6 +2,11 @@
 
 # `iris.tools`
 
+`ToolExecutor(..., observability=service)` borrows a host observability service and defaults to
+disabled collection. Runtime wires the Agent's shared instance into the executor, which neither
+reads export configuration nor owns SDK/service closure. This currently wires the dependency;
+tool interval recording follows separately.
+
 `iris.tools` is Iris's tool kernel. It adapts Python callables or `BaseTool` subclasses into
 model-visible tool definitions and centralizes input validation, permission checks, execution, result
 normalization, large-output artifacts, middleware, and circuit breaking.

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ..decision import DecisionEvaluator
     from ..hooks import HookRegistration
     from ..memory import MemoryService
+    from ..observability.service import Observability
     from ..prompts import PromptSource
     from ..tools import ToolMiddleware
 
@@ -50,6 +51,7 @@ class RuntimeFactory:
         *,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        observability: Observability | None = None,
         decision_client: DecisionEvaluator | None = None,
         prompt_source: PromptSource | None = None,
         context_access: ContextAccessPort | None = None,
@@ -64,6 +66,7 @@ class RuntimeFactory:
             path (str | Path): Agent YAML 配置文件路径。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            observability: 优先于 Agent 采集配置的借用服务，由创建者关闭。
             decision_client: 可选借用的判断能力，是否挂载由接点配置决定。
             prompt_source: 已初始化的项目模板来源；未提供时按 workspace 初始化。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
@@ -82,6 +85,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            observability=observability,
             decision_client=decision_client,
             prompt_source=prompt_source,
             context_access=context_access,
@@ -99,6 +103,7 @@ class RuntimeFactory:
         config_path: Path | None = None,
         provider: CompletionProvider | None = None,
         memory_service: MemoryService | None = None,
+        observability: Observability | None = None,
         decision_client: DecisionEvaluator | None = None,
         prompt_source: PromptSource | None = None,
         context_access: ContextAccessPort | None = None,
@@ -114,6 +119,7 @@ class RuntimeFactory:
             config_path (Path | None): 配置文件路径；相对它解析 workspace 和 context。
             provider (CompletionProvider | None): 可选 provider 注入；存在时不创建真实 client。
             memory_service (MemoryService | None): 优先于配置后端的 memory 服务注入。
+            observability: 优先于 Agent 采集配置的借用服务，由创建者关闭。
             decision_client: 可选借用的判断能力，是否挂载由接点配置决定。
             prompt_source: 已初始化的项目模板来源；未提供时按 workspace 初始化。
             context_access (ContextAccessPort | None): context_policy 启用时必需的宿主回读协议。
@@ -134,6 +140,7 @@ class RuntimeFactory:
             config_path=config_path,
             provider=provider,
             memory_service=memory_service,
+            observability=observability,
             decision_client=decision_client,
             prompt_source=prompt_source,
             context_access=context_access,

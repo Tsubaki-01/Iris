@@ -2,15 +2,19 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from pathlib import Path
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.exceptions import IrisGoalPersistenceError, IrisGoalStateError
 from iris.goal.models import GoalChanged, GoalView
 from iris.harness import AgentRunner, SessionManager
 from iris.lifecycle import RunPhase
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.observability.service import Observability
 from iris.store import InMemoryLifecycleStore
 
 from .fakes import BlockingProvider, StaticProvider, text_response, tool_response
@@ -28,11 +32,18 @@ async def goal_state(events: AsyncIterator[object], status: str) -> GoalView:
 
 
 @pytest.mark.asyncio
-async def test_goal_continues_two_rounds_then_committed_report_completes(tmp_path: Path) -> None:
+async def test_goal_continues_two_rounds_then_committed_report_completes(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
     store = InMemoryLifecycleStore()
+    observation, exporter = observability
+    marker = ContextVar("goal_business_context", default="unset")
+    seen_markers: list[str] = []
 
     class Provider(StaticProvider):
         async def complete(self, request: LLMRequest) -> LLMResponse:
+            seen_markers.append(marker.get())
             self.requests.append(request)
             if len(self.requests) == 2:
                 goal = store.get_current_goal("s")
@@ -51,10 +62,20 @@ async def test_goal_continues_two_rounds_then_committed_report_completes(tmp_pat
             return text_response()
 
     provider = Provider()
-    runner = AgentRunner.from_config(goal_config(tmp_path), provider=provider, store=store)
+    runner = AgentRunner.from_config(
+        goal_config(tmp_path), provider=provider, store=store, observability=observation
+    )
     manager = SessionManager(runner, "s")
+    host = observation.start_span("ended-host")
+    observation.end_span(host)
     try:
-        created = await manager.goal.create("两轮完成", max_rounds=2)
+        token = marker.set("goal-host-value")
+        try:
+            with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+                created = await manager.goal.create("两轮完成", max_rounds=2)
+                assert trace.get_current_span() is host
+        finally:
+            marker.reset(token)
         assert created.disposition == "scheduled"
         view = await goal_state(manager.events(), "completed")
         assert view.goal.rounds_started == 2 and not view.armed
@@ -62,6 +83,15 @@ async def test_goal_continues_two_rounds_then_committed_report_completes(tmp_pat
         assert len(store._runs) == 2
         assert all(run.phase is RunPhase.TERMINAL for run in store._runs.values())
         assert store.list_unsettled_goal_runs("s") == ()
+        models = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ]
+        assert len(models) == 3
+        assert all(span.context.trace_id != host.get_span_context().trace_id for span in models)
+        assert all(span.attributes.get("iris.run.id") != "old-run" for span in models)
+        assert seen_markers == ["goal-host-value"] * 3
     finally:
         await manager.close(cancel_run=True)
         await runner.aclose()

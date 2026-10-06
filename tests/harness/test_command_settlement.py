@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.command import (
     CommandBinding,
@@ -41,6 +44,7 @@ from iris.lifecycle import (
     ToolCallPhase,
 )
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.observability.service import Observability
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
 
@@ -265,7 +269,20 @@ async def test_expired_start_stops_before_input_or_terminal(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_waiting_deadline_settles_without_new_input(tmp_path: Path) -> None:
+async def test_waiting_deadline_settles_without_new_input(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    marker = ContextVar("deadline_business_context", default="unset")
+    seen_markers: list[str] = []
+
+    class ObservedService(ControlledService):
+        def stop(self, scope: CommandScope) -> ControlledStop:
+            with observation.scope("deadline-stop"):
+                seen_markers.append(marker.get())
+                return super().stop(scope)
+
     registry = ToolRegistry()
     registry.register_function(
         lambda: "x", name="write", description="写入", capabilities={ToolCapability.WRITE}
@@ -275,14 +292,23 @@ async def test_waiting_deadline_settles_without_new_input(tmp_path: Path) -> Non
         runtime=build_runtime(tmp_path, provider=provider, registry=registry),
         store=InMemoryLifecycleStore(),
     )
-    service = ControlledService()
+    runner.runtime.environment.observability = observation
+    service = ObservedService()
     bind_service(runner, service)
-    waiting = await runner.start(
-        AgentRunRequest(input="wait", run_id="waiting"),
-        options=AgentRunOptions(
-            limits=RunLimits(deadline_at=datetime.now(UTC) + timedelta(milliseconds=80))
-        ),
-    )
+    host = observation.start_span("ended-host")
+    observation.end_span(host)
+    token = marker.set("deadline-host-value")
+    try:
+        with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+            waiting = await runner.start(
+                AgentRunRequest(input="wait", run_id="waiting"),
+                options=AgentRunOptions(
+                    limits=RunLimits(deadline_at=datetime.now(UTC) + timedelta(milliseconds=80))
+                ),
+            )
+            assert trace.get_current_span() is host
+    finally:
+        marker.reset(token)
     assert waiting.run.phase is RunPhase.WAITING
     await asyncio.wait_for(service.entered.wait(), 1)
     assert runner.get_run("waiting").phase is RunPhase.WAITING
@@ -292,6 +318,10 @@ async def test_waiting_deadline_settles_without_new_input(tmp_path: Path) -> Non
             break
         await asyncio.sleep(0.01)
     assert runner.get_result("waiting").run.stop_reason is RunStopReason.DEADLINE_EXCEEDED
+    stop_span = next(span for span in exporter.get_finished_spans() if span.name == "deadline-stop")
+    assert stop_span.context.trace_id != host.get_span_context().trace_id
+    assert stop_span.attributes.get("iris.run.id") != "old-run"
+    assert seen_markers == ["deadline-host-value"]
     await runner.aclose()
 
 

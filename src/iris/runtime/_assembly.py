@@ -15,6 +15,7 @@ from ..command.config import CommandConfig
 from ..command.models import CommandEnvironment, CommandMode, CommandStopSlot
 from ..command.native import NativeCommandService
 from ..command.service import CommandBinding, CommandService
+from ..config import get_config
 from ..context import (
     ContextBuilder,
     ContextBuildInput,
@@ -39,6 +40,8 @@ from ..exceptions import (
 from ..goal.context import GoalContextSource
 from ..goal.tools import GetGoalTool, ReportGoalTool
 from ..memory.config import build_memory_service_from_config
+from ..observability.provider import observe_provider
+from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers import create_provider_client
 from ..providers.protocols import CompletionProvider
@@ -194,6 +197,7 @@ def assemble_runtime(
     tool_middlewares: Sequence[ToolMiddleware] = (),
     decision_client: DecisionEvaluator | None = None,
     prompt_source: PromptSource | None = None,
+    observability: Observability | None = None,
 ) -> AgentRuntime:
     """消费已解析边界装配 inner engine 和可选服务，不创建 lifecycle store。"""
     if config.goal.enabled:
@@ -231,7 +235,7 @@ def assemble_runtime(
     if prompt_source is None:
         prompt_source = PromptSource.initialize(workspace_root, config.prompts.root)
     prompt_snapshot = snapshot_prompts(prompt_source)
-    resolved_provider = (
+    raw_provider = (
         create_provider_client(
             config.to_model_route(),
             api_key=api_key,
@@ -242,139 +246,160 @@ def assemble_runtime(
         if provider is None
         else provider
     )
-    memory_service = build_memory_service_from_config(
-        config.memory,
-        workspace_root,
-        memory_service=memory_service,
-        overview_provider=resolved_provider,
-        overview_model=config.model.name,
-        prompt_source=prompt_source,
-    )
-    context_input = _build_context_input(config, base_dir=base_dir)
+    owned_observability = None
+    if observability is None:
+        if config.observability.enabled:
+            observability = Observability.from_config(
+                config.observability, get_config().observability
+            )
+            owned_observability = observability
+        else:
+            observability = Observability()
     try:
-        context_renderer = TemplateRenderer.freeze_directories(
-            section.template.parent
-            for section in (
-                context_input.system,
-                context_input.memory,
-                context_input.before_current_input,
-            )
-            if section is not None and section.template is not None
+        memory_service = build_memory_service_from_config(
+            config.memory,
+            workspace_root,
+            memory_service=memory_service,
+            overview_provider=raw_provider,
+            overview_model=config.model.name,
+            observability=observability,
+            prompt_source=prompt_source,
         )
-    except IrisTemplateError as exc:
-        raise IrisContextError(exc.message, **exc.context) from exc
-    context_input, skill_registry = _prepare_skills(
-        context_input,
-        config=config,
-        workspace_root=workspace_root,
-        prompt_snapshot=prompt_snapshot,
-    )
-    mcp_config = None
-    if config.mcp is not None:
-        from ..mcp.config import load_mcp_config
-
-        mcp_config = load_mcp_config(
-            _resolve_relative_to_base(config.mcp.path, base_dir=base_dir),
-            overrides=config.mcp.overrides,
-        )
-    decision_client, owned_decision_client = build_decision_client(
-        decision_config, decision_client=decision_client
-    )
-    tool_registry = build_tool_registry(
-        config.tools,
-        memory_service=memory_service,
-        memory_config=config.memory,
-        memory_decision_client=decision_client if decision_config.memory.recall else None,
-        command_binding=boundary.command_binding,
-        prompt_snapshot=prompt_snapshot,
-    )
-    if config.context_policy.enabled:
-        access = cast(ContextAccessPort, context_access)
+        context_input = _build_context_input(config, base_dir=base_dir)
         try:
-            tool_registry.register(ContextReadTool(access))
-            tool_registry.register(ContextSearchTool(access))
-        except IrisToolValidationError as exc:
-            raise IrisConfigError("context_read/search 与现有工具名称或别名冲突") from exc
-    if goal_service is not None:
-        try:
-            tool_registry.register_many((GetGoalTool(goal_service), ReportGoalTool(goal_service)))
-        except IrisToolValidationError as exc:
-            raise IrisConfigError("get_goal/report_goal 与现有工具名称或别名冲突") from exc
-        context_source = GoalContextSource(
-            goal_service, host_source=context_source, prompt_snapshot=prompt_snapshot
-        )
-    if skill_registry is not None:
-        try:
-            tool_registry.register(LoadSkillTool(skill_registry))
-        except IrisToolValidationError as exc:
-            raise IrisConfigError(
-                "load_skill 与现有工具名称或别名冲突",
-                tool="load_skill",
-            ) from exc
-    if execution_scope is RuntimeExecutionScope.ROOT and subagent is not None:
-        try:
-            tool_registry.register(SubagentTool(routes=subagent.routes, port=subagent.port))
-        except IrisToolValidationError as exc:
-            raise IrisConfigError("subagent 与现有工具名称或别名冲突", tool="subagent") from exc
-    mcp_manager = None
-    if mcp_config is not None:
-        from ..mcp.manager import MCPManager
-
-        mcp_manager = MCPManager(
-            mcp_config,
-            registry=tool_registry,
-            workspace_root=workspace_root,
-            defer_tools=config.context_policy.deferred_tools,
-        )
-    tool_view = tool_registry.view()
-    if config.context_policy.deferred_tools:
-        try:
-            tool_registry.register(
-                ToolSearchTool(
-                    tool_view,
-                    decision_client=decision_client if decision_config.tools.discovery else None,
-                    prompt_snapshot=prompt_snapshot,
+            context_renderer = TemplateRenderer.freeze_directories(
+                section.template.parent
+                for section in (
+                    context_input.system,
+                    context_input.memory,
+                    context_input.before_current_input,
                 )
+                if section is not None and section.template is not None
             )
-        except IrisToolValidationError as exc:
-            raise IrisConfigError("tool_search 与现有工具名称或别名冲突") from exc
-    tool_executor = ToolExecutor(
-        tool_registry,
-        permission_policy=boundary.permission_policy,
-        middleware=middlewares,
-    )
-    tool_bridge = ToolBridge(
-        tool_view=tool_view,
-        tool_executor=tool_executor,
-    )
-    environment = RuntimeEnvironment(
-        agent_config=config,
-        context_input=context_input,
-        context_builder=ContextBuilder(template_renderer=context_renderer),
-        provider=resolved_provider,
-        prompt_source=prompt_source,
-        prompt_snapshot=prompt_snapshot,
-        tool_bridge=tool_bridge,
-        workspace_root=workspace_root,
-        memory_service=memory_service,
-        goal_service=goal_service,
-        skill_registry=skill_registry,
-        mcp_manager=mcp_manager,
-        execution_scope=execution_scope,
-        command_binding=boundary.command_binding,
-        command_environment=(
-            boundary.command_binding.environment
-            if _COMMAND_TOOL_KEYS.intersection(config.tools.builtin)
-            else None
-        ),
-        host_os=boundary.command_binding.environment.host_os,
-        command_stop_slots=boundary.command_stop_slots,
-        context_source=context_source,
-        hook_dispatcher=hook_dispatcher,
-        decision_client=decision_client,
-        owned_decision_client=owned_decision_client,
-    )
-    return AgentRuntime(environment)
+        except IrisTemplateError as exc:
+            raise IrisContextError(exc.message, **exc.context) from exc
+        context_input, skill_registry = _prepare_skills(
+            context_input,
+            config=config,
+            workspace_root=workspace_root,
+            prompt_snapshot=prompt_snapshot,
+        )
+        mcp_config = None
+        if config.mcp is not None:
+            from ..mcp.config import load_mcp_config
+
+            mcp_config = load_mcp_config(
+                _resolve_relative_to_base(config.mcp.path, base_dir=base_dir),
+                overrides=config.mcp.overrides,
+            )
+        decision_client, owned_decision_client = build_decision_client(
+            decision_config, decision_client=decision_client
+        )
+        tool_registry = build_tool_registry(
+            config.tools,
+            memory_service=memory_service,
+            memory_config=config.memory,
+            memory_decision_client=decision_client if decision_config.memory.recall else None,
+            command_binding=boundary.command_binding,
+            prompt_snapshot=prompt_snapshot,
+        )
+        if config.context_policy.enabled:
+            access = cast(ContextAccessPort, context_access)
+            try:
+                tool_registry.register(ContextReadTool(access))
+                tool_registry.register(ContextSearchTool(access))
+            except IrisToolValidationError as exc:
+                raise IrisConfigError("context_read/search 与现有工具名称或别名冲突") from exc
+        if goal_service is not None:
+            try:
+                tool_registry.register_many(
+                    (GetGoalTool(goal_service), ReportGoalTool(goal_service))
+                )
+            except IrisToolValidationError as exc:
+                raise IrisConfigError("get_goal/report_goal 与现有工具名称或别名冲突") from exc
+            context_source = GoalContextSource(
+                goal_service, host_source=context_source, prompt_snapshot=prompt_snapshot
+            )
+        if skill_registry is not None:
+            try:
+                tool_registry.register(LoadSkillTool(skill_registry))
+            except IrisToolValidationError as exc:
+                raise IrisConfigError(
+                    "load_skill 与现有工具名称或别名冲突",
+                    tool="load_skill",
+                ) from exc
+        if execution_scope is RuntimeExecutionScope.ROOT and subagent is not None:
+            try:
+                tool_registry.register(SubagentTool(routes=subagent.routes, port=subagent.port))
+            except IrisToolValidationError as exc:
+                raise IrisConfigError("subagent 与现有工具名称或别名冲突", tool="subagent") from exc
+        mcp_manager = None
+        if mcp_config is not None:
+            from ..mcp.manager import MCPManager
+
+            mcp_manager = MCPManager(
+                mcp_config,
+                registry=tool_registry,
+                workspace_root=workspace_root,
+                defer_tools=config.context_policy.deferred_tools,
+            )
+        tool_view = tool_registry.view()
+        if config.context_policy.deferred_tools:
+            try:
+                tool_registry.register(
+                    ToolSearchTool(
+                        tool_view,
+                        decision_client=decision_client
+                        if decision_config.tools.discovery
+                        else None,
+                        prompt_snapshot=prompt_snapshot,
+                    )
+                )
+            except IrisToolValidationError as exc:
+                raise IrisConfigError("tool_search 与现有工具名称或别名冲突") from exc
+        tool_executor = ToolExecutor(
+            tool_registry,
+            permission_policy=boundary.permission_policy,
+            middleware=middlewares,
+        )
+        tool_bridge = ToolBridge(
+            tool_view=tool_view,
+            tool_executor=tool_executor,
+        )
+        environment = RuntimeEnvironment(
+            agent_config=config,
+            context_input=context_input,
+            context_builder=ContextBuilder(template_renderer=context_renderer),
+            provider=observe_provider(raw_provider, observability),
+            prompt_source=prompt_source,
+            prompt_snapshot=prompt_snapshot,
+            tool_bridge=tool_bridge,
+            workspace_root=workspace_root,
+            memory_service=memory_service,
+            goal_service=goal_service,
+            skill_registry=skill_registry,
+            mcp_manager=mcp_manager,
+            execution_scope=execution_scope,
+            command_binding=boundary.command_binding,
+            command_environment=(
+                boundary.command_binding.environment
+                if _COMMAND_TOOL_KEYS.intersection(config.tools.builtin)
+                else None
+            ),
+            host_os=boundary.command_binding.environment.host_os,
+            command_stop_slots=boundary.command_stop_slots,
+            context_source=context_source,
+            hook_dispatcher=hook_dispatcher,
+            decision_client=decision_client,
+            owned_decision_client=owned_decision_client,
+            observability=observability,
+            owned_observability=owned_observability,
+        )
+        return AgentRuntime(environment)
+    except BaseException:
+        if owned_observability is not None:
+            owned_observability._shutdown()
+        raise
 
 
 def _base_dir(config_path: Path | None) -> Path:

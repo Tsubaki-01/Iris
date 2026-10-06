@@ -9,6 +9,16 @@ process-local admission facade，只组合 runner，不接管 durable ownership�
 
 ## 快速入门
 
+`from_config*()` 接受 `observability=` 完整服务注入；同一实例交给 runtime、工具执行器和
+child。显式注入优先于各 Agent 的采集配置，child 仍读取当前 YAML 的其他业务设置。
+未注入且启用时，runtime 装配从全局 `Config.observability` 自建服务，由 environment
+在业务资源之后关闭；注入服务由宿主最后关闭。禁用且使用自定义 provider 时，观测不会
+增加 `init_config()` 要求。构造与准备失败同样收口自建 SDK。
+
+共享维护、Goal 自动续跑和 deadline 的延后任务清空 OTel parent，但保留业务
+ContextVars。当前已接通普通/流式模型记录，activation、工具和维护区间后续接入。
+详见 [observability](../observability/README.md)。
+
 ```python
 from iris.harness import AgentRunRequest, AgentRunner
 

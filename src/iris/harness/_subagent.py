@@ -57,6 +57,7 @@ from ..tools.subagent import (
 )
 
 if TYPE_CHECKING:
+    from ..observability.service import Observability
     from ..prompts import PromptSource
     from ._command_lifecycle import CommandLifecycle
     from .runner import AgentRunner, Clock
@@ -100,6 +101,8 @@ class HarnessSubagentController:
         self.child_provider_factory = child_provider_factory
         self.clock = clock
         self.command_lifecycle: CommandLifecycle | None = None
+        # root 在 assembly 完成后交接同一实例，此前 controller 不执行 child。
+        self.observability: Observability
         self._live_children: dict[str, tuple[AgentRunner, asyncio.Task[RunResult]]] = {}
 
     async def execute(self, invocation: SubagentInvocation) -> SubagentExecutionOutcome:
@@ -222,6 +225,7 @@ class HarnessSubagentController:
             provider=provider,
             memory_service=None,
             prompt_source=self.prompt_source,
+            observability=self.observability,
             decision_client=None,
             api_key=None,
             execution_scope=RuntimeExecutionScope.CHILD,

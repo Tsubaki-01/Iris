@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
 import pytest
 from filelock import FileLock, Timeout
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.agents import AgentConfig
 from iris.evolution.config import EvolutionConfig
@@ -37,9 +40,11 @@ from iris.lifecycle import AgentRunRequest, FinishRun, RunStopReason
 from iris.lifecycle.history import RunMessageSlice
 from iris.memory import MemoryObserveInput
 from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability
+from iris.utils.generation_worker import generation_worker
 
 from ..store.test_run_input_commit import _input_command
 from .fakes import StaticProvider, text_response, tool_response
@@ -76,6 +81,59 @@ class ControlledEvolution:
             self.cancelled.set()
             raise
         return EvolutionResult(status="empty")
+
+
+@pytest.mark.asyncio
+async def test_evolution_worker_resets_ended_trace_but_keeps_business_context(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    marker = ContextVar("evolution_business_context", default="unset")
+    seen_markers: list[str] = []
+
+    class ObservedEvolution(ControlledEvolution):
+        async def maintain_cycle(self, *, scope: EvolutionMaintenanceScope) -> EvolutionResult:
+            worker = generation_worker.get()
+            assert worker is coordinator._evolution_worker
+
+            def in_worker() -> None:
+                with observation.scope("evolution-io"):
+                    assert generation_worker.get() is worker
+                    seen_markers.append(marker.get())
+
+            await worker.run(in_worker)
+            return await super().maintain_cycle(scope=scope)
+
+    evolution = ObservedEvolution()
+    evolution.release.set()
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator._attach(
+        None,
+        InMemoryLifecycleStore(),
+        evolution=ProjectEvolutionBinding(
+            workspace_root=tmp_path, service=cast(EvolutionService, evolution)
+        ),
+    )
+    host = observation.start_span("ended-host")
+    observation.end_span(host)
+    token = marker.set("evolution-host-value")
+    try:
+        with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+            await coordinator.prepare()
+            assert trace.get_current_span() is host
+    finally:
+        marker.reset(token)
+    try:
+        await asyncio.wait_for(evolution.entered.wait(), 2)
+    finally:
+        await coordinator.aclose()
+    worker_span = next(
+        span for span in exporter.get_finished_spans() if span.name == "evolution-io"
+    )
+    assert worker_span.context.trace_id != host.get_span_context().trace_id
+    assert worker_span.attributes.get("iris.run.id") != "old-run"
+    assert seen_markers == ["evolution-host-value"]
 
 
 def project_service(tmp_path: Path, provider: StaticProvider | None = None) -> EvolutionService:

@@ -38,6 +38,7 @@ from ..hitl.models import (
 from ..hooks.dispatcher import HookDispatcher
 from ..hooks.models import ToolAfterEvent, ToolBeforeEvent
 from ..message import ToolUseBlock
+from ..observability.service import Observability
 from ._execution_control import ToolExecutionControlSlot
 from ._hooks import consume_tool_hook_control, drain_hook_commands
 from ._io import run_tool_io
@@ -141,6 +142,7 @@ class ToolExecutor:
         circuit_breaker: CircuitBreaker | None = None,
         hook_dispatcher: HookDispatcher | None = None,
         command_binding: CommandBinding | None = None,
+        observability: Observability | None = None,
     ) -> None:
         """初始化执行器。
 
@@ -153,6 +155,7 @@ class ToolExecutor:
             circuit_breaker (CircuitBreaker | None): 连续失败熔断器。
             hook_dispatcher (HookDispatcher | None): 本 Agent 共享的工具 Hook 派发器。
             command_binding (CommandBinding | None): Hook 停止事实收口使用的命令依赖。
+            observability: 借用的观测服务；未提供时禁用，不拥有其关闭责任。
         """
         self.registry = registry
         self.permission_policy = permission_policy or DefaultPermissionPolicy()
@@ -160,6 +163,7 @@ class ToolExecutor:
         self.circuit_breaker = circuit_breaker
         self.hook_dispatcher = hook_dispatcher
         self.command_binding = command_binding
+        self.observability = observability if observability is not None else Observability()
 
     # endregion
 

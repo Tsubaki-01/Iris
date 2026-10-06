@@ -2,6 +2,15 @@
 
 # `iris.runtime`
 
+`RuntimeFactory.from_config()` / `from_config_path()` 接收 `observability=`。完整服务注入优先于
+Agent YAML；未注入且 `observability.enabled=true` 时，唯一共享装配从 `get_config().observability`
+读取导出配置并自建服务。禁用不新增全局配置初始化要求，主 provider 保持原对象。
+主模型与新建 Memory 各自只包装一次 raw provider；`RuntimeEnvironment.observability` 和工具
+执行器借用同一服务。`owned_observability` 仅记录自建者，MCP、command、decision 收尾后关闭，
+既有资源关闭失败仍会执行；同步装配失败也释放未交接的自建服务。直接使用 factory 的宿主
+须调用 `await runtime.environment.aclose()`；外部注入服务由宿主最后关闭。
+当前已接通模型 complete/stream 记录；工具等业务区间的观测由后续实现补齐。
+
 原文捕获通过 `RuntimeCapturePort` 的 `request_capture(run_id, through_count)` 提示宿主，
 由 `RuntimeEnvironment.capture_port` 注入。Runtime 不知道该事实提示会写入 Memory、
 项目经验材料或两者；捕获进度、终态资格、学习调度和锁由各自 owner 处理。

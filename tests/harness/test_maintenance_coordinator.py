@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextvars import ContextVar
 from pathlib import Path
 
 import pytest
 from filelock import FileLock, Timeout
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.exceptions import IrisConfigError, IrisRunStateError
 from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
@@ -18,9 +21,11 @@ from iris.memory.generation_models import MemoryGenerationConfig
 from iris.memory.mirror import FileMemoryMirror
 from iris.memory.service import MemoryIOExecutionMode
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.store import InMemoryLifecycleStore, SQLiteStore
 from iris.tools import ToolCapability, ToolRegistry
+from iris.utils.generation_worker import generation_worker
 
 from .fakes import StaticProvider, build_runtime, text_response, tool_response
 
@@ -30,6 +35,7 @@ def memory_service(
     provider: StaticProvider | None = None,
     *,
     io_mode: MemoryIOExecutionMode = MemoryIOExecutionMode.INLINE,
+    observability: Observability | None = None,
 ) -> MemoryService:
     """创建完整自动生成依赖。"""
     provider = provider or StaticProvider(text_response('{"observations": []}'))
@@ -42,7 +48,70 @@ def memory_service(
         overview_provider=provider,
         overview_model="overview",
         io_execution_mode=io_mode,
+        observability=observability,
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    marker = ContextVar("memory_business_context", default="unset")
+    generated = asyncio.Event()
+    seen_markers: list[str] = []
+
+    class Generation(StaticProvider):
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            seen_markers.append(marker.get())
+            assert generation_worker.get() is coordinator._worker
+            generated.set()
+            return text_response('{"observations": []}')
+
+    service = memory_service(
+        tmp_path / "memory.db",
+        Generation(),
+        io_mode=MemoryIOExecutionMode.THREAD,
+        observability=observation,
+    )
+    service.observe(MemoryObserveInput(text="待整理材料"))
+    read_sources = service.list_pending_sources
+
+    def read_in_worker(namespace: str) -> object:
+        with observation.scope("memory-io"):
+            assert generation_worker.get() is coordinator._worker
+            seen_markers.append(marker.get())
+            return read_sources(namespace)
+
+    monkeypatch.setattr(service, "list_pending_sources", read_in_worker)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator._attach(
+        MemoryMaintenanceBinding(
+            service=service, database_path=tmp_path / "memory.db", namespace="project"
+        ),
+        InMemoryLifecycleStore(),
+    )
+    host = observation.start_span("ended-host")
+    observation.end_span(host)
+    token = marker.set("memory-host-value")
+    try:
+        with observation.use_span(host), observation.bind({"iris.run.id": "old-run"}):
+            await coordinator.prepare()
+            assert trace.get_current_span() is host
+    finally:
+        marker.reset(token)
+    try:
+        await asyncio.wait_for(generated.wait(), 2)
+    finally:
+        await coordinator.aclose()
+    spans = [span for span in exporter.get_finished_spans() if span.name != "ended-host"]
+    assert any(span.name == "memory-io" for span in spans)
+    assert any(span.attributes.get("gen_ai.operation.name") == "chat" for span in spans)
+    assert all(span.context.trace_id != host.get_span_context().trace_id for span in spans)
+    assert all(span.attributes.get("iris.run.id") != "old-run" for span in spans)
+    assert seen_markers and set(seen_markers) == {"memory-host-value"}
 
 
 def configured_runner(

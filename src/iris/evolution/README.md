@@ -51,6 +51,12 @@ schema 与发布校验，也不保证模型每次判断都正确。
 唯一解析入口；开放 config 修订时必须传入原 `config_path`。独立服务的 `prompt_targets` 与
 `config_target` 同样由宿主绑定，不由模型决定。
 
+工厂和 `EvolutionService` 构造器接受 `observability=...`，借用宿主的
+[观测服务](../observability/README.md)。默认关闭且不读取全局配置；工厂只传 raw provider，
+实际包装由构造器完成一次。宿主共享服务时，向 runner、Memory、Evolution 和维护协调器
+传入同一个对象，并在维护排空、runner 关闭后统一 `await observability.aclose()`。
+领域服务不创建或关闭 exporter，也不改变材料、发布和状态的权威来源。
+
 `MaintenanceCoordinator` 负责项目锁、空闲时机、来源资格与取消。服务的
 `await maintain_cycle(scope=...)` 只在该锁内执行一轮；`scope.allowed_sources` 限定本次来源，
 `scope.check(actual_sources)` 在模型前与发布前重查。宿主主动整理也走同一入口，

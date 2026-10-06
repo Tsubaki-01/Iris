@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..exceptions import IrisEvolutionError, IrisSkillError, IrisTemplateError
 from ..message import LLMRequest, LLMResponse, Msg
+from ..observability.provider import observe_provider
+from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill.frontmatter import split_frontmatter
@@ -122,12 +124,14 @@ class EvolutionService:
         prompt_source: PromptSource,
         prompt_targets: tuple[PromptTarget, ...] = (),
         config_target: ConfigTarget | None = None,
+        observability: Observability | None = None,
     ) -> None:
         """绑定装配层已经选定的唯一项目与 Skill 目标。"""
         self.workspace_root = workspace_root
         self.skill_path = skill_path
         self.store = store
-        self.provider = provider
+        self.observability = observability if observability is not None else Observability()
+        self.provider = observe_provider(provider, self.observability)
         self.model = model
         self.config = config
         self.prompt_source = prompt_source

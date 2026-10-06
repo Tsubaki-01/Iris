@@ -27,6 +27,7 @@ from ..command.models import CommandEnvironment, CommandStopSlot
 from ..command.service import CommandBinding
 from ..context import ContextBuilder, ContextBuildInput, ContextSource
 from ..memory import MemoryService
+from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
@@ -98,6 +99,8 @@ class RuntimeEnvironment:
         hook_dispatcher (HookDispatcher | None): 当前 Agent 的可选进程内 Hook 派发依赖。
         decision_client (DecisionEvaluator | None): 当前已启用接点共同借用的判断能力。
         owned_decision_client (JevClient | None): 本环境自建且负责关闭的判断客户端。
+        observability (Observability): 当前 Agent 的固定观测策略，工具执行器借用同一实例。
+        owned_observability (Observability | None): 装配自建且在业务资源关闭后收口的服务。
     """
 
     agent_config: AgentConfig
@@ -123,13 +126,16 @@ class RuntimeEnvironment:
     hook_dispatcher: HookDispatcher | None = None
     decision_client: DecisionEvaluator | None = None
     owned_decision_client: JevClient | None = None
+    observability: Observability = field(default_factory=Observability)
+    owned_observability: Observability | None = None
 
     def __post_init__(self) -> None:
-        """归一化 workspace，交接当前 Agent 的 Hooks 与共享命令依赖。"""
+        """归一化 workspace，交接当前 Agent 的 Hooks、命令和观测依赖。"""
         self.workspace_root = self.workspace_root.resolve()
         self.tool_bridge.command_stop_slots = self.command_stop_slots
         self.tool_bridge.tool_executor.hook_dispatcher = self.hook_dispatcher
         self.tool_bridge.tool_executor.command_binding = self.command_binding
+        self.tool_bridge.tool_executor.observability = self.observability
 
     async def aprepare(self) -> MCPCatalogSnapshot | None:
         """准备绑定的命令服务和本环境自有 MCP，返回 MCP 目录快照。"""
@@ -140,20 +146,25 @@ class RuntimeEnvironment:
         return None
 
     async def aclose(self) -> None:
-        """依次关闭自有资源；child 保留借用命令服务但关闭自建判断客户端。"""
+        """依次关闭业务资源，最后收口自建观测；借用服务由其宿主关闭。"""
         try:
-            if self.mcp_manager is not None:
-                await self.mcp_manager.aclose()
-        finally:
             try:
-                if (
-                    self.execution_scope is RuntimeExecutionScope.ROOT
-                    and self.command_binding is not None
-                ):
-                    await self.command_binding.service.aclose()
+                if self.mcp_manager is not None:
+                    await self.mcp_manager.aclose()
             finally:
-                if self.owned_decision_client is not None:
-                    await self.owned_decision_client.aclose()
+                try:
+                    if (
+                        self.execution_scope is RuntimeExecutionScope.ROOT
+                        and self.command_binding is not None
+                    ):
+                        await self.command_binding.service.aclose()
+                finally:
+                    if self.owned_decision_client is not None:
+                        await self.owned_decision_client.aclose()
+        finally:
+            owned, self.owned_observability = self.owned_observability, None
+            if owned is not None:
+                await owned.aclose()
 
 
 __all__ = [

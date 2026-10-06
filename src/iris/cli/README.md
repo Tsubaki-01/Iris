@@ -45,6 +45,13 @@ iris chat agent.yaml --session-id work --max-steps 8
 新前台输入取消未提交的生成。退出时先停止 SessionManager，再排空维护的实际 IO，
 最后关闭 runner 自有资源和后台 event loop，不在退出阶段补跑模型。
 
+启用 Agent 的 `observability.enabled` 后，CLI 从全局 `observability` 导出配置创建一个
+共享观测服务，传给 runner、Memory、Evolution 与维护协调器。安装要求和完整 OTLP 地址配置
+见 [observability](../observability/README.md)。正文默认不采集；关闭观测时不创建 SDK/exporter。
+退出时先完成上述业务收尾，再关闭观测服务；同步装配或准备失败也由 CLI 释放自己的服务。
+直接调用 `run_chat_loop(runner=...)` 不接管 runner 借用的观测资源；只有显式传入
+`observability=...` 才将该共享服务的关闭责任交给 chat 宿主。
+
 ## 查看 Todo 工作清单
 
 在现有 Agent 配置中设置 `todo.enabled: true`，并保持 `context_policy.enabled: true`，

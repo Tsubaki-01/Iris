@@ -357,7 +357,8 @@ class _GoalControl:
         self._intent_task = self._track_operation(self._start_intent(intent))
 
     def _track_operation(self, operation: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
-        task = asyncio.create_task(operation)
+        with self.runner.runtime.environment.observability.detached():
+            task = asyncio.create_task(operation)
         self._operations.add(task)
         task.add_done_callback(self._operation_finished)
         return task

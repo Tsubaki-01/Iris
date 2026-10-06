@@ -71,6 +71,13 @@ estimators should select THREAD only when they support calls from worker threads
 occupies the event loop; maintenance does not override this choice. Independent `MemoryService`
 and low-level tool-registration SDK calls do not require the Agent switch.
 
+`MemoryService(..., observability=...)` and the factory's matching parameter accept a host-owned
+[observation service](../observability/README.md). Omitting it disables observation without reading
+global configuration or creating an exporter. The factory passes raw providers; the constructor
+wraps each overview and generation entry point once. Callers should pass unwrapped providers.
+An injected complete `memory_service` retains its own observation policy; the runner neither
+rewraps nor overrides it. The host closes observation resources after maintenance and other calls finish.
+
 ## Architecture and lifecycle
 
 ```mermaid

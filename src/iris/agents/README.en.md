@@ -49,7 +49,7 @@ on an existing runner keeps the runner's original configuration.
 `observability` declares the capture policy: `enabled=false`, `capture_content=false`, and
 `max_content_chars=65536` by default. Export endpoint/headers belong to global
 `Config.observability`, not Agent YAML. Loading configuration does not create an SDK.
-The collection core is available; runtime composition is not connected yet.
+Enabled SDK/CLI composition creates or borrows one observation service.
 See [observability](../observability/README.md).
 
 `AgentConfig.decision` accepts optional `AgentDecisionConfig(path)` (exported from `iris.agents`).

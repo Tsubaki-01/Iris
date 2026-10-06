@@ -66,6 +66,12 @@ THREAD 的 async 读写每次以一个完整作业完成连接、SQL 和结果�
 INLINE 的同步操作仍会占用事件循环，后台维护不会覆盖这个选择。
 独立 `MemoryService` 和低层工具注册 SDK 不受 Agent 开关控制。
 
+`MemoryService(..., observability=...)` 与配置工厂的同名参数接受宿主持有的
+[观测服务](../observability/README.md)。省略时默认关闭，不读取全局配置或创建 exporter。
+工厂传递 raw provider，构造器分别为概览和生成入口包装一次；调用方无需预先包装。
+注入完整 `memory_service` 时保留它已有的观测策略，runner 不再包装或覆盖它。
+服务只借用观测资源，由宿主在维护任务和相关调用全部结束后关闭。
+
 ## 架构与数据流
 
 ```mermaid

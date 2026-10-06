@@ -2,6 +2,16 @@
 
 # `iris.runtime`
 
+`RuntimeFactory.from_config()` / `from_config_path()` accept `observability=`. A supplied service
+overrides Agent YAML. Without one, enabled collection reads `get_config().observability` in the
+shared assembly and creates an owned service. Disabled collection adds no global initialization
+requirement and preserves provider identity. The main model and newly built Memory each wrap the
+raw provider once; the environment and executor share the same observability service.
+`owned_observability` is closed after MCP, command, and decision resources, including when those
+closures fail. Synchronous assembly failure releases the service before ownership is transferred.
+Direct factory users call `await runtime.environment.aclose()`; injected services remain host-owned.
+Model complete/stream recording is connected; tool and other business intervals follow separately.
+
 Source capture uses `RuntimeCapturePort.request_capture(run_id, through_count)`, injected through
 `RuntimeEnvironment.capture_port`. Runtime does not choose Memory or project experience consumers.
 Capture progress, terminal eligibility, learning schedules and locks stay with their respective owners.

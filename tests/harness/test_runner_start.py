@@ -6,7 +6,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from iris.agents import AgentConfig
+from iris.config import Config
 from iris.exceptions import IrisProviderError, IrisRunConflictError
 from iris.harness import AgentRunner
 from iris.lifecycle import (
@@ -21,6 +24,7 @@ from iris.lifecycle import (
     ToolErrorPolicy,
 )
 from iris.message import LLMRequest, LLMResponse, Msg, ToolUseBlock
+from iris.observability.service import Observability
 from iris.runtime import SteeringInput
 from iris.store import InMemoryLifecycleStore
 from iris.tools import (
@@ -36,6 +40,30 @@ from .fakes import (
     text_response,
     tool_response,
 )
+
+
+def test_runner_constructor_failure_closes_unhanded_observability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    from iris.runtime import _assembly
+
+    service, _ = observability
+    closed: list[bool] = []
+    monkeypatch.setattr(Observability, "from_config", lambda *args, **kwargs: service)
+    monkeypatch.setattr(service, "_shutdown", lambda: closed.append(True))
+    monkeypatch.setattr(_assembly, "get_config", lambda: Config())
+    config = AgentConfig(
+        name="test",
+        model="openai/test",
+        system="hello",
+        permissions={"workspace": str(tmp_path)},
+        observability={"enabled": True},
+    )
+    with pytest.raises(ValueError, match="observer_event_timeout_s"):
+        AgentRunner.from_config(config, provider=StaticProvider(), observer_event_timeout_s=0)
+    assert closed == [True]
 
 
 @pytest.mark.asyncio

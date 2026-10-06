@@ -7,6 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.agents import AgentConfig, ToolsConfig, build_tool_registry
 from iris.command.service import CommandBinding
@@ -55,6 +56,7 @@ from iris.message import (
     Msg,
     ToolUseBlock,
 )
+from iris.observability.service import Observability
 from iris.prompts import PromptSnapshot, PromptSource
 from iris.providers import CompletionProvider
 from iris.runtime import RuntimeCursor, RuntimeStreamEvent
@@ -86,6 +88,47 @@ def _parent_provider() -> StaticProvider:
         ),
         text_response("Parent complete"),
     )
+
+
+@pytest.mark.asyncio
+async def test_child_borrows_observability_and_current_yaml(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    service, exporter = observability
+    path = _write_configs(tmp_path)
+    factory = ChildProviders(StaticProvider(text_response("Child done")))
+    runner = AgentRunner.from_config_path(
+        path,
+        provider=_parent_provider(),
+        child_provider_factory=factory,
+        observability=service,
+    )
+    controller = runner._subagent_controller
+    assert controller.observability is service
+    child_path = tmp_path / "child.yaml"
+    child_path.write_text(
+        child_path.read_text(encoding="utf-8").replace("Child instructions", "Updated instructions")
+        + "observability:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    child = controller._assemble_child(controller.routes.routes["researcher"])
+    assert child.runtime.environment.observability is service
+    assert child.runtime.environment.tool_bridge.tool_executor.observability is service
+    assert factory.configs[-1][0].system == "Updated instructions"
+    await child.aclose()
+    result = await runner.start(AgentRunRequest(input="Start", run_id="parent"))
+    assert result.run.stop_reason is RunStopReason.COMPLETED
+    await runner.aclose()
+    with service.scope("still usable after borrowers close"):
+        pass
+    models = [span for span in exporter.get_finished_spans() if span.name.startswith("chat ")]
+    assert [span.attributes["gen_ai.request.model"] for span in models] == [
+        "parent-model",
+        "child-model",
+        "parent-model",
+    ]
+    assert exporter.get_finished_spans()[-1].name == "still usable after borrowers close"
 
 
 @pytest.mark.asyncio

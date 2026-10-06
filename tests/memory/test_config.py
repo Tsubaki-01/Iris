@@ -6,6 +6,9 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import ValidationError
 
 import iris.memory.config as memory_config
@@ -19,8 +22,12 @@ from iris.memory import (
     SQLiteMemoryStore,
     build_memory_service_from_config,
 )
+from iris.message import LLMRequest, LLMResponse, Msg
+from iris.observability import AgentObservabilityConfig, ObservabilityExportConfig
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.providers import CompletionProvider
+from tests.harness.fakes import StaticProvider
 
 
 @pytest.mark.parametrize(
@@ -89,6 +96,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
         overview_config=overview_config,
         prompt_source=prompt_source,
     )
+    original_observability = service.observability
 
     def forbidden(*args: object, **kwargs: object) -> None:
         raise AssertionError("关闭或使用注入对象时不应解析路径或新建记忆依赖")
@@ -104,6 +112,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
         overview_provider=Mock(spec=CompletionProvider),
         overview_model="agent-model",
         prompt_source=PromptSource(tmp_path / "agent-prompts"),
+        observability=Observability(),
     )
 
     assert result is (service if enabled else None)
@@ -114,6 +123,7 @@ def test_memory_factory_resolves_disabled_and_injected_sources_without_construct
     assert service.overview_config is overview_config
     assert service.prompt_source is prompt_source
     assert service.io_execution_mode is MemoryIOExecutionMode.INLINE
+    assert service.observability is original_observability
     assert store.mock_calls == []
     assert provider.mock_calls == []
     assert list(tmp_path.iterdir()) == []
@@ -155,3 +165,49 @@ def test_enabled_memory_factory_builds_sqlite_and_binds_generation_dependencies(
     assert service.io_execution_mode is MemoryIOExecutionMode.THREAD
     assert provider.mock_calls == []
     assert list(service.mirror.root.rglob("Memory.md")) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("from_config", [False, True])
+async def test_memory_wraps_each_raw_provider_once_with_borrowed_observability(
+    tmp_path: Path, from_config: bool
+) -> None:
+    """工厂仅传递依赖，构造器为实际持有的两个模型入口各包一层。"""
+    sdk = TracerProvider(shutdown_on_exit=False)
+    exporter = InMemorySpanExporter()
+    sdk.add_span_processor(SimpleSpanProcessor(exporter))
+    observability = Observability.from_config(
+        AgentObservabilityConfig(enabled=True), ObservabilityExportConfig(), tracer_provider=sdk
+    )
+    raw = StaticProvider(LLMResponse(provider="test"), LLMResponse(provider="test"))
+    source = PromptSource.initialize(tmp_path)
+    if from_config:
+        service = build_memory_service_from_config(
+            MemoryConfig(enabled=True),
+            tmp_path,
+            overview_provider=raw,
+            overview_model="test",
+            prompt_source=source,
+            observability=observability,
+        )
+    else:
+        service = MemoryService(
+            Mock(spec=MemoryStore),
+            overview_provider=raw,
+            generation_provider=raw,
+            observability=observability,
+        )
+    assert service is not None
+    assert service.observability is observability
+    request = LLMRequest(model="test", messages=[Msg.user("inspect")])
+    try:
+        await service.overview_provider.complete(request)
+        await service.generation_provider.complete(request)
+        assert raw.requests == [request, request]
+        assert len(exporter.get_finished_spans()) == 2
+        await observability.aclose()
+        with sdk.get_tracer("host").start_as_current_span("still-open"):
+            pass
+        assert len(exporter.get_finished_spans()) == 3
+    finally:
+        sdk.shutdown()

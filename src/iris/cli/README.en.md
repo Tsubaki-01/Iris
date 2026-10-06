@@ -52,6 +52,14 @@ keeps its materials pending. New foreground work cancels uncommitted generation.
 stops SessionManager, drains actual maintenance IO, then closes runner-owned resources and the event
 loop. Shutdown never starts extra model generation.
 
+With the Agent's `observability.enabled`, the CLI creates one shared service using the global
+`observability` export configuration and passes it to the runner, Memory, Evolution, and coordinator.
+See [observability](../observability/README.md) for installation and the complete OTLP endpoint.
+Content capture is off by default; disabled observation creates no SDK or exporter. The CLI closes
+its service after business resources finish, including cleanup after construction or preparation
+failure. A direct `run_chat_loop(runner=...)` call does not own the runner's borrowed observation
+service; explicitly passing `observability=...` transfers its close responsibility to the chat host.
+
 ## Viewing a Todo checklist
 
 Set `todo.enabled: true` in the Agent configuration and keep `context_policy.enabled: true`, then

@@ -10,6 +10,17 @@ ownership from it.
 
 ## Quick start
 
+Both `from_config*()` entry points accept `observability=` and share that instance with the runtime,
+tool executor, and children. Explicit injection overrides each Agent's capture policy; children still
+load current YAML for business settings. When enabled without injection, runtime composition creates
+a service from global `Config.observability`, and its environment closes it after business resources.
+Hosts close injected services last. Disabled observation adds no `init_config()` requirement for a
+custom provider. Construction and preparation failures also close a self-created SDK.
+
+Delayed maintenance, automatic Goal continuation, and deadline tasks clear the OTel parent while
+preserving business ContextVars. Complete/stream model calls are connected; activation, tool, and
+maintenance scopes are not connected yet. See [observability](../observability/README.md).
+
 Both `from_config*()` entry points accept optional `decision_client=` and borrow only its `evaluate`
 capability. Runner shutdown never closes an injected evaluator. A client created from configuration
 is reused across sessions/Runs and closed by the environment. Children construct independent clients
