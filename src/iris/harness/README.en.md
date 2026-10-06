@@ -27,8 +27,9 @@ Cancellation, deadlines, and finalization without an ordinary activation use `ir
 A waiting child continuation includes the child call, result normalization, and finalize/rebind,
 then ends before the parent's next activation. Outcome-ready recovery records finalization without
 inventing a model call. `iris.driver.outcome` and durable `iris.run.status` remain separate: cancelling
-the driver after a committed completion does not relabel the durable result as failed. Maintenance
-cycle scopes are not connected yet. See [observability](../observability/README.md).
+the driver after a committed completion does not relabel the durable result as failed. Background
+work uses independent `iris.maintenance.cycle` resource roots, described below and in
+[observability](../observability/README.md).
 
 Both `from_config*()` entry points accept optional `decision_client=` and borrow only its `evaluate`
 capability. Runner shutdown never closes an injected evaluator. A client created from configuration
@@ -824,6 +825,16 @@ IO cleanup, preventing duplicate model calls across independent processes for th
 A busy lock yields the local slot and retries after `max(idle_seconds, 1 second)` without user
 input. Multiple resources receive bounded turns. MemoryService owns the dream-first or
 flush-then-dream sequence and projection/overview repair; the coordinator does not interpret content.
+
+With observation enabled, each job that acquires its lock creates an independent
+`iris.maintenance.cycle`. Memory records its database path and namespace; Evolution records its
+workspace, without borrowing a contributing Run's parent or session. A busy lock emits no cycle.
+The interval includes domain execution, actual worker drain, and lock release. `iris.driver.outcome`
+records only returned/failed/cancelled; `iris.maintenance.result` events describe domain stage and
+status without treating `has_more` as success. With content capture enabled, model spans retain the
+actual request. A prompt revision during a cycle does not rewrite earlier telemetry; the next cycle
+adopts the new snapshot. The coordinator borrows observation resources, which the host closes after
+these jobs finish.
 
 Hosts construct `build_project_evolution_binding(config, workspace_root=workspace,
 prompt_source=prompt_source, provider=provider)` and share it through

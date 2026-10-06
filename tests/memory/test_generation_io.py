@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 import iris.memory.generation as memory_generation
 import iris.memory.service as memory_service
@@ -26,6 +28,7 @@ from iris.memory import (
     _prompts,
 )
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 
 
@@ -69,7 +72,9 @@ class _Provider:
         )
 
 
-def _service(tmp_path: Path) -> tuple[MemoryService, _Provider]:
+def _service(
+    tmp_path: Path, *, observability: Observability | None = None
+) -> tuple[MemoryService, _Provider]:
     """使用真实 SQLite 与 THREAD 路径验证提交和落账。"""
     provider = _Provider()
     service = MemoryService(
@@ -81,6 +86,7 @@ def _service(tmp_path: Path) -> tuple[MemoryService, _Provider]:
         overview_model="test",
         prompt_source=PromptSource.initialize(tmp_path),
         io_execution_mode=MemoryIOExecutionMode.THREAD,
+        observability=observability,
     )
     return service, provider
 
@@ -169,10 +175,14 @@ async def test_slow_generation_processing_leaves_loop_and_foreground_reads_avail
 @pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["flush", "dream", "overview_publish", "overview_record"])
 async def test_cancelled_short_commit_finishes_and_records_model_cost_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """前台重复取消不拆开已开始的短提交，成功记录不能另写一次 cancelled 成本。"""
-    service, provider = _service(tmp_path)
+    observation, exporter = observability
+    service, provider = _service(tmp_path, observability=observation)
     started, release = threading.Event(), threading.Event()
     stage = boundary.split("_")[0]
     operation: Callable[[], Awaitable[object]]
@@ -200,7 +210,12 @@ async def test_cancelled_short_commit_finishes_and_records_model_cost_once(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method, delayed)
-    task = asyncio.create_task(operation())
+
+    async def observed_operation() -> object:
+        with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+            return await operation()
+
+    task = asyncio.create_task(observed_operation())
     try:
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
@@ -219,6 +234,12 @@ async def test_cancelled_short_commit_finishes_and_records_model_cost_once(
     assert len(results) == provider.calls == 1
     assert results[0]["status"] == "completed"
     assert results[0]["usage"]["total_tokens"] == 15
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.purpose"] == f"memory_{stage}"
+    assert model.status.status_code is cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.stage"] == stage
+    assert event.attributes["iris.maintenance.status"] == "completed"
     state = service.generation_state("project")
     if stage == "flush":
         assert state.pending_episodes == 0

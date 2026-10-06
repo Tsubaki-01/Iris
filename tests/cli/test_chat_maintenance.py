@@ -85,6 +85,18 @@ def test_chat_owns_maintenance_and_drains_before_loop_exit(
 
     def shutdown() -> None:
         assert provider.cancelled.is_set()
+        cycles = [
+            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        ]
+        assert cycles
+        assert all(span.attributes["iris.maintenance.kind"] == feature for span in cycles)
+        [model] = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("iris.model.purpose") in {"memory_flush", "evolution_experience"}
+        ]
+        cycle = next(span for span in cycles if span.context.span_id == model.parent.span_id)
+        assert cycle.end_time >= model.end_time
         shutdowns.append("exporter")
 
     observability, exporter = _host_observability(monkeypatch, shutdown)
@@ -128,7 +140,8 @@ def test_chat_owns_maintenance_and_drains_before_loop_exit(
     assert len(provider.stream_requests) == len(provider.requests) == 1
     assert len(captured) == 1
     assert shutdowns == ["exporter"]
-    assert len(exporter.get_finished_spans()) == 2
+    models = [span for span in exporter.get_finished_spans() if span.name.startswith("chat ")]
+    assert len(models) == 2
     if feature == "evolution":
         assert not (tmp_path / ".iris" / "memory").exists()
 

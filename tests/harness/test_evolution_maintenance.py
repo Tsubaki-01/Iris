@@ -8,13 +8,16 @@ import threading
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
+from time import time_ns
 from typing import cast
 
 import pytest
 from filelock import FileLock, Timeout
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
+import iris.harness.maintenance as maintenance_module
 from iris.agents import AgentConfig
 from iris.evolution.config import EvolutionConfig
 from iris.evolution.materials import EvolutionMaterialStore
@@ -134,6 +137,14 @@ async def test_evolution_worker_resets_ended_trace_but_keeps_business_context(
     assert worker_span.context.trace_id != host.get_span_context().trace_id
     assert worker_span.attributes.get("iris.run.id") != "old-run"
     assert seen_markers == ["evolution-host-value"]
+    cycle = next(
+        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+    )
+    assert cycle.parent is None
+    assert cycle.attributes["iris.maintenance.kind"] == "evolution"
+    assert cycle.attributes["iris.maintenance.workspace"] == str(tmp_path)
+    assert "gen_ai.conversation.id" not in cycle.attributes
+    assert worker_span.parent.span_id == cycle.context.span_id
 
 
 def project_service(tmp_path: Path, provider: StaticProvider | None = None) -> EvolutionService:
@@ -168,20 +179,29 @@ def project_runner(tmp_path: Path, provider: StaticProvider | None = None) -> Ag
 @pytest.mark.asyncio
 async def test_memory_and_evolution_run_concurrently_and_cancel_independently(
     tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """撤销一个项目只取消其 lane，Memory 仍可独立完成。"""
     memory_entered, memory_release = asyncio.Event(), asyncio.Event()
+    observation, exporter = observability
 
     class Provider(StaticProvider):
         async def complete(self, request: LLMRequest) -> LLMResponse:
+            assert observation.association()["iris.maintenance.kind"] == "memory"
             memory_entered.set()
             await memory_release.wait()
             return text_response('{"observations": []}')
 
     memory = memory_service(tmp_path / "memory.db", Provider())
     memory.observe(MemoryObserveInput(text="pending memory"))
-    evolution = ControlledEvolution()
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+
+    class ObservedEvolution(ControlledEvolution):
+        async def maintain_cycle(self, *, scope: EvolutionMaintenanceScope) -> EvolutionResult:
+            assert observation.association()["iris.maintenance.kind"] == "evolution"
+            return await super().maintain_cycle(scope=scope)
+
+    evolution = ObservedEvolution()
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
     binding = ProjectEvolutionBinding(
         workspace_root=tmp_path, service=cast(EvolutionService, evolution)
     )
@@ -207,6 +227,19 @@ async def test_memory_and_evolution_run_concurrently_and_cancel_independently(
     finally:
         memory_release.set()
         await coordinator.aclose()
+    cycles = [
+        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+    ]
+    assert len(cycles) == 2
+    memory_cycle = next(
+        span for span in cycles if span.attributes["iris.maintenance.kind"] == "memory"
+    )
+    evolution_cycle = next(span for span in cycles if span is not memory_cycle)
+    assert all(span.parent is None for span in cycles)
+    assert memory_cycle.context.trace_id != evolution_cycle.context.trace_id
+    assert max(span.start_time for span in cycles) < min(span.end_time for span in cycles)
+    assert memory_cycle.attributes["iris.driver.outcome"] == "returned"
+    assert evolution_cycle.attributes["iris.driver.outcome"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -511,6 +544,7 @@ async def test_waiting_and_missing_reader_keep_only_their_sources_pending(tmp_pa
 async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """已派发短IO不被关闭中断；任务位置和项目锁持有到真实收尾。"""
     entered, release = threading.Event(), threading.Event()
@@ -523,7 +557,18 @@ async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close
         return original()
 
     monkeypatch.setattr(service.store, "list_pending_sources", blocked_sources)
-    coordinator = MaintenanceCoordinator(idle_seconds=300)
+    observation, exporter = observability
+    coordinator = MaintenanceCoordinator(idle_seconds=300, observability=observation)
+    released_at: list[int] = []
+
+    class ObservedLock(FileLock):
+        def release(self, force: bool = False) -> None:
+            owned = self.is_locked
+            super().release(force=force)
+            if owned:
+                released_at.append(time_ns())
+
+    monkeypatch.setattr(maintenance_module, "FileLock", ObservedLock)
     binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
     coordinator._attach(None, InMemoryLifecycleStore(), evolution=binding)
     requested = asyncio.create_task(coordinator.request_project_experience(binding))
@@ -536,16 +581,24 @@ async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close
     closing = asyncio.create_task(coordinator.aclose())
     await asyncio.sleep(0)
     assert not closing.done() and coordinator._evolution_task is task
+    assert not any(span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans())
     release.set()
     await asyncio.wait_for(closing, 2)
     with pytest.raises(asyncio.CancelledError):
         await requested
     with lock:
         assert not coordinator._evolution_worker.busy
+    cycle = next(
+        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+    )
+    assert len(released_at) == 1 and cycle.end_time >= released_at[0]
+    assert cycle.attributes["iris.driver.outcome"] == "cancelled"
 
 
 @pytest.mark.asyncio
-async def test_explicit_waiter_finishes_on_failure_and_queued_close(tmp_path: Path) -> None:
+async def test_explicit_waiter_finishes_on_failure_and_queued_close(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
     """执行失败与前台等待中的宿主关闭都会结束主动等待者。"""
 
     class FailingEvolution(ControlledEvolution):
@@ -553,7 +606,8 @@ async def test_explicit_waiter_finishes_on_failure_and_queued_close(tmp_path: Pa
             raise IrisEvolutionError("generation failed")
 
     service = FailingEvolution()
-    coordinator = MaintenanceCoordinator(idle_seconds=300)
+    observation, exporter = observability
+    coordinator = MaintenanceCoordinator(idle_seconds=300, observability=observation)
     binding = ProjectEvolutionBinding(
         workspace_root=tmp_path, service=cast(EvolutionService, service)
     )
@@ -566,6 +620,12 @@ async def test_explicit_waiter_finishes_on_failure_and_queued_close(tmp_path: Pa
     await coordinator.aclose()
     with pytest.raises(IrisRunStateError, match="关闭"):
         await requested
+    cycles = [
+        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+    ]
+    assert len(cycles) == 1
+    assert cycles[0].attributes["iris.driver.outcome"] == "failed"
+    assert cycles[0].status.status_code is StatusCode.ERROR
 
 
 @pytest.mark.asyncio

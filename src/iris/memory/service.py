@@ -212,6 +212,11 @@ class MemoryService:
             self, namespace, prompt_snapshot=prompts, retry_blocked=retry_blocked, scope=scope
         )
 
+    def _observe_generation_result(self, result: GenerationResult) -> GenerationResult:
+        """报告实际阶段结果；观测服务决定当前是否有本领域的维护区间。"""
+        self.observability.maintenance_result("memory", result.stage, result.status)
+        return result
+
     async def maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> bool:
         """执行一轮有界学习与投影修复，返回本范围是否仍有可执行积压。"""
         await self.run_async_io(
@@ -659,7 +664,8 @@ class MemoryService:
                         estimated_tokens=estimated_tokens,
                         input_budget_tokens=self.overview_config.input_budget_tokens,
                     )
-                response = await self.overview_provider.complete(request)
+                with self.observability.bind({"iris.model.purpose": "memory_overview"}):
+                    response = await self.overview_provider.complete(request)
                 usage = {
                     "input_tokens": response.input_tokens,
                     "output_tokens": response.output_tokens,
@@ -695,6 +701,7 @@ class MemoryService:
             await self.run_async_io(
                 lambda: self.store.record_generation_result(failure), complete_on_cancel=True
             )
+            self._observe_generation_result(failure)
             raise
         result = GenerationResult(
             namespace=namespace,
@@ -708,6 +715,7 @@ class MemoryService:
         await self.run_async_io(
             lambda: self.store.record_generation_result(result), complete_on_cancel=True
         )
+        self._observe_generation_result(result)
         raise_if_generation_cancelled()
         return MemoryOverviewGenerationResult(
             namespace=namespace,

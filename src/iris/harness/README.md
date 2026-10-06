@@ -24,7 +24,8 @@ ContextVars。`invoke_agent <agent>` 覆盖一次真实 activation 的开始/结
 继续的控制区间包含 child、结果归一化及 finalize/rebind，在父后续 activation 前结束；
 outcome-ready 恢复只有真实 finalize，没有虚构模型调用。`iris.driver.outcome` 与持久化
 `iris.run.status` 分开记录，已提交 completed 不因驱动随后取消而变成 failed。
-当前尚未接通维护 cycle 区间，详见 [observability](../observability/README.md)。
+后台维护使用独立资源根 `iris.maintenance.cycle`，详见下文与
+[observability](../observability/README.md)。
 
 ```python
 from iris.harness import AgentRunRequest, AgentRunner
@@ -703,6 +704,13 @@ Memory 使用实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
 执行有界领域周期并排空真实 IO，同库同 namespace 的独立进程不会重复调用模型。
 锁忙让出本地位置，至少等待 `max(idle_seconds, 1 秒)` 后自动再试，多资源按有界周期轮转。
 Memory 服务拥有 dream 优先、flush 后 dream、投影与 overview 修复的顺序，协调器不解释内容。
+
+启用观测时，每个成功获锁的作业创建独立 `iris.maintenance.cycle`，Memory 记录数据库路径与
+namespace，Evolution 记录 workspace；不借用贡献 Run 的 parent/session。锁忙不创建周期。
+区间覆盖领域执行、真实 worker 排空和锁释放，`iris.driver.outcome` 只记录驱动的
+returned/failed/cancelled；领域的 stage/status 由 `iris.maintenance.result` 事件表达，不从
+has_more 推断成功。正文采集启用时，模型节点保留当次实际请求；周期中修订 Prompt 不回改
+已采集内容，下次周期才使用新快照。协调器只借用观测服务，宿主在这些真实作业结束后关闭它。
 
 项目学习由宿主用 `build_project_evolution_binding(config, workspace_root=workspace,
 prompt_source=prompt_source, provider=provider)` 构造，然后通过

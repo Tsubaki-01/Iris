@@ -347,7 +347,9 @@ async def flush(
             )
         )
         if not progresses:
-            return GenerationResult(namespace=namespace, stage="flush", status="empty")
+            return service._observe_generation_result(
+                GenerationResult(namespace=namespace, stage="flush", status="empty")
+            )
         prompt = await service.run_async_io(
             lambda: structured_memory_prompt(
                 prompt_snapshot, "memory_flush", _FLUSH_INSTRUCTIONS, _FlushResponse
@@ -391,7 +393,8 @@ async def flush(
         }
         await _check_sources(scope, sources)
         if refs:
-            response = await provider.complete(request)
+            with service.observability.bind({"iris.model.purpose": "memory_flush"}):
+                response = await provider.complete(request)
             usage = _usage(response)
             extracted = await service.run_async_io(partial(_parse, response, _FlushResponse))
         else:
@@ -454,6 +457,7 @@ async def flush(
                 lambda: service.store.record_generation_result(result), complete_on_cancel=True
             )
         result_recorded = True
+        service._observe_generation_result(result)
         raise_if_generation_cancelled()
         state = await service.ageneration_state(namespace, scope=scope)
         return result.model_copy(update={"has_more": bool(state.pending_episodes)})
@@ -709,8 +713,10 @@ async def dream(
             )
         )
         if not snapshot.observations and not snapshot.changes:
-            return GenerationResult(
-                namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
+            return service._observe_generation_result(
+                GenerationResult(
+                    namespace=namespace, stage="dream", status="empty", counts={"blocked": 0}
+                )
             )
         prompt = await service.run_async_io(
             lambda: structured_memory_prompt(
@@ -730,7 +736,7 @@ async def dream(
                         await service.run_async_io(
                             partial(service.store.record_generation_result, result)
                         )
-                    return result
+                    return service._observe_generation_result(result)
                 request, refs, estimated_tokens = await service.run_async_io(
                     partial(_prepare_dream_request, service, snapshot, provider, model, prompt)
                 )
@@ -754,8 +760,8 @@ async def dream(
                         complete_on_cancel=True,
                     )
                     if not marked:
-                        return GenerationResult(
-                            namespace=namespace, stage="dream", status="conflict"
+                        return service._observe_generation_result(
+                            GenerationResult(namespace=namespace, stage="dream", status="conflict")
                         )
                     blocked += 1
                     raise_if_generation_cancelled()
@@ -771,7 +777,7 @@ async def dream(
                         await service.run_async_io(
                             partial(service.store.record_generation_result, result)
                         )
-                        return result
+                        return service._observe_generation_result(result)
                     break
                 selected = inputs[: max(1, len(inputs) // 2)]
                 snapshot = await service.run_async_io(
@@ -797,7 +803,8 @@ async def dream(
             + [item.event_id for item in snapshot.changes]
         )
         await _check_sources(scope, snapshot.sources)
-        response = await provider.complete(request)
+        with service.observability.bind({"iris.model.purpose": "memory_dream"}):
+            response = await provider.complete(request)
         usage = _usage(response)
         plan = await service.run_async_io(
             lambda: _bind_plan(_parse(response, _DreamResponse), snapshot, refs)
@@ -844,6 +851,7 @@ async def dream(
                 lambda: service.store.record_generation_result(result), complete_on_cancel=True
             )
         result_recorded = True
+        service._observe_generation_result(result)
         raise_if_generation_cancelled()
         if committed:
             state = await service.ageneration_state(namespace, scope=scope)
@@ -884,3 +892,4 @@ async def _failed(
     await service.run_async_io(
         lambda: service.store.record_generation_result(result), complete_on_cancel=True
     )
+    service._observe_generation_result(result)

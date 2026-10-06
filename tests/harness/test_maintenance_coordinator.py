@@ -7,12 +7,14 @@ import json
 import threading
 from contextvars import ContextVar
 from pathlib import Path
+from time import time_ns
 
 import pytest
 from filelock import FileLock, Timeout
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+import iris.harness.maintenance as maintenance_module
 from iris.exceptions import IrisConfigError, IrisRunStateError
 from iris.harness import AgentRunner, MaintenanceCoordinator, MemoryMaintenanceBinding
 from iris.lifecycle import AgentRunRequest, LifecycleStore
@@ -112,6 +114,13 @@ async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
     assert all(span.context.trace_id != host.get_span_context().trace_id for span in spans)
     assert all(span.attributes.get("iris.run.id") != "old-run" for span in spans)
     assert seen_markers and set(seen_markers) == {"memory-host-value"}
+    cycle = next(span for span in spans if span.name == "iris.maintenance.cycle")
+    assert cycle.parent is None
+    assert cycle.attributes["iris.maintenance.kind"] == "memory"
+    assert cycle.attributes["iris.maintenance.database"] == str(tmp_path / "memory.db")
+    assert cycle.attributes["iris.maintenance.namespace"] == "project"
+    assert "gen_ai.conversation.id" not in cycle.attributes
+    assert all(span.parent.span_id == cycle.context.span_id for span in spans if span is not cycle)
 
 
 def configured_runner(
@@ -240,10 +249,24 @@ async def test_waiting_excludes_old_session_sources_after_runner_close(tmp_path:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("remove_resource", [False, True])
 async def test_real_worker_drain_retains_slot_and_os_lock(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remove_resource: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remove_resource: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """前台立即完成，已派发同步工作仍占锁；关闭不二次取消 drain。"""
     entered, release = threading.Event(), threading.Event()
+    observation, exporter = observability
+    released_at: list[int] = []
+
+    class ObservedLock(FileLock):
+        def release(self, force: bool = False) -> None:
+            owned = self.is_locked
+            super().release(force=force)
+            if owned:
+                released_at.append(time_ns())
+
+    monkeypatch.setattr(maintenance_module, "FileLock", ObservedLock)
     service = memory_service(tmp_path / "memory.db", io_mode=MemoryIOExecutionMode.THREAD)
     service.observe(MemoryObserveInput(text="待整理"))
     read_sources = service.list_pending_sources
@@ -254,7 +277,7 @@ async def test_real_worker_drain_retains_slot_and_os_lock(
         return read_sources(namespace)
 
     monkeypatch.setattr(service, "list_pending_sources", blocked_read)
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
     runner = configured_runner(tmp_path, service)
     binding = MemoryMaintenanceBinding(
         service=service, database_path=tmp_path / "memory.db", namespace="project"
@@ -276,12 +299,18 @@ async def test_real_worker_drain_retains_slot_and_os_lock(
     )
     await asyncio.sleep(0)
     assert not closing.done()
+    assert not any(span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans())
     with pytest.raises(Timeout):
         peer_lock.acquire()
     release.set()
     await asyncio.wait_for(closing, 2)
     with peer_lock:
         assert not coordinator._worker.busy
+    cycle = next(
+        span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+    )
+    assert len(released_at) == 1 and cycle.end_time >= released_at[0]
+    assert cycle.attributes["iris.driver.outcome"] == "cancelled"
     await coordinator.aclose()
 
 
@@ -453,6 +482,7 @@ async def test_missing_lifecycle_reader_retains_pending_after_restart(tmp_path: 
 @pytest.mark.asyncio
 async def test_lock_busy_retries_without_activity_and_yields_to_other_resource(
     tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
     """idle=0 锁忙至少退让一秒，其他资源先行，无新输入也会重试。"""
     first_service = memory_service(tmp_path / "first.db")
@@ -463,7 +493,8 @@ async def test_lock_busy_retries_without_activity_and_yields_to_other_resource(
         configured_runner(tmp_path, first_service),
         configured_runner(tmp_path, second_service),
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    observation, exporter = observability
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
     for runner, name, service in (
         (first, "first", first_service),
         (second, "second", second_service),
@@ -482,6 +513,11 @@ async def test_lock_busy_retries_without_activity_and_yields_to_other_resource(
         await asyncio.sleep(0.15)
         assert not first_service.generation_provider.requests
         assert len(second_service.generation_provider.requests) == 1
+        cycles = [
+            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        ]
+        assert len(cycles) == 1
+        assert cycles[0].attributes["iris.maintenance.database"] == str(tmp_path / "second.db")
         assert first._maintenance.resource.ready_at > asyncio.get_running_loop().time()
         assert coordinator._task is None
     finally:

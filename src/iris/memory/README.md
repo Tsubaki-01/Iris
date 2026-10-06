@@ -71,6 +71,12 @@ INLINE 的同步操作仍会占用事件循环，后台维护不会覆盖这个�
 工厂传递 raw provider，构造器分别为概览和生成入口包装一次；调用方无需预先包装。
 注入完整 `memory_service` 时保留它已有的观测策略，runner 不再包装或覆盖它。
 服务只借用观测资源，由宿主在维护任务和相关调用全部结束后关闭。
+真实概览、flush、dream 模型调用分别标注 `memory_overview`、`memory_flush`、`memory_dream`
+用途。处于宿主 Memory 维护区间时，每次实际阶段结果记录一个 `iris.maintenance.result`；
+empty、blocked、conflict 保持非错误，没有模型请求就没有模型节点。阶段失败只影响所属
+维护区间，不会把已经成功的模型调用改成失败。提交后取消保留已经提交的阶段状态。
+独立 SDK 或前台概览仍有实际模型记录，但不会向宿主普通 span 添加维护结果，也不创建维护周期；
+`maintain_cycle()` 的 bool 仍只表示是否有后续积压。
 
 ## 架构与数据流
 

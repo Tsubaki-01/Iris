@@ -1,9 +1,13 @@
 """A 阶段有界整理、固定协议、发布与消费边界。"""
 
+from __future__ import annotations
+
 import asyncio
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -20,6 +24,7 @@ from iris.evolution.models import (
 from iris.evolution.service import EvolutionService
 from iris.exceptions import IrisEvolutionError
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.skill.discovery import discover_skills
 from iris.skill.frontmatter import parse_frontmatter, split_frontmatter
@@ -27,6 +32,11 @@ from iris.skill.models import SkillDiscoveryOptions, SkillScope
 from iris.skill.registry import SkillRegistry
 from iris.skill.tool import LoadSkillInput, LoadSkillTool
 from iris.tools import ToolExecutionContext
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from iris.evolution.models import EvolutionMaterial, EvolutionResult, RevisionItem
 
 
 class Provider:
@@ -63,7 +73,7 @@ async def eligible_session(session: EvolutionSession | None) -> bool:
 
 
 def prepare(
-    tmp_path: Path, **config: object
+    tmp_path: Path, *, observability: Observability | None = None, **config: object
 ) -> tuple[EvolutionService, Provider, EvolutionMaintenanceScope]:
     provider = Provider()
     store = EvolutionMaterialStore(tmp_path)
@@ -97,6 +107,7 @@ def prepare(
         model="test",
         config=EvolutionConfig(**config),
         prompt_source=PromptSource.initialize(tmp_path),
+        observability=observability,
     )
     return (
         service,
@@ -137,19 +148,38 @@ def append_source(service: EvolutionService, run_id: str) -> EvolutionMaintenanc
 
 
 @pytest.mark.asyncio
-async def test_update_publishes_stable_skill_and_consumes_only_once(tmp_path: Path) -> None:
-    service, provider, scope = prepare(tmp_path)
-    result = await service.maintain_cycle(scope=scope)
+@pytest.mark.parametrize("in_cycle", [False, True])
+async def test_update_publishes_stable_skill_and_consumes_only_once(
+    tmp_path: Path,
+    in_cycle: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    service, provider, scope = prepare(tmp_path, observability=observation)
+    with (
+        observation.bind({"iris.maintenance.kind": "evolution"} if in_cycle else {}),
+        observation.scope("cycle" if in_cycle else "host"),
+    ):
+        result = await service.maintain_cycle(scope=scope)
+        empty = await service.maintain_cycle(scope=scope)
     assert result.status == "updated" and not result.has_more
     frontmatter, body = split_frontmatter(service.skill_path.read_text(encoding="utf-8"))
     assert parse_frontmatter(frontmatter)["name"] == "project-experience"
     assert body.strip() == provider.output["body"]
     assert result.usage["total_tokens"] == 25
-    assert (await service.maintain_cycle(scope=scope)).status == "empty"
+    assert empty.status == "empty"
     assert len(provider.requests) == 1
     assert not provider.requests[0].tools
     prompt = provider.requests[0].messages[0].text
     assert "body" in prompt and "reason" in prompt and "项目" in prompt
+    spans = exporter.get_finished_spans()
+    [model] = [span for span in spans if span.name.startswith("chat ")]
+    assert model.attributes["iris.model.purpose"] == "evolution_experience"
+    events = [event for span in spans for event in span.events]
+    assert [event.attributes["iris.maintenance.status"] for event in events] == (
+        ["updated", "empty"] if in_cycle else []
+    )
+    assert all(event.name == "iris.maintenance.result" for event in events)
 
 
 @pytest.mark.asyncio
@@ -280,8 +310,13 @@ async def test_next_cycle_adopts_new_template_and_policy(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_cancelled_provider_late_response_cannot_publish(tmp_path: Path) -> None:
-    service, provider, scope = prepare(tmp_path)
+async def test_cancelled_provider_late_response_cannot_publish(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    observation, exporter = observability
+    service, provider, scope = prepare(tmp_path, observability=observation)
     started = asyncio.Event()
     original = provider.complete
 
@@ -294,12 +329,73 @@ async def test_cancelled_provider_late_response_cannot_publish(tmp_path: Path) -
         raise AssertionError("必须取消模型等待")
 
     provider.complete = suppress
-    task = asyncio.create_task(service.maintain_cycle(scope=scope))
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
+        task = asyncio.create_task(service.maintain_cycle(scope=scope))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     assert not service.skill_path.exists() and service.store.list_pending_sources()
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.outcome"] == "completed"
+    assert cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == "cancelled"
+    assert event.attributes["iris.maintenance.stage"] == "experience"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["updated", "no_change"])
+async def test_experience_cancelled_after_commit_keeps_committed_result_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    """A 提交后仍向外传播取消；事件保留已确认结果，不追加 cancelled。"""
+    from opentelemetry.trace import StatusCode
+
+    observation, exporter = observability
+    service, provider, scope = prepare(tmp_path, observability=observation)
+    if status == "no_change":
+        provider.output = {"body": None, "reason": "没有新增项目经验"}
+    committed: list[EvolutionResult] = []
+    entered = threading.Event()
+    release = threading.Event()
+    original = service._commit
+
+    def commit(
+        selected: tuple[EvolutionMaterial, ...],
+        baseline: str | None,
+        content: str | None,
+        result: EvolutionResult,
+        issue: RevisionItem | None,
+    ) -> EvolutionResult:
+        stored = original(selected, baseline, content, result, issue)
+        committed.append(stored)
+        entered.set()
+        release.wait()
+        return stored
+
+    monkeypatch.setattr(service, "_commit", commit)
+    with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
+        task = asyncio.create_task(service.maintain_cycle(scope=scope))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1)
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert committed[0].status == status
+    assert service.store.list_pending_sources() == ()
+    assert service.skill_path.exists() is (status == "updated")
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.outcome"] == "completed"
+    assert model.status.status_code is cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.stage"] == "experience"
+    assert event.attributes["iris.maintenance.status"] == status
 
 
 @pytest.mark.asyncio
@@ -325,9 +421,14 @@ async def test_new_skill_discovery_and_registered_tool_read_current_body(tmp_pat
 
 @pytest.mark.asyncio
 async def test_publication_failure_keeps_previous_skill_and_material(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
-    service, provider, scope = prepare(tmp_path)
+    from opentelemetry.trace import StatusCode
+
+    observation, exporter = observability
+    service, provider, scope = prepare(tmp_path, observability=observation)
     service.skill_path.parent.mkdir(parents=True)
     service.skill_path.write_text("原有经验", encoding="utf-8")
     error = OSError("文件写入失败")
@@ -336,9 +437,21 @@ async def test_publication_failure_keeps_previous_skill_and_material(
         raise error
 
     monkeypatch.setattr(evolution_service, "atomic_write_text", fail)
-    with pytest.raises(IrisEvolutionError) as captured:
+    with (
+        pytest.raises(IrisEvolutionError) as captured,
+        observation.bind({"iris.maintenance.kind": "evolution"}),
+        observation.scope("cycle"),
+    ):
         await service.maintain_cycle(scope=scope)
     assert captured.value.__cause__ is error
     assert service.skill_path.read_text(encoding="utf-8") == "原有经验"
     assert service.store.list_pending_sources()
     assert len(provider.requests) == 1
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.purpose"] == "evolution_experience"
+    assert model.attributes["iris.model.outcome"] == "completed"
+    assert model.status.status_code is StatusCode.UNSET
+    assert cycle.status.status_code is StatusCode.ERROR
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == "failed"
+    assert event.attributes["iris.maintenance.stage"] == "experience"

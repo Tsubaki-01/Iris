@@ -214,6 +214,29 @@ class Observability:
         except Exception:
             _logger.exception("观测事件记录失败")
 
+    def maintenance_result(
+        self,
+        kind: str,
+        stage: str,
+        status: str,
+        *,
+        revision_id: str | None = None,
+    ) -> None:
+        """将领域结果记录到当前维护区间；独立 SDK 不产生维护事件。"""
+        if self.association().get("iris.maintenance.kind") != kind:
+            return
+        span = trace.get_current_span()
+        attributes = {
+            "iris.maintenance.kind": kind,
+            "iris.maintenance.stage": stage,
+            "iris.maintenance.status": status,
+        }
+        if revision_id is not None:
+            attributes["iris.maintenance.revision_id"] = revision_id
+        self.event(span, "iris.maintenance.result", attributes)
+        if status == "failed":
+            self.error(span, f"{kind}.{stage}: failed")
+
     def error(self, span: Span, error: BaseException | str) -> None:
         """标记真实失败；取消和正常等待由 owner 单独分类。"""
         try:

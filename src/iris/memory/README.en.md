@@ -77,6 +77,14 @@ global configuration or creating an exporter. The factory passes raw providers; 
 wraps each overview and generation entry point once. Callers should pass unwrapped providers.
 An injected complete `memory_service` retains its own observation policy; the runner neither
 rewraps nor overrides it. The host closes observation resources after maintenance and other calls finish.
+Actual overview, flush, and dream requests carry the `memory_overview`, `memory_flush`, and
+`memory_dream` purposes. Within a host Memory maintenance cycle, each actual stage result produces
+one `iris.maintenance.result` event. Empty, blocked, and conflict outcomes remain non-errors;
+stages without a model request produce no model span. A stage failure marks its maintenance cycle
+without changing an already successful model call. Cancellation after commit retains the committed
+stage status. Standalone SDK calls and foreground overview generation retain actual model traces
+without adding maintenance results to ordinary host spans or creating cycles. The bool returned by
+`maintain_cycle()` still reports only whether eligible work remains.
 
 ## Architecture and lifecycle
 

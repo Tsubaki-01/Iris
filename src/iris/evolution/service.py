@@ -329,7 +329,11 @@ class EvolutionService:
                 )
             )
             if revisions:
-                return await self._maintain_revision(revisions[0], scope)
+                result = await self._maintain_revision(revisions[0], scope)
+                self.observability.maintenance_result(
+                    "evolution", result.stage, result.status, revision_id=result.revision_id
+                )
+                return result
         return await self._maintain_experience(scope)
 
     async def _maintain_experience(self, scope: EvolutionMaintenanceScope) -> EvolutionResult:
@@ -341,6 +345,7 @@ class EvolutionService:
                 lambda: self.store.read_pending(allowed_sources=scope.allowed_sources)
             )
             if not pending.items:
+                self.observability.maintenance_result("evolution", "experience", "empty")
                 return EvolutionResult(status="empty")
             baseline, selected, request = await self.run_async_io(
                 lambda: self._prepare(pending.items)
@@ -350,7 +355,8 @@ class EvolutionService:
             if not await scope.check(sources):
                 raise asyncio.CancelledError
             if any(item.records for item in selected):
-                response = await self.provider.complete(request)
+                with self.observability.bind({"iris.model.purpose": "evolution_experience"}):
+                    response = await self.provider.complete(request)
                 usage = {
                     "input_tokens": response.input_tokens,
                     "output_tokens": response.output_tokens,
@@ -386,6 +392,7 @@ class EvolutionService:
                 complete_on_cancel=True,
             )
             recorded = True
+            self.observability.maintenance_result("evolution", result.stage, result.status)
             _check_cancelled()
             return result
         except (Exception, asyncio.CancelledError) as exc:
@@ -398,6 +405,7 @@ class EvolutionService:
                 await self.run_async_io(
                     lambda: self.store.record_step(failure), complete_on_cancel=True
                 )
+                self.observability.maintenance_result("evolution", failure.stage, failure.status)
             raise
 
     def _prepare_review(self, item: RevisionItem) -> tuple[RevisionContext, LLMRequest]:
@@ -480,7 +488,8 @@ class EvolutionService:
             _check_cancelled()
             if not await self._revision_eligible(item, scope):
                 raise asyncio.CancelledError
-            response = await self.provider.complete(request)
+            with self.observability.bind({"iris.model.purpose": "evolution_revision"}):
+                response = await self.provider.complete(request)
             usage = {
                 "input_tokens": response.input_tokens,
                 "output_tokens": response.output_tokens,

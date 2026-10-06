@@ -57,6 +57,13 @@ schema 与发布校验，也不保证模型每次判断都正确。
 传入同一个对象，并在维护排空、runner 关闭后统一 `await observability.aclose()`。
 领域服务不创建或关闭 exporter，也不改变材料、发布和状态的权威来源。
 
+实际 A/B 模型调用分别记录 `evolution_experience` / `evolution_revision` purpose。
+在宿主已有 Evolution 维护 cycle 内，阶段结果通过 `iris.maintenance.result` 记录原有
+stage、status 和可用 revision_id；`failed` 标记维护失败，`empty/no_change/conflict` 保持非错误。
+独立 SDK 调用只保留模型 span 和原返回值，不向任意宿主 span 写维护结果，也不新建 cycle。
+A 的异常或取消仍向外传播；B 仍返回原有失败/取消结果。提交后收到取消时，观测保留实际
+已提交结果的原 status，不虚构 `committed` 状态，也不把模型成功后的发布失败回写为模型失败。
+
 `MaintenanceCoordinator` 负责项目锁、空闲时机、来源资格与取消。服务的
 `await maintain_cycle(scope=...)` 只在该锁内执行一轮；`scope.allowed_sources` 限定本次来源，
 `scope.check(actual_sources)` 在模型前与发布前重查。宿主主动整理也走同一入口，

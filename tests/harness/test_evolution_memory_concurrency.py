@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from iris.agents import AgentConfig
 from iris.evolution.models import RevisionRequest, RevisionTarget
@@ -14,6 +15,7 @@ from iris.memory import FileMemoryMirror, MemoryObserveInput, MemoryService, SQL
 from iris.memory.generation import _DreamResponse, _FlushResponse
 from iris.memory.models import MemoryOverviewContent
 from iris.message import LLMRequest, LLMResponse
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 from iris.store import InMemoryLifecycleStore
 
@@ -23,9 +25,12 @@ from .fakes import StaticProvider, text_response
 
 
 @pytest.mark.asyncio
-async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(tmp_path: Path) -> None:
+async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
     """B 在 flush 等待模型时完成发布，当前 dream 仍使用周期开始时的正文。"""
     prompts = PromptSource.initialize(tmp_path)
+    observation, exporter = observability
     _seed(prompts, "old")
     entered = (asyncio.Event(), asyncio.Event())
     released = (asyncio.Event(), asyncio.Event())
@@ -79,6 +84,7 @@ async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(tmp_pat
         generation_model="test",
         overview_provider=memory_provider,
         overview_model="test",
+        observability=observation,
     )
     new_body = "new-dream: schema 仅允许伪造字段 fake"
     revision_provider = StaticProvider(
@@ -105,9 +111,13 @@ async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(tmp_pat
         }
     )
     binding = build_project_evolution_binding(
-        config, workspace_root=tmp_path, prompt_source=prompts, provider=revision_provider
+        config,
+        workspace_root=tmp_path,
+        prompt_source=prompts,
+        provider=revision_provider,
+        observability=observation,
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
     coordinator._attach(
         MemoryMaintenanceBinding(
             service=memory, database_path=tmp_path / "memory.db", namespace="project"
@@ -160,6 +170,31 @@ async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(tmp_pat
         assert next_dream.startswith(new_body)
         assert json.dumps(_DreamResponse.model_json_schema(), ensure_ascii=False) in next_dream
         assert len(revision_provider.requests) == 1
+        dreams = [
+            span
+            for span in exporter.get_finished_spans()
+            if span.attributes.get("iris.model.purpose") == "memory_dream"
+        ]
+        assert len(dreams) == 2
+        recorded_systems = [
+            json.loads(span.attributes["gen_ai.input.messages"])[0]["parts"][0]["content"]
+            for span in dreams
+        ]
+        assert recorded_systems == [
+            memory_provider.requests[index].messages[0].text for index in (1, 4)
+        ]
+        assert recorded_systems[0].startswith("old-dream")
+        assert recorded_systems[1].startswith(new_body)
+        cycles = {
+            span.context.span_id: span
+            for span in exporter.get_finished_spans()
+            if span.name == "iris.maintenance.cycle"
+        }
+        assert dreams[0].parent.span_id != dreams[1].parent.span_id
+        assert all(
+            cycles[span.parent.span_id].attributes["iris.maintenance.kind"] == "memory"
+            for span in dreams
+        )
     finally:
         for release in released:
             release.set()

@@ -1,9 +1,13 @@
 """项目经验 A 与有限策略 B 分轮结算，失败不重复学习已消费材料。"""
 
+from __future__ import annotations
+
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -12,15 +16,21 @@ from iris.evolution.config import EvolutionConfig
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import (
     EvolutionMaintenanceScope,
+    EvolutionResult,
     EvolutionSession,
+    RevisionItem,
     RevisionRequest,
     RevisionTarget,
 )
-from iris.evolution.revision import ConfigTarget, PromptTarget
+from iris.evolution.revision import ConfigTarget, PreparedRevision, PromptTarget
 from iris.evolution.service import EvolutionService
 from iris.exceptions import IrisEvolutionError
+from iris.observability.service import Observability
 
 from .test_project_skill import eligible_session, prepare
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 
 @pytest.mark.asyncio
@@ -233,8 +243,15 @@ async def test_reopened_pending_respects_narrowed_current_targets(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_b_keeps_request_pending_with_its_identity(tmp_path: Path) -> None:
-    service, provider, scope = prepare(tmp_path, prompt_targets=["compaction"])
+async def test_cancelled_b_keeps_request_pending_with_its_identity(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    observation, exporter = observability
+    service, provider, scope = prepare(
+        tmp_path, observability=observation, prompt_targets=["compaction"]
+    )
     service.prompt_targets = (PromptTarget("compaction", "自然语言摘要", {}),)
     item = await service.enqueue_revision(
         RevisionRequest(
@@ -248,12 +265,20 @@ async def test_cancelled_b_keeps_request_pending_with_its_identity(tmp_path: Pat
         await asyncio.Event().wait()
 
     provider.complete = wait
-    task = asyncio.create_task(service.maintain_cycle(scope=scope))
-    await started.wait()
-    task.cancel()
-    result = await task
+    with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
+        task = asyncio.create_task(service.maintain_cycle(scope=scope))
+        await started.wait()
+        task.cancel()
+        result = await task
     assert result.status == "cancelled" and result.revision_id == item.id
     assert service.store.revision_result(item.id) is None
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.purpose"] == "evolution_revision"
+    assert model.attributes["iris.model.outcome"] == "cancelled"
+    assert cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == "cancelled"
+    assert event.attributes["iris.maintenance.revision_id"] == item.id
 
 
 @pytest.mark.asyncio
@@ -326,3 +351,119 @@ async def test_another_process_settlement_is_observed_without_second_model(tmp_p
     )
     result = await service.maintain_cycle(scope=replace(scope, allowed_sources=frozenset()))
     assert result.status == "empty" and provider.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "no_change", "conflict"])
+@pytest.mark.parametrize("in_cycle", [False, True])
+async def test_observed_revision_reports_returned_domain_result(
+    tmp_path: Path,
+    status: str,
+    in_cycle: bool,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    from opentelemetry.trace import StatusCode
+
+    observation, exporter = observability
+    service, provider, scope = prepare(
+        tmp_path, observability=observation, prompt_targets=["compaction"]
+    )
+    service.prompt_targets = (PromptTarget("compaction", "自然语言摘要", {}),)
+    item = await service.enqueue_revision(
+        RevisionRequest(
+            description="修订摘要", targets=(RevisionTarget(kind="prompt", name="compaction"),)
+        )
+    )
+    provider.output = (
+        {"action": "no_change", "reason": "当前内容已足够"}
+        if status == "no_change"
+        else {
+            "action": "prompt",
+            "target": "compaction",
+            "body": "{{ missing }}" if status == "failed" else "新摘要规则",
+            "reason": "修改",
+        }
+    )
+    if status == "conflict":
+        target = service.prompt_source.root / "compaction.j2"
+        provider.on_complete = lambda: target.write_text("人工修改", encoding="utf-8")
+    with (
+        observation.bind({"iris.maintenance.kind": "evolution"} if in_cycle else {}),
+        observation.scope("cycle" if in_cycle else "host"),
+    ):
+        result = await service.maintain_cycle(scope=scope)
+    assert result.status == status
+    model, owner = exporter.get_finished_spans()
+    assert model.attributes["iris.model.purpose"] == "evolution_revision"
+    assert model.attributes["iris.model.outcome"] == "completed"
+    assert model.status.status_code is StatusCode.UNSET
+    if in_cycle:
+        [event] = owner.events
+        assert event.name == "iris.maintenance.result"
+        assert dict(event.attributes) == {
+            "iris.maintenance.kind": "evolution",
+            "iris.maintenance.stage": "revision",
+            "iris.maintenance.status": status,
+            "iris.maintenance.revision_id": item.id,
+        }
+    else:
+        assert not owner.events
+    assert owner.status.status_code is (
+        StatusCode.ERROR if in_cycle and status == "failed" else StatusCode.UNSET
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["updated", "no_change"])
+async def test_revision_cancelled_after_commit_reports_original_result_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    service, provider, scope = prepare(
+        tmp_path, observability=observation, prompt_targets=["compaction"]
+    )
+    service.prompt_targets = (PromptTarget("compaction", "自然语言摘要", {}),)
+    item = await service.enqueue_revision(
+        RevisionRequest(
+            description="检查摘要", targets=(RevisionTarget(kind="prompt", name="compaction"),)
+        )
+    )
+    provider.output = (
+        {"action": "no_change", "reason": "当前规则已满足"}
+        if status == "no_change"
+        else {"action": "prompt", "target": "compaction", "body": "新摘要规则", "reason": "修改"}
+    )
+    committed: list[EvolutionResult] = []
+    entered = threading.Event()
+    release = threading.Event()
+    original = service._commit_revision
+
+    def commit(
+        revision: RevisionItem, candidate: PreparedRevision, usage: dict[str, int]
+    ) -> EvolutionResult:
+        result = original(revision, candidate, usage)
+        committed.append(result)
+        entered.set()
+        release.wait()
+        return result
+
+    monkeypatch.setattr(service, "_commit_revision", commit)
+    with observation.bind({"iris.maintenance.kind": "evolution"}), observation.scope("cycle"):
+        task = asyncio.create_task(service.maintain_cycle(scope=scope))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(entered.wait), timeout=1)
+            task.cancel()
+        finally:
+            release.set()
+        result = await task
+    assert result is committed[0]
+    assert result.status == status and result.revision_id == item.id
+    assert service.store.revision_result(item.id) is not None
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.outcome"] == "completed"
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == status
+    assert event.attributes["iris.maintenance.revision_id"] == item.id

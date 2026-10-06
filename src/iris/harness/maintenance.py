@@ -6,7 +6,8 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -405,6 +406,44 @@ class MaintenanceCoordinator:
             project.revision += 1
         return eligible
 
+    @contextmanager
+    def _observe_cycle(
+        self, binding: MemoryMaintenanceBinding | ProjectEvolutionBinding
+    ) -> Iterator[None]:
+        """获锁后记录独立资源周期，调用方退出前完成真实 worker 排空和锁释放。"""
+        observation = self.observability
+        if not observation.enabled:
+            yield
+            return
+        attributes = (
+            {
+                "iris.maintenance.kind": "memory",
+                "iris.maintenance.database": str(binding.database_path),
+                "iris.maintenance.namespace": binding.namespace,
+            }
+            if isinstance(binding, MemoryMaintenanceBinding)
+            else {
+                "iris.maintenance.kind": "evolution",
+                "iris.maintenance.workspace": str(binding.workspace_root),
+            }
+        )
+        with (
+            observation.detached(),
+            observation.bind(attributes),
+            observation.scope("iris.maintenance.cycle") as span,
+        ):
+            outcome = "returned"
+            try:
+                yield
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except BaseException:
+                outcome = "failed"
+                raise
+            finally:
+                observation.attributes(span, {"iris.driver.outcome": outcome})
+
     async def _run_cycle(self, resource: _MemoryResource) -> None:
         """有界周期持有 OS 锁，取消后直到真实 worker 排空才释放。"""
         lock = FileLock(resource.lock_path, timeout=0)
@@ -414,30 +453,31 @@ class MaintenanceCoordinator:
             resource.dirty = True
             resource.ready_at = self._loop.time() + max(self.idle_seconds, 1)
             return
-        revision = resource.revision
-        try:
-            with self.observability.detached(), self._worker.bind():
-                service = resource.binding.service
-                sources = await service.alist_pending_sources(resource.binding.namespace)
-                scope = MemoryMaintenanceScope(
-                    allowed_sources=frozenset(
-                        (source.lifecycle_source_id, source.run_id)
-                        for source in sources
-                        if self._source_eligible(
-                            source.lifecycle_source_id, source.run_id, source.session_id
-                        )
-                    ),
-                    check=partial(self._eligible, resource),
-                )
-                more = await service.maintain_cycle(resource.binding.namespace, scope=scope)
-                resource.dirty = more or resource.revision != revision
-                resource.ready_at = self._loop.time() + self.idle_seconds
-        except (Exception, asyncio.CancelledError):
-            resource.dirty = resource.revision != revision
-            raise
-        finally:
-            await self._worker.wait_idle()
-            lock.release()
+        with self._observe_cycle(resource.binding):
+            revision = resource.revision
+            try:
+                with self._worker.bind():
+                    service = resource.binding.service
+                    sources = await service.alist_pending_sources(resource.binding.namespace)
+                    scope = MemoryMaintenanceScope(
+                        allowed_sources=frozenset(
+                            (source.lifecycle_source_id, source.run_id)
+                            for source in sources
+                            if self._source_eligible(
+                                source.lifecycle_source_id, source.run_id, source.session_id
+                            )
+                        ),
+                        check=partial(self._eligible, resource),
+                    )
+                    more = await service.maintain_cycle(resource.binding.namespace, scope=scope)
+                    resource.dirty = more or resource.revision != revision
+                    resource.ready_at = self._loop.time() + self.idle_seconds
+            except (Exception, asyncio.CancelledError):
+                resource.dirty = resource.revision != revision
+                raise
+            finally:
+                await self._worker.wait_idle()
+                lock.release()
 
     def _finished(self, task: asyncio.Task[None]) -> None:
         """真实作业收尾完成后才释放本地任务位置。"""
@@ -456,57 +496,58 @@ class MaintenanceCoordinator:
             project.dirty = True
             project.ready_at = self._loop.time() + max(self.idle_seconds, 1)
             return None
-        revision = project.revision
-        try:
-            with self.observability.detached(), self._evolution_worker.bind():
-                service = project.binding.service
-                for item_id in tuple(project.revision_requests):
-                    settled = await service.run_async_io(
-                        partial(service.store.revision_result, item_id)
-                    )
-                    if settled is not None:
-                        project.revision_requests.pop(item_id).future.set_result(settled)
-                sources = await service.alist_pending_sources()
-                sessions = await service.alist_pending_sessions()
-                scope = EvolutionMaintenanceScope(
-                    allowed_sources=frozenset(
-                        (source.lifecycle_source_id, source.run_id)
-                        for source in sources
-                        if self._source_eligible(
-                            source.lifecycle_source_id, source.run_id, source.session_id
+        with self._observe_cycle(project.binding):
+            revision = project.revision
+            try:
+                with self._evolution_worker.bind():
+                    service = project.binding.service
+                    for item_id in tuple(project.revision_requests):
+                        settled = await service.run_async_io(
+                            partial(service.store.revision_result, item_id)
                         )
-                    ),
-                    check=partial(self._eligible, project),
-                    allowed_sessions=frozenset(
-                        (session.lifecycle_source_id, session.session_id)
-                        for session in sessions
-                        if self._session_eligible(session)
-                    ),
-                    check_session=partial(self._eligible_session, project),
-                    experience_only=project.request is not None,
-                    requested_revision_id=next(
-                        (
-                            item_id
-                            for item_id, waiter in project.revision_requests.items()
-                            if self._session_eligible(waiter.session)
+                        if settled is not None:
+                            project.revision_requests.pop(item_id).future.set_result(settled)
+                    sources = await service.alist_pending_sources()
+                    sessions = await service.alist_pending_sessions()
+                    scope = EvolutionMaintenanceScope(
+                        allowed_sources=frozenset(
+                            (source.lifecycle_source_id, source.run_id)
+                            for source in sources
+                            if self._source_eligible(
+                                source.lifecycle_source_id, source.run_id, source.session_id
+                            )
                         ),
-                        None,
-                    ),
-                )
-                result = await service.maintain_cycle(scope=scope)
-                project.dirty = result.has_more or project.revision != revision
-                project.ready_at = (
-                    0
-                    if project.request is not None or project.revision_requests
-                    else self._loop.time() + self.idle_seconds
-                )
-                return result
-        except BaseException:
-            project.dirty = project.revision != revision
-            raise
-        finally:
-            await self._evolution_worker.wait_idle()
-            lock.release()
+                        check=partial(self._eligible, project),
+                        allowed_sessions=frozenset(
+                            (session.lifecycle_source_id, session.session_id)
+                            for session in sessions
+                            if self._session_eligible(session)
+                        ),
+                        check_session=partial(self._eligible_session, project),
+                        experience_only=project.request is not None,
+                        requested_revision_id=next(
+                            (
+                                item_id
+                                for item_id, waiter in project.revision_requests.items()
+                                if self._session_eligible(waiter.session)
+                            ),
+                            None,
+                        ),
+                    )
+                    result = await service.maintain_cycle(scope=scope)
+                    project.dirty = result.has_more or project.revision != revision
+                    project.ready_at = (
+                        0
+                        if project.request is not None or project.revision_requests
+                        else self._loop.time() + self.idle_seconds
+                    )
+                    return result
+            except BaseException:
+                project.dirty = project.revision != revision
+                raise
+            finally:
+                await self._evolution_worker.wait_idle()
+                lock.release()
 
     def _evolution_finished(self, task: asyncio.Task[EvolutionResult | None]) -> None:
         """项目真实收尾完成后才释放该类任务位置，Memory 独立继续。"""

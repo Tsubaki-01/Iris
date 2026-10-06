@@ -5,7 +5,7 @@
 
 SDK/CLI、子 Agent、Memory 和 Evolution 已接入普通与流式模型记录和正文投影。
 前台 trace 包含每次 activation、请求准备、模型、真实工具、控制与 observer 区间；
-后台维护 cycle 尚未接入。
+后台维护使用独立的资源 cycle。
 
 ## 配置与使用
 
@@ -76,6 +76,13 @@ subagent 的等待正常结束本次区间；继续执行的 control 覆盖 chil
 权威结果、触发业务重试或成为恢复依据。
 
 ## 边界与记录语义
+
+Memory 和 Evolution 各自持有独立维护根，只在取得资源锁后开始，并在真实 worker 排空、
+锁释放后结束。模型用途区分 overview/flush/dream 和 experience/revision；
+`iris.maintenance.result` 保留实际 stage/status，不将积压 bool 当成功标志。
+empty、blocked、no_change、conflict 保持非错误；failed 标记维护失败。取消后已经提交的
+结果保留原状态；模型成功后的发布失败不会回改模型节点。独立 SDK 调用没有维护 cycle
+时仍记录模型，但不向任意宿主 span 添加维护事件。发布成功不等于其他 runner 已采用。
 
 - 关闭时内部包装 helper 返回原 provider；scope 为空操作，不清空宿主上下文。
 - wrapper 保留 complete-only / streaming 能力；估算不采集，也不发模型请求。

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from iris.exceptions import IrisMemoryError, IrisTemplateError
 from iris.memory import (
@@ -23,6 +25,7 @@ from iris.memory import (
     SQLiteMemoryStore,
 )
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 
 from .test_search import _flush_observation
@@ -53,7 +56,9 @@ class _Provider:
         return self.response
 
 
-def _service(tmp_path: Path, provider: _Provider | None = None) -> MemoryService:
+def _service(
+    tmp_path: Path, provider: _Provider | None = None, *, observability: Observability | None = None
+) -> MemoryService:
     return MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"),
         mirror=FileMemoryMirror(tmp_path / "mirror"),
@@ -61,6 +66,7 @@ def _service(tmp_path: Path, provider: _Provider | None = None) -> MemoryService
         overview_model="fake-model" if provider is not None else None,
         overview_config=MemoryOverviewConfig(input_budget_tokens=100),
         prompt_source=PromptSource.initialize(tmp_path),
+        observability=observability,
     )
 
 
@@ -414,10 +420,13 @@ async def test_provider_failure_preserves_previous_overview_and_propagates_error
 
 @pytest.mark.asyncio
 async def test_overview_publication_failure_keeps_file_and_reports_generation_usage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    observation, exporter = observability
     provider = _Provider()
-    service = _service(tmp_path, provider)
+    service = _service(tmp_path, provider, observability=observation)
     service.remember(MemoryWriteInput(text="fact", reason="seed"))
     result = await service.refresh_overview("project")
     before = result.path.read_text(encoding="utf-8")
@@ -427,9 +436,19 @@ async def test_overview_publication_failure_keeps_file_and_reports_generation_us
 
     monkeypatch.setattr(service.mirror, "_atomic_replace", fail)
     with pytest.raises(IrisMemoryError, match="write failed") as captured:
-        await service.refresh_overview("project")
+        with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+            await service.refresh_overview("project")
     assert captured.value.context["usage"]["total_tokens"] == 24
     assert result.path.read_text(encoding="utf-8") == before
     saved = service.generation_state("project").latest_results[0]
     assert saved.stage == "overview" and saved.status == "failed"
     assert saved.usage["total_tokens"] == 24
+    first_model, failed_publication_model, cycle = exporter.get_finished_spans()
+    assert first_model.attributes["iris.model.purpose"] == "memory_overview"
+    assert first_model.events == ()
+    assert failed_publication_model.attributes["iris.model.purpose"] == "memory_overview"
+    assert failed_publication_model.status.status_code is StatusCode.UNSET
+    assert cycle.status.status_code is StatusCode.ERROR
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.stage"] == "overview"
+    assert event.attributes["iris.maintenance.status"] == "failed"

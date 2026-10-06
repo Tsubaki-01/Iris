@@ -200,3 +200,49 @@ async def test_cancelled_scope_propagates_without_error_status(cooperative: bool
     assert caught.value is error
     assert exporter.get_finished_spans()[0].status.status_code == StatusCode.UNSET
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "kind,stage,status",
+    [
+        ("memory", "flush", "blocked"),
+        ("memory", "dream", "completed"),
+        ("memory", "overview", "failed"),
+        ("evolution", "experience", "empty"),
+        ("evolution", "revision", "failed"),
+        ("evolution", "revision", "cancelled"),
+    ],
+)
+def test_domain_result_only_marks_real_failure_on_current_cycle(
+    observability: tuple[Observability, InMemorySpanExporter],
+    kind: str,
+    stage: str,
+    status: str,
+) -> None:
+    obs, exporter = observability
+    with obs.bind({"iris.maintenance.kind": kind}), obs.scope("iris.maintenance.cycle"):
+        obs.maintenance_result(
+            kind, stage, status, revision_id="revision" if stage == "revision" else None
+        )
+    [span] = exporter.get_finished_spans()
+    [event] = span.events
+    assert event.name == "iris.maintenance.result"
+    assert event.attributes["iris.maintenance.kind"] == kind
+    assert event.attributes["iris.maintenance.stage"] == stage
+    assert event.attributes["iris.maintenance.status"] == status
+    assert (span.status.status_code is StatusCode.ERROR) is (status == "failed")
+    assert ("iris.maintenance.revision_id" in event.attributes) is (stage == "revision")
+
+
+def test_standalone_domain_result_does_not_write_to_host_or_wrong_cycle(
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    obs, exporter = observability
+    with obs.scope("host"):
+        obs.maintenance_result("memory", "overview", "failed")
+    with obs.bind({"iris.maintenance.kind": "evolution"}), obs.scope("iris.maintenance.cycle"):
+        obs.maintenance_result("memory", "overview", "failed")
+    assert all(not span.events for span in exporter.get_finished_spans())
+    assert all(
+        span.status.status_code is StatusCode.UNSET for span in exporter.get_finished_spans()
+    )

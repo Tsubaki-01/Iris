@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from iris.exceptions import IrisMemoryError, IrisTemplateError
 from iris.memory import (
@@ -26,6 +28,7 @@ from iris.memory import (
 from iris.memory.generation import _DreamResponse, _flush_input, _FlushResponse
 from iris.memory.generation_models import EpisodeCursor, EpisodeProgress, EpisodeSlice
 from iris.message import LLMRequest, LLMResponse, TextBlock
+from iris.observability.service import Observability
 from iris.prompts import PromptSource
 
 
@@ -70,7 +73,13 @@ def flush_one(source: dict[str, object]) -> dict[str, object]:
     }
 
 
-def service(tmp_path: Path, provider: Provider, **budgets: int) -> MemoryService:
+def service(
+    tmp_path: Path,
+    provider: Provider,
+    *,
+    observability: Observability | None = None,
+    **budgets: int,
+) -> MemoryService:
     """构造没有镜像也能显式生成的独立 SDK。"""
     return MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"),
@@ -78,7 +87,96 @@ def service(tmp_path: Path, provider: Provider, **budgets: int) -> MemoryService
         generation_model="test-model",
         generation_config=MemoryGenerationConfig(**budgets),
         prompt_source=PromptSource.initialize(tmp_path),
+        observability=observability,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_cycle", [False, True])
+async def test_generation_purposes_and_results_belong_only_to_a_memory_cycle(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    in_cycle: bool,
+) -> None:
+    observation, exporter = observability
+    provider = Provider(lambda _: {"observations": []})
+    memory = service(tmp_path, provider, observability=observation)
+    memory.observe(MemoryObserveInput(text="记录原文"))
+    with observation.bind({"iris.maintenance.kind": "memory"} if in_cycle else {}):
+        with observation.scope("owner") as owner:
+            assert (await memory.flush("project")).status == "completed"
+            memory.remember(MemoryWriteInput(text="保留事实", reason="seed"))
+            provider.respond = lambda _: {"operations": [], "resolutions": []}
+            assert (await memory.dream("project")).status == "completed"
+    flush_span, dream_span, owner_span = exporter.get_finished_spans()
+    assert flush_span.attributes["iris.model.purpose"] == "memory_flush"
+    assert dream_span.attributes["iris.model.purpose"] == "memory_dream"
+    assert flush_span.parent == dream_span.parent == owner.get_span_context()
+    assert owner_span.status.status_code is StatusCode.UNSET
+    assert [
+        (event.attributes["iris.maintenance.stage"], event.attributes["iris.maintenance.status"])
+        for event in owner_span.events
+    ] == ([("flush", "completed"), ("dream", "completed")] if in_cycle else [])
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_budget_blocked_records_domain_result_without_model_error(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+) -> None:
+    observation, exporter = observability
+    provider = Provider(lambda _: {"operations": [], "resolutions": []})
+    memory = service(tmp_path, provider, observability=observation, dream_input_budget_tokens=5000)
+    memory.remember(MemoryWriteInput(text="large fact " * 2000, reason="大段材料"))
+    with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+        result = await memory.dream("project")
+    assert result.status == "blocked"
+    assert provider.requests == []
+    [cycle] = exporter.get_finished_spans()
+    assert cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.stage"] == "dream"
+    assert event.attributes["iris.maintenance.status"] == "blocked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["flush", "dream", "block"])
+async def test_generation_conflict_keeps_domain_status_and_actual_model_calls(
+    tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    observation, exporter = observability
+    provider = Provider(
+        lambda _: (
+            {"observations": []} if boundary == "flush" else {"operations": [], "resolutions": []}
+        )
+    )
+    memory = service(tmp_path, provider, observability=observation, dream_input_budget_tokens=5000)
+    if boundary == "flush":
+        memory.observe(MemoryObserveInput(text="原文"))
+    else:
+        memory.remember(
+            MemoryWriteInput(
+                text="large fact " * 2000 if boundary == "block" else "fact", reason="seed"
+            )
+        )
+    monkeypatch.setattr(
+        memory.store,
+        "block_dream" if boundary == "block" else f"commit_{boundary}",
+        lambda *args, **kwargs: False,
+    )
+    with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+        result = await (memory.flush("project") if boundary == "flush" else memory.dream("project"))
+    assert result.status == "conflict"
+    assert len(provider.requests) == int(boundary != "block")
+    *models, cycle = exporter.get_finished_spans()
+    assert len(models) == len(provider.requests)
+    assert cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == "conflict"
 
 
 def test_flush_input_keeps_semantic_context_without_repeated_source_ids() -> None:
@@ -259,16 +357,26 @@ async def test_template_failure_does_not_consume_generation_input(
 
 
 @pytest.mark.asyncio
-async def test_empty_generation_does_not_render_templates(tmp_path: Path) -> None:
+async def test_empty_generation_does_not_render_templates(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
     provider = Provider(flush_one)
-    memory = service(tmp_path, provider)
+    memory = service(tmp_path, provider, observability=observation)
     for stage in ("flush", "dream"):
         (memory.prompt_source.root / f"memory_{stage}.j2").write_text(
             "{% invalid %}", encoding="utf-8"
         )
-    assert (await memory.flush("project")).status == "empty"
-    assert (await memory.dream("project")).status == "empty"
+    with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+        assert (await memory.flush("project")).status == "empty"
+        assert (await memory.dream("project")).status == "empty"
     assert provider.requests == []
+    [cycle] = exporter.get_finished_spans()
+    assert cycle.status.status_code is StatusCode.UNSET
+    assert [event.attributes["iris.maintenance.status"] for event in cycle.events] == [
+        "empty",
+        "empty",
+    ]
 
 
 @pytest.mark.asyncio
@@ -312,13 +420,23 @@ async def test_dream_receives_original_attribution_and_tool_metadata(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_empty_flush_consumes_and_truncated_flush_does_not(tmp_path: Path) -> None:
+async def test_empty_flush_consumes_and_truncated_flush_does_not(
+    tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
+) -> None:
+    observation, exporter = observability
     provider = Provider(lambda _: {"observations": []})
-    memory = service(tmp_path, provider)
+    memory = service(tmp_path, provider, observability=observation)
     memory.observe(MemoryObserveInput(text="无需要记录的闲聊"))
     provider.finish_reason = "length"
-    with pytest.raises(IrisMemoryError):
-        await memory.flush("project")
+    with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+        with pytest.raises(IrisMemoryError):
+            await memory.flush("project")
+    model, cycle = exporter.get_finished_spans()
+    assert model.status.status_code is StatusCode.UNSET
+    assert cycle.status.status_code is StatusCode.ERROR
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.stage"] == "flush"
+    assert event.attributes["iris.maintenance.status"] == "failed"
     assert memory.generation_state("project").pending_episodes == 1
     assert memory.generation_state("project").latest_results[0].usage["total_tokens"] == 15
     provider.finish_reason = "stop"
@@ -430,7 +548,9 @@ async def test_large_explicit_change_is_blocked_but_unrelated_small_change_advan
 @pytest.mark.asyncio
 async def test_provider_suppressing_cancellation_cannot_commit_late_observations(
     tmp_path: Path,
+    observability: tuple[Observability, InMemorySpanExporter],
 ) -> None:
+    observation, exporter = observability
     started = asyncio.Event()
 
     class SlowProvider(Provider):
@@ -444,14 +564,20 @@ async def test_provider_suppressing_cancellation_cannot_commit_late_observations
                 return await super().complete(request)
 
     provider = SlowProvider(flush_one)
-    memory = service(tmp_path, provider)
+    memory = service(tmp_path, provider, observability=observation)
     memory.observe(MemoryObserveInput(text="本项目使用 uv"))
-    task = asyncio.create_task(memory.flush("project"))
-    await started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
+        task = asyncio.create_task(memory.flush("project"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
     state = memory.generation_state("project")
     assert state.pending_episodes == 1 and state.pending_observations == 0
     assert state.latest_results[0].status == "cancelled"
     assert state.latest_results[0].usage["total_tokens"] == 15
+    model, cycle = exporter.get_finished_spans()
+    assert model.attributes["iris.model.outcome"] == "completed"
+    assert model.status.status_code is cycle.status.status_code is StatusCode.UNSET
+    [event] = cycle.events
+    assert event.attributes["iris.maintenance.status"] == "cancelled"
