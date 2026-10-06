@@ -12,7 +12,7 @@ Example:
 # region imports
 from .client import ProviderClient
 from .factory import ModelRoute, create_provider_client, parse_model_route
-from .protocols import CompletionProvider
+from .protocols import CompletionProvider, StreamingProvider, streaming_provider_for
 
 # endregion
 
@@ -20,6 +20,8 @@ __all__ = [
     "CompletionProvider",
     "ModelRoute",
     "ProviderClient",
+    "StreamingProvider",
     "create_provider_client",
     "parse_model_route",
+    "streaming_provider_for",
 ]

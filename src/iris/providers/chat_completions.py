@@ -28,6 +28,7 @@ from ..message import (
 from ..message.llm import ResponseFormat
 from ._images import image_data_url
 from ._tool_encoding import chat_tool_choice, chat_tools
+from ._usage import parse_usage
 
 # endregion
 
@@ -134,11 +135,7 @@ class ChatCompletionsMapper:
     def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
         """归一化成功终态，失败保留用量且不返回工具意图。"""
         usage = data.get("usage") or {}
-        tokens = {
-            "input_tokens": int(usage.get("prompt_tokens") or 0),
-            "output_tokens": int(usage.get("completion_tokens") or 0),
-            "total_tokens": int(usage.get("total_tokens") or 0),
-        }
+        tokens = parse_usage(usage, chat_completions=True)
         context: dict[str, Any] = {"provider": provider}
         if data.get("usage") is not None:
             context["usage"] = tokens

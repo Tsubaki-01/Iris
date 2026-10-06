@@ -15,11 +15,7 @@ from .commit import (
     RuntimeToolResultCommit,
     ToolCallClaim,
 )
-from .environment import (
-    RuntimeEnvironment,
-    StreamingRuntimeProvider,
-    streaming_provider_for,
-)
+from .environment import RuntimeEnvironment
 from .factory import RuntimeFactory
 from .models import (
     RuntimeActivationInput,
@@ -60,6 +56,4 @@ __all__ = [
     "ToolCallClaim",
     "ToolBridge",
     "SteeringInput",
-    "StreamingRuntimeProvider",
-    "streaming_provider_for",
 ]

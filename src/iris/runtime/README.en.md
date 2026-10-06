@@ -433,7 +433,7 @@ cause. These statuses reuse existing identity fields without a separate payload 
 `stream_sink=None` preserves the complete-only path exactly: runtime continues to call
 `CompletionProvider.complete()` with `stream=False`, overriding `request_options`. With a synchronous
 `RuntimeEventSink`, runtime
-uses the independent structural `StreamingRuntimeProvider` capability to detect `stream()`.
+uses the structural `iris.providers.StreamingProvider` capability to detect `stream()`.
 Missing capability fails with `PROVIDER_STREAM_ERROR/provider`; runtime neither falls back to
 `complete()` nor fabricates tokens.
 
@@ -686,12 +686,13 @@ A `skills.root` escape, missing `skills.require` entry, or name/alias collision 
 
 ## Public API
 
-Package exports cover `AgentRuntime`, factory/environment, `StreamingRuntimeProvider`,
-`streaming_provider_for()`, `RuntimeEventSink`, `RuntimeStreamEvent`, assembler/tool
+Package exports cover `AgentRuntime`, factory/environment,
+`RuntimeEventSink`, `RuntimeStreamEvent`, assembler/tool
 bridge, `RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
 options/status/results, `run_turn()`, `run_loop()`,
 `resume()`, and old checkpoint helpers do not exist.
-Import the shared non-streaming `CompletionProvider` protocol from `iris.providers`.
+Import `CompletionProvider`, `StreamingProvider`, and `streaming_provider_for()` from
+`iris.providers`; runtime does not re-export provider protocols.
 
 ## Verification
 

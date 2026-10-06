@@ -2,12 +2,41 @@
 
 import json
 from copy import deepcopy
+from typing import Any
 
 import pytest
 
 from iris.exceptions import IrisProviderError
 from iris.message import Msg, TextBlock, ToolUseBlock
 from iris.providers.responses import ResponsesMapper
+
+
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {}),
+        ({"usage": None}, {}),
+        ({"usage": {}}, {}),
+        ({"usage": {"input_tokens": None, "output_tokens": None}}, {}),
+        ({"usage": {"input_tokens": 0}}, {"input_tokens": 0}),
+        ({"usage": {"output_tokens": 7}}, {"output_tokens": 7}),
+        ({"usage": {"input_tokens": 3, "total_tokens": 3}}, {"input_tokens": 3, "total_tokens": 3}),
+    ],
+)
+def test_responses_complete_preserves_usage_field_presence(
+    usage_fields: dict[str, Any], expected: dict[str, int]
+) -> None:
+    data = {"status": "completed", "output": [], **usage_fields}
+    mapper = ResponsesMapper()
+    response = mapper.parse_response(data, provider="openai")
+    fields = {"input_tokens", "output_tokens", "total_tokens"}
+    assert response.model_fields_set & fields == expected.keys()
+    assert {name: getattr(response, name) for name in fields} == dict.fromkeys(fields, 0) | expected
+
+    data["status"] = "failed"
+    with pytest.raises(IrisProviderError) as captured:
+        mapper.parse_response(data, provider="openai")
+    assert captured.value.context.get("usage", {}) == expected
 
 
 def _completed() -> dict:

@@ -29,8 +29,7 @@ from iris.message import (
     Msg,
     ProviderStreamError,
 )
-from iris.providers import create_provider_client, parse_model_route
-from iris.runtime import StreamingRuntimeProvider
+from iris.providers import StreamingProvider, create_provider_client, parse_model_route
 
 # endregion
 
@@ -55,7 +54,7 @@ def build_request(*, model: str, prompt: str) -> LLMRequest:
 
 
 async def stream_once(
-    provider: StreamingRuntimeProvider,
+    provider: StreamingProvider,
     request: LLMRequest,
     *,
     output: TextIO,
@@ -63,7 +62,7 @@ async def stream_once(
     """使用注入的 provider 增量写出文本并返回完整响应。
 
     Args:
-        provider (StreamingRuntimeProvider): 提供流式调用的运行时 provider。
+        provider (StreamingProvider): 提供流式调用的运行时 provider。
         request (LLMRequest): 待发送的 provider-neutral 请求。
         output (TextIO): 接收文本增量的输出流。
 

@@ -114,6 +114,51 @@ async def _collect() -> list[Any]:
     return [event async for event in client.stream(request)]
 
 
+@pytest.mark.parametrize("terminal_kind", ["completed", "failed", "error"])
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {}),
+        ({"usage": None}, {}),
+        ({"usage": {}}, {}),
+        ({"usage": {"input_tokens": None, "output_tokens": None}}, {}),
+        ({"usage": {"input_tokens": 0}}, {"input_tokens": 0}),
+        ({"usage": {"output_tokens": 7}}, {"output_tokens": 7}),
+        ({"usage": {"input_tokens": 3, "total_tokens": 3}}, {"input_tokens": 3, "total_tokens": 3}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_responses_stream_preserves_usage_field_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_kind: str,
+    usage_fields: dict[str, Any],
+    expected: dict[str, int],
+) -> None:
+    event = (
+        {"type": "error", "code": "failed", "message": "失败", **usage_fields}
+        if terminal_kind == "error"
+        else _event(terminal_kind, response={"status": terminal_kind, "output": [], **usage_fields})
+    )
+    _install_stream(monkeypatch, _RawStream(event))
+    events = await _collect()
+    fields = {"input_tokens", "output_tokens", "total_tokens"}
+    snapshots = [event.usage for event in events if isinstance(event, ModelUsageUpdated)]
+    for snapshot in snapshots:
+        assert snapshot.model_fields_set & fields == expected.keys()
+        assert {name: getattr(snapshot, name) for name in fields} == dict.fromkeys(
+            fields, 0
+        ) | expected
+        assert snapshot.complete
+    if terminal_kind == "completed":
+        terminal = events[-1]
+        assert isinstance(terminal, ModelResponseCompleted)
+        assert terminal.response.model_fields_set & fields == expected.keys()
+        assert len(snapshots) == 1
+    else:
+        assert isinstance(events[-1], ModelResponseFailed)
+        assert len(snapshots) == int(usage_fields.get("usage") is not None)
+
+
 @pytest.mark.asyncio
 async def test_provider_stream_text_typed_events_and_terminal_usage(
     monkeypatch: pytest.MonkeyPatch,

@@ -12,7 +12,8 @@ BIDI/realtime、可注入 HTTP client、历史 adapter API 与 `close()` 都不�
 
 Runtime 与显式 memory 概览生成共用 `CompletionProvider` 协议，要求异步 `complete()` 和同步
 `estimate_input_tokens(request)`。协议定义在 [protocols.py](protocols.py)，自定义 provider 和
-测试替身实现同一接口；流式调用仍使用 runtime 的独立 `StreamingRuntimeProvider` 能力。
+测试替身实现同一接口。可选流式能力 `StreamingProvider` 和 `streaming_provider_for()` 也由
+本包提供；`stream(request)` 直接返回 `AsyncIterator[ModelStreamEvent]`，建流结果不另行 await。
 
 ## 快速开始
 
@@ -61,6 +62,8 @@ flowchart LR
 - `create_provider_client(...)`：根据路由、配置与显式参数装配 client。
 - `ProviderClient`：执行选定协议的一次完整或流式调用。
 - `CompletionProvider`：完整响应与输入 token 估算的共同协议。
+- `StreamingProvider`：独立可选的 typed event stream 协议。
+- `streaming_provider_for(provider)`：取得 provider 的流式能力；缺失时返回 `None`。
 
 ### 路由与配置
 
@@ -169,6 +172,11 @@ runtime 只对当前失败摘要分块的连接、超时或限流错误额外重
 - incomplete、failed、error 和终态前 EOF 都失败，不提交部分工具调用；
 - 已返回 usage 在失败时仍交给 runtime 结算，cached/reasoning 明细不重复加进总数；
 - consumer 结束或取消时关闭 raw iterator；Responses 关闭本次 HTTP 响应，连接池由 LiteLLM 管理。
+
+响应与 usage 快照的 token 值仍默认 `0`，但 `model_fields_set` 只包含服务商实际返回的
+非 null 计数；真实 `0` 是已知计数，缺失/null 是未知。失败异常的 `context['usage']` 同样
+只保留已知字段。快照与响应之间保持这个区别；`complete=True` 表示流式用量收口，不代表
+账单完整，也不改变 runtime 既有累计逻辑。
 
 ```python
 from iris.message import LLMRequest, ModelBlockDelta, ModelResponseCompleted, Msg

@@ -39,6 +39,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ._stream_utils import close_raw_stream, safe_provider_error
+from ._usage import known_usage, parse_usage
 from .chat_completions import chat_reasoning_field
 
 # endregion
@@ -292,7 +293,7 @@ class ChatCompletionsStreamAccumulator:
         if raw_usage is None:
             return None
         usage = self._as_mapping(raw_usage)
-        if not usage:
+        if not usage and raw_usage != {}:
             raise IrisProviderStreamProtocolError("usage 不是可解析的mapping")
         return usage
 
@@ -512,9 +513,7 @@ class ChatCompletionsStreamAccumulator:
             finish_reason="tool_calls"
             if any(isinstance(block, ToolUseBlock) for block in content)
             else "stop",
-            input_tokens=self._usage.input_tokens,
-            output_tokens=self._usage.output_tokens,
-            total_tokens=self._usage.total_tokens,
+            **known_usage(self._usage),
             reasoning=reasoning,
             metadata=metadata,
         )
@@ -532,9 +531,7 @@ class ChatCompletionsStreamAccumulator:
         """把provider usage mapping转换为typed snapshot。"""
         try:
             return ModelUsageSnapshot(
-                input_tokens=int(usage.get("prompt_tokens", 0) or 0),
-                output_tokens=int(usage.get("completion_tokens", 0) or 0),
-                total_tokens=int(usage.get("total_tokens", 0) or 0),
+                **parse_usage(usage, chat_completions=True),
                 complete=complete,
             )
         except (TypeError, ValueError) as exc:

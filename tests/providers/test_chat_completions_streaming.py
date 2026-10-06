@@ -14,6 +14,7 @@ from iris.message import (
     ModelBlockDelta,
     ModelResponseCompleted,
     ModelResponseFailed,
+    ModelUsageUpdated,
     Msg,
     TextBlock,
     ToolUseBlock,
@@ -63,6 +64,62 @@ def _chunk(
 
 async def _collect(client: ProviderClient, request: LLMRequest) -> list[Any]:
     return [event async for event in client.stream(request)]
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {}),
+        ({"usage": None}, {}),
+        ({"usage": {}}, {}),
+        ({"usage": {"prompt_tokens": None, "completion_tokens": None}}, {}),
+        ({"usage": {"prompt_tokens": 0}}, {"input_tokens": 0}),
+        ({"usage": {"completion_tokens": 7}}, {"output_tokens": 7}),
+        (
+            {"usage": {"prompt_tokens": 3, "total_tokens": 3}},
+            {"input_tokens": 3, "total_tokens": 3},
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_chat_stream_preserves_usage_field_presence(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+    usage_fields: dict[str, Any],
+    expected: dict[str, int],
+) -> None:
+    import iris.providers.client as provider_client
+
+    chunk = _chunk(finish_reason=finish_reason)
+    chunk.pop("usage")
+    chunk.update(usage_fields)
+    raw = _RawStream(chunk)
+
+    async def fake_acompletion(**kwargs: Any) -> _RawStream:
+        return raw
+
+    monkeypatch.setattr(provider_client.litellm, "acompletion", fake_acompletion)
+    events = await _collect(
+        ProviderClient(api_style="chat_completions", provider="openai", api_key="test"),
+        LLMRequest(model="gpt-4o", messages=[Msg.user("你好")], stream=True),
+    )
+    fields = {"input_tokens", "output_tokens", "total_tokens"}
+    snapshots = [event.usage for event in events if isinstance(event, ModelUsageUpdated)]
+    for snapshot in snapshots:
+        assert snapshot.model_fields_set & fields == expected.keys()
+        assert {name: getattr(snapshot, name) for name in fields} == dict.fromkeys(
+            fields, 0
+        ) | expected
+    if finish_reason == "stop":
+        terminal = events[-1]
+        assert isinstance(terminal, ModelResponseCompleted)
+        assert terminal.response.model_fields_set & fields == expected.keys()
+        assert snapshots[-1].complete
+    else:
+        assert isinstance(events[-1], ModelResponseFailed)
+        if usage_fields.get("usage") is not None:
+            assert snapshots[-1].complete
 
 
 @pytest.mark.asyncio

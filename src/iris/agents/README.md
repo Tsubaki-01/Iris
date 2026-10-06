@@ -53,6 +53,11 @@ registry = build_tool_registry(config.tools)
 
 ## 配置示例
 
+`observability` 声明默认关闭的采集策略：`enabled=false`、`capture_content=false`、
+`max_content_chars=65536`。导出 endpoint/headers 属于全局 `Config.observability`，
+不放进 Agent YAML。加载配置不会创建 SDK；当前仅提供采集内核，运行装配尚未接通。
+见 [observability](../observability/README.md)。
+
 项目经验自动维护默认关闭，可独立于 Memory 启用：
 
 ```yaml

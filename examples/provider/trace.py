@@ -24,8 +24,7 @@ from iris.message import (
     ModelResponseFailed,
     ModelStreamEvent,
 )
-from iris.providers import create_provider_client, parse_model_route
-from iris.runtime import StreamingRuntimeProvider
+from iris.providers import StreamingProvider, create_provider_client, parse_model_route
 
 from .basic import build_request, stream_once
 
@@ -66,10 +65,10 @@ class TraceRecord:
 
 
 class TracingProvider:
-    """记录流式调用并委托给另一个 StreamingRuntimeProvider。
+    """记录流式调用并委托给另一个 StreamingProvider。
 
     Attributes:
-        delegate (StreamingRuntimeProvider): 实际执行流式调用的 provider。
+        delegate (StreamingProvider): 实际执行流式调用的 provider。
         records (list[TraceRecord]): 按调用顺序保存的进程内记录。
 
     Example:
@@ -77,11 +76,11 @@ class TracingProvider:
         events = [event async for event in provider.stream(request)]
     """
 
-    def __init__(self, delegate: StreamingRuntimeProvider) -> None:
+    def __init__(self, delegate: StreamingProvider) -> None:
         """创建包裹指定 provider 的记录器。
 
         Args:
-            delegate (StreamingRuntimeProvider): 实际完成流式请求的 provider。
+            delegate (StreamingProvider): 实际完成流式请求的 provider。
         """
         self.delegate = delegate
         self.records: list[TraceRecord] = []

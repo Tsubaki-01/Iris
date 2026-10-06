@@ -17,18 +17,16 @@ Example:
 from __future__ import annotations
 
 import platform
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 from ..agents import AgentConfig
 from ..command.models import CommandEnvironment, CommandStopSlot
 from ..command.service import CommandBinding
 from ..context import ContextBuilder, ContextBuildInput, ContextSource
 from ..memory import MemoryService
-from ..message import LLMRequest, ModelStreamEvent
 from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
@@ -58,37 +56,6 @@ class RuntimeCapturePort(Protocol):
 
     def request_capture(self, run_id: str, through_count: int) -> None:
         """合并已提交原文范围，不等待模型或持久 IO。"""
-
-
-@runtime_checkable
-class StreamingRuntimeProvider(Protocol):
-    """Runtime 可选检测的 provider streaming capability。"""
-
-    def stream(self, request: LLMRequest) -> AsyncIterator[ModelStreamEvent]:
-        """返回一次 provider-neutral typed event stream。
-
-        Args:
-            request (LLMRequest): 已启用 streaming 的可信请求。
-
-        Returns:
-            AsyncIterator[ModelStreamEvent]: 顺序产生的模型流式事件。
-        """
-
-
-def streaming_provider_for(
-    provider: CompletionProvider,
-) -> StreamingRuntimeProvider | None:
-    """返回 provider 的独立 streaming capability。
-
-    Args:
-        provider (CompletionProvider): Runtime 当前绑定的 complete capability。
-
-    Returns:
-        StreamingRuntimeProvider | None: 可用的 stream capability；缺失时返回 ``None``。
-    """
-    if isinstance(provider, StreamingRuntimeProvider):
-        return provider
-    return None
 
 
 def _default_tool_bridge() -> ToolBridge:
@@ -193,6 +160,4 @@ __all__ = [
     "RuntimeEnvironment",
     "RuntimeExecutionScope",
     "RuntimeCapturePort",
-    "StreamingRuntimeProvider",
-    "streaming_provider_for",
 ]

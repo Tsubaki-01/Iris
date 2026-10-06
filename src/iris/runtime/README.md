@@ -359,7 +359,7 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 `stream_sink=None` 精确保留 complete-only 路径：runtime 继续调用
 `CompletionProvider.complete()`，请求的 `stream` 强制为 `False`，不受 `request_options` 覆盖。
 传入同步 `RuntimeEventSink` 时，
-runtime 通过独立的 `StreamingRuntimeProvider` structural capability 检测 `stream()`；capability
+runtime 通过 `iris.providers.StreamingProvider` structural capability 检测 `stream()`；capability
 缺失会以 `PROVIDER_STREAM_ERROR/provider` 失败，不回退到 `complete()`，也不伪造 token。
 
 streaming 路径只复制当前可信请求并把 `stream` 设为 `True`，然后在 provider async iterator 上
@@ -567,11 +567,12 @@ registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过
 ## 公开接口
 
 包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、
-`StreamingRuntimeProvider`、`streaming_provider_for()`、`RuntimeEventSink`、
+`RuntimeEventSink`、
 `RuntimeStreamEvent`、assembler/tool bridge、`RuntimeSteeringPort`、`SteeringInput`，以及
 activation/commit-port contracts。不存在 complete-run options/status/result、
 `run_turn()`、`run_loop()`、`resume()` 或旧 checkpoint helper。
-共同非流式协议 `CompletionProvider` 从 `iris.providers` 导入。
+共同协议 `CompletionProvider`、`StreamingProvider` 及 `streaming_provider_for()` 从
+`iris.providers` 导入；runtime 不重复导出 provider 协议。
 
 ## 验证
 

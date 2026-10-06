@@ -25,6 +25,7 @@ from ..message import (
 from ..message.llm import ResponseFormat
 from ._images import image_data_url
 from ._tool_encoding import chat_tool_choice, chat_tools, function_schema
+from ._usage import parse_usage
 
 
 class ResponsesMapper:
@@ -70,10 +71,7 @@ class ResponsesMapper:
     def parse_response(self, data: Mapping[str, Any], *, provider: str) -> LLMResponse:
         """解析完整终态；失败保留已知 usage，不交付可执行的部分工具调用。"""
         usage = data.get("usage") or {}
-        tokens = {
-            name: int(usage.get(name) or 0)
-            for name in ("input_tokens", "output_tokens", "total_tokens")
-        }
+        tokens = parse_usage(usage)
         status = data.get("status")
         error_context: dict[str, Any] = {"provider": provider, "status": status}
         if data.get("usage") is not None:

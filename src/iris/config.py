@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .exceptions import IrisConfigError
+from .observability import ObservabilityExportConfig
 
 # endregion
 
@@ -85,6 +86,7 @@ class Config(BaseSettings):
         default_factory=dict,
         description="按 provider 名称声明的非 secret 运行配置",
     )
+    observability: ObservabilityExportConfig = Field(default_factory=ObservabilityExportConfig)
 
     # --- 字段检验 ---
     def model_post_init(self, __context: Any) -> None:

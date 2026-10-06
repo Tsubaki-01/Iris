@@ -56,6 +56,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.message import data_text
+from ..providers.protocols import streaming_provider_for
 from ..todo import TodoSnapshot, TodoStatus
 from ..todo.context import render_todo_context
 from ..todo.document import read_todo
@@ -94,7 +95,7 @@ from .commit import (
     build_runtime_tool_call,
 )
 from .compaction import project_history, select_compaction_end
-from .environment import RuntimeEnvironment, streaming_provider_for
+from .environment import RuntimeEnvironment
 from .memory_context import load_context_windows, select_context_window
 from .models import (
     RuntimeActivationInput,

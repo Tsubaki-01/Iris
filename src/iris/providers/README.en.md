@@ -11,7 +11,8 @@ not public capabilities.
 Runtime and explicit memory overview generation share `CompletionProvider`, which requires async
 `complete()` and synchronous `estimate_input_tokens(request)`. The protocol lives in
 [protocols.py](protocols.py); custom providers and test doubles implement the same interface.
-Streaming continues to use runtime's independent `StreamingRuntimeProvider` capability.
+The optional `StreamingProvider` protocol and `streaming_provider_for()` also live in this package.
+`stream(request)` directly returns `AsyncIterator[ModelStreamEvent]`; creation is not separately awaited.
 
 ## Quick start
 
@@ -55,7 +56,8 @@ internal and are not exported from `iris.providers`.
 ## Public API
 
 The package exports frozen `ModelRoute`, `parse_model_route()`, `create_provider_client()`,
-`ProviderClient`, and the shared `CompletionProvider` protocol.
+`ProviderClient`, the shared `CompletionProvider` and optional `StreamingProvider` protocols, and
+`streaming_provider_for(provider)`, which returns the streaming capability or `None`.
 
 Built-in Iris provider IDs are `openai`, `anthropic`, and `deepseek`. A custom provider enters the
 registry only when initialized `Config.providers` contains its `base_url`; an API key alone does not
@@ -131,6 +133,12 @@ results succeed, with the same normalized finish reason in complete and stream. 
 error and EOF without a valid terminal fail without committing partial tool intentions. Known usage
 is retained for existing runtime settlement. Cached/reasoning details are not added again, and raw
 iterators close in `finally`; Responses also closes its HTTP response while LiteLLM owns the client pool.
+
+Token values still default to `0`, but response and usage snapshot `model_fields_set` contain only
+non-null counts actually reported by the provider. An explicit zero is known; missing/null is unknown.
+Failure `context['usage']` preserves only known keys, and response/snapshot projections retain that
+distinction. `complete=True` closes the usage stream; it does not promise a complete bill or change
+the existing runtime totals.
 
 The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
 `model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.

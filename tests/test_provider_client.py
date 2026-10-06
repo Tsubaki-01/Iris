@@ -15,6 +15,42 @@ from iris.providers import ProviderClient
 from iris.providers.responses import ResponsesMapper
 
 
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {}),
+        ({"usage": None}, {}),
+        ({"usage": {}}, {}),
+        ({"usage": {"prompt_tokens": None, "completion_tokens": None}}, {}),
+        ({"usage": {"prompt_tokens": 0}}, {"input_tokens": 0}),
+        ({"usage": {"completion_tokens": 7}}, {"output_tokens": 7}),
+        (
+            {"usage": {"prompt_tokens": 3, "total_tokens": 3}},
+            {"input_tokens": 3, "total_tokens": 3},
+        ),
+    ],
+)
+def test_chat_complete_preserves_usage_field_presence(
+    usage_fields: dict[str, Any], expected: dict[str, int]
+) -> None:
+    from iris.providers.chat_completions import ChatCompletionsMapper
+
+    data = {
+        "choices": [{"message": {"content": "完成"}, "finish_reason": "stop"}],
+        **usage_fields,
+    }
+    mapper = ChatCompletionsMapper()
+    response = mapper.parse_response(data, provider="openai")
+    fields = {"input_tokens", "output_tokens", "total_tokens"}
+    assert response.model_fields_set & fields == expected.keys()
+    assert {name: getattr(response, name) for name in fields} == dict.fromkeys(fields, 0) | expected
+
+    data["choices"][0]["finish_reason"] = "length"
+    with pytest.raises(IrisProviderError) as captured:
+        mapper.parse_response(data, provider="openai")
+    assert captured.value.context.get("usage", {}) == expected
+
+
 def _response(text: str = "你好", **updates: Any) -> dict[str, Any]:
     return {
         "id": "resp_1",

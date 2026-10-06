@@ -12,6 +12,7 @@ dependencies = [
     "jsonschema>=4.26.0",
     "litellm>=1.103.2",
     "mcp>=2.2,<3",
+    "opentelemetry-api>=1.44.0",
     "pillow>=12.3.0",
     "pydantic-settings>=2.14.0",
     "python-dotenv>=1.2.2",
@@ -26,6 +27,10 @@ iris = "iris.cli:main"
 [project.optional-dependencies]
 sandbox = [
     "aiodocker>=0.27.0",
+]
+observability = [
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
 ]
 
 [build-system]

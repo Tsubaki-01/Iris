@@ -23,6 +23,7 @@ from ...exceptions import IrisConfigError, IrisValidationError
 from ...goal.config import GoalConfig
 from ...memory.config import MemoryConfig
 from ...message.llm import ProviderOptions, ResponseFormat, ToolChoice
+from ...observability import AgentObservabilityConfig
 from ...prompts.config import PromptConfig
 from ...providers import ModelRoute, parse_model_route
 from ...speech.config import SpeechConfig
@@ -262,6 +263,7 @@ class AgentConfig(BaseModel):
         evolution (EvolutionConfig): 默认关闭的项目经验自动维护。
         goal (GoalConfig): 可选跨 Run 目标能力与默认自动轮数。
         todo (TodoConfig): 会话 Markdown 待办清单开关。
+        observability (AgentObservabilityConfig): 默认关闭的运行观测与正文采集策略。
         speech (SpeechConfig): 默认关闭的语音输入声明，由宿主装配客户端。
         tools (ToolsConfig): 工具配置。
         hooks (tuple[HookConfig, ...]): 按声明顺序执行的四事件处理器。
@@ -286,6 +288,7 @@ class AgentConfig(BaseModel):
     evolution: EvolutionConfig = Field(default_factory=EvolutionConfig)
     goal: GoalConfig = Field(default_factory=GoalConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
+    observability: AgentObservabilityConfig = Field(default_factory=AgentObservabilityConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     hooks: tuple[HookConfig, ...] = ()

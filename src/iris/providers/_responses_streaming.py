@@ -30,6 +30,7 @@ from ..message import (
     ModelUsageUpdated,
 )
 from ._stream_utils import close_raw_stream, safe_provider_error
+from ._usage import known_usage, parse_usage
 from .responses import ResponsesMapper
 
 _AsMapping = Callable[[Any], Mapping[str, Any]]
@@ -106,9 +107,7 @@ class ResponsesStreamAccumulator:
                 ModelUsageUpdated(
                     **self._event_fields(),
                     usage=ModelUsageSnapshot(
-                        input_tokens=parsed.input_tokens,
-                        output_tokens=parsed.output_tokens,
-                        total_tokens=parsed.total_tokens,
+                        **known_usage(parsed),
                         complete=True,
                     ),
                 )
@@ -126,7 +125,9 @@ class ResponsesStreamAccumulator:
                 "Responses stream 返回 error",
                 status="error",
                 reason=f"{event.get('code') or 'error'}: {event.get('message', '')}",
-                **({"usage": event["usage"]} if event.get("usage") is not None else {}),
+                **(
+                    {"usage": parse_usage(event["usage"])} if event.get("usage") is not None else {}
+                ),
             )
         elif event_type == "response.output_item.added":
             item = self._as_mapping(event.get("item"))
@@ -175,9 +176,7 @@ class ResponsesStreamAccumulator:
                 ModelUsageUpdated(
                     **self._event_fields(),
                     usage=ModelUsageSnapshot(
-                        input_tokens=usage.get("input_tokens", 0),
-                        output_tokens=usage.get("output_tokens", 0),
-                        total_tokens=usage.get("total_tokens", 0),
+                        **usage,
                         complete=True,
                     ),
                 )
