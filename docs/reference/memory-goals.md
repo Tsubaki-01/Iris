@@ -1,0 +1,372 @@
+# 记忆、经验、Goal 与 Todo 参考
+
+本页是长期能力的配置与 SDK 查询入口。第一次使用请先读[记忆](../cookbook/memory.md)、[经验与修订](../cookbook/evolution.md)或[目标与清单](../cookbook/goals-todos.md)配方。一般运行、会话和存储配置见[配置参考](configuration.md)与[运行参考](runtime.md)。
+
+## 配置字段
+
+以下路径都位于 `agent.yaml`。配置在构造 runner 时采用；修改配置文件后重建 runner，不支持用旧 runner 的新会话热更新配置。路径所指的 workspace 由 `permissions.workspace` 确定。
+
+### Memory
+
+| 字段 | 类型与默认值 | 规则 |
+| --- | --- | --- |
+| `memory.enabled` | `bool = false` | 统一控制服务挂载、概览和自动注册的 Search/Fetch；关闭时不使用注入服务 |
+| `memory.root` | `str = ".iris/memory"` | Markdown 投影目录；相对 workspace，必须位于 workspace 内 |
+| `memory.path` | `str = ".iris/memory/memory.db"` | SQLite 数据库；与 root 相同的路径解析规则 |
+| `memory.read_namespaces` | `list[str] = ["project"]` | 模型可读范围；空列表表示不读取任何 namespace；每项必须含非空白字符 |
+| `memory.write_namespace` | `str = "project"` | 写工具及自动捕获的单一目标 namespace，必须含非空白字符 |
+| `memory.overview.input_budget_tokens` | `int = 96000` | 显式概览生成的输入预算，必须大于 0 |
+| `memory.overview.max_tokens` | `int = 4096` | 概览生成输出上限，必须大于 0 |
+| `memory.overview.system_budget_ratio` | `float = 0.02` | 所有 namespace 概览共用 `compaction.input_budget_tokens × ratio` 额度；取值 `(0, 1]` |
+| `memory.generation.enabled` | `bool = false` | 开启 Run 材料捕获与宿主自动维护；SDK 需绑定协调器 |
+| `memory.generation.flush_input_budget_tokens` | `int = 32000` | flush 输入预算，必须大于 0 |
+| `memory.generation.flush_output_budget_tokens` | `int = 4000` | flush 输出预算，必须大于 0 |
+| `memory.generation.dream_input_budget_tokens` | `int = 32000` | dream 输入预算，必须大于 0 |
+| `memory.generation.dream_output_budget_tokens` | `int = 4000` | dream 输出预算，必须大于 0 |
+
+`memory.generation.enabled` 不取代 `memory.enabled`。所有生成预算都是对应独立请求的额度，概览占用比例则用于主模型请求的窗口采用。新会话首次输入、成功压缩采用概览；普通后续 Run 和恢复重用持久窗口。完整概览超额时尝试完整知识范围，知识范围仍超额抛出 `IrisContextError`。
+
+### Evolution 与共享维护
+
+| 字段 | 类型与默认值 | 规则 |
+| --- | --- | --- |
+| `maintenance.idle_seconds` | `float = 300` | 宿主共享空闲时间，有限且非负；只有启用维护能力时才有维护工作 |
+| `evolution.enabled` | `bool = false` | 开启项目经验维护；要求 `skills.enabled: true` |
+| `evolution.policy_skill` | `str \| null = null` | 非空时相对 workspace 读取策略 Skill；空值使用包内策略 |
+| `evolution.skill_max_chars` | `int = 8000` | 经验 Skill 正文字符上限，必须大于 0 |
+| `evolution.input_budget_tokens` | `int = 32000` | 经验整理与修订请求的独立输入上限，必须大于 0 |
+| `evolution.output_budget_tokens` | `int = 8000` | 独立输出上限，必须大于 0 |
+| `evolution.prompt_targets` | 字符串序列，默认空 | 显式开放的命名 prompt，见下表 |
+| `evolution.config_targets` | 字符串序列，默认空 | 显式开放的主 YAML 叶字段，见下表 |
+
+经验发布到 `<skills.root>/project-experience/SKILL.md`，默认 `.agents/skills/project-experience/SKILL.md`。完整文件还需满足现有 Skill loader 的 50000 字符、1000 行限制。`skills` 自身配置见[工具与扩展参考](tools.md)。
+
+允许开放的修订目标：
+
+| 类型 | 完整取值 |
+| --- | --- |
+| prompt | `memory_flush`、`memory_dream`、`memory_overview`、`project_skill_update`、`compaction`、`compaction_input` |
+| config | `context_policy.preserve_recent_tool_groups`、`context_policy.old_result_preview_chars`、`compaction.input_budget_tokens`、`compaction.keep_recent_ratio`、`compaction.summary_ratio`、`todo.enabled`、`system` |
+
+config 候选按完整 AgentConfig 重新解析；`system` 只允许修改已有简单模式的文本，不能从外部 context 模式切换。一次候选只发布一个 prompt 或一份主 YAML 的有限字段。开放 config 目标时，装配函数必须收到明确 `config_path`。YAML 发布会重新序列化，可能改变排版并移除注释。
+
+### Goal 与 Todo
+
+| 字段 | 类型与默认值 | 规则 |
+| --- | --- | --- |
+| `goal.enabled` | `bool = false` | 启用 `SessionManager.goal`、目标上下文与目标工具；要求 context policy 开启 |
+| `goal.max_rounds` | `int = 20` | 新目标的默认自动顶层 Run 总数上限，必须大于 0 |
+| `todo.enabled` | `bool = false` | 每个获准模型步骤读取当前会话清单；要求 context policy 开启 |
+
+Goal 自动执行的 `AgentRunOptions.runtime.include_tools` 必须是 `true`；最终 `tool_choice` 必须为 `auto` 或未指定。子 Agent 的 Todo 由自己的配置控制，使用自己的 session 文件。Goal 不向子 Agent 传播一套独立的自动目标循环。
+
+## Memory SDK
+
+本页代码框展示接口签名，不是可直接执行的脚本；完整用法见对应 Cookbook。
+
+从 `iris.memory` 导入下列服务、模型与存储。`MemoryService` 是公开读写门面，`MemoryStore` 是存储实现者协议。
+
+### 构造与资源
+
+```text
+MemoryService(
+    store,
+    *,
+    mirror=None,
+    overview_provider=None,
+    overview_model=None,
+    overview_config=None,
+    generation_provider=None,
+    generation_model=None,
+    generation_config=None,
+    prompt_source=None,
+    observability=None,
+    io_execution_mode=MemoryIOExecutionMode.INLINE,
+)
+```
+
+- `store: MemoryStore` 是权威条目与生成状态存储；内置实现为 `SQLiteMemoryStore(db_path)`。
+- `mirror: FileMemoryMirror | None` 是可选文件投影。`FileMemoryMirror(root, *, workspace_root=None)` 的 `initialize_layout()` 创建投影目录。
+- 概览生成需 `overview_provider`、`overview_model`、mirror 及初始化后的 `PromptSource`；flush/dream 需 `generation_provider`、`generation_model` 及提示来源。普通读写不要求模型。
+- 自定义 store 默认 `INLINE`；配置工厂构造的 SQLite 服务使用 `THREAD`，异步调用将一次完整同步操作交给后台 IO。`await wait_pending_io()` 等待已派发 IO 真正结束。SQLiteMemoryStore 每次操作管理自己的连接，没有服务级 `close()`。
+- 服务借用 provider 与 observability，不替宿主关闭这些依赖。
+
+配置工厂的完整调用面：
+
+```text
+build_memory_service_from_config(
+    config,
+    workspace_root,
+    *,
+    memory_service=None,
+    overview_provider=None,
+    overview_model=None,
+    prompt_source=None,
+    observability=None,
+) -> MemoryService | None
+
+resolve_memory_path(value: str, workspace_root: Path) -> Path
+```
+
+关闭时工厂返回 `None`；启用且传入服务时原样复用，不改写其策略与资源；否则构造 SQLite 服务，并将传入概览 provider/model 同时绑定为生成 provider/model。`resolve_memory_path` 返回 workspace 内的绝对路径。
+
+### 写入模型与分类
+
+`MemoryWriteInput` 必填 `text`、`reason`，两者不可为空白。其余字段：`namespace="project"`、`category="user"`、`kind="note"`、`source_type="sdk"`、`source_id=""`、`actor="sdk"`、`evidence=()`、`artifacts=[]`、`metadata={}`。
+
+| 枚举 | 取值 |
+| --- | --- |
+| `MemoryCategory` | `user`、`feedback`、`reference`、`task`、`session` |
+| `MemoryItemKind` | `fact`、`preference`、`note`、`summary`、`task_state`、`correction` |
+| `MemoryItemStatus` | `active`、`deleted`、`superseded` |
+| `MemorySourceType` | `message`、`tool_event`、`artifact`、`task`、`reference`、`sdk`、`generation` |
+| `MemoryActor` | `sdk`、`agent`、`user`、`system` |
+
+`MemoryItem` 包含稳定 `id`、上述内容/来源字段、`status`、`superseded_by`、`created_at`、`updated_at`、`deleted_at`。默认查询只返回 active 条目。
+
+`MemoryItemPatch` 可修改 `text`、`category`、`kind`、`status`、`artifacts`、`evidence`、`metadata`；省略表示不变，显式 `null` 非法，集合是整体替换。`MemoryArtifactRef(path, mime_type="text/plain", metadata={})` 的 path 必须是相对路径。
+
+`MemoryEvidenceRef` 两种形式：
+
+- `kind="episode"`：`source_id` 指向 Episode，必需 `record_id` 和字符半开区间 `start`、`end`，满足 `end > start >= 0`。
+- `kind="event"`：`source_id` 指向真实写入事件，不携带记录或字符区间。
+
+### 读写方法
+
+下表是同步签名。除 `observe()` 外，每个表中读写方法都有同签名的异步版本，在名称前加 `a`，例如 `aremember()`、`aget_item()`、`alist_events()`。
+
+| 方法 | 返回与语义 |
+| --- | --- |
+| `observe(input: MemoryObserveInput)` | `MemoryEpisode`；保存原始材料，尚不能作为正式知识查询 |
+| `remember(input: MemoryWriteInput)` | `MemoryItem`；创建正式条目并刷新分类投影 |
+| `update(item_id, namespace, patch, *, actor=MemoryActor.SDK, reason, source_type=MemorySourceType.SDK, source_id="")` | 更新后的 `MemoryItem`，稳定 ID 不变 |
+| `forget(item_id, namespace, *, actor=MemoryActor.SDK, reason, source_type=MemorySourceType.SDK, source_id="")` | `bool`；active 条目实际软删除为 true；未命中为 false |
+| `get_item(item_id, namespaces)` | `MemoryItem \| None`；读取允许范围内的当前活跃条目 |
+| `search(query: MemorySearchQuery, namespaces)` | `MemorySearchResponse`；本地检索，不自动调用 Decision |
+| `list_items(namespaces, *, limit=50, categories=None, kinds=None)` | `list[MemoryItem]`；联合读取近期活跃条目，过滤后应用 limit；`None` 读取完整投影，整数为 1–100 |
+| `list_events(namespace, *, item_id=None, limit=100)` | `list[MemoryEvent]`；操作历史，limit 为 1–100 |
+
+`namespaces` 为 `Sequence[str]`，读取范围由调用方绑定，不由模型自行扩大。写入方法的 `namespace` 为单个字符串。不存在的更新、非法状态/来源等使用 `IrisMemoryError`；边界模型输入不合 schema 时由 Pydantic 报错。已经写入历史的旧概览或工具结果不会因 `forget()` 被追溯删除。
+
+`MemoryObserveInput` 的字段为 `namespace="project"`、`text=""`、`source_type="sdk"`、`source_id=""`、`actor="sdk"`、`records=()`、`reason=""`、`artifacts=[]`、`metadata={}`。可提供 `MemoryRecord` 序列，或用 text 建立一条记录。`MemoryRecord` 包含自动 ID、`role="sdk"`、`text=""`、来源、发生时间、artifacts 和 metadata。一个 Episode 至少有一条记录且记录 ID 唯一。
+
+### 搜索与工具
+
+`MemorySearchQuery(query, required_terms=[], categories=[], kinds=[], limit=8)`：query 去除首尾空白后必须非空，limit 为 1–100。required_terms 中每一项都必须含可索引字符；正文必须同时匹配全部词组，英文大小写不敏感，按既有分词有序相邻匹配。它不是正则表达式或原始 FTS 语法。
+
+本地分词使用英文/数字词和中文双字片段；普通查询词做 OR 检索，必要词组做 AND 约束，按 SQLite FTS/BM25 排序。返回 `MemorySearchResponse(items, has_more)`，items 内每个 `MemorySearchHit` 有 `item_id`、`namespace`、`category`、`kind`、`snippet`、`is_complete`。短文本返回全文，长文本返回命中位置附近连续 300 字符原文；`has_more` 只说明仍有候选，不强制继续查询。
+
+| 注册方式 / YAML 名称 | 模型工具名 | 输入和结果 |
+| --- | --- | --- |
+| `memory.enabled` 自动注册 | `memory_search` | 输入 `MemorySearchQuery`；结果 `items`、`has_more`，还有候选时含 hint |
+| `memory.enabled` 自动注册 | `memory_fetch` | `item_id`；结果 `item`，当前完整条目与元数据；缺失、非活跃、范围外均为读取错误 |
+| `memory.remember` | `memory_remember` | `text`、`reason`、可选 category/kind；结果 `item` |
+| `memory.update` | `memory_update` | `item_id`、`patch`、`reason`；结果 `item` |
+| `memory.forget` | `memory_forget` | `item_id`、`reason`；结果 `deleted` |
+
+写工具的 namespace 与调用来源由宿主绑定。正文投影未同步时结果可带 `warning`。不要在 YAML 手动声明 `memory.search`、`memory.fetch`；配置入口会拒绝重复声明。独立 SDK 工具装配使用以下入口，默认不注册工具：
+
+```text
+register_memory_tools(
+    *,
+    service: MemoryService,
+    access_policy_factory: MemoryAccessPolicyFactory,
+    registry: ToolRegistry | None = None,
+    max_result_chars: int = 50000,
+    tool_names: Sequence[str] = (),
+    memory_decision_client: DecisionEvaluator | None = None,
+    prompt_snapshot: PromptSnapshot | None = None,
+) -> ToolRegistry
+```
+
+`tool_names` 使用表中的点号声明名。未提供 registry 时新建，提供时扩展该 registry。`MemoryAccessPolicy(read_namespaces=("project",), write_namespace="project")` 定义一次调用的范围；`MemoryAccessPolicyFactory` 是 `Callable[[ToolExecutionContext], MemoryAccessPolicy]`，可由 `default_memory_access_policy_factory(config)` 构建。
+
+可选 Decision 只改变 `memory_search` 工具内部召回。它按当前范围、分类、类型读取完整 active 候选，再应用相同 required_terms，以一次 Score 请求评分全部剩余正文，保留分数至少为 2 的结果，按分数降序稳定排序并取 limit。返回完整正文且 `is_complete=true`；usage 位于工具 metadata 的 `decision`。本地 `MemoryService.search/asearch` 始终保持本地检索语义。Decision 连接配置见[工具参考](tools.md)。
+
+### 生成、概览与查询结果
+
+| 调用 | 返回 / 用途 |
+| --- | --- |
+| `await flush(namespace, *, scope=None)` | `GenerationResult`；提炼一批 Episode 为 Observation |
+| `await dream(namespace, *, retry_blocked=False, scope=None)` | `GenerationResult`；整理观察与显式变化，不隐式 flush；可显式重试受阻输入 |
+| `await refresh_overview(namespace)` | `MemoryOverviewGenerationResult`；生成并尝试发布概览，不在普通主 Run 中隐式执行 |
+| `generation_state(namespace, *, scope=None)` / `await ageneration_state(...)` | `GenerationState`；积压、受阻输入、版本和最近阶段结果 |
+| `load_overviews(namespaces)` / `await aload_overviews(namespaces)` | `tuple[MemoryOverviewDocument, ...]`；只读发布物，缺文件给缺产物说明，不调用模型 |
+| `projection_warning(namespace)` | `str \| None`；分类投影的新鲜度说明 |
+| `file_access(read_namespaces)` | `MemoryFileAccess \| None`；供通用文件工具使用的只读路径/版本能力 |
+| `list_pending_sources(namespace)` / `await alist_pending_sources(...)` | `tuple[MemorySource, ...]`；待消费输入的 lifecycle 来源 |
+| `await maintain_cycle(namespace, *, scope)` | `bool`；有界维护周期后是否还有本范围可执行积压，调度器调用入口 |
+
+`GenerationResult` 有 `id`、`namespace`、`stage`（capture/flush/dream/overview）、`status`（completed/empty/failed/cancelled/conflict/blocked）、`usage`、`elapsed_seconds`、`error`、`input_ids`、`consumed_ranges`、`counts`、`item_revision`、`has_more`、`created_at`。这些成本独立于主 Run usage。
+
+`GenerationState` 包含 `namespace`，`pending_episodes`、`pending_observations`、`blocked_observations`、`pending_changes`、`blocked_changes`，以及 `item_revision`、`projection_revision`、`overview_revision`、`latest_results`。`MemoryObservation` 则包含 text、applicability、category、kind、reason、evidence、target_item_ids、generation_model 和创建时间。
+
+`MemoryOverviewGenerationResult` 包含 namespace/path、source_revision/current_revision/projection_revision、item_count、published/publication_reason、usage、elapsed_seconds。`published=false` 不等于数据库写入丢失，应查看 publication_reason。`MemoryOverviewDocument` 提供 namespace/path、source_revision、text、navigation、warning。
+
+高级宿主可用 `MemoryMaintenanceScope(allowed_sources, check)`，其中来源集合是 `(lifecycle_source_id, run_id)`，异步 `check(tuple[MemorySource, ...]) -> bool` 在消费前复查资格。常规集成应使用协调器，不必自行构造此范围。服务还提供 `add_change_listener(callback)`、`remove_change_listener(callback)`；回调在实际写入线程执行。
+
+### 文件格式
+
+`namespace_key(namespace)` 将名称编码为 `ns_` 加无填充 URL-safe Base64。默认 project 的目录是 `.iris/memory/namespaces/ns_cHJvamVjdA/`：
+
+```text
+Memory.md
+User/user.md
+User/preferences.md
+Feedback/feedback.md
+Feedback/corrections.md
+Reference/notes.md
+Tasks/task.md
+Sessions/session_items.md
+```
+
+文件首行携带 `<!-- iris-memory source_revision: N -->`。`Memory.md` 有“核心事实”和“可查询的知识”，二者由 `<!-- iris-memory-knowledge-scope -->` 分隔。完整概览格式错误时读取报错；不要手工构造概览来替代生成入口。分类文件与概览都是派生投影，写入以 SQLite 为准。
+
+人工检查路径可使用 `mirror.namespace_directory(namespace) -> Path`；`mirror.document_path(namespace, relative_path="Memory.md")` 在配置 workspace_root 时返回 workspace 相对路径。需要重新发布分类正文时，`mirror.rebuild_from_store(store, namespace) -> MemoryNamespaceState` 从当前数据库完整重建，不生成概览。概览仍通过 `refresh_overview()` 更新。
+
+自定义 `MemoryStore` 应实现[完整存储协议](../../src/iris/memory/store.py)。关键事务不只是 Item CRUD：条目与事件一起提交，capture 按水位 CAS，flush 同时提交观察与消费区间，dream 同时比较条目版本、应用计划并消费输入，分类正文发布在短事务中绑定完整快照版本。`MemoryNamespaceState(namespace, item_revision=0, projection_revision=None)` 与 `MemoryNamespaceSnapshot(state, items)` 是供投影使用的只读结果；只实现查询和写入方法不足以支持自动生成。
+
+## 维护协调器与 Evolution SDK
+
+以下入口从 `iris.harness` 导入：
+
+```text
+MaintenanceCoordinator(*, idle_seconds=300, observability=None)
+MemoryMaintenanceBinding(*, service, database_path: Path, namespace: str)
+ProjectEvolutionBinding(*, workspace_root: Path, service)
+
+build_project_evolution_binding(
+    config,
+    *,
+    workspace_root: Path,
+    prompt_source,
+    provider,
+    config_path: Path | None = None,
+    observability=None,
+) -> ProjectEvolutionBinding | None
+
+runner.bind_maintenance(coordinator, *, memory=None, evolution=None) -> None
+```
+
+工厂关闭时返回 None，不启动后台工作；开启时创建服务绑定。`runner.bind_maintenance()` 在前台工作前执行，每个 runner 只能绑定一次；memory 服务必须就是该 runner 实际使用的对象，namespace 与 write_namespace 一致，Evolution workspace 与 runner workspace 一致。自动记忆或项目经验已开启但未绑定时，前台运行会报告 `IrisConfigError`。
+
+| 协调器方法 | 结果与约定 |
+| --- | --- |
+| `await prepare()` | 绑定当前事件循环，启动必要监听与调度；runner 准备时会调用 |
+| `await request_project_experience(binding)` | `EvolutionResult`；同项目请求合并，跳过普通 idle，仍检查前台/资格/锁 |
+| `await request_revision(binding, request)` | `EvolutionResult`；保存请求并等这一项自己的结算 |
+| `await unbind_memory(binding)` | 先关闭借用 runner；排空本资源维护，不关闭 service |
+| `await unbind_evolution(binding)` | 同上；持久 pending 请求继续保留 |
+| `await aclose()` | 停止派发、取消生成并排空 IO；不关闭宿主注入的服务、reader 和观测资源 |
+
+同一协调器对同一 DB/namespace 或同一项目要求共享同一服务实例。Memory 与 Evolution 各有最多一个作业位置；所有前台工作共用空闲计数。来源 Run 要求 TERMINAL，来源 session 当前不能 WAITING。显式请求可不关联 session；有关联时也检查该 session 的真实等待状态。取消调用方等待不会取消已经保存的共享请求。
+
+从 `iris.evolution` 导入：
+
+```text
+RevisionTarget(kind="prompt" | "config", name: str)
+EvolutionSession(lifecycle_source_id: str, session_id: str)
+RevisionRequest(description: str, targets: tuple[RevisionTarget, ...], session=None)
+```
+
+description 和目标名称不可为空白；targets 至少一个，必须在配置开放范围内。无 session 的宿主请求不伪造经历或 Run；有 session 时传入真实 store.source_id 与 session ID。`RevisionEvidence(ref, quote)` 用于经历问题的原文证据，经验整理会检查 ref 和逐字片段确实来自本批材料。
+
+`EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
+
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料保存在 `.iris/evolution/pending/` 的 sources/captures/blocks/requests 与 progress.json，属于内部维护格式，不建议应用直接改写。
+
+## Goal SDK
+
+`manager = SessionManager(runner, session_id)` 在启用 Goal 时提供 `manager.goal: GoalSession`，关闭时为 None。推荐用这个会话入口，让目标控制与普通输入共享同一准入 owner。
+
+### GoalSession 方法
+
+以下都是异步方法；除 `get()` 返回 GoalView，其余返回 GoalControlResult。
+
+```text
+await goal.create(objective: str, *, max_rounds=None, run_options=None)
+await goal.get()
+await goal.edit(*, objective=None, max_rounds=None, run_options=None)
+await goal.pause(*, reason: str)
+await goal.complete(*, reason: str)
+await goal.resume(*, expected_activation_id: str | None = None)
+await goal.clear()
+```
+
+- `create` 保存并允许调度，不等待模型完成；未完成的当前目标不能被覆盖，先 clear。省略 max_rounds 使用配置默认，省略 run_options 使用 `AgentRunOptions()`。
+- `get` 完全只读，不启动运行、恢复或补结算。
+- `edit` 至少提供一个字段，保留已用轮数并暂停。max_rounds 是总上限，不能小于 rounds_started。
+- `pause`/`complete` 要求非空原因，停止后续推进但不取消已准入 Run。立即中断用 manager.interrupt。
+- `resume` 优先接手已有 Run；需要接管脱离本进程的 ACTIVE 执行时显式提供 activation ID；WAITING 仍须 typed HITL response。
+- `clear` 取消当前选择，保留历史 Goal/绑定/结果。completed 目标不能再编辑或恢复为进行中。
+
+`GoalControlResult` 有 `view` 与 `disposition`，后者可为：scheduled、admitted、running、waiting、needs_recovery、occupied、stopped。它描述本次控制达到的阶段，不能作为最终目标完成证明。
+
+### 视图与事件
+
+`GoalView` 字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `goal: GoalSnapshot \| None` | 当前选中的目标；clear 后可为 None |
+| `armed: bool` | 本进程明确允许自动推进，且当前目标 active |
+| `run: RunSnapshot \| None` | 当前 session lane 上的 Run |
+| `run_goal_id: str \| None` | 该 Run 的目标归属；普通 Run 为 None |
+| `interaction` | 当前 Run 的人工交互；可为 None |
+| `settlement_pending: bool` | 有终态 Goal Run 尚待结算 |
+| `driver_error` | 自动推进的进程错误；可为 None |
+
+`GoalSnapshot` 包含 goal_id/session_id、revision、objective、status、reason、max_rounds、rounds_started、run_options、created_at、updated_at。`reason` 为 `GoalReason(code, text)`；`snapshot.ref` 是 `GoalRef(goal_id, revision)`。
+
+`GoalChanged(session_id, view)` 是会话最新投影通知，可从 `manager.events()` 观察；不是逐操作持久重放日志。`GoalRunBinding` 记录 run_id、goal_id、round_no、admission_revision、settled_at、applied_report_call_id。自动轮准入增加轮数，恢复同一 Run 不增加。
+
+### 模型工具与结算
+
+`get_goal` 无参数。`report_goal` 输入为 `goal_id`、`revision >= 0`、`decision`（complete/blocked/continue）、非空 `reason`；身份来自真实当前 Run。两者都是普通可见工具，保留历史。
+
+报告提交不改变目标、不结束 Run。正常结束后，最新成功提交报告才参与结算；complete/blocked 要求版本仍有效，且报告所在步骤及之后没有其它工作工具、后续用户输入或人工回答。新工作后重新申报；continue 可撤回旧结论。非正常 Run 终态使目标暂停，轮数用尽也暂停。清单是否全部完成不参与 Goal 状态结算。
+
+### 自定义宿主与存储实现者
+
+`iris.goal.GoalService(store, *, config=None, process_state_reader=None, run_options_validator=None)` 是同步领域 API，不拥有调度。只读方法为 `get_current(session_id)`、`get(goal_id)`、`get_view(session_id)`；控制方法如下：
+
+```text
+service.create(session_id, objective, *, max_rounds=None, run_options=None)  # GoalSnapshot
+service.edit(expected: GoalRef, *, objective=None, max_rounds=None, run_options=None)
+service.pause(expected: GoalRef, *, reason: GoalReason)
+service.resume(expected: GoalRef)
+service.complete(expected: GoalRef, *, reason: GoalReason)
+service.clear(session_id, *, expected: GoalRef | None)  # GoalSnapshot | None
+service.report(run_id, report: GoalReport)  # 核对并返回报告，不结算
+service.settle_run(run_id, *, now)  # GoalSettlement
+service.reconcile(session_id)  # tuple[GoalSettlement, ...]
+```
+
+edit/pause/resume/complete 返回 GoalSnapshot。mutations 使用 GoalRef 的精确版本；冲突报 `IrisGoalConflictError`，非法目标状态报 `IrisGoalStateError`。`GoalSettlement` 有 binding、goal、goal_changed。直接使用服务只改变领域事实，必须由自定义宿主另外拥有准入与执行；常规应用使用 SessionManager。
+
+`GoalStore` 扩展同一 `LifecycleStore`：get_current_goal/get_goal/get_goal_run/list_unsettled_goal_runs 是读取面；create_goal/update_goal/admit_goal_run/settle_goal_run 是事务面。内置 InMemoryLifecycleStore 与 SQLiteStore 都实现它。目标轮数、Run 创建和绑定要原子准入，终态证据与目标结算要在同一权威存储完成，不能另放一个与 Run 松散同步的数据库。精确 command 类型供存储实现者查阅 [GoalStore](../../src/iris/goal/store.py)。
+
+## Todo SDK 与文件格式
+
+```text
+snapshot = await runner.get_todo(session_id: str)  # TodoSnapshot
+```
+
+未启用时抛 `IrisTodoError`。session 不必已有文件；读操作不创建目录、缓存或文件。`TodoSnapshot` 有 `path: Path`、`items: tuple[TodoItem, ...]`、`error: str | None`；`TodoItem` 有 content/status，`TodoStatus` 为 pending/in_progress/completed。这些只读类型从 `iris.todo` 导入。
+
+路径固定为 `<workspace>/.iris/todos/<session_id.encode("utf-8").hex()>.md`。文件允许 UTF-8 或 UTF-8 BOM：
+
+```markdown
+# 工作清单
+- [ ] 尚未开始
+- [-] 正在处理
+- [x] 已经完成
+```
+
+允许空行、最多三个前导空格的 ATX 标题、无缩进单行条目。状态括号后至少一个空格或 tab，正文非空；`X` 也表示完成。普通段落、代码围栏、嵌套条目、条目续行均不属于格式。任一行非法或编码错误，返回空 items 和整份文件诊断；文件不存在返回空 items 且无 error；其它 OS 读取失败抛 IrisTodoError。
+
+runtime 每个获准模型步骤读取一次，按 required contribution 注入。结束自查每 Run 最多安排一次，前提是有未完成项/诊断、有剩余模型步骤、未过期限。checkpoint 的 `todo_reminder_step` 只保存目标步骤编号；Todo 正文以文件为准，不随恢复或历史 fork 复制。新 session 使用新文件；子 Agent 使用自身 session 的文件。
+
+CLI 的 `/todo` 只读，Goal 命令见[CLI 参考](cli.md)。更多取舍见[Goal 与 Todo 设计](../design/goals.md)。
+
+维护本页时优先核对：[Memory 配置与导出](../../src/iris/memory/__init__.py)、[生成模型](../../src/iris/memory/generation_models.py)、[Evolution 配置](../../src/iris/evolution/config.py)、[维护协调器](../../src/iris/harness/maintenance.py)、[Goal 模型](../../src/iris/goal/models.py)、[Todo 解析](../../src/iris/todo/document.py)。
