@@ -97,6 +97,44 @@ async def test_unconfirmed_publication_finishes_new_request_without_spin(
 
 
 @pytest.mark.asyncio
+async def test_settled_old_conflict_allows_new_revision_waiter_to_continue(tmp_path: Path) -> None:
+    """旧结果收尾不等于本次请求完成；已无阻塞时继续合格的新请求。"""
+    provider = StaticProvider(text_response('{"action":"no_change","reason":"维持"}'))
+    service = revision_service(tmp_path, provider)
+    old = await service.enqueue_revision(request("旧请求"))
+    record = PublicationRecord(
+        stage="revision",
+        revision_id=old.id,
+        origin="host_request",
+        description=old.description,
+        targets=old.targets,
+        request=old,
+    )
+    record = record.model_copy(
+        update={
+            "outcome": EvolutionResult(
+                stage="revision",
+                revision_id=old.id,
+                publication_id=record.publication_id,
+                status="conflict",
+                reason="旧文件基线冲突",
+            )
+        }
+    )
+    service.store.save_publication(record)
+    coordinator = MaintenanceCoordinator(idle_seconds=3600)
+    binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
+    coordinator._attach(None, InMemoryLifecycleStore(), evolution=binding)
+    try:
+        result = await asyncio.wait_for(coordinator.request_revision(binding, request("新请求")), 1)
+        assert result.revision_id != old.id and result.status == "no_change"
+        assert service.get_publication(record.publication_id).settled
+        assert coordinator.snapshot().resources[0].pending_request_id is None
+    finally:
+        await coordinator.aclose()
+
+
+@pytest.mark.asyncio
 async def test_explicit_a_skips_pending_b_and_returns_only_a(tmp_path: Path) -> None:
     provider = StaticProvider(text_response('{"action":"no_change","reason":"保持"}'))
     service = revision_service(tmp_path, provider)

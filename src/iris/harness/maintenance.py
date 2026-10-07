@@ -737,26 +737,20 @@ class MaintenanceCoordinator:
             logger.error("项目经验维护失败", exc_info=error)
         elif (result := task.result()) is not None:
             project.last_result_ref = result.publication_id or result.revision_id
-            completed_request = False
             if result.stage == "experience" and project.request is not None:
                 project.request.set_result(result)
                 project.request = None
                 project.request_id = None
-                completed_request = True
             if result.revision_id in project.revision_requests:
                 project.revision_requests.pop(result.revision_id).future.set_result(result)
-                completed_request = True
             if result.error_code == "publication_unconfirmed":
                 blocked = IrisEvolutionError(result.reason, publication_id=result.publication_id)
                 self._fail_request(project, blocked)
                 self._fail_revisions(project, blocked)
                 project.dirty = False
-            elif project.request is not None or (
-                completed_request
-                and any(
-                    self._session_eligible(waiter.session)
-                    for waiter in project.revision_requests.values()
-                )
+            elif project.request is not None or any(
+                self._session_eligible(waiter.session)
+                for waiter in project.revision_requests.values()
             ):
                 project.dirty = True
                 project.ready_at = 0
