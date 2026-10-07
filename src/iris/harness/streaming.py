@@ -16,6 +16,7 @@ from typing import Protocol
 from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
+from .control import SessionControlSnapshot
 from .session_manager import SubmissionEvent
 
 # endregion
@@ -35,6 +36,13 @@ class SessionSubmissionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionControlChanged:
+    """Manager 已原子替换的完整控制视图，必须作为 critical 事件传送。"""
+
+    snapshot: SessionControlSnapshot
+
+
+@dataclass(frozen=True, slots=True)
 class CommandCleanupFailed:
     """本次异步执行环境清理失败，run 仍等待结算而非 durable terminal。"""
 
@@ -44,7 +52,12 @@ class CommandCleanupFailed:
 
 
 type LiveFact = (
-    RuntimeStreamEvent | RunEvent | SessionSubmissionEvent | CommandCleanupFailed | GoalChanged
+    RuntimeStreamEvent
+    | RunEvent
+    | SessionSubmissionEvent
+    | CommandCleanupFailed
+    | GoalChanged
+    | SessionControlChanged
 )
 
 
@@ -70,4 +83,10 @@ class _RuntimeLiveSink(RuntimeEventSink):
         self._publisher.publish(event)
 
 
-__all__ = ["CommandCleanupFailed", "LiveFact", "LivePublisher", "SessionSubmissionEvent"]
+__all__ = [
+    "CommandCleanupFailed",
+    "LiveFact",
+    "LivePublisher",
+    "SessionSubmissionEvent",
+    "SessionControlChanged",
+]

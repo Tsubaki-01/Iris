@@ -7,6 +7,11 @@ resume、durable cancellation、settlement observation、显式 recovery、事�
 live resources；`AgentRuntime` 只作为其内部 engine。`SessionManager` 是可选的单 session
 process-local admission facade，只组合 runner，不接管 durable ownership。
 
+`manager.snapshot()` 同步返回不可变控制快照，不等待 admission lock 或读取 store。
+pending 覆盖 queued、claim 后尚未确认及 follow-up admitting 输入；WAITING 的旧 task
+收尾后才开放 resume。可选 publisher 发布 critical `session.control.changed`；详情见
+[运行参考](../../../docs/reference/runtime.md#只读控制快照)。
+
 ## 快速入门
 
 `from_config*()` 接受 `observability=` 完整服务注入；同一实例交给 runtime、工具执行器和

@@ -225,7 +225,9 @@ class _GoalControl:
                 )
             )
             self.manager._current_task = task
+            self.manager._admission_started = started
             self.manager._attach_settlement_callback(task, run_id, submission=None)
+            self.manager._refresh_control(run=self.runner.get_run(run_id))
             self._resume_arming = task
             goal_id = goal.goal_id
         # 原 Run 已有持久身份；等待准备/注册期间仍允许 pause、interrupt 与 close 取锁。
@@ -403,6 +405,7 @@ class _GoalControl:
                 manager._current_run_id = intent.run_id
                 task = cast(asyncio.Task[RunResult], execution)
                 manager._current_task = task
+                manager._admission_started = started
                 manager._attach_settlement_callback(task, intent.run_id, submission=None)
                 self.publish()
                 return created

@@ -9,6 +9,7 @@ import pytest
 
 from iris.exceptions import IrisRunStateError
 from iris.harness import AgentRunner, AgentRunOptions, RunPhase, SessionManager
+from iris.harness.streaming import SessionSubmissionEvent
 from iris.hitl import PermissionInteractionResponse
 from iris.lifecycle import RunStopReason
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
@@ -51,7 +52,9 @@ async def test_broker_only_runs_and_submissions_do_not_require_mixed_consumer(
         await _wait_until(lambda: manager._current_run_id is None)
         assert store.load_result(current.run_id).run.stop_reason is RunStopReason.COMPLETED
         provider.release.clear()
-    assert [fact.event.state for fact in publisher.facts] == ["pending", "delivered"] * 3
+    assert [
+        fact.event.state for fact in publisher.facts if isinstance(fact, SessionSubmissionEvent)
+    ] == ["pending", "delivered"] * 3
     await manager.close()
 
 

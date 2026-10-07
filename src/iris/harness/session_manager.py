@@ -22,7 +22,8 @@ import uuid
 from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import (
@@ -51,6 +52,7 @@ from ..lifecycle.models import normalize_run_input
 from ..message import DataBlock, Msg
 from ..runtime import SteeringInput
 from ._goal import _GoalControl
+from .control import PendingSubmission, SessionControlSnapshot
 from .runner import AgentRunner
 
 if TYPE_CHECKING:
@@ -202,6 +204,7 @@ class _PendingInput:
     mode: SubmissionMode
     run_id: str
     options: AgentRunOptions | None = None
+    submitted_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class _PendingInputQueue:
@@ -237,6 +240,10 @@ class _PendingInputQueue:
         if mode == "steer":
             return len(self._steer) < self._max_steer
         return len(self._follow_up) < self._max_follow_up
+
+    def snapshot(self) -> tuple[_PendingInput, ...]:
+        """返回两条 FIFO 的当前内容。"""
+        return (*self._steer, *self._follow_up)
 
     def enqueue(self, item: _PendingInput) -> None:
         """把已通过 admission 的 input 追加到对应 FIFO。"""
@@ -595,6 +602,7 @@ class _SessionSteeringPort:
                 return None
             # 已离开队列但尚未证明 durable delivery，暂存等待 acknowledge/fail 回调结算。
             manager._claimed_steer[item.submission_id] = item
+            manager._refresh_control()
             return SteeringInput.model_construct(
                 submission_id=item.submission_id,
                 message=Msg.user(
@@ -748,6 +756,14 @@ class SessionManager:
         self._event_consumer_started = False
         self._steering = _SessionSteeringPort(self)
         self._follow_up_admissions: dict[str, _FollowUpAdmission] = {}
+        self._admission_started: asyncio.Event | None = None
+        self._admitting_submission: PendingSubmission | None = None
+        self._control = SessionControlSnapshot(
+            manager_id=f"manager_{uuid.uuid4().hex}",
+            revision=0,
+            session_id=self._session_id,
+            allowed_commands=("submit", "close"),
+        )
         self._maintenance_handoffs: set[str] = set()
         self._tracker_reconcile_task: asyncio.Task[None] | None = None
         self._event_buffer = (
@@ -768,6 +784,87 @@ class SessionManager:
         )
         self._finished_callback = self._on_finished
         self._runner._hook_lifecycle.subscribe(self._session_id, self._finished_callback)
+
+    def snapshot(self) -> SessionControlSnapshot:
+        """返回最近完整投影；不等待锁，不读取 store，也不推进运行。"""
+        return self._control
+
+    def _refresh_control(self, *, run: RunSnapshot | None = None) -> None:
+        """在 owner 变化点投影已有事实；整个片段不包含 await。"""
+        from .streaming import SessionControlChanged
+
+        previous = self._control
+        if run is None and previous.current_run_id == self._current_run_id:
+            run = previous.run
+        if self._current_run_id is None:
+            run = None
+        active_task = self._current_task is not None and not self._current_task.done()
+        admitting = active_task and (
+            self._admission_started is not None and not self._admission_started.is_set()
+        )
+        pending = [
+            PendingSubmission(
+                item.submission_id,
+                item.run_id,
+                item.mode,
+                item.input if isinstance(item.input, str) else tuple(item.input),
+                stage,
+                item.submitted_at,
+            )
+            for item, stage in (
+                *((item, "queued") for item in self._pending.snapshot()),
+                *((item, "committing") for item in self._claimed_steer.values()),
+            )
+        ]
+        if self._admitting_submission is not None:
+            pending.append(self._admitting_submission)
+        previous_order = {item.submission_id: index for index, item in enumerate(previous.pending)}
+        pending.sort(
+            key=lambda item: (
+                item.submitted_at,
+                previous_order.get(item.submission_id, len(previous_order)),
+            )
+        )
+        state: Literal["idle", "admitting", "running", "settling", "detached", "closed"]
+        commands: tuple[str, ...]
+        if self._closed:
+            state, commands = "closed", ()
+        elif self._current_run_id is None:
+            state, commands = "idle", ("submit", "close")
+        elif admitting:
+            state, commands = "admitting", ("close",)
+        elif active_task:
+            state = (
+                "running"
+                if run is not None
+                and run.phase is RunPhase.ACTIVE
+                and run.cancellation_requested_at is None
+                else "settling"
+            )
+            commands = ("follow_up", "interrupt", "close")
+            if run is not None and run.phase is not RunPhase.TERMINAL:
+                if run.cancellation_requested_at is None:
+                    commands = ("steer", *commands)
+        elif run is not None and run.phase is RunPhase.WAITING:
+            state, commands = "idle", ("resume", "steer", "follow_up", "interrupt", "close")
+        else:
+            state, commands = "detached", ("restore", "interrupt", "close")
+        current = replace(
+            previous,
+            current_run_id=self._current_run_id,
+            run=run,
+            driver_state=state,
+            pending=tuple(pending),
+            allowed_commands=commands,
+        )
+        if current == previous:
+            return
+        self._control = replace(current, revision=previous.revision + 1)
+        if self._submission_publisher is not None:
+            try:
+                self._submission_publisher.publish(SessionControlChanged(self._control))
+            except Exception:
+                logger.warning("live publisher 处理控制快照失败", exc_info=True)
 
     # endregion
 
@@ -846,6 +943,14 @@ class SessionManager:
             ):
                 raise IrisRunStateError("durable run tracker 容量已满")
             self._current_run_id = run_id
+            self._admitting_submission = PendingSubmission(
+                submission_id,
+                run_id,
+                None,
+                normalized_input if isinstance(normalized_input, str) else tuple(normalized_input),
+                "admitting",
+                datetime.now(UTC),
+            )
             task, started = self._create_start_task_locked(
                 input=normalized_input,
                 run_id=run_id,
@@ -861,6 +966,7 @@ class SessionManager:
                     self._current_run_id = None
                 if self._event_buffer is not None:
                     self._event_buffer.discard_run(run_id)
+                self._refresh_control()
                 raise
             return SubmitReceipt(
                 submission_id=submission_id,
@@ -989,7 +1095,9 @@ class SessionManager:
                 )
             )
             self._current_task = task
+            self._admission_started = started
             self._attach_settlement_callback(task, run_id, submission=None)
+            self._refresh_control(run=snapshot)
             await self._wait_for_admission(task, started)
         return ResumeReceipt(run_id=run_id, interaction_id=interaction_id.strip()), task
 
@@ -1057,9 +1165,11 @@ class SessionManager:
                         self._cancel_after_delivery(run_id, previous, reason=reason)
                     )
                     self._current_task = task
+                    self._admission_started = None
                     self._interrupt_task = task
                     self._attach_settlement_callback(task, run_id, submission=None)
                 # 连续 interrupt 共享已有 cleanup owner，不能取消正在执行的 settlement。
+            self._refresh_control(run=snapshot if self._current_run_id == run_id else None)
             if goal_error is not None:
                 goal_error.add_note(f"已对 Run {run_id} 提交取消请求")
                 raise goal_error
@@ -1145,6 +1255,7 @@ class SessionManager:
             if self._close_task is None or self._close_task.done():
                 self._close_task = asyncio.create_task(self._finish_close(reason=reason))
             task = self._close_task
+            self._refresh_control()
         try:
             await asyncio.shield(task)
         finally:
@@ -1179,6 +1290,8 @@ class SessionManager:
             self._close_run_id = None
             self._close_finished = False
             self._close_complete = True
+            self._admitting_submission = None
+            self._refresh_control()
 
     # endregion
 
@@ -1228,7 +1341,18 @@ class SessionManager:
             )
         )
         self._current_task = task
+        self._admission_started = started
+        if submission is not None:
+            self._admitting_submission = PendingSubmission(
+                submission.submission_id,
+                run_id,
+                submission.mode,
+                input if isinstance(input, str) else tuple(input),
+                "admitting",
+                submission.submitted_at,
+            )
         self._attach_settlement_callback(task, run_id, submission=submission)
+        self._refresh_control()
         return task, started
 
     def _attach_settlement_callback(
@@ -1282,6 +1406,9 @@ class SessionManager:
             signal_waiter.cancel()
             with suppress(asyncio.CancelledError):
                 await signal_waiter
+            if self._current_task is task and (started.is_set() or task.done()):
+                self._admitting_submission = None
+                self._refresh_control()
 
     async def _settle_managed_task(
         self,
@@ -1314,6 +1441,7 @@ class SessionManager:
                 if self._current_task is not task or self._current_run_id != run_id:
                     return
                 self._current_task = None
+                self._admitting_submission = None
                 try:
                     snapshot = self._runner.get_run(run_id)
                 except IrisRunNotFoundError:
@@ -1329,6 +1457,7 @@ class SessionManager:
                                     task_error or IrisRunStateError("follow-up create 未形成 run")
                                 )
                             self._complete_follow_up_failure_locked(admission)
+                    self._refresh_control()
                     return
                 # run 已 durable 存在即视为 follow-up 投递成功，run 自身成败与之无关。
                 if self._goal_control is not None and not self._closed:
@@ -1344,6 +1473,7 @@ class SessionManager:
                         self._event_buffer.mark_run_settled(run_id)
                     await self._handle_terminal_locked(run_id)
                 # waiting 保留 current owner；active task error 也不自动 recover/drain。
+                self._refresh_control(run=snapshot if self._current_run_id == run_id else None)
         except Exception as exc:
             if self._goal_control is not None:
                 self._goal_control.fail(exc)
@@ -1373,6 +1503,7 @@ class SessionManager:
                 self._current_run_id = None
                 if self._event_buffer is not None:
                     self._event_buffer.discard_run(run_id)
+                self._refresh_control()
                 return
             if snapshot.phase is RunPhase.TERMINAL:
                 if not await self._handle_terminal_locked(run_id):
@@ -1382,6 +1513,7 @@ class SessionManager:
             task = self._current_task
             if task is not None and task.done():
                 self._current_task = None
+            self._refresh_control(run=snapshot)
             return
 
     async def _handle_terminal_locked(self, run_id: str) -> bool:
@@ -1402,6 +1534,7 @@ class SessionManager:
             await self._start_next_follow_up_locked()
             if self._goal_control is not None:
                 self._goal_control.schedule_locked()
+        self._refresh_control()
         return True
 
     async def _start_next_follow_up_locked(self) -> None:
@@ -1493,6 +1626,7 @@ class SessionManager:
             return
         self._release_maintenance_handoff(admission.item.run_id)
         self._cancel_follow_up_helpers(admission)
+        self._admitting_submission = None
         self._emit_submission_event(admission.item, "delivered")
 
     def _complete_follow_up_failure_locked(self, admission: _FollowUpAdmission) -> None:
@@ -1508,6 +1642,7 @@ class SessionManager:
         if self._current_task is admission.task and self._current_run_id == admission.item.run_id:
             self._current_task = None
             self._current_run_id = None
+            self._admitting_submission = None
         if self._event_buffer is not None:
             self._event_buffer.discard_run(admission.item.run_id)
         self._emit_submission_event(admission.item, "failed", reason="start_failed")
@@ -1587,6 +1722,8 @@ class SessionManager:
                 self._goal_control.reserve_successor(event.run_id)
         if self._event_buffer is not None:
             self._event_buffer.observe_run_event(event)
+        if event.run_id == self._current_run_id:
+            self._refresh_control(run=self._runner.get_run(event.run_id))
 
     def _reserve_maintenance_handoff(self, run_id: str) -> None:
         """terminal 至后继 admission 之间保留前台优先，不创建第二个维护 owner。"""
@@ -1622,6 +1759,7 @@ class SessionManager:
             else:
                 self._event_buffer.add_terminal(event)
         self._publish_submission_event(event)
+        self._refresh_control()
 
     def _publish_submission_event(self, event: SubmissionEvent) -> None:
         """向 host 选择的 publisher 发布 submission fact。"""
@@ -1648,6 +1786,7 @@ class SessionManager:
 
     def _publish_goal_changed(self, event: GoalChanged) -> None:
         """向选定的 mixed/live 出口发布最新 Goal 视图。"""
+        self._refresh_control(run=event.view.run)
         if self._event_buffer is not None:
             self._event_buffer.add_goal_changed(event)
         publisher = self._submission_publisher

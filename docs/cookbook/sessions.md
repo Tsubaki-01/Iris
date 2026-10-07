@@ -128,6 +128,11 @@ uv run python session_demo.py
 
 ## 让会话跨进程保留
 
+Web 宿主在当前进程内刷新时，用 `manager.snapshot()` 重建排队正文和可用操作。
+不要只依据 durable WAITING 点亮继续按钮：旧任务可能仍在投递收尾，应以快照中
+`allowed_commands` 是否包含 `resume` 为准。控制变化由 critical live 事件通知，
+字段见[运行参考](../reference/runtime.md#只读控制快照)。
+
 以下是 `agent.yaml` 中的配置片段，追加到已可运行的 Agent 配置：
 
 ```yaml

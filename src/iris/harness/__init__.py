@@ -17,6 +17,7 @@ from ..lifecycle import (
     RunUsage,
 )
 from ._subagent import ChildProviderFactory
+from .control import PendingSubmission, SessionControlSnapshot
 from .evolution import build_project_evolution_binding
 from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding, ProjectEvolutionBinding
 from .observer import RunEventObserver
@@ -62,6 +63,8 @@ __all__ = [
     "SessionEvent",
     "SessionHistory",
     "SessionManager",
+    "SessionControlSnapshot",
+    "PendingSubmission",
     "SessionSubmissionEvent",
     "SubmissionEvent",
     "SubmitReceipt",

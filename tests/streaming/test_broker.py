@@ -9,8 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from iris.harness.control import SessionControlSnapshot
 from iris.harness.session_manager import SubmissionEvent
-from iris.harness.streaming import CommandCleanupFailed, SessionSubmissionEvent
+from iris.harness.streaming import (
+    CommandCleanupFailed,
+    SessionControlChanged,
+    SessionSubmissionEvent,
+)
 from iris.lifecycle import RunErrorInfo, RunEvent, RunEventKind
 from iris.message import (
     LLMResponse,
@@ -260,6 +265,34 @@ async def test_critical_fact_evicts_pending_partial() -> None:
 
     assert isinstance(item, LiveEnvelope)
     assert item.kind == RunEventKind.RUN_STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_control_changes_are_critical_and_reconnect_can_recover_latest() -> None:
+    """最后一次 ready 不能静默丢失；过载给出 gap，重连可读最新投影。"""
+    broker = LiveStreamBroker(replay_capacity_per_scope=4, subscription_capacity=1)
+    request = LiveSubscriptionRequest(scope="session", scope_id="session-1")
+    slow = broker.subscribe(request)
+    for revision in (1, 2):
+        snapshot = SessionControlSnapshot(
+            manager_id="manager-1",
+            revision=revision,
+            session_id="session-1",
+            allowed_commands=("resume",) if revision == 2 else (),
+        )
+        fact = SessionControlChanged(snapshot)
+        assert project_live_fact(fact)[0].critical
+        broker.publish(fact)
+    assert isinstance(await _next(slow), ReplayGap)
+    assert isinstance(await _next(slow), SubscriptionTerminal)
+    recovered = broker.subscribe(request)
+    broker.publish(fact)
+    item = await _next(recovered)
+    assert isinstance(item, LiveEnvelope)
+    assert item.kind == "session.control.changed"
+    assert item.payload["snapshot"]["revision"] == 2
+    assert item.payload["snapshot"]["allowed_commands"] == ["resume"]
+    await recovered.aclose()
 
 
 @pytest.mark.asyncio

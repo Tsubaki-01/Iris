@@ -53,6 +53,11 @@ submit/resume 接受不表示任务完成。cancel 在只暂停 Goal 续跑意�
 
 ### 事件与缺口
 
+`session.control.changed` 是 session scope 的 critical 事件，payload.snapshot 为 Manager
+刚发布的完整 `SessionControlSnapshot`。容量不足沿既有 slow-consumer gap/terminal 结束
+该订阅；重新订阅并读取 `manager.snapshot()` 可恢复 pending/ready。它不进入 durable
+sequence，也不随模型 token 重复发布。
+
 `LiveEnvelope` 的字段：stream_epoch、scope、scope_id、live_sequence、kind、可选 run_id/session_id/activation_id、可选 durable_sequence 和 JSON payload。
 
 常见 kind 包括：`model.response.started`、`model.block.delta`、`model.response.completed/failed/cancelled`、`run.started`、`run.terminal`、`interaction.suspended/resolved`、`submission.pending/delivered/failed`、`goal.changed`。最终正文应从持久结果获取，不从一个完成事件的元数据猜出。

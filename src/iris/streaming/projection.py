@@ -16,7 +16,13 @@ from typing import Literal, assert_never, cast
 from pydantic import JsonValue, TypeAdapter
 
 from ..goal.models import GoalChanged, GoalView
-from ..harness.streaming import CommandCleanupFailed, LiveFact, SessionSubmissionEvent
+from ..harness.control import SessionControlSnapshot
+from ..harness.streaming import (
+    CommandCleanupFailed,
+    LiveFact,
+    SessionControlChanged,
+    SessionSubmissionEvent,
+)
 from ..lifecycle import RunEvent
 from ..message import (
     ModelBlockCompleted,
@@ -37,6 +43,7 @@ from ..tools import ToolResult
 # endregion
 
 _GOAL_VIEW_ADAPTER = TypeAdapter(GoalView)
+_CONTROL_ADAPTER = TypeAdapter(SessionControlSnapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +76,21 @@ def project_live_fact(fact: LiveFact) -> tuple[_ProjectedLiveFact, ...]:
         return _run_and_session(projected)
     if isinstance(fact, SessionSubmissionEvent):
         return (_project_submission_event(fact),)
+    if isinstance(fact, SessionControlChanged):
+        snapshot = fact.snapshot
+        return (
+            _ProjectedLiveFact(
+                scope="session",
+                scope_id=snapshot.session_id,
+                kind="session.control.changed",
+                run_id=snapshot.current_run_id,
+                session_id=snapshot.session_id,
+                activation_id=None,
+                durable_sequence=None,
+                payload={"snapshot": _CONTROL_ADAPTER.dump_python(snapshot, mode="json")},
+                critical=True,
+            ),
+        )
     if isinstance(fact, GoalChanged):
         return (
             _ProjectedLiveFact(

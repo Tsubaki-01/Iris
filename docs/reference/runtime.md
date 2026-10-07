@@ -189,6 +189,25 @@ SessionManager(
 
 显式 steer 不接收 options；auto 在忙碌分支忽略 options。follow-up 有独立的未来 Run ID，在当前 Run terminal 前没有真正创建 Run。waiting 仍属于忙碌。
 
+### 只读控制快照
+
+`manager.snapshot() -> SessionControlSnapshot` 同步返回最近完整的不可变投影，不等准入锁、
+不查 Store、不触发 reconcile。宿主可以在 submit、resume 或 follow-up 准入等待期间读取。
+
+快照包含 `manager_id`、进程内 `revision`、`session_id`、`current_run_id`、最近 `run`、
+`driver_state`、`pending` 与 `allowed_commands`。driver_state 为 idle、admitting、running、
+settling、detached 或 closed；命令列表用于界面提示，实际准入仍由 Manager 检查。
+durable WAITING 已提交但旧任务仍在收尾时不开放 resume，任务结束后再更新控制视图。
+
+`PendingSubmission` 包含 submission_id、run_id、mode、input、stage、submitted_at。
+stage 为 queued、committing 或 admitting；已 claim 未确认的 steer 和已出队但仍在准入的
+follow-up 均保留正文。块输入使用 tuple。`pending_scope="process_local"` 表示浏览器刷新
+可以重读，进程重启不会恢复未投递输入。
+
+传入 `submission_publisher` 后，实际变化发布 `SessionControlChanged`，携带同一份快照；
+Broker 映射为 critical `session.control.changed`，详见[流式参考](streaming-observability.md)。
+用 manager_id/revision 更新这一份 pending 集合，避免再从 submission 通知维护另一套队列。
+
 ### 回执、投递事件与容量
 
 `SubmitReceipt` 字段为 `submission_id: str`、`run_id: str`、`mode: Literal["steer", "follow_up"] | None`、`state: Literal["pending", "delivered"]`。空闲提交返回 `mode=None, state="delivered"`，表示 Run 创建已提交；忙碌提交返回 pending，不能据此推断输入已进模型历史。
