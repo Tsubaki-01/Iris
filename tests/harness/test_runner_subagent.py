@@ -303,6 +303,7 @@ async def test_subagent_live_plane_preserves_parent_and_child_identity(
             )
     assert result.run.stop_reason == RunStopReason.COMPLETED, result.error
     from iris.harness.streaming import LineagedLiveFact, SubagentLinked
+    from iris.observability.facts import ConfigurationApplied
 
     children = [fact for fact in publisher.facts if isinstance(fact, LineagedLiveFact)]
     assert bool(children) == (flow != "error")
@@ -316,6 +317,10 @@ async def test_subagent_live_plane_preserves_parent_and_child_identity(
         link = runner.store.load_subagent_link("parent", "delegate")
         assert all(fact.lineage.child_run_id == link.child_run_id for fact in children)
         assert all(fact.lineage.root_run_id == "parent" for fact in children)
+        configurations = [
+            fact.fact for fact in children if isinstance(fact.fact, ConfigurationApplied)
+        ]
+        assert configurations and configurations[0].configuration.agent_config.name == "researcher"
     starts = [
         fact
         for fact in publisher.facts

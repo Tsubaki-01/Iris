@@ -9,6 +9,7 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from ..exceptions import IrisContextError
+from ..utils.sources import read_source_text
 from .models import ContextBuildInput
 
 _SECTION_NAMES = ("system", "memory", "before_current_input")
@@ -27,7 +28,7 @@ def load_context_build_input(path: str | Path) -> ContextBuildInput:
     """从 YAML 文件加载 ContextBuilder 输入。"""
     config_path = Path(path)
     try:
-        content = config_path.read_text(encoding="utf-8")
+        content = read_source_text(config_path, kind="context")
     except (OSError, UnicodeError) as exc:
         raise IrisContextError(
             "读取 context 配置失败",

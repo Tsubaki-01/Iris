@@ -7,6 +7,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from ..exceptions import IrisConfigError
+from ..utils.sources import read_source_text
 from .jev import JEV_DEFAULT_MODEL, JEV_DEFAULT_TIMEOUT_SECONDS
 
 
@@ -51,7 +52,9 @@ def load_decision_config(path: str | Path) -> DecisionConfig:
     """读取指定文件并将文件、YAML 和原始字段错误归入配置异常。"""
     path = Path(path)
     try:
-        return DecisionConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+        return DecisionConfig.model_validate(
+            yaml.safe_load(read_source_text(path, kind="decision"))
+        )
     except (OSError, UnicodeError, yaml.YAMLError, ValidationError) as exc:
         raise IrisConfigError("Decision 配置文件读取或解析失败", path=str(path)) from exc
 

@@ -8,6 +8,7 @@ import sys
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import AbstractContextManager, asynccontextmanager, nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -55,6 +56,7 @@ from ..tools.subagent import (
     SubagentRoute,
     SubagentRouteTable,
 )
+from ..utils.sources import capture_source_reads
 
 if TYPE_CHECKING:
     from ..observability.service import Observability
@@ -218,10 +220,12 @@ class HarnessSubagentController:
             if interrupted and not body_failed:
                 raise asyncio.CancelledError
 
+    @capture_source_reads
     def _assemble_child(self, route: SubagentRoute) -> AgentRunner:
         """只加载 selected ordinary config，直接消费 CHILD boundary 与独立 provider。"""
         from ._command_lifecycle import ChildCommandTarget
         from ._context_access import ContextAccess
+        from .configuration import ConfigurationDependency
         from .runner import AgentRunner
 
         config = load_agent_config(route.config_path)
@@ -251,6 +255,22 @@ class HarnessSubagentController:
         )
         runner = AgentRunner(
             runtime=runtime, store=self.store, clock=self.clock, live_publisher=self.live_publisher
+        )
+        runner._configuration = replace(
+            runner._configuration,
+            dependencies=(
+                ConfigurationDependency(
+                    "provider",
+                    type(
+                        provider if provider is not None else runtime.environment.provider
+                    ).__qualname__,
+                    "injected" if self.child_provider_factory is not None else "configured",
+                ),
+                ConfigurationDependency("store", type(self.store).__qualname__, "injected"),
+                ConfigurationDependency(
+                    "observability", type(self.observability).__qualname__, "injected"
+                ),
+            ),
         )
         runner._command_lifecycle = cast("CommandLifecycle", self.command_lifecycle)
         runner._hook_lifecycle = runner._command_lifecycle.root._hook_lifecycle

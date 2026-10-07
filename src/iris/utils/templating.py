@@ -19,6 +19,7 @@ from jinja2 import (
 from jinja2.loaders import split_template_path
 
 from ..exceptions import IrisTemplateError
+from .sources import SourceDocument
 
 
 class _FrozenLoader(BaseLoader):
@@ -57,6 +58,7 @@ class TemplateRenderer:
         """创建实例级编译缓存，不提前读取模板。"""
         self._environments: dict[Path, Environment] = {}
         self._frozen = False
+        self._documents: tuple[SourceDocument, ...] | None = None
 
     @classmethod
     def freeze_directories(cls, directories: Iterable[Path]) -> TemplateRenderer:
@@ -111,6 +113,27 @@ class TemplateRenderer:
             raise IrisTemplateError(
                 "模板渲染失败", path=str(template_path), error=str(exc)
             ) from exc
+
+    def source_documents(self) -> tuple[SourceDocument, ...]:
+        """枚举已冻结源，不访问磁盘或提前编译未使用的模板。"""
+        if not self._frozen:
+            return ()
+        if self._documents is not None:
+            return self._documents
+        documents = []
+        for directory, environment in self._environments.items():
+            loader = cast(_FrozenLoader, environment.loader)
+            for name, content in loader._sources.items():
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeError:
+                    documents.append(
+                        SourceDocument("template", str(directory / name), None, "not_utf8")
+                    )
+                else:
+                    documents.append(SourceDocument("template", str(directory / name), text))
+        self._documents = tuple(documents)
+        return self._documents
 
     def with_template(self, template_path: Path, source: str) -> TemplateRenderer:
         """在同一冻结来源中替换一个入口，返回独立候选 renderer。

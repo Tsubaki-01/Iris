@@ -61,6 +61,7 @@ from ..tools.discovery import ToolSearchTool
 from ..tools.permissions import MostRestrictivePermissionPolicy
 from ..tools.subagent import SubagentExecutionPort, SubagentRouteTable, SubagentTool
 from ..utils import TemplateRenderer
+from ..utils.sources import capture_source_reads, captured_documents
 from ._extensions import build_extensions
 from ._prompts import snapshot_prompts
 from .environment import RuntimeEnvironment, RuntimeExecutionScope
@@ -180,6 +181,7 @@ def _create_command_binding(
     )
 
 
+@capture_source_reads
 def assemble_runtime(
     config: AgentConfig,
     *,
@@ -368,6 +370,11 @@ def assemble_runtime(
         )
         environment = RuntimeEnvironment(
             agent_config=config,
+            configuration_path=config_path,
+            configuration_sources=(
+                *config._source_documents, *captured_documents(),
+                *context_renderer.source_documents(), *prompt_snapshot.source_documents(),
+            ),
             context_input=context_input,
             context_builder=ContextBuilder(template_renderer=context_renderer),
             provider=observe_provider(raw_provider, observability),

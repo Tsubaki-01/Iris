@@ -20,7 +20,8 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -100,6 +101,7 @@ from ..lifecycle.history import (
 )
 from ..memory import MemoryService
 from ..message import ImageBlock, Msg, image_block_from_saved
+from ..observability.facts import ConfigurationApplied, SourceAdopted, bind_fact_scope
 from ..prompts import PromptSource
 from ..providers import CompletionProvider
 from ..runtime import (
@@ -128,6 +130,7 @@ from ..tools import CancellationSignal, PermissionPolicy, ToolResult
 from ..tools._paths import safe_path_segment
 from ..tools.subagent import ChildWaiting, SubagentExecutionOutcome, SubagentParentCall
 from ..utils.images import save_image
+from ..utils.sources import capture_source_reads
 from ._capture import RunCapture
 from ._command_lifecycle import (
     ChildCommandTarget,
@@ -142,6 +145,12 @@ from ._events import _RunEventCollector
 from ._goal import validate_goal_options
 from ._hooks import HookLifecycle, HookStartControl, run_started
 from ._subagent import ChildProviderFactory, HarnessSubagentController
+from .configuration import (
+    ConfigurationDependency,
+    EffectiveConfiguration,
+    LifecycleStorageDescription,
+    snapshot_tool_catalog,
+)
 from .maintenance import (
     MaintenanceAttachment,
     MaintenanceCoordinator,
@@ -354,6 +363,43 @@ class AgentRunner:
             str, Callable[[RunEvent | CommandCleanupFailed], None]
         ] = {}
         self._goal_service = environment.goal_service
+        self._configuration = EffectiveConfiguration(
+            environment.configuration_snapshot_id,
+            self._now(),
+            environment.configuration_path,
+            deepcopy(environment.agent_config),
+            environment.workspace_root,
+            environment.configuration_sources,
+            tuple(
+                ConfigurationDependency(kind, type(value).__qualname__, "injected")
+                for kind, value in (("provider", environment.provider), ("store", store))
+            ),
+            "effective_only"
+            if not any(document.kind == "agent" for document in environment.configuration_sources)
+            else (
+                "partial"
+                if any(
+                    document.status != "captured" for document in environment.configuration_sources
+                )
+                else "complete"
+            ),
+            LifecycleStorageDescription(
+                "sqlite"
+                if isinstance(store, SQLiteStore)
+                else "memory"
+                if isinstance(store, InMemoryLifecycleStore)
+                else type(store).__qualname__,
+                store.source_id,
+                str(store.path.resolve()) if isinstance(store, SQLiteStore) else None,
+            ),
+            snapshot_tool_catalog(environment.tool_bridge.tool_view),
+            tuple(
+                environment.skill_registry.get(name) for name in environment.skill_registry.names()
+            )
+            if environment.skill_registry is not None
+            else (),
+            self._prepared,
+        )
         if self._goal_service is not None:
             if self._goal_service.store is not store:
                 raise IrisConfigError("GoalService 必须使用 Runner 的同一 store 实例")
@@ -454,6 +500,11 @@ class AgentRunner:
         try:
             await self.runtime.environment.aprepare()
             self._prepared = True
+            self._configuration = replace(
+                self._configuration,
+                prepared=True,
+                tool_catalog=snapshot_tool_catalog(self.runtime.environment.tool_bridge.tool_view),
+            )
         except BaseException:
             self._closed = True
             try:
@@ -578,6 +629,7 @@ class AgentRunner:
         )
 
     @classmethod
+    @capture_source_reads
     def from_config(
         cls,
         config: AgentConfig,
@@ -667,6 +719,32 @@ class AgentRunner:
                 runtime.environment.owned_observability._shutdown()
             raise
         runner._subagent_controller = controller
+        runner._configuration = replace(
+            runner._configuration,
+            dependencies=tuple(
+                ConfigurationDependency(
+                    kind, type(value).__qualname__, "injected" if injected else "configured"
+                )
+                for kind, value, injected in (
+                    (
+                        "provider",
+                        provider if provider is not None else runtime.environment.provider,
+                        provider is not None,
+                    ),
+                    ("store", resolved_store, store is not None),
+                    ("memory", runtime.environment.memory_service, memory_service is not None),
+                    (
+                        "context_source",
+                        runtime.environment.context_source,
+                        context_source is not None,
+                    ),
+                    ("observability", runtime.environment.observability, observability is not None),
+                    ("decision", runtime.environment.decision_client, decision_client is not None),
+                    ("mcp", runtime.environment.mcp_manager, False),
+                )
+                if value is not None
+            ),
+        )
         if controller is not None:
             controller.command_lifecycle = runner._command_lifecycle
             controller.observability = runtime.environment.observability
@@ -2129,6 +2207,10 @@ class AgentRunner:
     #               Durable Reads
     # ==========================================
     # region
+    def describe_configuration(self) -> EffectiveConfiguration:
+        """返回已采用配置的隔离副本，不回读 YAML、模板或目录。"""
+        return deepcopy(self._configuration)
+
     def get_run(self, run_id: str) -> RunSnapshot:
         """读取一个 logical run 的 durable snapshot。"""
         record = self.store.load_run(self._required_id(run_id))
@@ -2270,6 +2352,7 @@ class AgentRunner:
             yield INVALID_SPAN
             return
         attributes: dict[str, AttributeValue] = {
+            "iris.configuration.snapshot_id": self.runtime.environment.configuration_snapshot_id,
             "iris.lifecycle.source_id": self.store.source_id,
             "iris.run.id": run.run_id,
             "gen_ai.conversation.id": run.session_id,
@@ -2386,7 +2469,26 @@ class AgentRunner:
             IrisRunPersistenceError: 当 durable 写入失败时。
             IrisRunStateError: 当出现不可解释的 phase/outcome 组合，或缺少 durable result 时。
         """
-        with self._observe_run(port.run, activation_id=active.activation_id):
+        with (
+            self._observe_run(port.run, activation_id=active.activation_id),
+            bind_fact_scope(
+                self._publish_live_fact,
+                configuration_snapshot_id=self.runtime.environment.configuration_snapshot_id,
+                run_id=port.run.run_id,
+                session_id=port.run.session_id,
+                activation_id=active.activation_id,
+            ),
+        ):
+            self._publish_live_fact(
+                ConfigurationApplied(
+                    self.runtime.environment.configuration_snapshot_id,
+                    port.run.run_id,
+                    port.run.session_id,
+                    active.activation_id,
+                    port.run.agent_id,
+                    self.describe_configuration(),
+                )
+            )
             # --- 1. 注册跨 activation 的 deadline，并驱动 engine ---
             try:
                 deadline = port.run.options.limits.deadline_at
@@ -2973,6 +3075,15 @@ class AgentRunner:
             run_id = None
             session_id = fact.session_id
             activation_id = None
+        elif isinstance(fact, (ConfigurationApplied, SourceAdopted)):
+            fact_kind = (
+                "configuration.applied"
+                if isinstance(fact, ConfigurationApplied)
+                else "source.adopted"
+            )
+            run_id = fact.run_id
+            session_id = fact.session_id
+            activation_id = fact.activation_id
         else:
             fact_kind = f"submission.{fact.event.state}"
             run_id = fact.event.run_id

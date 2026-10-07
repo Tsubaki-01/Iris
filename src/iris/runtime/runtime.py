@@ -58,6 +58,7 @@ from ..message import (
     ToolUseBlock,
 )
 from ..message.message import data_text
+from ..observability.facts import bind_fact_step, record_source_adoption
 from ..providers.protocols import streaming_provider_for
 from ..todo import TodoSnapshot, TodoStatus
 from ..todo.context import render_todo_context
@@ -73,6 +74,7 @@ from ..tools import (
 from ..tools._execution_control import ToolExecutionControlSlot
 from ..tools.base import ToolTimeoutOwner
 from ..tools.subagent import ChildWaiting, SubagentParentCall, SubagentTool
+from ..utils.sources import SourceDocument
 from ._compaction_summary import (
     consume_summary_response,
     next_summary_batch,
@@ -208,7 +210,10 @@ class AgentRuntime:
         plan: ToolBatchPlan | None = None
 
         while True:
-            with self.environment.observability.bind({"iris.step.index": cursor.step_index}):
+            with (
+                self.environment.observability.bind({"iris.step.index": cursor.step_index}),
+                bind_fact_step(cursor.step_index),
+            ):
                 # --- 2. 收口 activation 状态 ---
                 # 先兑现已提交的最终结果；未完成时再检查取消与截止时间。
                 if cursor.position == "outcome_ready":
@@ -1072,7 +1077,7 @@ class AgentRuntime:
             return RuntimeActivationResult(
                 outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
             )
-        return commits.commit_run_input(
+        committed = commits.commit_run_input(
             RuntimeRunInputCommit(
                 cursor_before=cursor,
                 message_delta=tuple(messages),
@@ -1080,6 +1085,9 @@ class AgentRuntime:
                 initial_context_window=initial_window,
             )
         )
+        if initial_window is not None:
+            _record_window_adoption(initial_window, "session_first_input")
+        return committed
 
     def _context_messages(self, snapshot: SessionContextSnapshot) -> SessionContextSnapshot:
         """保留原文位置，为启用策略的模型视图附加回读引用。"""
@@ -1265,6 +1273,7 @@ class AgentRuntime:
             ),
             self.environment.observability.scope("iris.context.prepare") as prepare_span,
             preparation,
+            bind_fact_step(cursor.step_index, preparation.value.preparation_id),
         ):
             context_snapshot = None
             todo_snapshot: TodoSnapshot | None = None
@@ -1771,6 +1780,12 @@ class AgentRuntime:
         completed = False
         try:
             prompt_snapshot = snapshot_prompts(self.environment.prompt_source)
+            record_source_adoption(
+                owner_kind="runtime",
+                source_kind="prompt_snapshot",
+                boundary="compaction_operation",
+                documents=prompt_snapshot.source_documents(),
+            )
             system_prompt = render_prompt(prompt_snapshot, "compaction", {}).strip()
             previous = snapshot.compaction
             summary = previous.summary if previous is not None else None
@@ -1901,6 +1916,7 @@ class AgentRuntime:
                 )
             )
             completed = True
+            _record_window_adoption(next_window, "compaction_committed")
             diagnostics.record(
                 "compaction",
                 before,
@@ -2519,6 +2535,25 @@ def _apply_tool_specs(
             "tools": tool_view.specs_for(selection.names),
             "tool_choice": selection.tool_choice,
         }
+    )
+
+
+def _record_window_adoption(window: SessionContextWindow, boundary: str) -> None:
+    """只在窗口提交成功后记录实际选中正文，不标记未采用的候选。"""
+    if not window.memory_overview:
+        return
+    record_source_adoption(
+        owner_kind="runtime",
+        source_kind="memory_overview",
+        boundary=boundary,
+        documents=(SourceDocument("memory_context_window", None, window.memory_overview),),
+        source_versions=tuple(
+            (
+                source.path,
+                str(source.source_revision) if source.source_revision is not None else None,
+            )
+            for source in window.sources
+        ),
     )
 
 

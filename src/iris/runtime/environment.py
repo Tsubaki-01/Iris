@@ -33,6 +33,7 @@ from ..prompts import PromptSnapshot, PromptSource
 from ..providers.protocols import CompletionProvider
 from ..skill import SkillRegistry
 from ..tools import ToolExecutor, ToolRegistry
+from ..utils.sources import SourceDocument
 from .assembler import RuntimeMessageAssembler
 from .tool_bridge import ToolBridge
 
@@ -130,6 +131,8 @@ class RuntimeEnvironment:
     observability: Observability = field(default_factory=Observability)
     owned_observability: Observability | None = None
     configuration_snapshot_id: str = field(default_factory=lambda: f"configuration_{uuid4().hex}")
+    configuration_path: Path | None = None
+    configuration_sources: tuple[SourceDocument, ...] = ()
 
     def __post_init__(self) -> None:
         """归一化 workspace，交接当前 Agent 的 Hooks、命令和观测依赖。"""

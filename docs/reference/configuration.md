@@ -1,5 +1,33 @@
 # 配置参考
 
+## 查询实例实际采用的配置
+
+`runner.describe_configuration() -> EffectiveConfiguration` 返回该实例构造期采用的配置、
+workspace、config_path、configuration_snapshot_id、constructed_at、冻结 source_documents
+及依赖来源。读取只复制已保存对象，不重读 YAML、模板或目录；保存源文件后，旧 Runner
+仍描述旧来源。纯 Python 配置没有主 YAML 正文时，source_completeness 为 effective_only，
+不会伪造一份声明文件。
+
+storage 是实际 Store 的 backend/source_id/path，显式注入 Store 时可与 agent_config 中的
+声明不同。tool_catalog 保存实际可用定义（含 deferred/group）；MCP 准备完成后更新为真实
+目录，prepared 表示准备是否完成。skill_catalog 是构造时发现的 metadata，不把目录元数据
+当作已加载正文。dependencies 只描述实际依赖类型与 configured/injected 来源，不复制凭据。
+
+配置来源在原 loader 读取时捕获；模板来自冻结 renderer。SourceDocument 含 document_id、
+kind、original_path、text 与 status。MCP 的 env/header 凭据字段以 redacted 投影呈现；
+未使用的非 UTF-8 冻结源标 not_utf8，不因此改变模板按需加载行为。有这类缺口时完整性为
+partial。完整性描述来源采集范围，不意味着能还原外部 Python 对象或远程服务。
+
+每次 activation 发布 `ConfigurationApplied`。原始 fact 携带完整 configuration，便于宿主
+保存临时 child 的实际配置；网络 `configuration.applied` 只包含配置 ID 与 agent_id。
+恢复旧 Run 会采用当前恢复 Runner 的配置，原 activation 和恢复 activation 的关联各自保留。
+
+来源真正被消费时才发布 `SourceAdopted`：压缩、Memory 和 Evolution 在操作取 snapshot
+时记录冻结来源；Memory 窗口只在首次输入或成功压缩提交后记录实际选中正文与来源 revision；
+load_skill 记录本次实际返回的正文。操作 snapshot 表示可供本操作使用的来源集合，不表示
+每个模板都注入了请求。实际 provider 请求仍由原观察接点证明。事实保存采用时刻及
+run/activation/step 或 maintenance/resource 关联，不把文件发布当成已采用或效果提升。
+
 Iris 有两层配置：进程配置提供服务凭据、provider 注册和统一导出设置；Agent YAML 声明一个 Agent 的模型、上下文、工具和可选能力。首次使用见[快速开始](../getting-started/quickstart.md)，常见组合见[配置配方](../cookbook/configure-agent.md)。
 
 ## 加载入口与路径

@@ -18,6 +18,7 @@ from ..exceptions import (
     IrisToolValidationError,
 )
 from ..message import TextBlock
+from ..observability.facts import record_source_adoption
 from ..tools import (
     BaseTool,
     ReadFileRecord,
@@ -29,6 +30,7 @@ from ..tools import (
     WorkspaceFileService,
     schema_from_pydantic_model,
 )
+from ..utils.sources import SourceDocument
 from ._paths import is_resolved_within
 from .models import _NAME_RE, SkillMetadata
 from .registry import SkillRegistry
@@ -152,6 +154,12 @@ class LoadSkillTool(BaseTool):
             return self._read_error(input_data.name, "SKILL.md 读取失败")
 
         self.file_service.ensure_read_state(context).merge(record)
+        record_source_adoption(
+            owner_kind="tool",
+            source_kind="skill",
+            boundary="load_skill_result",
+            documents=(SourceDocument("skill", str(live_file), text),),
+        )
         return ToolResult(
             tool_use_id="",
             tool_name="load_skill",

@@ -41,6 +41,7 @@ from ..message import (
     ModelUsageUpdated,
     TextBlock,
 )
+from ..observability.facts import ConfigurationApplied, SourceAdopted
 from ..runtime import RuntimeStreamEvent
 from ..runtime.diagnostics import ContextPreparation
 from ..tools import ToolResult
@@ -98,6 +99,45 @@ def _project_fact(fact: UnscopedLiveFact) -> tuple[_ProjectedLiveFact, ...]:
     Returns:
         tuple[_ProjectedLiveFact, ...]: Allowlisted run/session projections。
     """
+    if isinstance(fact, ConfigurationApplied):
+        return _run_and_session(
+            _ProjectedLiveFact(
+                scope="run",
+                scope_id=fact.run_id,
+                kind="configuration.applied",
+                run_id=fact.run_id,
+                session_id=fact.session_id,
+                activation_id=fact.activation_id,
+                durable_sequence=None,
+                payload={
+                    "configuration_snapshot_id": fact.configuration_snapshot_id,
+                    "agent_id": fact.agent_id,
+                },
+                critical=True,
+            )
+        )
+    if isinstance(fact, SourceAdopted):
+        projected = _ProjectedLiveFact(
+            scope="resource" if fact.resource_ref is not None else "run",
+            scope_id=fact.resource_ref if fact.resource_ref is not None else cast(str, fact.run_id),
+            kind="source.adopted",
+            run_id=fact.run_id,
+            session_id=fact.session_id,
+            activation_id=fact.activation_id,
+            durable_sequence=None,
+            payload={
+                "adoption_id": fact.adoption_id,
+                "source_kind": fact.source_kind,
+                "owner_kind": fact.owner_kind,
+                "adoption_boundary": fact.adoption_boundary,
+                "step_index": fact.step_index,
+                "preparation_id": fact.preparation_id,
+                "maintenance_cycle_id": fact.maintenance_cycle_id,
+                "document_ids": [document.document_id for document in fact.documents],
+            },
+            critical=False,
+        )
+        return (projected,) if fact.resource_ref is not None else _run_and_session(projected)
     if isinstance(fact, ContextPreparation):
         return _run_and_session(
             _ProjectedLiveFact(

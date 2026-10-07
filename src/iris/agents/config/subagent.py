@@ -20,6 +20,7 @@ from pydantic import (
 
 from ...exceptions import IrisConfigError
 from ...tools.subagent import SubagentRoute, SubagentRouteTable
+from ...utils.sources import read_source_text
 
 
 class SubagentCatalogEntry(BaseModel):
@@ -68,7 +69,7 @@ def load_subagent_catalog(path: str | Path) -> SubagentRouteTable:
     """
     catalog_path = Path(path).resolve()
     try:
-        raw = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(read_source_text(catalog_path, kind="subagent_catalog"))
         catalog = SubagentCatalog.model_validate(raw, context={"catalog_path": catalog_path})
     except (OSError, UnicodeError, yaml.YAMLError, ValidationError) as exc:
         raise IrisConfigError(

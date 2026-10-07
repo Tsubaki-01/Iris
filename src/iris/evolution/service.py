@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..exceptions import IrisEvolutionError, IrisSkillError, IrisTemplateError
 from ..message import LLMRequest, LLMResponse, Msg
+from ..observability.facts import record_source_adoption
 from ..observability.provider import observe_provider
 from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
@@ -21,6 +22,7 @@ from ..skill.frontmatter import split_frontmatter
 from ..utils.background_io import BackgroundIO
 from ..utils.files import atomic_write_text
 from ..utils.generation_worker import check_generation_cancelled
+from ..utils.sources import SourceDocument
 from .config import EvolutionConfig
 from .materials import EvolutionMaterialStore
 from .models import (
@@ -187,6 +189,21 @@ class EvolutionService:
             policy_body = split_frontmatter(policy)[1]
         except (OSError, UnicodeError, IrisTemplateError, IrisSkillError) as exc:
             raise IrisEvolutionError("项目修订策略读取失败", error=str(exc)) from exc
+        record_source_adoption(
+            owner_kind="evolution",
+            source_kind="prompt_snapshot",
+            boundary=prompt_id,
+            documents=(
+                *snapshot.source_documents(),
+                SourceDocument(
+                    "evolution_policy",
+                    str(self.workspace_root / self.config.policy_skill)
+                    if self.config.policy_skill is not None
+                    else "iris.evolution/self-evolution/SKILL.md",
+                    policy,
+                ),
+            ),
+        )
         return snapshot, f"{strategy}\n\n策略 Skill：\n{policy_body}\n\n固定输出契约：\n{contract}"
 
     def _read_skill(self) -> str | None:

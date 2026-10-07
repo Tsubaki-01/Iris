@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from collections.abc import Mapping
+from copy import deepcopy
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from pydantic import StrictBool, TypeAdapter, ValidationError
 
 from ..agents.config.mcp import MCPServerOverride
 from ..exceptions import IrisConfigError
+from ..utils.sources import SourceDocument, capture_document
 from .models import MCPConfig, MCPDiagnostic, MCPResolvedServer, MCPServerConfig
 
 _ROOTS = ("mcpServers", "servers", "mcp_servers")
@@ -117,6 +120,22 @@ def load_mcp_config(path: Path, *, overrides: Mapping[str, MCPServerOverride]) -
     if len(roots) != 1 or not isinstance(document[roots[0]], dict):
         raise IrisConfigError("MCP 文件必须包含且仅包含一个 server mapping 根区段")
     declarations = document[roots[0]]
+    visible = deepcopy(document)
+    redacted = False
+    for declaration in visible[roots[0]].values():
+        if isinstance(declaration, dict):
+            for credential_field in ("env", "headers", "http_headers"):
+                if credential_field in declaration:
+                    declaration[credential_field] = "<redacted>"
+                    redacted = True
+    capture_document(
+        SourceDocument(
+            "mcp",
+            str(path.resolve()),
+            json.dumps(visible, ensure_ascii=False) if redacted else source,
+            "redacted" if redacted else "captured",
+        )
+    )
     missing = overrides.keys() - declarations.keys()
     if missing:
         raise IrisConfigError("MCP override 引用了不存在的 server", server_id=sorted(missing)[0])

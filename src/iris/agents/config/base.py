@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -28,6 +29,7 @@ from ...prompts.config import PromptConfig
 from ...providers import ModelRoute, parse_model_route
 from ...speech.config import SpeechConfig
 from ...todo.config import TodoConfig
+from ...utils.sources import SourceDocument
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
 from .decision import AgentDecisionConfig
@@ -273,6 +275,8 @@ class AgentConfig(BaseModel):
         session (SessionConfig): 会话配置。
     """
 
+    _source_documents: tuple[SourceDocument, ...] = PrivateAttr(default=())
+
     name: str
     model: ModelConfig
     system: str | None = None
@@ -390,7 +394,9 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     if not isinstance(raw_config, dict):
         raise IrisConfigError("Agent 配置顶层必须是对象", path=str(config_path))
 
-    return parse_agent_config(raw_config, config_path=config_path)
+    config = parse_agent_config(raw_config, config_path=config_path)
+    config._source_documents = (SourceDocument("agent", str(config_path.resolve()), config_text),)
+    return config
 
 
 def parse_agent_config(raw_config: dict[str, Any], *, config_path: Path) -> AgentConfig:

@@ -11,6 +11,7 @@ from typing import Any
 
 from ..exceptions import IrisTemplateError
 from ..utils import TemplateRenderer
+from ..utils.sources import SourceDocument
 
 PROMPT_IDS = (
     "compaction",
@@ -92,6 +93,10 @@ class PromptSnapshot:
 
     root: Path
     renderer: TemplateRenderer
+
+    def source_documents(self) -> tuple[SourceDocument, ...]:
+        """返回本次操作已经冻结的来源；可用不等于全部模板被注入请求。"""
+        return self.renderer.source_documents()
 
     def with_template(self, prompt_id: str, source: str) -> PromptSnapshot:
         """在原冻结源中替换一个命名模板，不回读磁盘或修改原快照。"""

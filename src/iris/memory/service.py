@@ -21,6 +21,7 @@ from time import perf_counter
 from typing import TypeVar
 
 from ..exceptions import IrisMemoryError
+from ..observability.facts import record_source_adoption
 from ..observability.provider import observe_provider
 from ..observability.service import Observability
 from ..prompts import PromptSnapshot, PromptSource
@@ -197,6 +198,12 @@ class MemoryService:
     ) -> GenerationResult:
         """从已捕获经历提炼一批观察；正式知识在 dreaming 后才可读取。"""
         prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        record_source_adoption(
+            owner_kind="memory",
+            source_kind="prompt_snapshot",
+            boundary="memory_flush",
+            documents=prompts.source_documents(),
+        )
         return await flush(self, namespace, prompt_snapshot=prompts, scope=scope)
 
     async def dream(
@@ -208,6 +215,12 @@ class MemoryService:
     ) -> GenerationResult:
         """将一批观察和显式修改原子整理到正式知识，不隐式执行 flush。"""
         prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        record_source_adoption(
+            owner_kind="memory",
+            source_kind="prompt_snapshot",
+            boundary="memory_dream",
+            documents=prompts.source_documents(),
+        )
         return await dream(
             self, namespace, prompt_snapshot=prompts, retry_blocked=retry_blocked, scope=scope
         )
@@ -228,6 +241,12 @@ class MemoryService:
         )
         state = await self.ageneration_state(namespace, scope=scope)
         prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        record_source_adoption(
+            owner_kind="memory",
+            source_kind="prompt_snapshot",
+            boundary="memory_cycle",
+            documents=prompts.source_documents(),
+        )
         if state.pending_observations or state.pending_changes:
             result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
             if result.status in {"failed", "cancelled", "conflict"}:
@@ -635,6 +654,12 @@ class MemoryService:
     async def refresh_overview(self, namespace: str) -> MemoryOverviewGenerationResult:
         """显式生成和发布概览，保留旧完整产物及实际模型用量。"""
         prompts = await self.run_async_io(lambda: snapshot_memory_prompts(self.prompt_source))
+        record_source_adoption(
+            owner_kind="memory",
+            source_kind="prompt_snapshot",
+            boundary="memory_overview",
+            documents=prompts.source_documents(),
+        )
         return await self._refresh_overview(namespace, prompts)
 
     async def _refresh_overview(

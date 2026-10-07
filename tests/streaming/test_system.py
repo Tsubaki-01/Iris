@@ -187,9 +187,8 @@ class _FakeResponsesBackend:
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """在协议调用边界注入 raw stream，保留实际解析与运行链路。"""
-        async def invoke(
-            adapter: ResponsesAdapter, kwargs: dict[str, Any]
-        ) -> _ControlledRawStream:
+
+        async def invoke(adapter: ResponsesAdapter, kwargs: dict[str, Any]) -> _ControlledRawStream:
             return await self(**kwargs)
 
         monkeypatch.setattr(ResponsesAdapter, "invoke", invoke)
@@ -917,7 +916,7 @@ async def test_slow_consumer_isolated_while_normal_consumer_and_run_complete(
     runner, manager, broker, gateway, _ = _build_system(
         tmp_path,
         provider,
-        subscription_capacity=7,
+        subscription_capacity=8,
     )
     slow = gateway.subscribe(
         SubscribeCommand(
@@ -933,6 +932,16 @@ async def test_slow_consumer_isolated_while_normal_consumer_and_run_complete(
             scope_id="session-system",
         )
     )
+    partial_task = asyncio.create_task(
+        _take_until(
+            normal,
+            lambda item: (
+                isinstance(item, LiveEnvelope)
+                and item.kind == "model.block.delta"
+                and item.payload.get("snapshot") == "片段" * 12
+            ),
+        )
+    )
     run_task = asyncio.create_task(
         runner.start(
             AgentRunRequest(
@@ -943,14 +952,7 @@ async def test_slow_consumer_isolated_while_normal_consumer_and_run_complete(
         )
     )
     await asyncio.wait_for(raw.waiting[12].wait(), timeout=1)
-    partial_items = await _take_until(
-        normal,
-        lambda item: (
-            isinstance(item, LiveEnvelope)
-            and item.kind == "model.block.delta"
-            and item.payload.get("snapshot") == "片段" * 12
-        ),
-    )
+    partial_items = await partial_task
     raw.gates[12].set()
     result = await run_task
     normal_items = partial_items + await _take_until(
@@ -969,8 +971,8 @@ async def test_slow_consumer_isolated_while_normal_consumer_and_run_complete(
     assert len(gaps) == 1 and gaps[0].reason == "slow_consumer"
     assert len(terminals) == 1 and terminals[0].reason == "slow_consumer"
     assert all(len(ring) <= 512 for ring in broker._rings.values())
-    assert slow._subscription._data_count <= 7
-    assert normal._subscription._data_count <= 7
+    assert slow._subscription._data_count <= 8
+    assert normal._subscription._data_count <= 8
 
     await slow.aclose()
     await normal.aclose()

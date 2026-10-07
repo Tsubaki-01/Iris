@@ -16,6 +16,7 @@ from typing import Protocol
 from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
 from ..lifecycle.history import RunLineage
+from ..observability.facts import ConfigurationApplied, SourceAdopted
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from ..runtime.diagnostics import ContextPreparation
 from .control import SessionControlSnapshot
@@ -69,6 +70,8 @@ type UnscopedLiveFact = (
     | SessionControlChanged
     | SubagentLinked
     | ContextPreparation
+    | ConfigurationApplied
+    | SourceAdopted
 )
 
 

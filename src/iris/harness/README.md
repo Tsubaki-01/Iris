@@ -16,6 +16,10 @@ pending 覆盖 queued、claim 后尚未确认及 follow-up admitting 输入；WA
 只附着，ACTIVE/已回答 proxy 复用 Runner recovery。仅存活 managed task 可以幂等复用；
 Goal 不因此自动 arm，历史读取也不会触发 restore。
 
+`runner.describe_configuration()` 读取有效配置、实际存储身份、冻结来源与已准备的工具目录，
+不访问磁盘。activation 原始事实携带同一实例的配置描述，临时 child 也可由宿主保存。
+配置和来源采用的字段及准确时机见[配置参考](../../../docs/reference/configuration.md#查询实例实际采用的配置)。
+
 ## 快速入门
 
 `from_config*()` 接受 `observability=` 完整服务注入；同一实例交给 runtime、工具执行器和

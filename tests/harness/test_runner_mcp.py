@@ -56,11 +56,17 @@ async def test_prepare_precedes_create_and_reuses_catalog(
     )
     runner = AgentRunner.from_config(mcp_agent(tmp_path), store=store, provider=provider)
     assert not peer.events
+    assert not runner.describe_configuration().prepared
+    assert "mcp__test__echo" not in {
+        tool.name for tool in runner.describe_configuration().tool_catalog
+    }
     if explicit:
         await runner.aprepare()
         assert store.load_run("first") is None
     result = await runner.start(AgentRunRequest(input="call", run_id="first"))
     assert result.run.stop_reason is RunStopReason.COMPLETED
+    assert runner.describe_configuration().prepared
+    assert "mcp__test__echo" in {tool.name for tool in runner.describe_configuration().tool_catalog}
     assert store.list_tool_calls("first")[0].phase is ToolCallPhase.COMMITTED
     await runner.start(AgentRunRequest(input="again", run_id="second"))
     assert peer.events == ["open", "list", "call:echo"]
