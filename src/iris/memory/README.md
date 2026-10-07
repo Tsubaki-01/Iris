@@ -24,7 +24,7 @@ memory:
 ## 运行要求与快速开始
 
 本包随 Iris 安装，使用标准库 SQLite 和 FTS5。默认本地搜索使用 FTS5；初始化或查询错误
-报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 5，旧版库
+报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 6，旧版库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
@@ -76,6 +76,12 @@ INLINE 的同步操作仍会占用事件循环，后台维护不会覆盖这个�
 empty、blocked、conflict 保持非错误，没有模型请求就没有模型节点。阶段失败只影响所属
 维护区间，不会把已经成功的模型调用改成失败。提交后取消保留已经提交的阶段状态。
 独立 SDK 或前台概览仍有实际模型记录，但不会向宿主普通 span 添加维护结果，也不创建维护周期；
+完整历史由 `list_episodes`、`list_generation_results`、`get_observation` 读取；分页按
+created_at/id 升序，包含已消费 Episode 与旧轮次。Mirror 在真实发布边界保存
+`MemoryPublicationRecord`，`list_publications`/`get_publication` 读取当时正文，文件覆盖不删除历史。
+published 只在完整发布成功后写入；部分写入保留 failed 和已写正文，文件完成但版本提交失败
+保留 unconfirmed。Item 前后值继续由原 `MemoryEvent` 持有。Service 同时提供这些入口的 async 版本。
+
 `maintain_cycle(namespace, scope=..., cycle_id=...)` 返回 `MemoryCycleResult`，
 其中 results 为本轮真实阶段结果，has_more 表示范围内的后续积压；空轮次 results 为空。
 

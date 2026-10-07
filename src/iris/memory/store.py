@@ -16,6 +16,13 @@ from .generation_models import (
     MemorySource,
     ObservationState,
 )
+from .history import (
+    EpisodePage,
+    GenerationResultPage,
+    MemoryHistoryCursor,
+    MemoryPublicationPage,
+    MemoryPublicationRecord,
+)
 from .models import (
     MemoryCategory,
     MemoryEpisode,
@@ -102,6 +109,32 @@ class MemoryStore(Protocol):
 
     def get_episode(self, episode_id: str, namespace: str) -> MemoryEpisode | None:
         """读取不可变来源内容。"""
+
+    def list_episodes(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> EpisodePage:
+        """读取全部 Episode 历史，包含已消费原文；按 created_at/id 升序分页。"""
+
+    def list_generation_results(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> GenerationResultPage:
+        """读取全部阶段结果，保留失败与历史轮次。"""
+
+    def get_observation(self, namespace: str, observation_id: str) -> ObservationState | None:
+        """读取一条原观察及当前处理状态。"""
+
+    def list_publications(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> MemoryPublicationPage:
+        """分页读取实际发布产物和失败记录。"""
+
+    def get_publication(
+        self, namespace: str, publication_id: str
+    ) -> MemoryPublicationRecord | None:
+        """按 namespace 和 ID 读取一份持久发布记录。"""
+
+    def record_publication(self, record: MemoryPublicationRecord) -> None:
+        """保存原发布 owner 的结果，不依据当前文件推断发布历史。"""
 
     def list_pending_episodes(
         self,

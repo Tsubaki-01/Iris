@@ -15,6 +15,14 @@ from .generation_models import (
     MemoryMaintenanceScope,
     MemorySource,
 )
+from .history import (
+    EpisodePage,
+    GenerationResultPage,
+    MemoryHistoryCursor,
+    MemoryPublicationDocument,
+    MemoryPublicationPage,
+    MemoryPublicationRecord,
+)
 from .mirror import FileMemoryMirror
 from .models import (
     MemoryActor,
@@ -66,6 +74,12 @@ from .tools import (
 )
 
 __all__ = [
+    "EpisodePage",
+    "GenerationResultPage",
+    "MemoryHistoryCursor",
+    "MemoryPublicationDocument",
+    "MemoryPublicationPage",
+    "MemoryPublicationRecord",
     "generation_prompt_descriptions",
     "overview_prompt_description",
     "GenerationResult",

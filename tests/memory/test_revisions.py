@@ -125,10 +125,12 @@ def test_late_publisher_reads_latest_snapshot_inside_lock(
     resume = Event()
     rebuild = first_mirror.rebuild_from_store
 
-    def delayed_rebuild(store: SQLiteMemoryStore, namespace: str) -> None:
+    def delayed_rebuild(
+        store: SQLiteMemoryStore, namespace: str, *, generation_result_id: str | None = None
+    ) -> None:
         entered.set()
         assert resume.wait(timeout=5)
-        rebuild(store, namespace)
+        rebuild(store, namespace, generation_result_id=generation_result_id)
 
     monkeypatch.setattr(first_mirror, "rebuild_from_store", delayed_rebuild)
     with ThreadPoolExecutor(max_workers=1) as executor:

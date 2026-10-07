@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..exceptions import IrisMemoryError
 from .files import BODY_PATHS, namespace_key, source_revision
+from .history import MemoryPublicationDocument, MemoryPublicationRecord
 from .models import (
     MemoryCategory,
     MemoryItem,
@@ -51,11 +52,51 @@ class FileMemoryMirror:
             return path.relative_to(self.workspace_root)
         return path
 
-    def rebuild_from_store(self, store: MemoryStore, namespace: str) -> MemoryNamespaceState:
+    def rebuild_from_store(
+        self, store: MemoryStore, namespace: str, *, generation_result_id: str | None = None
+    ) -> MemoryNamespaceState:
         """在 store 的短发布事务内现读并发布全部分类正文。"""
-        return store.publish_projection(namespace, self._publish_snapshot)
+        before: MemoryNamespaceState | None = None
+        documents: list[MemoryPublicationDocument] = []
 
-    def _publish_snapshot(self, snapshot: MemoryNamespaceSnapshot) -> None:
+        def publish(snapshot: MemoryNamespaceSnapshot) -> None:
+            nonlocal before
+            before = snapshot.state
+            self._publish_snapshot(snapshot, documents)
+
+        try:
+            state = store.publish_projection(namespace, publish)
+        except Exception as exc:
+            if before is not None:
+                store.record_publication(
+                    MemoryPublicationRecord(
+                        kind="projection",
+                        namespace=namespace,
+                        item_revision=before.item_revision,
+                        projection_revision=before.projection_revision,
+                        status="unconfirmed" if len(documents) == len(BODY_PATHS) else "failed",
+                        documents=tuple(documents),
+                        generation_result_id=generation_result_id,
+                        error=str(exc),
+                    )
+                )
+            raise
+        store.record_publication(
+            MemoryPublicationRecord(
+                kind="projection",
+                namespace=namespace,
+                item_revision=state.item_revision,
+                projection_revision=state.projection_revision,
+                status="published",
+                documents=tuple(documents),
+                generation_result_id=generation_result_id,
+            )
+        )
+        return state
+
+    def _publish_snapshot(
+        self, snapshot: MemoryNamespaceSnapshot, documents: list[MemoryPublicationDocument]
+    ) -> None:
         """发布当前锁内完整快照，每个分类文件携带同一来源版本。"""
         namespace = snapshot.state.namespace
         prefix = f"namespaces/{namespace_key(namespace)}"
@@ -63,6 +104,11 @@ class FileMemoryMirror:
             items = tuple(item for item in snapshot.items if target_for_item(item) == target)
             content = self._render_body(namespace, snapshot.state.item_revision, target, items)
             self._atomic_replace(f"{prefix}/{target}", content)
+            documents.append(
+                MemoryPublicationDocument(
+                    path=str(self.namespace_directory(namespace) / target), text=content
+                )
+            )
 
     def read_overview(self, namespace: str) -> tuple[int, str, str] | None:
         """读回规定格式的完整概览和知识范围；缺少文件返回 None。"""
@@ -82,7 +128,7 @@ class FileMemoryMirror:
             or not facts.startswith(f"# Memory：{namespace}\n\n## 核心事实\n\n")
             or not marker
             or not navigation.startswith(scope_header)
-            or not navigation[len(scope_header):].strip()
+            or not navigation[len(scope_header) :].strip()
         ):
             raise IrisMemoryError("memory 概览格式不完整，请显式刷新概览", path=str(path))
         return revision, content, navigation.strip() + "\n"
@@ -92,6 +138,8 @@ class FileMemoryMirror:
         store: MemoryStore,
         snapshot: MemoryNamespaceSnapshot,
         content: MemoryOverviewContent,
+        *,
+        generation_result_id: str | None = None,
     ) -> tuple[bool, MemoryNamespaceState]:
         """短发布锁内比较来源版本，原子发布完整的双段概览。"""
         namespace = snapshot.state.namespace
@@ -103,8 +151,10 @@ class FileMemoryMirror:
             f"{KNOWLEDGE_SCOPE_MARKER}\n"
             f"## 可查询的知识\n\n{content.knowledge_scope.strip()}\n"
         )
+        documents: tuple[MemoryPublicationDocument, ...] = ()
 
         def publish(state: MemoryNamespaceState) -> tuple[bool, MemoryNamespaceState]:
+            nonlocal documents
             path = self.namespace_directory(namespace) / "Memory.md"
             try:
                 with path.open(encoding="utf-8") as previous:
@@ -116,9 +166,38 @@ class FileMemoryMirror:
             if previous_revision is not None and previous_revision > revision:
                 return False, state
             self._atomic_replace(f"namespaces/{namespace_key(namespace)}/Memory.md", rendered)
+            documents = (MemoryPublicationDocument(path=str(path), text=rendered),)
             return True, state
 
-        return store.publish_overview(namespace, publish)
+        try:
+            published, state = store.publish_overview(namespace, publish)
+        except Exception as exc:
+            store.record_publication(
+                MemoryPublicationRecord(
+                    kind="overview",
+                    namespace=namespace,
+                    item_revision=revision,
+                    projection_revision=snapshot.state.projection_revision,
+                    status="unconfirmed" if documents else "failed",
+                    documents=documents,
+                    generation_result_id=generation_result_id,
+                    error=str(exc),
+                )
+            )
+            raise
+        store.record_publication(
+            MemoryPublicationRecord(
+                kind="overview",
+                namespace=namespace,
+                item_revision=revision,
+                projection_revision=state.projection_revision,
+                status="published" if published else "conflict",
+                documents=documents,
+                generation_result_id=generation_result_id,
+                error=None if published else "已有更新版本",
+            )
+        )
+        return published, state
 
     def _render_body(
         self, namespace: str, revision: int, target: str, items: Sequence[MemoryItem]

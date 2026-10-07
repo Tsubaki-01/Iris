@@ -856,7 +856,9 @@ async def dream(
         if committed:
             state = await service.ageneration_state(namespace, scope=scope)
             if state.item_revision != snapshot.item_revision:
-                await service.run_async_io(lambda: service._rebuild_committed(namespace))
+                await service.run_async_io(
+                    lambda: service._rebuild_committed(namespace, generation_result_id=result.id)
+                )
         state = await service.ageneration_state(namespace, scope=scope)
         return result.model_copy(
             update={

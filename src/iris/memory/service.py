@@ -38,6 +38,14 @@ from .generation_models import (
     MemoryGenerationConfig,
     MemoryMaintenanceScope,
     MemorySource,
+    ObservationState,
+)
+from .history import (
+    EpisodePage,
+    GenerationResultPage,
+    MemoryHistoryCursor,
+    MemoryPublicationPage,
+    MemoryPublicationRecord,
 )
 from .mirror import FileMemoryMirror
 from .models import (
@@ -59,6 +67,7 @@ from .models import (
     MemorySearchResponse,
     MemorySourceType,
     MemoryWriteInput,
+    _new_id,
 )
 from .overview import build_overview_request, complete_overview_content
 from .store import MemoryStore
@@ -631,6 +640,70 @@ class MemoryService:
     #           Context & Helpers
     # ==========================================
     # region
+    def list_episodes(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> EpisodePage:
+        """读取全部原始经历，包括已消费的材料。"""
+        return self.store.list_episodes(namespace, after=after, limit=limit)
+
+    async def alist_episodes(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> EpisodePage:
+        """异步读取原始经历历史页。"""
+        return await self.run_async_io(
+            lambda: self.list_episodes(namespace, after=after, limit=limit)
+        )
+
+    def list_generation_results(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> GenerationResultPage:
+        """读取全部阶段结果，保留失败和已完成轮次。"""
+        return self.store.list_generation_results(namespace, after=after, limit=limit)
+
+    async def alist_generation_results(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> GenerationResultPage:
+        """异步读取阶段结果历史页。"""
+        return await self.run_async_io(
+            lambda: self.list_generation_results(namespace, after=after, limit=limit)
+        )
+
+    def get_observation(self, namespace: str, observation_id: str) -> ObservationState | None:
+        """读取原观察和当前处理去向。"""
+        return self.store.get_observation(namespace, observation_id)
+
+    async def aget_observation(
+        self, namespace: str, observation_id: str
+    ) -> ObservationState | None:
+        """异步读取一条观察。"""
+        return await self.run_async_io(lambda: self.get_observation(namespace, observation_id))
+
+    def list_publications(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> MemoryPublicationPage:
+        """读取原发布 owner 保存的正文版本历史。"""
+        return self.store.list_publications(namespace, after=after, limit=limit)
+
+    async def alist_publications(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> MemoryPublicationPage:
+        """异步读取发布记录页。"""
+        return await self.run_async_io(
+            lambda: self.list_publications(namespace, after=after, limit=limit)
+        )
+
+    def get_publication(
+        self, namespace: str, publication_id: str
+    ) -> MemoryPublicationRecord | None:
+        """按 namespace 和发布 ID 读取当时的实际正文。"""
+        return self.store.get_publication(namespace, publication_id)
+
+    async def aget_publication(
+        self, namespace: str, publication_id: str
+    ) -> MemoryPublicationRecord | None:
+        """异步读取一份发布产物。"""
+        return await self.run_async_io(lambda: self.get_publication(namespace, publication_id))
+
     def file_access(self, read_namespaces: Sequence[str]) -> MemoryFileAccess | None:
         """提供通用文件工具所需的当前只读路径和版本接口。"""
         if self.mirror is None:
@@ -696,6 +769,7 @@ class MemoryService:
             raise IrisMemoryError("memory 概览生成依赖未配置", namespace=namespace)
         started = perf_counter()
         snapshot = await self.run_async_io(lambda: self.store.read_namespace_snapshot(namespace))
+        result_id = _new_id()
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         try:
             response = None
@@ -729,7 +803,9 @@ class MemoryService:
             )
             await before_generation_commit()
             published, state = await self.run_async_io(
-                lambda: self.mirror.publish_overview(self.store, snapshot, content),
+                lambda: self.mirror.publish_overview(
+                    self.store, snapshot, content, generation_result_id=result_id
+                ),
                 complete_on_cancel=True,
             )
         except (Exception, asyncio.CancelledError) as exc:
@@ -741,6 +817,7 @@ class MemoryService:
                     elapsed_seconds=perf_counter() - started,
                 )
             failure = GenerationResult(
+                id=result_id,
                 namespace=namespace,
                 stage="overview",
                 status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
@@ -755,6 +832,7 @@ class MemoryService:
             self._observe_generation_result(failure)
             raise
         result = GenerationResult(
+            id=result_id,
             namespace=namespace,
             stage="overview",
             status="completed",
@@ -781,11 +859,15 @@ class MemoryService:
             elapsed_seconds=perf_counter() - started,
         )
 
-    def _rebuild_committed(self, namespace: str) -> None:
+    def _rebuild_committed(
+        self, namespace: str, *, generation_result_id: str | None = None
+    ) -> None:
         """数据库成功后同步完整正文，失败由版本状态对读取方明示。"""
         if self.mirror is not None:
             try:
-                self.mirror.rebuild_from_store(self.store, namespace)
+                self.mirror.rebuild_from_store(
+                    self.store, namespace, generation_result_id=generation_result_id
+                )
             except Exception:
                 logger.warning(
                     "memory mirror 自动重建失败；数据库写入已提交 namespace=%s",

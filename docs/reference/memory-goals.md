@@ -196,6 +196,22 @@ register_memory_tools(
 | `file_access(read_namespaces)` | `MemoryFileAccess \| None`；供通用文件工具使用的只读路径/版本能力 |
 | `list_pending_sources(namespace)` / `await alist_pending_sources(...)` | `tuple[MemorySource, ...]`；待消费输入的 lifecycle 来源 |
 | `await maintain_cycle(namespace, *, scope, cycle_id)` | `MemoryCycleResult`；一个有界周期的实际阶段结果、周期 ID 和剩余积压，调度器调用入口 |
+| `list_episodes(namespace, *, after=None, limit=50)` / `await alist_episodes(...)` | `EpisodePage`；含已消费原文的完整 Episode 历史 |
+| `list_generation_results(namespace, *, after=None, limit=50)` / `await alist_generation_results(...)` | `GenerationResultPage`；完整阶段历史，包含失败、冲突及旧轮次 |
+| `get_observation(namespace, observation_id)` / `await aget_observation(...)` | `ObservationState \| None`；原始观察及处理去向 |
+| `list_publications(namespace, *, after=None, limit=50)` / `await alist_publications(...)` | `MemoryPublicationPage`；分类与概览的发布记录 |
+| `get_publication(namespace, publication_id)` / `await aget_publication(...)` | `MemoryPublicationRecord \| None`；当时的实际正文，按 namespace 隔离 |
+
+上述分页结果提供 items 和 next_cursor。`MemoryHistoryCursor(created_at, id)` 按创建时间和
+原始 ID 升序定位；limit 为 1–100，由 MemoryStore 唯一校验，Service 直接委托。
+Memory SQLite 当前为 schema 6，旧 schema 在初始化时拒绝，不迁移或回填历史发布记录。
+
+`MemoryPublicationRecord` 包含 publication_id、kind（projection/overview）、namespace、
+item_revision、projection_revision、generation_result_id、created_at、status、documents 和 error。
+每份 document 保存 path/text。status 为 published、failed、conflict 或 unconfirmed：
+部分文件写入后失败只保留已写正文，已有新概览时为 conflict；文件完成而版本提交未确认时为
+unconfirmed。只有完整发布完成才标 published。记录与文件不具有跨文件 ACID；旧 Item 前后值仍读
+`MemoryEvent.before/after`，发布也不表示某次 Run 已采用它。
 
 `GenerationResult` 有 `id`、`namespace`、`stage`（capture/flush/dream/overview）、`status`（completed/empty/failed/cancelled/conflict/blocked）、`usage`、`elapsed_seconds`、`error`、`input_ids`、`consumed_ranges`、`counts`、`item_revision`、`has_more`、`created_at`。这些成本独立于主 Run usage。
 

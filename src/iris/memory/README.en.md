@@ -62,7 +62,7 @@ enabled, it returns the injected object unchanged or builds a SQLite service if 
 An injected service keeps its store, mirror, provider/model, and IO mode. Configured memory root and
 database paths must resolve inside the caller-supplied workspace. Default local search uses SQLite FTS5: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
-New databases use schema version 5; older versions are rejected at initialization without migration,
+New databases use schema version 6; older versions are rejected at initialization without migration,
 version overwrite, or deletion. Configured SQLite services use `MemoryIOExecutionMode.THREAD`;
 directly constructed services default to `INLINE`, preserving the host's execution choice.
 Each THREAD async read or write runs connection setup, SQL, and result construction in one worker job.
@@ -84,6 +84,11 @@ stages without a model request produce no model span. A stage failure marks its 
 without changing an already successful model call. Cancellation after commit retains the committed
 stage status. Standalone SDK calls and foreground overview generation retain actual model traces
 without adding maintenance results to ordinary host spans or creating cycles.
+History APIs include `list_episodes`, `list_generation_results`, `get_observation`,
+`list_publications`, and `get_publication`, with async counterparts on the service.
+Publication records retain actual document bodies after files are overwritten; partial failures and
+unconfirmed state commits are distinct from complete publication. Item changes still use MemoryEvent.
+
 `maintain_cycle(namespace, scope=..., cycle_id=...)` returns a `MemoryCycleResult` containing
 the actual stage results and remaining work. An empty cycle has no generated results.
 

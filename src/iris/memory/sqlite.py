@@ -25,6 +25,14 @@ from .generation_models import (
     MemorySource,
     ObservationState,
 )
+from .history import (
+    EpisodePage,
+    GenerationResultPage,
+    MemoryHistoryCursor,
+    MemoryHistoryPage,
+    MemoryPublicationPage,
+    MemoryPublicationRecord,
+)
 from .models import (
     MemoryActor,
     MemoryCategory,
@@ -50,7 +58,7 @@ PublicationT = TypeVar("PublicationT")
 
 
 class SQLiteMemoryStore:
-    """保留 FTS 读取面、使用 schema v5 的本地记忆存储。"""
+    """保留 FTS 读取面、使用 schema v6 的本地记忆存储。"""
 
     def __init__(self, path: str | Path) -> None:
         """只接受新空库或当前 schema，不迁移已有数据库。"""
@@ -75,16 +83,22 @@ class SQLiteMemoryStore:
                 row = connection.execute(
                     "SELECT value FROM memory_schema WHERE key='schema_version'"
                 ).fetchone()
-                if row is None or row["value"] != "5":
+                if row is None or row["value"] != "6":
                     raise IrisMemoryError(
-                        "SQLite memory 版本不受支持，要求 schema version 5",
+                        "SQLite memory 版本不受支持，要求 schema version 6",
                         path=str(self.path),
                         version=None if row is None else row["value"],
                     )
                 return
             statements = (
                 "CREATE TABLE memory_schema (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-                "INSERT INTO memory_schema VALUES ('schema_version','5')",
+                "INSERT INTO memory_schema VALUES ('schema_version','6')",
+                (
+                    "CREATE TABLE memory_publications (id TEXT PRIMARY KEY,namespace TEXT NOT NULL,"
+                    "created_at TEXT NOT NULL,payload TEXT NOT NULL)"
+                ),
+                "CREATE INDEX idx_memory_publications_history "
+                "ON memory_publications(namespace,created_at,id)",
                 (
                     "CREATE TABLE memory_items (id TEXT PRIMARY KEY, namespace "
                     "TEXT NOT NULL, category TEXT NOT NULL, kind TEXT NOT NULL,"
@@ -161,6 +175,10 @@ class SQLiteMemoryStore:
                     "KEY,namespace TEXT NOT NULL,stage TEXT NOT NULL,created_at"
                     " TEXT NOT NULL,payload TEXT NOT NULL)"
                 ),
+                "CREATE INDEX idx_memory_episodes_history "
+                "ON memory_episodes(namespace,created_at,id)",
+                "CREATE INDEX idx_memory_results_history "
+                "ON memory_generation_results(namespace,created_at,id)",
             )
             for statement in statements:
                 connection.execute(statement)
@@ -636,6 +654,87 @@ class SQLiteMemoryStore:
             sql += " ORDER BY created_at,id LIMIT ?"
             params.append(_validated_list_limit(limit))
             return [_row_to_observation_state(row) for row in connection.execute(sql, params)]
+
+    def get_observation(self, namespace: str, observation_id: str) -> ObservationState | None:
+        """读取原始观察及其处理状态，不按 pending 过滤历史。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_observations WHERE namespace=? AND id=?",
+                (namespace, observation_id),
+            ).fetchone()
+            return _row_to_observation_state(row) if row is not None else None
+
+    def _history_rows(
+        self, table: str, namespace: str, after: MemoryHistoryCursor | None, limit: int
+    ) -> tuple[list[sqlite3.Row], MemoryHistoryCursor | None]:
+        """固定内部表的共同分页读取；limit 在 store 边界校验一次。"""
+        limit = _validated_list_limit(limit)
+        sql = f"SELECT * FROM {table} WHERE namespace=?"
+        params: list[Any] = [namespace]
+        if after is not None:
+            sql += " AND (created_at,id)>(?,?)"
+            params.extend((after.created_at, after.id))
+        sql += " ORDER BY created_at,id LIMIT ?"
+        params.append(limit + 1)
+        with self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        cursor = (
+            MemoryHistoryCursor(rows[limit - 1]["created_at"], rows[limit - 1]["id"])
+            if len(rows) > limit
+            else None
+        )
+        return rows[:limit], cursor
+
+    def list_episodes(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> EpisodePage:
+        """分页读取含已消费内容的完整原始经历。"""
+        rows, cursor = self._history_rows("memory_episodes", namespace, after, limit)
+        return MemoryHistoryPage(
+            tuple(MemoryEpisode.model_validate_json(row["payload"]) for row in rows), cursor
+        )
+
+    def list_generation_results(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> GenerationResultPage:
+        """分页读取全部阶段执行结果，不只保留每阶段 latest。"""
+        rows, cursor = self._history_rows("memory_generation_results", namespace, after, limit)
+        return MemoryHistoryPage(
+            tuple(GenerationResult.model_validate_json(row["payload"]) for row in rows), cursor
+        )
+
+    def list_publications(
+        self, namespace: str, *, after: MemoryHistoryCursor | None = None, limit: int = 50
+    ) -> MemoryPublicationPage:
+        """分页读取由真实文件发布 owner 保存的产物。"""
+        rows, cursor = self._history_rows("memory_publications", namespace, after, limit)
+        return MemoryHistoryPage(
+            tuple(MemoryPublicationRecord.model_validate_json(row["payload"]) for row in rows),
+            cursor,
+        )
+
+    def get_publication(
+        self, namespace: str, publication_id: str
+    ) -> MemoryPublicationRecord | None:
+        """按资源和原始 ID 读取正文版本，不重读当前文件。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT payload FROM memory_publications WHERE namespace=? AND id=?",
+                (namespace, publication_id),
+            ).fetchone()
+            return (
+                MemoryPublicationRecord.model_validate_json(row["payload"])
+                if row is not None
+                else None
+            )
+
+    def record_publication(self, record: MemoryPublicationRecord) -> None:
+        """持久保存确认、失败或未确认的发布事实。"""
+        with self._connection() as connection:
+            connection.execute(
+                "INSERT INTO memory_publications VALUES (?,?,?,?)",
+                (record.publication_id, record.namespace, record.created_at, _dump_model(record)),
+            )
 
     def read_dream_snapshot(
         self,
