@@ -172,6 +172,7 @@ class HarnessSubagentController:
                     parent_tool_call_id=tool.tool_call_id,
                     expected_parent_tool_version=tool.version,
                     child_create=child_create,
+                    agent_selector=route.selector,
                 )
             )
             if link.child_run_id == child_create.request.run_id:

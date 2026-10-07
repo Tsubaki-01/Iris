@@ -622,7 +622,7 @@ start、resume、subagent parent resume 和 recover 都从 durable run 传递 `r
 有效 runtime memory service 存在时，工具循环、后续 run、HITL 与恢复重放已提交的概览窗口，
 不重新查询或加载更新后的文件。
 成功压缩时新摘要和新窗口同事务替换，失败时保留原状态；fork 的目标窗口未初始化，首次输入
-重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 11，checkpoint 为 4，
+重新采用。窗口文本不另存一份到 checkpoint。lifecycle SQLite 使用 schema 12，checkpoint 为 4，
 旧库/旧 checkpoint 按既有边界拒绝，不迁移或自动删除数据。
 
 新 runtime 未绑定 memory service 时，普通请求、HITL 与恢复都不把已保存概览追加到 system。

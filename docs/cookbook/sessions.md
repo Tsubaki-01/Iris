@@ -149,6 +149,10 @@ SessionManager 自己的排队输入和投递回执不持久化。新建 Manager
 
 ## 查历史与创建分支
 
+使用 `runner.list_sessions()` 发现已有根会话，再用 `list_runs(session_id)` 分页查询所有
+状态的运行。调用 `list_child_runs(parent_run_id)` 展开其直接子任务；每页的 next_cursor
+原样传给下一次 after。选择历史记录只需要这些读取，不调用 restore 或 submit。
+
 `SessionHistory(runner.store)` 借用与 Runner 相同的 Store。三个操作分别用于选择位置、预览内容和创建新 Session：
 
 - `list_fork_points(session_id, after=None, limit=50)`：按 `(created_at, run_id)` 升序列出终态顶层 Run；下一页传上次的 `next_cursor`。

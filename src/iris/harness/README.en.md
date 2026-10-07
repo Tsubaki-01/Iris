@@ -724,7 +724,7 @@ With an effective runtime memory service, tool loops, later runs, HITL, and reco
 overview without re-querying or reloading updated files. Successful compaction replaces summary and window in the same transaction;
 failure retains the old state. Fork targets start without an adopted window and choose one at their
 first input. Checkpoints bind the session revision without duplicating window text. Lifecycle SQLite
-uses schema 11 and checkpoint version 4; old formats are rejected without migration or cleanup.
+uses schema 12 and checkpoint version 4; old formats are rejected without migration or cleanup.
 
 A new runtime without a memory service omits the saved overview from system messages during ordinary
 requests, HITL, and recovery. This does not mutate the saved window or add a session revision change;

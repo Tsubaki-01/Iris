@@ -134,7 +134,7 @@ SessionManager 决定是否启动下一轮；提示要求遵守目标规定的�
 
 Goal 与 Run 使用同一个 InMemoryLifecycleStore 或 SQLiteStore。创建可以早于首次聊天，
 不写聊天历史、不占 lane；Goal 控制不会改变 session history revision。
-SQLite 当前 lifecycle schema 为 11，不兼容旧库且不迁移；使用新数据库路径，旧文件不重置。
+SQLite 当前 lifecycle schema 为 12，不兼容旧库且不迁移；使用新数据库路径，旧文件不重置。
 这个 schema 约束在 Goal 关闭时也适用。
 
 默认 child 不继承 Goal，显式为 child 开启会报配置错误；history fork 不复制当前目标和绑定。

@@ -1,4 +1,4 @@
-"""精确 lifecycle schema v11 的同步 SQLite store。"""
+"""精确 lifecycle schema v12 的同步 SQLite store。"""
 
 from __future__ import annotations
 
@@ -44,13 +44,20 @@ from ..hitl.models import (
     QuestionInteractionResponse,
 )
 from ..lifecycle.history import (
+    ChildRunPage,
+    ChildRunSummary,
     ForkPointCursor,
     ForkPointPage,
+    RunCursor,
     RunHistorySnapshot,
     RunMessageSlice,
+    RunPage,
     SessionContextSnapshot,
+    SessionCursor,
     SessionHeader,
     SessionMessagePage,
+    SessionPage,
+    SessionSummary,
 )
 from ..lifecycle.models import (
     ActivationKind,
@@ -80,6 +87,7 @@ from ..lifecycle.models import (
     SubagentRunLink,
     ToolCallPhase,
     project_result,
+    snapshot_run,
 )
 from ..lifecycle.store import (
     AdmitChildRun,
@@ -117,6 +125,7 @@ from ..lifecycle.transitions import (
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._compaction import add_compaction_usage, validate_compaction_commit
+from ._navigation import child_run_page, run_page, session_page
 from ._serialization import jsonable as _jsonable
 from ._session_history import (
     build_fork_point_page,
@@ -494,8 +503,7 @@ class SQLiteStore:
     ) -> SubagentRunLink | None:
         """从 durable row 的解析边界加载 link。"""
         row = connection.execute(
-            "SELECT parent_run_id, parent_tool_call_id, child_run_id FROM subagent_run_links "
-            "WHERE parent_run_id = ? AND parent_tool_call_id = ?",
+            "SELECT * FROM subagent_run_links WHERE parent_run_id = ? AND parent_tool_call_id = ?",
             (run_id, tool_call_id),
         ).fetchone()
         return (
@@ -567,13 +575,19 @@ class SQLiteStore:
                         parent_run_id=command.parent_run_id,
                         parent_tool_call_id=command.parent_tool_call_id,
                         child_run_id=child.run.run_id,
+                        agent_selector=command.agent_selector,
                     )
                     _execute(
                         connection,
                         "INSERT INTO subagent_run_links "
-                        "(parent_run_id, parent_tool_call_id, child_run_id) "
-                        "VALUES (?, ?, ?)",
-                        (link.parent_run_id, link.parent_tool_call_id, link.child_run_id),
+                        "(parent_run_id, parent_tool_call_id, child_run_id, agent_selector) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            link.parent_run_id,
+                            link.parent_tool_call_id,
+                            link.child_run_id,
+                            link.agent_selector,
+                        ),
                     )
                     connection.commit()
                     return link
@@ -1171,6 +1185,101 @@ class SQLiteStore:
             outcome=run.stop_reason,
             messages=tuple(messages),
         )
+
+    def list_sessions(self, *, after: SessionCursor | None = None, limit: int = 50) -> SessionPage:
+        """在一条有限 SQL 查询中读取根会话及最新 Run。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+
+        def read(connection: sqlite3.Connection) -> SessionPage:
+            query = """SELECT s.session_id, s.revision, s.message_count,
+                lane.run_id AS current_run_id, latest.run_id AS latest_run_id,
+                latest.created_at AS latest_run_at, s.forked_from_run_id
+                FROM sessions s
+                LEFT JOIN session_run_lanes lane ON lane.session_id = s.session_id
+                LEFT JOIN agent_runs latest ON latest.run_id = (
+                    SELECT r.run_id FROM agent_runs r WHERE r.session_id = s.session_id
+                    ORDER BY r.created_at DESC, r.run_id DESC LIMIT 1
+                )
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM subagent_run_links link
+                    JOIN agent_runs child ON child.run_id = link.child_run_id
+                    WHERE child.session_id = s.session_id
+                )"""
+            parameters: tuple[object, ...] = ()
+            if after is not None:
+                query += " AND (COALESCE(latest.created_at, ''), s.session_id) < (?, ?)"
+                parameters += (
+                    after.latest_run_at.isoformat() if after.latest_run_at else "",
+                    after.session_id,
+                )
+            query += " ORDER BY latest.created_at DESC, s.session_id DESC LIMIT ?"
+            rows = connection.execute(query, (*parameters, limit + 1))
+            items = [
+                _decode_row(
+                    _session_summary_from_row, row, path=self.path, operation="list_sessions"
+                )
+                for row in rows
+            ]
+            return session_page(items, limit)
+
+        return self._read("list_sessions", read)
+
+    def list_runs(
+        self, session_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> RunPage:
+        """在 SQL 中按身份与游标筛选全部 phase，再限制读取条数。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+
+        def read(connection: sqlite3.Connection) -> RunPage:
+            query = "SELECT * FROM agent_runs WHERE session_id = ?"
+            parameters: tuple[object, ...] = (session_id,)
+            if after is not None:
+                query += " AND (created_at, run_id) > (?, ?)"
+                parameters += (after.created_at.isoformat(), after.run_id)
+            query += " ORDER BY created_at, run_id LIMIT ?"
+            rows = connection.execute(query, (*parameters, limit + 1))
+            items = [
+                snapshot_run(_decode_row(_row_to_run, row, path=self.path, operation="list_runs"))
+                for row in rows
+            ]
+            return run_page(items, limit)
+
+        return self._read("list_runs", read)
+
+    def list_child_runs(
+        self, parent_run_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> ChildRunPage:
+        """分页读取直接 child 的原身份与 admission selector。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+
+        def read(connection: sqlite3.Connection) -> ChildRunPage:
+            query = """SELECT r.*, link.parent_run_id, link.parent_tool_call_id,
+                link.agent_selector FROM subagent_run_links link
+                JOIN agent_runs r ON r.run_id = link.child_run_id
+                WHERE link.parent_run_id = ?"""
+            parameters: tuple[object, ...] = (parent_run_id,)
+            if after is not None:
+                query += " AND (r.created_at, r.run_id) > (?, ?)"
+                parameters += (after.created_at.isoformat(), after.run_id)
+            query += " ORDER BY r.created_at, r.run_id LIMIT ?"
+            rows = connection.execute(query, (*parameters, limit + 1))
+            items = [
+                ChildRunSummary(
+                    snapshot_run(
+                        _decode_row(_row_to_run, row, path=self.path, operation="list_child_runs")
+                    ),
+                    row["parent_run_id"],
+                    row["parent_tool_call_id"],
+                    row["agent_selector"],
+                )
+                for row in rows
+            ]
+            return child_run_page(items, limit)
+
+        return self._read("list_child_runs", read)
 
     def list_fork_points(
         self,
@@ -3819,7 +3928,16 @@ def _subagent_link_from_row(row: sqlite3.Row) -> SubagentRunLink:
         parent_run_id=row["parent_run_id"],
         parent_tool_call_id=row["parent_tool_call_id"],
         child_run_id=row["child_run_id"],
+        agent_selector=row["agent_selector"],
     )
+
+
+_SESSION_SUMMARY_ADAPTER = TypeAdapter(SessionSummary)
+
+
+def _session_summary_from_row(row: sqlite3.Row) -> SessionSummary:
+    """在 SQLite 读取边界解析导航 DTO。"""
+    return _SESSION_SUMMARY_ADAPTER.validate_python(dict(row))
 
 
 def _row_to_run(row: sqlite3.Row) -> RunRecord:

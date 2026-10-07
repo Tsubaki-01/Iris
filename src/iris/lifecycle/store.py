@@ -17,13 +17,18 @@ from ..hitl.models import HumanInteraction, HumanInteractionResponse
 from ..message.message import Msg
 from ..tools.base import ToolResult
 from .history import (
+    ChildRunPage,
     ForkPointCursor,
     ForkPointPage,
+    RunCursor,
     RunHistorySnapshot,
     RunMessageSlice,
+    RunPage,
     SessionContextSnapshot,
+    SessionCursor,
     SessionHeader,
     SessionMessagePage,
+    SessionPage,
 )
 from .models import (
     ActivationKind,
@@ -89,6 +94,7 @@ class AdmitChildRun:
     parent_tool_call_id: str
     expected_parent_tool_version: int
     child_create: CreateRun
+    agent_selector: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -375,6 +381,22 @@ class LifecycleStore(Protocol):
     def load_run_control(self, run_id: str) -> RunControlSnapshot | None: ...
 
     def load_session(self, session_id: str) -> SessionSnapshot: ...
+
+    def list_sessions(self, *, after: SessionCursor | None = None, limit: int = 50) -> SessionPage:
+        """按最新运行降序查询根会话；过滤与 limit 均由 store 执行。"""
+        ...
+
+    def list_runs(
+        self, session_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> RunPage:
+        """按创建时间和 Run ID 升序查询当前会话全部 phase。"""
+        ...
+
+    def list_child_runs(
+        self, parent_run_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> ChildRunPage:
+        """按创建时间和 Run ID 升序查询直接 child 的持久关系。"""
+        ...
 
     def load_session_header(self, session_id: str) -> SessionHeader: ...
 

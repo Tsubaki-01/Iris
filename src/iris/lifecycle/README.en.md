@@ -3,7 +3,7 @@
 # `iris.lifecycle`
 
 Public Sub Agent contracts link independent runs through
-`SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id)` while the parent tool stays
+`SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)` while the parent tool stays
 PREPARED. The store adds `AdmitChildRun`, `RebindSubagentProxy`, `FinalizeSubagentResult`, and an
 exact link point read. Rebind returns complete WAITING `RunCommit` facts. WAITING finalize returns
 the ACTIVE run/checkpoint bound to a fresh RESUME activation in the same commit, without an extra

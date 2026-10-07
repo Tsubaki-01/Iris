@@ -58,7 +58,12 @@ _COLUMNS = {
         "settled_at",
         "applied_report_call_id",
     ],
-    "subagent_run_links": ["parent_run_id", "parent_tool_call_id", "child_run_id"],
+    "subagent_run_links": [
+        "parent_run_id",
+        "parent_tool_call_id",
+        "child_run_id",
+        "agent_selector",
+    ],
     "lifecycle_schema": ["component", "version", "source_id"],
     "sessions": [
         "session_id",
@@ -175,7 +180,7 @@ def _message_json(text: str = "hello") -> str:
     return json.dumps(Msg.user(text).model_dump(mode="json"), ensure_ascii=False)
 
 
-def test_empty_database_creates_exact_v11_schema_and_reopens(tmp_path: Path) -> None:
+def test_empty_database_creates_exact_v12_schema_and_reopens(tmp_path: Path) -> None:
     path = tmp_path / "lifecycle.db"
     path.touch()
 
@@ -222,7 +227,7 @@ def test_empty_database_creates_exact_v11_schema_and_reopens(tmp_path: Path) -> 
         "one_current_goal_per_session",
     }
     assert triggers == set()
-    assert identity == [("agent_lifecycle", 11)]
+    assert identity == [("agent_lifecycle", 12)]
     assert columns == _COLUMNS
     assert [(row[2], row[3], row[4]) for row in message_fks] == [
         ("sessions", "session_id", "session_id")

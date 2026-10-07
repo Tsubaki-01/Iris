@@ -2514,6 +2514,7 @@ def _admit_child(store: LifecycleStore, parent: RunCommit) -> AdmitChildRun:
         parent_tool_call_id="delegate",
         expected_parent_tool_version=1,
         child_create=_create_command(),
+        agent_selector="researcher",
     )
     store.admit_child_run(command)
     return command
@@ -2649,12 +2650,16 @@ def test_admit_child_run_is_atomic_and_parent_stays_prepared(
     _admit_child(store, parent)
     link = store.load_subagent_link("parent", "delegate")
     assert link == SubagentRunLink(
-        parent_run_id="parent", parent_tool_call_id="delegate", child_run_id="run-1"
+        parent_run_id="parent",
+        parent_tool_call_id="delegate",
+        child_run_id="run-1",
+        agent_selector="researcher",
     )
     assert link.model_dump() == {
         "parent_run_id": "parent",
         "parent_tool_call_id": "delegate",
         "child_run_id": "run-1",
+        "agent_selector": "researcher",
     }
     assert store.load_run("parent") == parent.run
     assert store.load_tool_call("parent", "delegate").phase.value == "prepared"
@@ -2697,6 +2702,7 @@ def test_admit_child_run_failure_leaves_no_child_or_link(lifecycle_store: Lifecy
         parent_tool_call_id="delegate",
         expected_parent_tool_version=1,
         child_create=_create_command(),
+        agent_selector="researcher",
     )
     with pytest.raises(IrisRunConflictError):
         store.admit_child_run(command)

@@ -2013,6 +2013,7 @@ def _admit_durable_child(runner: AgentRunner) -> str:
             parent_tool_call_id="delegate",
             expected_parent_tool_version=1,
             child_create=child_create,
+            agent_selector="researcher",
         )
     ).child_run_id
 

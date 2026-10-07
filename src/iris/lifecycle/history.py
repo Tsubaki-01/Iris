@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ..message.message import Msg, Role
-from .models import RunStopReason, SessionCompaction, SessionContextWindow, SessionToolDiscovery
+from .models import (
+    RunSnapshot,
+    RunStopReason,
+    SessionCompaction,
+    SessionContextWindow,
+    SessionToolDiscovery,
+)
 
 
 def is_ordinary_user(message: Msg) -> bool:
@@ -101,7 +107,77 @@ class SessionMessagePage:
     total_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class SessionCursor:
+    """按最新 Run 时间和 session ID 降序分页的位置。"""
+
+    latest_run_at: datetime | None
+    session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    """不包含正文的根会话导航信息。"""
+
+    session_id: str
+    revision: int
+    message_count: int
+    current_run_id: str | None
+    latest_run_id: str | None
+    latest_run_at: datetime | None
+    forked_from_run_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPage:
+    """一次读取快照中的根会话页，未运行的持久 fork 排在末尾。"""
+
+    items: tuple[SessionSummary, ...]
+    next_cursor: SessionCursor | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunCursor:
+    """按创建时间和 Run ID 升序分页的位置。"""
+
+    created_at: datetime
+    run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunPage:
+    """包含所有 phase 的运行页，不复用 fork-only 过滤。"""
+
+    items: tuple[RunSnapshot, ...]
+    next_cursor: RunCursor | None
+
+
+@dataclass(frozen=True, slots=True)
+class ChildRunSummary:
+    """持久父工具关系、真实 selector 与 child 自身的运行快照。"""
+
+    run: RunSnapshot
+    parent_run_id: str
+    parent_tool_call_id: str
+    agent_selector: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChildRunPage:
+    """父 Run 的直接 child 页；后代按各自父 Run 继续查询。"""
+
+    items: tuple[ChildRunSummary, ...]
+    next_cursor: RunCursor | None
+
+
 __all__ = [
+    "SessionCursor",
+    "SessionSummary",
+    "SessionPage",
+    "RunCursor",
+    "RunPage",
+    "ChildRunSummary",
+    "ChildRunPage",
     "SessionHeader",
     "SessionContextSnapshot",
     "is_ordinary_user",

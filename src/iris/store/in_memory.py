@@ -13,7 +13,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import RLock
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -44,13 +44,20 @@ from ..hitl.models import (
     QuestionInteractionResponse,
 )
 from ..lifecycle.history import (
+    ChildRunPage,
+    ChildRunSummary,
     ForkPointCursor,
     ForkPointPage,
+    RunCursor,
     RunHistorySnapshot,
     RunMessageSlice,
+    RunPage,
     SessionContextSnapshot,
+    SessionCursor,
     SessionHeader,
     SessionMessagePage,
+    SessionPage,
+    SessionSummary,
 )
 from ..lifecycle.models import (
     ActivationKind,
@@ -74,6 +81,7 @@ from ..lifecycle.models import (
     SubagentRunLink,
     ToolCallPhase,
     project_result,
+    snapshot_run,
 )
 from ..lifecycle.store import (
     AdmitChildRun,
@@ -111,6 +119,7 @@ from ..lifecycle.transitions import (
 from ..message.message import Msg, TextBlock
 from ..tools.base import ToolErrorInfo, ToolResult
 from ._compaction import add_compaction_usage, validate_compaction_commit
+from ._navigation import child_run_page, run_page, session_page
 from ._session_history import (
     build_fork_point_page,
     project_fork_point,
@@ -344,6 +353,7 @@ class InMemoryLifecycleStore:
                 parent_run_id=command.parent_run_id,
                 parent_tool_call_id=command.parent_tool_call_id,
                 child_run_id=command.child_create.request.run_id,
+                agent_selector=command.agent_selector,
             )
             # RLock 保持整个 admission 原子性；普通 create 先完成全部检查再写入。
             self.create_run(command.child_create)
@@ -1656,6 +1666,98 @@ class InMemoryLifecycleStore:
                 next_index=end if end < len(messages) else None,
                 total_count=len(messages),
             )
+
+    def list_sessions(self, *, after: SessionCursor | None = None, limit: int = 50) -> SessionPage:
+        """在同一锁内按最新运行降序读取根会话摘要。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+        with self._lock:
+            children = {
+                self._runs[link.child_run_id].session_id for link in self._subagent_links.values()
+            }
+            latest: dict[str, RunRecord] = {}
+            for run in self._runs.values():
+                prior = latest.get(run.session_id)
+                if prior is None or (run.created_at, run.run_id) > (prior.created_at, prior.run_id):
+                    latest[run.session_id] = run
+            rows: list[SessionSummary] = []
+            for session_id, session in self._sessions.items():
+                if session_id in children:
+                    continue
+                last = latest.get(session_id)
+                key = (
+                    last.created_at if last is not None else datetime.min.replace(tzinfo=UTC),
+                    session_id,
+                )
+                if after is not None and key >= (
+                    after.latest_run_at or datetime.min.replace(tzinfo=UTC),
+                    after.session_id,
+                ):
+                    continue
+                rows.append(
+                    SessionSummary(
+                        session_id,
+                        session.snapshot.revision,
+                        len(session.snapshot.messages),
+                        self._lanes.get(session_id),
+                        last.run_id if last is not None else None,
+                        last.created_at if last is not None else None,
+                        session.snapshot.forked_from_run_id,
+                    )
+                )
+            rows.sort(
+                key=lambda item: (
+                    item.latest_run_at or datetime.min.replace(tzinfo=UTC),
+                    item.session_id,
+                ),
+                reverse=True,
+            )
+            return session_page(rows[: limit + 1], limit)
+
+    def list_runs(
+        self, session_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> RunPage:
+        """包含全部 phase；不加载会话正文。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+        with self._lock:
+            records = sorted(
+                (
+                    run
+                    for run in self._runs.values()
+                    if run.session_id == session_id
+                    and (
+                        after is None
+                        or (run.created_at, run.run_id) > (after.created_at, after.run_id)
+                    )
+                ),
+                key=lambda run: (run.created_at, run.run_id),
+            )
+            return run_page([snapshot_run(deepcopy(run)) for run in records[: limit + 1]], limit)
+
+    def list_child_runs(
+        self, parent_run_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> ChildRunPage:
+        """读取直接 child 及 admission 已保存的 selector。"""
+        if limit <= 0:
+            raise IrisRunStateError("limit 必须大于 0", limit=limit)
+        with self._lock:
+            rows = []
+            for link in self._subagent_links.values():
+                if link.parent_run_id != parent_run_id:
+                    continue
+                run = self._runs[link.child_run_id]
+                if after is None or (run.created_at, run.run_id) > (after.created_at, after.run_id):
+                    rows.append(
+                        ChildRunSummary(
+                            snapshot_run(deepcopy(run)),
+                            parent_run_id,
+                            link.parent_tool_call_id,
+                            link.agent_selector,
+                        )
+                    )
+            rows.sort(key=lambda item: (item.run.created_at, item.run.run_id))
+            return child_run_page(rows[: limit + 1], limit)
 
     def load_run_message_slice(
         self, run_id: str, after_count: int = 0, *, limit: int = 128

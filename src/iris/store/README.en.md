@@ -30,12 +30,12 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v11
+`SQLiteStore(path)` accepts only an absent/zero-byte database or an exact lifecycle schema v12
 database. A new database gets its parent directory and complete schema. An old schema, missing or
 extra objects, index differences, or an unknown version raises `IrisLifecycleSchemaError` before
 any write. Old databases are unsupported; choose a new database path for the new store. The
 constructor never resets or changes that file.
-Schema 11 is required even with Goal disabled; there is no legacy reader or automatic migration.
+Schema 12 is required even with Goal disabled; there is no legacy reader or automatic migration.
 
 Both implementations expose a read-only `source_id`. SQLite saves a generated UUID in
 `lifecycle_schema.source_id` at creation and preserves it across reopenings; each InMemory instance
@@ -147,7 +147,7 @@ PENDING writes check run revision and interaction version; a matching RESOLVED a
 
 `agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
 removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v11. Runs and checkpoints no longer store
+when rows are first loaded. The current database is schema v12. Runs and checkpoints no longer store
 an environment fingerprint; older schemas are not migrated or read.
 
 Schema v11 contains:
@@ -181,7 +181,7 @@ and leaves the step index, usage, and event sequence unchanged. Old commands con
 roll back the entire group, so recovery cannot observe partial input or a separately updated window.
 Checkpoint payload version is `4`, including the runtime cursor's required `visible_tool_names`
 and `todo_reminder_step`. Todo file content is not stored, and there is no Todo table.
-Lifecycle schema is `11`. Older databases or checkpoints are rejected at their respective load
+Lifecycle schema is `12`. Older databases or checkpoints are rejected at their respective load
 boundaries without migration.
 
 `SessionSnapshot.context_window=None` means uninitialized; an explicit `SessionContextWindow()`
@@ -220,7 +220,7 @@ it does not promise exactly-once external model billing across process restarts.
 The `iris.store` package exports:
 
 - `InMemoryLifecycleStore` for tests and process-local execution;
-- `SQLiteStore` as the schema-v11-only durable `LifecycleStore` implementation.
+- `SQLiteStore` as the schema-v12-only durable `LifecycleStore` implementation.
 
 Both implement the `iris.lifecycle.LifecycleStore` create/begin/reserve/commit/claim/suspend/
 resolve/finish/recover/cancel commands and run/session/lane/checkpoint/tool/interaction/event/result
@@ -253,7 +253,7 @@ start beyond the end returns an empty page; the store raises `IrisRunStateError`
 `load_run_control()` follows `load_run()` by returning `None` for an absent run.
 `list_tool_calls()` still raises `IrisRunNotFoundError` for an absent run and preserves
 `(step_index, ordinal)` ordering. These targeted reads add no extra index or connection pool; the
-schema identity is lifecycle v11.
+schema identity is lifecycle v12.
 `list_tool_calls(run_id, step_index=...)` returns only the specified model step. SQLite applies the
 filter in SQL on one connection. Prepared batches use this bounded read, while HITL resume uses an
 exact tool-call read.
@@ -300,7 +300,7 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v11, config, commands, models, and public
+belongs to runtime and is not persisted; lifecycle schema v12, config, commands, models, and public
 exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
 recovery protocol and cannot be inferred from current multiple-claim support.
 
@@ -352,7 +352,7 @@ target session with its source field, copies messages through `INSERT ... SELECT
 initializes its discovery projection from that cutoff prefix, and commits within one
 `BEGIN IMMEDIATE` transaction. Failure rolls back everything, leaving no
 empty target or partial messages. This operation requires neither the source's current session
-revision nor a free lane. The current schema v11 policy still provides no migration.
+revision nor a free lane. The current schema v12 policy still provides no migration.
 
 Preview and fork raise `IrisRunNotFoundError` for an absent source. A non-terminal or child source,
 or a nonpositive list limit, raises `IrisRunStateError`. An existing target, including an empty

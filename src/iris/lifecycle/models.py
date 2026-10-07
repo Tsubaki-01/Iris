@@ -224,8 +224,9 @@ class SubagentRunLink(_FrozenModel):
     parent_run_id: str
     parent_tool_call_id: str
     child_run_id: str
+    agent_selector: str
 
-    @field_validator("parent_run_id", "parent_tool_call_id", "child_run_id")
+    @field_validator("parent_run_id", "parent_tool_call_id", "child_run_id", "agent_selector")
     @classmethod
     def _validate_required_text(cls, value: str, info: ValidationInfo) -> str:
         return _trim_required(value, field_name=str(info.field_name))

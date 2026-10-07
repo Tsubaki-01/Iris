@@ -22,11 +22,11 @@ session = store.load_session("default")
 print(session.revision, session.messages)
 ```
 
-`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v11 的
+`SQLiteStore(path)` 只接受不存在/零字节的数据库，或者精确匹配 lifecycle schema v12 的
 文件。新数据库会创建父目录和完整 schema；旧 schema、缺表/多表、索引或版本差异都会在
 任何写入前抛出 `IrisLifecycleSchemaError`。旧数据库不受支持，应为新 store 选择新的数据库路径；
 constructor 不重置或修改原文件。
-schema 11 的严格格式要求也适用于 Goal 关闭时；没有旧库读取或自动 migration 路径。
+schema 12 的严格格式要求也适用于 Goal 关闭时；没有旧库读取或自动 migration 路径。
 
 两种实现公开只读 `source_id`。SQLite 在 `lifecycle_schema.source_id` 保存创建时生成的 UUID，
 重开同一数据库保持相同身份；InMemory 每个实例生成自己的 UUID。`load_run_message_slice()`
@@ -86,7 +86,7 @@ rollback，不暴露半更新状态。
 两个 store 共用 lifecycle typed transition helper：mutation 先检查受影响的 phase/fence/delta，
 再对已验证模型应用 `model_copy(update=...)`。完整 `model_validate()` 只用于 SQLite row decode 等
 load/recovery 边界；durable JSON 投影使用 store 私有 serializer。
-schema v11 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
+schema v12 的 `sessions` 保存 revision、message count、更新时间、可空的 `forked_from_run_id`
 及 `compaction_json` 摘要投影、`context_window_json` 固定窗口；后续追加保留直接来源、摘要和窗口。
 消息按连续 ordinal 追加到
 `session_messages`。非空 delta 只序列化并插入本次消息，同时以 revision + message count 双条件
@@ -119,10 +119,10 @@ revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态�
 写入检查 run revision 与 interaction version；RESOLVED 的同回答直接返回当前事实。
 
 `agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
-时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v11，
+时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v12，
 run 与 checkpoint 不再保存环境总指纹；不迁移或读取旧 schema。
 
-schema v11 包含：
+schema v12 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
@@ -151,7 +151,7 @@ SQLite 连接/序列化/腐坏 row 错误映射为带 `path` 和 `operation` con
 旧 command 重交会冲突；SQL 失败整体回滚，恢复不会看到部分输入或单独更新的窗口。
 Checkpoint payload 使用版本 `4`，包含 runtime cursor 必需的 `visible_tool_names` 和
 `todo_reminder_step`；不保存 Todo 文件内容，不新增 Todo 表。lifecycle
-schema 为 `11`。旧库或旧 checkpoint 在对应读取边界拒绝，不执行迁移。
+schema 为 `12`。旧库或旧 checkpoint 在对应读取边界拒绝，不执行迁移。
 
 `SessionSnapshot.context_window=None` 表示未初始化；显式 `SessionContextWindow()` 表示已初始化且
 没有 memory 文本。首输入的 `initial_context_window` 必须传实际采用窗口，后续输入必须为 `None`。
@@ -183,7 +183,7 @@ token 额度由 runtime 负责。事件只含覆盖条数和前后输入估算�
 `iris.store` 顶层导出：
 
 - `InMemoryLifecycleStore`：用于测试和单进程运行；
-- `SQLiteStore`：只接受 schema v11 的持久化 `LifecycleStore` 实现。
+- `SQLiteStore`：只接受 schema v12 的持久化 `LifecycleStore` 实现。
 
 两者实现 `iris.lifecycle.LifecycleStore` 的 create/begin/reserve/commit/claim/suspend/resolve/
 finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/event/result reads。
@@ -209,7 +209,7 @@ finish/recover/cancel commands 及 run/session/lane/checkpoint/tool/interaction/
 `load_tool_call()` 的 composite key 不存在时返回 `None`，即使 run 不存在；
 `load_run_control()` 与 `load_run()` 一样在 run 不存在时返回 `None`。`list_tool_calls()` 仍在 run
 不存在时抛出 `IrisRunNotFoundError`，并保持 `(step_index, ordinal)` 排序。这些定向 read 没有增加
-额外索引或连接池，schema identity 为 lifecycle v11。
+额外索引或连接池，schema identity 为 lifecycle v12。
 `list_tool_calls(run_id, step_index=...)` 只返回指定模型步的工具事实；SQLite 在同一连接中将
 条件下推到 SQL。prepared batch 使用该限定查询，HITL resume 使用 exact tool-call read。
 
@@ -249,7 +249,7 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v11、config、command、
+固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v12、config、command、
 model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
 不能从当前多 claim 支持推导出来。
 
@@ -290,7 +290,7 @@ SQLite 在同一只读事务中查询来源与 `ordinal <= count` 的消息；`_
 `_session_history.py` 共享来源检查与结果投影。内存实现持同一 `RLock` 复制前缀并一次写入目标。
 SQLite 在 `BEGIN IMMEDIATE` 事务内检查来源、创建带来源字段的 session、通过 `INSERT ... SELECT`
 复制消息，再完整读回目标、从该截止前缀初始化发现投影并 commit。失败会整体回滚，不留下空目标或部分消息；该操作不要求
-source 当前 session revision 或空闲 lane。当前 schema v11 的无迁移规则保持不变。
+source 当前 session revision 或空闲 lane。当前 schema v12 的无迁移规则保持不变。
 
 来源不存在时，预览和 fork 抛 `IrisRunNotFoundError`；来源非 terminal 或为 child，以及
 非正数 list limit，使用 `IrisRunStateError`。目标已存在（包括空 session）抛

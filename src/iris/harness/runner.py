@@ -89,6 +89,14 @@ from ..lifecycle import (
     ToolErrorPolicy,
     snapshot_run,
 )
+from ..lifecycle.history import (
+    ChildRunPage,
+    RunCursor,
+    RunPage,
+    SessionCursor,
+    SessionMessagePage,
+    SessionPage,
+)
 from ..memory import MemoryService
 from ..message import ImageBlock, Msg, image_block_from_saved
 from ..prompts import PromptSource
@@ -2124,6 +2132,37 @@ class AgentRunner:
         if record is None:
             raise IrisRunNotFoundError("run 不存在", run_id=run_id)
         return snapshot_run(record)
+
+    def list_sessions(self, *, after: SessionCursor | None = None, limit: int = 50) -> SessionPage:
+        """委托 exact store 分页发现根会话，不创建草稿或运行。"""
+        return self.store.list_sessions(after=after, limit=limit)
+
+    def list_runs(
+        self, session_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> RunPage:
+        """查询会话的全部 phase，分页约束由 store 校验。"""
+        return self.store.list_runs(self._required_id(session_id), after=after, limit=limit)
+
+    def list_child_runs(
+        self, parent_run_id: str, *, after: RunCursor | None = None, limit: int = 50
+    ) -> ChildRunPage:
+        """读取直接 child 及持久父工具关系。"""
+        return self.store.list_child_runs(
+            self._required_id(parent_run_id), after=after, limit=limit
+        )
+
+    def read_session_messages(
+        self, session_id: str, *, start: int, limit: int
+    ) -> SessionMessagePage:
+        """按原始消息位置读取有限页，分页约束只在 store 校验。"""
+        return self.store.read_session_messages(
+            self._required_id(session_id), start=start, limit=limit
+        )
+
+    def get_session_lane(self, session_id: str) -> RunSnapshot | None:
+        """读取当前非终态 owner，不执行恢复。"""
+        run_id = self.store.load_session_lane(self._required_id(session_id))
+        return self.get_run(run_id) if run_id is not None else None
 
     def get_run_control(self, run_id: str) -> RunControlSnapshot:
         """读取 run 的窄控制快照，不加载完整请求、选项和模型输出。"""

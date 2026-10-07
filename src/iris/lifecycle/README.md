@@ -2,7 +2,7 @@
 
 # `iris.lifecycle`
 
-公开 Sub Agent 契约以 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id)`
+公开 Sub Agent 契约以 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)`
 关联独立运行；parent 工具保持 PREPARED。Store 增加 `AdmitChildRun`、`RebindSubagentProxy`、
 `FinalizeSubagentResult` 与 exact link point read。Rebind 返回完整 WAITING `RunCommit`；
 WAITING finalize 在同一 commit 返回绑定 fresh RESUME activation 的 ACTIVE run/checkpoint，

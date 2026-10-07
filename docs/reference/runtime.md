@@ -121,6 +121,27 @@ active 恢复检查当前 Activation 和版本，并要求当前 Runner 没有�
 
 ### 查询
 
+以下导航方法读取 Runner 的 exact Store，不隐式执行或恢复：
+
+```python
+runner.list_sessions(after=None, limit=50)  # SessionPage，根会话
+runner.list_runs(session_id, after=None, limit=50)  # RunPage，全部 phase
+runner.list_child_runs(parent_run_id, after=None, limit=50)  # ChildRunPage，直接 child
+runner.read_session_messages(session_id, start=0, limit=50)  # SessionMessagePage
+runner.get_session_lane(session_id)  # RunSnapshot | None
+```
+
+三个导航页的 items 为 tuple，next_cursor 为下一页位置或 None。session 按 latest_run_at、
+session_id 降序，尚无 Run 的持久 fork 排在末尾；child session 不进入根会话页。Run 和
+child 按 created_at、run_id 升序。SessionSummary 含 revision、message_count、当前与最新
+Run 身份及 fork 来源；child 项含自身 RunSnapshot、parent_run_id、parent_tool_call_id 和
+admission 实际采用的 agent_selector。每页只承诺本次读取快照，连续多页不冻结活动数据库。
+过滤和 limit 校验只由 Store 执行，SQLite 在查询内应用 LIMIT，不先加载完整数据库。
+`list_fork_points` 仍只返回可分支的终态顶层 Run。
+
+生命周期 SQLite 当前为 schema 12，持久 child link 增加 agent_selector；不读取或迁移旧
+schema。自定义 Store 必须直接实现同一导航协议与新的 AdmitChildRun 字段。
+
 以下方法均属于 `AgentRunner`；除 Todo 外为同步只读。
 
 | 方法 | 结果 |
