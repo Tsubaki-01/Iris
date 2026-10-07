@@ -115,6 +115,7 @@ class PublicationJournal:
             revision_id=record.revision_id,
             publication_id=record.publication_id,
             status="failed",
+            error_code="publication_unconfirmed",
             reason="publication_unconfirmed：缺少原发布确认，保留当前观察正文，未重放修改。",
             targets=record.targets,
             usage=record.usage,

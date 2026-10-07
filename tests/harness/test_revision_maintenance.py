@@ -8,6 +8,7 @@ import pytest
 from filelock import FileLock
 
 from iris.evolution.config import EvolutionConfig
+from iris.evolution.history import PublicationDocument, PublicationRecord
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import (
     EvolutionResult,
@@ -18,7 +19,7 @@ from iris.evolution.models import (
 )
 from iris.evolution.revision import PromptTarget
 from iris.evolution.service import EvolutionService
-from iris.exceptions import IrisRunStateError
+from iris.exceptions import IrisEvolutionError, IrisRunStateError
 from iris.harness import MaintenanceCoordinator, ProjectEvolutionBinding
 from iris.lifecycle import AgentRunRequest
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
@@ -50,6 +51,49 @@ def request(description: str, session: EvolutionSession | None = None) -> Revisi
         targets=(RevisionTarget(kind="prompt", name="project_skill_update"),),
         session=session,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["experience", "revision"])
+async def test_unconfirmed_publication_finishes_new_request_without_spin(
+    tmp_path: Path, command: str
+) -> None:
+    """新进程遇到旧未确认发布时，当前请求显式失败而非循环处理旧结果。"""
+    provider = StaticProvider()
+    service = revision_service(tmp_path, provider)
+    old = await service.enqueue_revision(request("旧请求"))
+    path = service.prompt_source.root / "project_skill_update.j2"
+    service.store.save_publication(
+        PublicationRecord(
+            stage="revision",
+            revision_id=old.id,
+            origin="host_request",
+            description=old.description,
+            targets=old.targets,
+            request=old,
+            publication_state="unconfirmed",
+            before_documents=(PublicationDocument(path=str(path), text="旧"),),
+            candidate_documents=(PublicationDocument(path=str(path), text="新"),),
+        )
+    )
+    coordinator = MaintenanceCoordinator(idle_seconds=3600)
+    binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
+    coordinator._attach(None, InMemoryLifecycleStore(), evolution=binding)
+    try:
+        operation = (
+            coordinator.request_project_experience(binding)
+            if command == "experience"
+            else coordinator.request_revision(binding, request("新请求"))
+        )
+        with pytest.raises(IrisEvolutionError, match="publication_unconfirmed"):
+            await asyncio.wait_for(operation, 1)
+        assert coordinator._evolution_task is None and coordinator._timer is None
+        assert coordinator.snapshot().resources[0].pending_request_id is None
+        assert service.store.revision_result(old.id) is None
+        assert service.list_publications().items[0].publication_state == "unconfirmed"
+        assert provider.requests == []
+    finally:
+        await coordinator.aclose()
 
 
 @pytest.mark.asyncio

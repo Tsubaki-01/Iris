@@ -155,6 +155,8 @@ A 正文。A 可以在 Skill no-change 时产生问题；普通事实缺失或�
 重启后缺少确认的记录保留 `publication_state=unconfirmed`，返回
 `publication_unconfirmed` 并保存 observed_documents；即使当前文件等于候选，也不填
 after_documents 或 published_at。该未确认记录阻止自动重放本项目修改，材料继续保留。
+失败结果通过 `error_code=publication_unconfirmed` 明示此状态；协调器结束因此受阻的手动等待，
+保留持久请求并停止反复自动调度，后续显式调用仍可读取这个未确认事实。
 档案的 settled 表示原材料/请求结算已完成；它不是另一份 Run 生命周期。
 完整模型请求与响应仍由宿主观测记录，领域档案保存正文、证据及发布事实。
 

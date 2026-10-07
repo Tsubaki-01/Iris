@@ -26,7 +26,7 @@ from ..evolution.models import (
     RevisionRequest,
 )
 from ..evolution.service import EvolutionService
-from ..exceptions import IrisConfigError, IrisRunStateError
+from ..exceptions import IrisConfigError, IrisEvolutionError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
 from ..memory import MemoryService
 from ..memory.generation_models import MemoryCycleResult, MemoryMaintenanceScope, MemorySource
@@ -746,7 +746,12 @@ class MaintenanceCoordinator:
             if result.revision_id in project.revision_requests:
                 project.revision_requests.pop(result.revision_id).future.set_result(result)
                 completed_request = True
-            if project.request is not None or (
+            if result.error_code == "publication_unconfirmed":
+                blocked = IrisEvolutionError(result.reason, publication_id=result.publication_id)
+                self._fail_request(project, blocked)
+                self._fail_revisions(project, blocked)
+                project.dirty = False
+            elif project.request is not None or (
                 completed_request
                 and any(
                     self._session_eligible(waiter.session)

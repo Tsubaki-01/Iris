@@ -326,6 +326,8 @@ after_documents/published_at；no_change、conflict、failed 不冒充 updated�
 结算已完成，consumed_ranges 在材料进度提交后填写。已确认写入的结算重试不重跑模型或文件修改。
 重启后无法确认的发布保留 unconfirmed，返回 `publication_unconfirmed`，并在 observed_documents
 保存读到的当前正文；不因正文等于候选就推断过去成功。未确认发布期间不自动重放项目修改。
+该失败结果的 error_code 为 `publication_unconfirmed`。它阻止其他维护请求时，协调器以
+`IrisEvolutionError` 结束这些等待，保留已保存的请求，并停止自动调度同一未确认记录。
 
 ## Goal SDK
 

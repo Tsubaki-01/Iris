@@ -184,4 +184,5 @@ class EvolutionResult(BaseModel):
     effect: str = ""
     revision_id: str | None = None
     publication_id: str | None = None
+    error_code: Literal["publication_unconfirmed"] | None = None
     targets: tuple[RevisionTarget, ...] = ()
