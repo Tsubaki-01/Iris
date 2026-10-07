@@ -18,6 +18,7 @@ from iris.message import LLMRequest, LLMResponse, Msg, TextBlock, ToolUseBlock
 from iris.prompts import PromptSource
 from iris.runtime import (
     AgentRuntime,
+    ContextPreparation,
     RuntimeActivationInput,
     RuntimeActivationOutcome,
     RuntimeStreamEvent,
@@ -200,9 +201,15 @@ async def test_invalid_summary_still_saves_usage(tmp_path: Path, response: LLMRe
 
 
 @pytest.mark.asyncio
-async def test_operation_timeout_is_not_retried(tmp_path: Path) -> None:
+async def test_operation_timeout_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     provider = _Provider([_response()], delay=0.1)
     runtime, activation, commits, cancellation = _case(tmp_path, provider, operation_timeout=0.01)
+    # 本例只验证 provider 操作超时，排除 Windows 模板文件读取的调度抖动。
+    monkeypatch.setattr(
+        "iris.runtime.runtime.snapshot_prompts", lambda source: runtime.environment.prompt_snapshot
+    )
     result = await runtime.execute(activation, commits=commits, cancellation=cancellation)
     assert result.error.code == "CONTEXT_COMPACTION_TIMEOUT"
     assert len(provider.summaries) == 1
@@ -273,10 +280,14 @@ async def test_response_cannot_commit_projection_after_control_stop(
 
     provider.on_summary = stop
     events: list[RuntimeStreamEvent] = []
+    preparations: list[ContextPreparation] = []
 
     class Sink:
-        def emit(self, event: RuntimeStreamEvent) -> None:
-            events.append(event)
+        def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
+            if isinstance(event, ContextPreparation):
+                preparations.append(event)
+            else:
+                events.append(event)
 
     result = await runtime.execute(
         activation, commits=commits, cancellation=cancellation, stream_sink=Sink()
@@ -287,6 +298,7 @@ async def test_response_cannot_commit_projection_after_control_stop(
         else RuntimeActivationOutcome.DEADLINE_EXCEEDED
     )
     assert result.outcome == expected
+    assert preparations[0].phase == "cancelled"
     assert len(commits.compaction_usages) == 1
     assert not commits.compaction_commits
     assert not provider.main

@@ -17,6 +17,7 @@ from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
 from ..lifecycle.history import RunLineage
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
+from ..runtime.diagnostics import ContextPreparation
 from .control import SessionControlSnapshot
 from .session_manager import SubmissionEvent
 
@@ -67,6 +68,7 @@ type UnscopedLiveFact = (
     | GoalChanged
     | SessionControlChanged
     | SubagentLinked
+    | ContextPreparation
 )
 
 
@@ -98,7 +100,7 @@ class _RuntimeLiveSink(RuntimeEventSink):
     def __init__(self, publisher: LivePublisher) -> None:
         self._publisher = publisher
 
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
         """把 runtime live event 原样发布。"""
         self._publisher.publish(event)
 

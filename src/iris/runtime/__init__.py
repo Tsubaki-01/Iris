@@ -15,6 +15,7 @@ from .commit import (
     RuntimeToolResultCommit,
     ToolCallClaim,
 )
+from .diagnostics import ContextDecision, ContextPreparation, ContextStage
 from .environment import RuntimeEnvironment
 from .factory import RuntimeFactory
 from .models import (
@@ -30,6 +31,9 @@ from .streaming import RuntimeEventSink, RuntimeStreamEvent
 from .tool_bridge import ToolBridge
 
 __all__ = [
+    "ContextDecision",
+    "ContextPreparation",
+    "ContextStage",
     "compaction_prompt_descriptions",
     "AgentRuntime",
     "CommitPortToolEffectGuard",

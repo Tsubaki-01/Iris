@@ -20,6 +20,7 @@ from .commit import (
     RuntimeToolCall,
     ToolCallClaim,
 )
+from .diagnostics import ContextPreparation
 from .models import RuntimeActivationInput
 
 # endregion
@@ -68,7 +69,7 @@ class RuntimeStreamEvent:
 class RuntimeEventSink(Protocol):
     """同步接收 runtime live event 的最小协议。"""
 
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
         """同步发布一条 live event。
 
         Args:

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from uuid import uuid4
 
 from ..agents import AgentConfig
 from ..command.models import CommandEnvironment, CommandStopSlot
@@ -128,6 +129,7 @@ class RuntimeEnvironment:
     owned_decision_client: JevClient | None = None
     observability: Observability = field(default_factory=Observability)
     owned_observability: Observability | None = None
+    configuration_snapshot_id: str = field(default_factory=lambda: f"configuration_{uuid4().hex}")
 
     def __post_init__(self) -> None:
         """归一化 workspace，交接当前 Agent 的 Hooks、命令和观测依赖。"""

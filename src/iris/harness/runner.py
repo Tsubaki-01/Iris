@@ -119,6 +119,7 @@ from ..runtime._assembly import (
     assemble_runtime,
     resolve_runtime_boundary,
 )
+from ..runtime.diagnostics import ContextPreparation
 from ..runtime.runtime import _normalize_run_error, _project_tool_result_cursor, _tool_run_error
 from ..store import InMemoryLifecycleStore, SQLiteStore
 from ..todo import TodoSnapshot
@@ -2957,8 +2958,8 @@ class AgentRunner:
             run_id = fact.run_id
             session_id = fact.session_id
             activation_id = fact.activation_id
-        elif isinstance(fact, RuntimeStreamEvent):
-            fact_kind = fact.kind
+        elif isinstance(fact, (RuntimeStreamEvent, ContextPreparation)):
+            fact_kind = fact.kind if isinstance(fact, RuntimeStreamEvent) else "context.preparation"
             run_id = fact.run_id
             session_id = fact.session_id
             activation_id = fact.activation_id

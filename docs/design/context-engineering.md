@@ -1,5 +1,9 @@
 # Iris Context Engineering 实现机制
 
+运行时还可通过 `ContextPreparation` 观察本次真实选材、计量与压缩过程；诊断不会重新
+执行选择或增加 token 估算。阶段候选、正式采用和 provider usage 的区别见
+[Context 参考](../reference/context.md#观察真实准备过程)。
+
 这篇总览解释 Iris 如何在有限窗口中保留任务方向、选择当前材料并回读原文。默认读者已了解模型、工具和一次 Agent 循环；需要实际配置时先看[上下文配方](../cookbook/context.md)，字段与默认值查 [Context 参考](../reference/context.md)。
 
 贯穿的区别是：**已经保存的任务事实，与这一步实际提供给模型的视图，是两份不同的东西。** 下文的裁剪和选材大多改变后者，不意味着删除前者。

@@ -42,6 +42,7 @@ from ..message import (
     TextBlock,
 )
 from ..runtime import RuntimeStreamEvent
+from ..runtime.diagnostics import ContextPreparation
 from ..tools import ToolResult
 
 # endregion
@@ -97,6 +98,33 @@ def _project_fact(fact: UnscopedLiveFact) -> tuple[_ProjectedLiveFact, ...]:
     Returns:
         tuple[_ProjectedLiveFact, ...]: Allowlisted run/session projections。
     """
+    if isinstance(fact, ContextPreparation):
+        return _run_and_session(
+            _ProjectedLiveFact(
+                scope="run",
+                scope_id=fact.run_id,
+                kind="context.preparation",
+                run_id=fact.run_id,
+                session_id=fact.session_id,
+                activation_id=fact.activation_id,
+                durable_sequence=None,
+                payload={
+                    "preparation_id": fact.preparation_id,
+                    "phase": fact.phase,
+                    "step_index": fact.step_index,
+                    "configuration_snapshot_id": fact.configuration_snapshot_id,
+                    "stage_count": len(fact.stages),
+                    "final_input_tokens": fact.final_input_tokens,
+                },
+                critical=False,
+                coalescing_key=(
+                    fact.run_id,
+                    fact.activation_id,
+                    "context.preparation",
+                    str(fact.step_index),
+                ),
+            )
+        )
     if isinstance(fact, SubagentLinked):
         lineage = fact.lineage
         return _run_and_session(

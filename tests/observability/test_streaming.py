@@ -197,6 +197,7 @@ async def test_creation_context_and_each_pull_are_isolated_across_tasks(
     assert model.attributes["iris.model.outcome"] == "completed"
     assert model.attributes["gen_ai.provider.name"] == "fake"
     assert model.attributes["gen_ai.response.model"] == "actual"
+    assert model.attributes["iris.model_stream.id"] == _SCOPE.model_stream_id
     assert model.attributes["iris.model.purpose"] == "compaction"
     assert model.attributes["iris.run.id"] == "creation-run"
 

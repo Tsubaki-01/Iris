@@ -131,14 +131,20 @@ async def test_ordinary_collect_failure_is_context_error(
     provider = CountingProvider()
     runtime = _runtime(tmp_path, Broken(), provider)
     activation = start_activation()
+    from .test_streaming import RecordingSink
+
+    sink = RecordingSink()
     result = await runtime.execute(
         activation,
         commits=FakeRuntimeCommitPort(activation),
         cancellation=MutableCancellationSignal(),
+        stream_sink=sink,
     )
     assert result.outcome is RuntimeActivationOutcome.FAILED
     assert result.error.source == "context" and "host unavailable" in result.error.message
     assert not provider.requests
+    assert sink.preparations[0].phase == "failed"
+    assert sink.preparations[0].error == result.error
 
 
 @pytest.mark.asyncio
@@ -191,11 +197,15 @@ async def test_collect_task_cancellation_propagates_without_context_error(tmp_pa
     provider = CountingProvider()
     runtime = _runtime(tmp_path, Waiting(), provider)
     activation = start_activation()
+    from .test_streaming import RecordingSink
+
+    sink = RecordingSink()
     task = asyncio.create_task(
         runtime.execute(
             activation,
             commits=FakeRuntimeCommitPort(activation),
             cancellation=MutableCancellationSignal(),
+            stream_sink=sink,
         )
     )
     await entered.wait()
@@ -203,6 +213,7 @@ async def test_collect_task_cancellation_propagates_without_context_error(tmp_pa
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not provider.requests
+    assert sink.preparations[0].phase == "cancelled"
 
 
 @pytest.mark.asyncio

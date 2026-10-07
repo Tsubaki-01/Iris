@@ -78,6 +78,7 @@ from ._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from ._context_diagnostics import ContextPreparationRecorder
 from ._context_projection import project_context_request
 from ._context_refs import with_context_refs
 from ._prompts import render_prompt, snapshot_prompts
@@ -97,6 +98,7 @@ from .commit import (
     build_runtime_tool_call,
 )
 from .compaction import project_history, select_compaction_end
+from .diagnostics import ContextDecision
 from .environment import RuntimeEnvironment
 from .memory_context import load_context_windows, select_context_window
 from .models import (
@@ -1244,7 +1246,26 @@ class AgentRuntime:
                 cursor=cursor,
             )
 
-        with self.environment.observability.scope("iris.context.prepare") as prepare_span:
+        preparation = ContextPreparationRecorder(
+            configuration_snapshot_id=self.environment.configuration_snapshot_id,
+            session_id=activation.session_id,
+            run_id=activation.run_id,
+            activation_id=activation.activation_id,
+            step_index=cursor.step_index,
+            input_budget_tokens=self.environment.agent_config.compaction.input_budget_tokens,
+            trigger_tokens=self.environment.agent_config.compaction.trigger_tokens,
+            publish=stream_sink.emit if stream_sink is not None else None,
+        )
+        with (
+            self.environment.observability.bind(
+                {
+                    "iris.context.preparation_id": preparation.value.preparation_id,
+                    "iris.configuration.snapshot_id": self.environment.configuration_snapshot_id,
+                }
+            ),
+            self.environment.observability.scope("iris.context.prepare") as prepare_span,
+            preparation,
+        ):
             context_snapshot = None
             todo_snapshot: TodoSnapshot | None = None
             source = self.environment.context_source
@@ -1283,27 +1304,37 @@ class AgentRuntime:
                                 )
                             )
                 except IrisCancellationRequestedError:
-                    return RuntimeActivationResult(
-                        outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                    return preparation.stop(
+                        RuntimeActivationResult(
+                            outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                        )
                     )
                 except Exception as exc:
                     if budget.expired():
-                        return RuntimeActivationResult(
-                            outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                        return preparation.stop(
+                            RuntimeActivationResult(
+                                outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                            )
                         )
                     self.environment.observability.error(prepare_span, exc)
                     if isinstance(exc, IrisTodoError):
-                        return _failed_activation(cursor, exc)
-                    return _failed_activation(
-                        cursor, IrisContextError(f"context_source 采集失败：{exc}")
+                        return preparation.stop(_failed_activation(cursor, exc))
+                    return preparation.stop(
+                        _failed_activation(
+                            cursor, IrisContextError(f"context_source 采集失败：{exc}")
+                        )
                     )
             if _activation_cancelled(commits, cancellation):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                return preparation.stop(
+                    RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                    )
                 )
             if _deadline_expired(commits):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                return preparation.stop(
+                    RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                    )
                 )
 
             snapshot = commits.load_model_context(
@@ -1331,7 +1362,10 @@ class AgentRuntime:
                 )
 
                 def project_request(
-                    candidate: MeasuredRequest, *, select_optional: bool = False
+                    candidate: MeasuredRequest,
+                    *,
+                    select_optional: bool = False,
+                    candidate_only: bool = False,
                 ) -> MeasuredRequest:
                     nonlocal context_snapshot
                     projected, context_snapshot = project_context_request(
@@ -1343,6 +1377,8 @@ class AgentRuntime:
                         snapshot=context_snapshot,
                         select_optional=select_optional,
                         optional_tool_names=tool_selection.optional_names,
+                        diagnostics=preparation,
+                        candidate_only=candidate_only,
                     )
                     return projected
 
@@ -1355,12 +1391,33 @@ class AgentRuntime:
                     return project_request(
                         self._measure_model_request(
                             request.model_copy(update={"messages": messages}), context_snapshot
-                        )
+                        ),
+                        candidate_only=True,
                     )
 
-                measured = project_request(
-                    self._measure_model_request(request, context_snapshot), select_optional=True
+                initial = self._measure_model_request(request, context_snapshot)
+                required = (
+                    tuple(
+                        ContextDecision("contribution", item.key, "retained", "required_context")
+                        for item in context_snapshot.contributions
+                        if item.required
+                    )
+                    if context_snapshot is not None
+                    else ()
                 )
+                required += tuple(
+                    ContextDecision("tool", tool.name, "retained", "required_tool")
+                    for tool in initial.request.tools
+                    if tool.name not in tool_selection.optional_names
+                )
+                preparation.protect(
+                    (
+                        *(f"message:{index}" for index in model_snapshot.protected_indices),
+                        *(f"{item.subject_kind}:{item.subject_ref}" for item in required),
+                    )
+                )
+                preparation.record("assemble", None, initial.input_tokens, decisions=required)
+                measured = project_request(initial, select_optional=True)
                 request = measured.request
                 tool_selection = ToolContextSelection(
                     tuple(tool.name for tool in request.tools),
@@ -1369,13 +1426,15 @@ class AgentRuntime:
                 )
             except Exception as exc:
                 self.environment.observability.error(prepare_span, exc)
-                return _failed_activation(cursor, exc)
+                return preparation.stop(_failed_activation(cursor, exc))
 
             try:
                 compacted = await self._compact_request(
                     measured=measured,
                     build_request=build_request,
-                    project_request=project_request,
+                    project_request=lambda candidate: project_request(
+                        candidate, candidate_only=True
+                    ),
                     model_snapshot=model_snapshot,
                     context_snapshot=context_snapshot,
                     tool_selection=tool_selection,
@@ -1385,26 +1444,38 @@ class AgentRuntime:
                     commits=commits,
                     cancellation=cancellation,
                     stream_sink=stream_sink,
+                    diagnostics=preparation,
                 )
             except Exception as exc:
                 self.environment.observability.error(prepare_span, exc)
-                return _failed_activation(cursor, exc)
+                return preparation.stop(_failed_activation(cursor, exc))
             if isinstance(compacted, RuntimeActivationResult):
                 if compacted.error is not None:
                     self.environment.observability.error(prepare_span, compacted.error.message)
-                return compacted
+                return preparation.stop(compacted)
             request = compacted.request
             visible_tool_names = tool_selection.names
             # 摘要与重试已消耗原 run 的绝对 deadline，不沿用 reservation 的旧剩余额度。
             remaining = commits.remaining_deadline_seconds()
             if remaining is not None and remaining <= 0:
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                return preparation.stop(
+                    RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.DEADLINE_EXCEEDED, cursor=cursor
+                    )
                 )
             if _activation_cancelled(commits, cancellation):
-                return RuntimeActivationResult(
-                    outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                return preparation.stop(
+                    RuntimeActivationResult(
+                        outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
+                    )
                 )
+
+            preparation.ready(
+                compacted,
+                tuple(item.key for item in context_snapshot.contributions)
+                if context_snapshot is not None
+                else (),
+            )
 
         if stream_sink is not None:
             stream_sink.emit(
@@ -1423,6 +1494,7 @@ class AgentRuntime:
                 activation=activation,
                 cursor=cursor,
                 stream_sink=stream_sink,
+                preparation_id=preparation.value.preparation_id,
             )
             provider_outcome = (
                 await asyncio.wait_for(operation, timeout=remaining)
@@ -1643,12 +1715,20 @@ class AgentRuntime:
         commits: RuntimeCommitPort,
         cancellation: CancellationSignal,
         stream_sink: RuntimeEventSink | None,
+        diagnostics: ContextPreparationRecorder,
     ) -> MeasuredRequest | RuntimeActivationResult:
         """在同一模型步 reservation 内生成并原子安装完整摘要投影。"""
         config = self.environment.agent_config.compaction
         provider = self.environment.provider
         before = measured.input_tokens
         if before < config.trigger_tokens:
+            diagnostics.record(
+                "compaction",
+                before,
+                before,
+                outcome="skipped",
+                decisions=(ContextDecision("request", "input", "unchanged", "below_pressure"),),
+            )
             return measured
         end = select_compaction_end(
             snapshot=model_snapshot,
@@ -1657,6 +1737,17 @@ class AgentRuntime:
         )
         if end is None:
             if before <= config.input_budget_tokens:
+                diagnostics.record(
+                    "compaction",
+                    before,
+                    before,
+                    outcome="skipped",
+                    decisions=(
+                        ContextDecision(
+                            "history", "prefix", "unchanged", "no_compressible_history"
+                        ),
+                    ),
+                )
                 return measured
             raise IrisContextCompactionError(
                 "输入超过预算且没有新增可压缩历史", code="CONTEXT_COMPACTION_UNAVAILABLE"
@@ -1745,6 +1836,18 @@ class AgentRuntime:
                 if stopped is not None:
                     return stopped
                 summary = consume_summary_response(response)
+                diagnostics.record(
+                    "summary",
+                    None,
+                    None,
+                    outcome="candidate",
+                    decisions=(
+                        ContextDecision(
+                            "history", f"messages:{start}:{end}", "summarized", "summary_coverage"
+                        ),
+                    ),
+                    compaction_ref=response.id,
+                )
                 position = batch.next_position
 
             compaction = SessionCompaction.model_construct(
@@ -1769,6 +1872,20 @@ class AgentRuntime:
             if stopped is not None:
                 return stopped
             if after > config.trigger_tokens or after >= before:
+                diagnostics.record(
+                    "compaction",
+                    before,
+                    after,
+                    outcome="rejected",
+                    decisions=(
+                        ContextDecision(
+                            "history",
+                            f"messages:{start}:{end}",
+                            "unchanged",
+                            "candidate_not_smaller" if after >= before else "candidate_over_budget",
+                        ),
+                    ),
+                )
                 raise IrisContextCompactionError(
                     "摘要后的完整请求未缩小或仍超过自动摘要额度",
                     code="CONTEXT_COMPACTION_FAILED",
@@ -1784,6 +1901,16 @@ class AgentRuntime:
                 )
             )
             completed = True
+            diagnostics.record(
+                "compaction",
+                before,
+                after,
+                decisions=(
+                    ContextDecision(
+                        "history", f"messages:{start}:{end}", "summarized", "summary_coverage"
+                    ),
+                ),
+            )
         except IrisCancellationRequestedError:
             return RuntimeActivationResult(
                 outcome=RuntimeActivationOutcome.CANCELLED, cursor=cursor
@@ -1835,9 +1962,16 @@ class AgentRuntime:
         activation: RuntimeActivationInput,
         cursor: RuntimeCursor,
         stream_sink: RuntimeEventSink | None,
+        preparation_id: str,
     ) -> LLMResponse | RuntimeActivationResult:
         """执行 complete 或 direct-pull stream，并只返回完整响应。"""
-        with self.environment.observability.bind({"iris.model.purpose": "main"}):
+        with self.environment.observability.bind(
+            {
+                "iris.model.purpose": "main",
+                "iris.context.preparation_id": preparation_id,
+                "iris.configuration.snapshot_id": self.environment.configuration_snapshot_id,
+            }
+        ):
             if stream_sink is None:
                 return await self.environment.provider.complete(
                     request.model_copy(update={"stream": False})

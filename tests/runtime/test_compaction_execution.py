@@ -162,12 +162,24 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
     ]
     assert summary.parent.span_id == prepare.context.span_id
     assert summary.attributes["iris.step.index"] == prepare.attributes["iris.step.index"] == 0
+    assert (
+        summary.attributes["iris.context.preparation_id"]
+        == prepare.attributes["iris.context.preparation_id"]
+    )
     assert prepare.status.status_code is (StatusCode.UNSET if accepted else StatusCode.ERROR)
     if accepted:
         [main] = [span for span in spans if span.attributes.get("iris.model.purpose") == "main"]
         assert main.parent is None
         assert main.start_time >= prepare.end_time
         assert main.attributes["iris.step.index"] == 0
+        assert (
+            main.attributes["iris.context.preparation_id"]
+            == prepare.attributes["iris.context.preparation_id"]
+        )
+        assert (
+            main.attributes["iris.configuration.snapshot_id"]
+            == summary.attributes["iris.configuration.snapshot_id"]
+        )
         assert result.outcome == RuntimeActivationOutcome.COMPLETED
         assert provider.requests[-1].messages[-1].text == "当前任务"
         assert port.compaction_commits[0].after_input_tokens == after

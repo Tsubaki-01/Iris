@@ -176,6 +176,7 @@ class _StreamingProvider(_CompletionProvider):
                         {
                             "gen_ai.provider.name": event.scope.provider,
                             "gen_ai.response.model": event.scope.model,
+                            "iris.model_stream.id": event.scope.model_stream_id,
                         },
                     )
                     scope_recorded = True

@@ -63,6 +63,15 @@ submit/resume 接受不表示任务完成。cancel 在只暂停 Goal 续跑意�
 
 ### 事件与缺口
 
+`ContextPreparation` 是原始 publisher 接收的完整上下文准备快照；其网络事件
+`context.preparation` 仅包含索引与计量摘要，可按 step 合并。Host recorder 应在投影前保存
+原始事实；字段及计量含义见[Context 参考](context.md#观察真实准备过程)。
+
+模型 span 包含 `iris.context.preparation_id`、`iris.configuration.snapshot_id`；typed
+stream 还记录实际 `iris.model_stream.id`。一次步骤中的多个摘要调用共享 preparation_id，
+仍各有自己的 span 身份。complete-only 调用没有虚构 stream ID，完整输入只在原采集策略
+允许时记录，span 结束前不承诺完整请求已经导出。
+
 `session.control.changed` 是 session scope 的 critical 事件，payload.snapshot 为 Manager
 刚发布的完整 `SessionControlSnapshot`。容量不足沿既有 slow-consumer gap/terminal 结束
 该订阅；重新订阅并读取 `manager.snapshot()` 可恢复 pending/ready。它不进入 durable

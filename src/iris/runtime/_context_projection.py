@@ -9,8 +9,10 @@ from ..agents import ContextPolicyConfig
 from ..context import ContextSnapshot
 from ..context.source import render_context_snapshot
 from ..message import DataBlock, ImageBlock, LLMRequest, TextBlock, ToolResultBlock
+from ._context_diagnostics import ContextPreparationRecorder
 from ._request_measurement import MeasuredRequest, measure_request
 from .compaction import _history_group_ends
+from .diagnostics import ContextDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,8 @@ def project_context_request(
     snapshot: ContextSnapshot | None = None,
     select_optional: bool = False,
     optional_tool_names: tuple[str, ...] = (),
+    diagnostics: ContextPreparationRecorder | None = None,
+    candidate_only: bool = False,
 ) -> tuple[MeasuredRequest, ContextSnapshot | None]:
     """对已装配并计量的请求依次折叠重复、选择可选材料、短化旧观察。
 
@@ -45,23 +49,36 @@ def project_context_request(
         snapshot: 本步骤已采集的完整快照或已冻结的选择。
         select_optional: 仅首次装配允许选择；后续候选沿用冻结材料。
         optional_tool_names: 可撤下工具定义的优先顺序，最优先项排在前。
+        diagnostics: 仅记录既有计量和决策的准备收集器。
+        candidate_only: 当前请求是压缩规划候选，不表示正式采用。
 
     Returns:
         写时复制的已计量请求与本步骤选定快照；不修改原历史。
     """
     request, tokens = measured.request, measured.input_tokens
     if tokens < trigger_tokens:
+        if diagnostics is not None:
+            for stage in ("deduplicate", "optional_context", "optional_tools", "preview"):
+                diagnostics.record(
+                    stage,
+                    tokens,
+                    tokens,
+                    outcome="skipped",
+                    decisions=(ContextDecision("request", "input", "unchanged", "below_pressure"),),
+                )
         return measured, snapshot
-    groups = (
-        _closed_observations(request, source_indices)
-        if config.enabled and _can_read_context(request)
-        else []
-    )
+    readable = config.enabled and _can_read_context(request)
+    groups = _closed_observations(request, source_indices) if readable else []
     recent = config.preserve_recent_tool_groups
     older = [item for group in (groups[:-recent] if recent else groups) for item in group]
     latest = {item.key: item for group in groups for item in group if item.key is not None}
     replacements: dict[tuple[int, int], str] = {}
     representatives: set[tuple[int, int]] = set()
+    decisions: list[ContextDecision] = [
+        ContextDecision("observation", item.ref, "retained", "recent_group_protected")
+        for group in (groups[-recent:] if recent else [])
+        for item in group
+    ]
     for item in older:
         if item.key is None:
             continue
@@ -75,6 +92,12 @@ def project_context_request(
         if len(text) < len(item.block.text):
             replacements[item.position] = text
             representatives.add(representative.position)
+            decisions.append(
+                ContextDecision(
+                    "observation", item.ref, "replaced", "duplicate_observation", representative.ref
+                )
+            )
+    before_dedup = tokens
     if replacements:
         candidate = measure_request(_replace_contents(request, replacements), estimate_input_tokens)
         if candidate.input_tokens < tokens:
@@ -83,6 +106,36 @@ def project_context_request(
         else:
             replacements.clear()
             representatives.clear()
+            decisions = [
+                ContextDecision(
+                    item.subject_kind,
+                    item.subject_ref,
+                    "unchanged" if item.action == "replaced" else item.action,
+                    "candidate_not_smaller" if item.action == "replaced" else item.reason_code,
+                    item.related_ref,
+                )
+                for item in decisions
+            ]
+    if diagnostics is not None:
+        diagnostics.record(
+            "deduplicate",
+            before_dedup,
+            tokens,
+            outcome="candidate" if candidate_only else "applied" if replacements else "skipped",
+            decisions=tuple(decisions)
+            if groups
+            else (
+                ContextDecision(
+                    "request",
+                    "observations",
+                    "unchanged",
+                    "no_observations"
+                    if readable
+                    else ("context_read_unavailable" if config.enabled else "projection_disabled"),
+                ),
+            ),
+        )
+    selected_context = False
     if select_optional and snapshot is not None and tokens >= trigger_tokens:
         optional = sorted(
             (
@@ -93,6 +146,8 @@ def project_context_request(
             key=lambda entry: (entry[1].priority, -entry[0]),
         )
         for _, item in optional:
+            selected_context = True
+            before_optional = tokens
             snapshot = ContextSnapshot(
                 tuple(
                     contribution
@@ -110,22 +165,90 @@ def project_context_request(
             )
             measured = measure_request(request, estimate_input_tokens)
             tokens = measured.input_tokens
+            if diagnostics is not None:
+                diagnostics.record(
+                    "optional_context",
+                    before_optional,
+                    tokens,
+                    outcome="candidate" if candidate_only else "applied",
+                    decisions=(
+                        ContextDecision("contribution", item.key, "removed", "optional_priority"),
+                    ),
+                )
             if tokens < trigger_tokens:
                 break
+    if diagnostics is not None and not selected_context:
+        diagnostics.record(
+            "optional_context",
+            tokens,
+            tokens,
+            outcome="skipped",
+            decisions=(
+                ContextDecision(
+                    "request",
+                    "contributions",
+                    "unchanged",
+                    "below_pressure"
+                    if tokens < trigger_tokens
+                    else "selection_frozen"
+                    if not select_optional
+                    else "no_optional_context",
+                ),
+            ),
+        )
+    selected_tools = False
     if select_optional and tokens >= trigger_tokens:
         for name in reversed(optional_tool_names):
+            selected_tools = True
+            before_tool = tokens
             request = request.model_copy(
-                update={
-                    "tools": [tool for tool in request.tools if tool.name != name]
-                }
+                update={"tools": [tool for tool in request.tools if tool.name != name]}
             )
             measured = measure_request(request, estimate_input_tokens)
             tokens = measured.input_tokens
+            if diagnostics is not None:
+                diagnostics.record(
+                    "optional_tools",
+                    before_tool,
+                    tokens,
+                    outcome="candidate" if candidate_only else "applied",
+                    decisions=(ContextDecision("tool", name, "removed", "optional_priority"),),
+                )
             if tokens < trigger_tokens:
                 break
+    if diagnostics is not None and not selected_tools:
+        diagnostics.record(
+            "optional_tools",
+            tokens,
+            tokens,
+            outcome="skipped",
+            decisions=(
+                ContextDecision(
+                    "request",
+                    "tools",
+                    "unchanged",
+                    "below_pressure"
+                    if tokens < trigger_tokens
+                    else "selection_frozen"
+                    if not select_optional
+                    else "no_optional_tools",
+                ),
+            ),
+        )
     if tokens < trigger_tokens:
+        if diagnostics is not None:
+            diagnostics.record(
+                "preview",
+                tokens,
+                tokens,
+                outcome="skipped",
+                decisions=(
+                    ContextDecision("request", "observations", "unchanged", "below_pressure"),
+                ),
+            )
         return measured, snapshot
     preview_chars = config.old_result_preview_chars
+    preview_attempted = False
     for item in older:
         if item.position in replacements or item.position in representatives:
             continue
@@ -146,11 +269,41 @@ def project_context_request(
         candidate = measure_request(
             _replace_contents(request, {item.position: text}), estimate_input_tokens
         )
+        preview_attempted = True
+        if diagnostics is not None:
+            diagnostics.record(
+                "preview",
+                tokens,
+                candidate.input_tokens,
+                outcome="candidate"
+                if candidate_only
+                else ("applied" if candidate.input_tokens < tokens else "rejected"),
+                decisions=(
+                    ContextDecision(
+                        "observation",
+                        item.ref,
+                        "replaced" if candidate.input_tokens < tokens else "unchanged",
+                        "old_observation_preview"
+                        if candidate.input_tokens < tokens
+                        else "candidate_not_smaller",
+                    ),
+                ),
+            )
         if candidate.input_tokens < tokens:
             measured = candidate
             request, tokens = measured.request, measured.input_tokens
             if tokens < trigger_tokens:
                 break
+    if diagnostics is not None and not preview_attempted:
+        diagnostics.record(
+            "preview",
+            tokens,
+            tokens,
+            outcome="skipped",
+            decisions=(
+                ContextDecision("request", "observations", "unchanged", "no_preview_candidate"),
+            ),
+        )
     return measured, snapshot
 
 

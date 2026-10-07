@@ -1,5 +1,25 @@
 # Context、压缩与项目模板参考
 
+## 观察真实准备过程
+
+Runtime 在每个获准的 `before_model` 步骤产生 `ContextPreparation`，由 live publisher
+交给宿主。它包含 preparation_id、configuration_snapshot_id、run/session/activation、
+step_index、输入预算、压力线、真实 stages/decisions、最终工具与贡献 key、保护来源和
+final_input_tokens。phase 为 ready、failed 或 cancelled；失败保留对应错误。该事实不进入
+checkpoint，也不参与恢复裁决。
+
+阶段记录来自已有的完整请求计量：装配、重复观察折叠、可选贡献与工具撤下、旧正文短化、
+压缩和最终选择。未进入的阶段标 skipped；压缩规划与摘要候选标 candidate，拒绝候选标
+rejected，只有真实提交后的压缩标 applied。required、近期结果、重复正文回读位置与
+可选优先级理由均由实际分支产生，不重新运行选材或为展示额外调用 estimator。
+
+before/after_input_tokens 是整个请求的估算，不是区块独立成本；不能将其拼成相加等于
+输入总量的饼图。provider 报告的 usage、摘要额外 usage 与本地估算分别展示。
+完整快照通过原始 publisher 交给宿主证据层；Broker 的 `context.preparation` 只发送
+preparation_id、phase、步骤、阶段数与最终计量。宿主可按 ID 保存和读取详情，观察失败不
+改变执行。真正 provider 输入仍由原 OTel capture_content 接点采集，final_request_ref
+尚未建立外部证据引用时为 None。
+
 本页集中维护上下文相关格式和默认值。先理解行为可读[上下文工程](../design/context-engineering.md)，需要接入步骤可读[上下文配方](../cookbook/context.md)。
 
 ## context.yaml 格式

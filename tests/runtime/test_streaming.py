@@ -46,6 +46,7 @@ from iris.message import (
 from iris.providers.protocols import CompletionProvider
 from iris.runtime import (
     AgentRuntime,
+    ContextPreparation,
     RuntimeActivationOutcome,
     RuntimeCursor,
     RuntimeEventSink,
@@ -237,10 +238,14 @@ class RecordingSink(RuntimeEventSink):
         callback: Callable[[RuntimeStreamEvent], None] | None = None,
     ) -> None:
         self.events: list[RuntimeStreamEvent] = []
+        self.preparations: list[ContextPreparation] = []
         self._callback = callback
 
-    def emit(self, event: RuntimeStreamEvent) -> None:
+    def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
         """记录一条事件。"""
+        if isinstance(event, ContextPreparation):
+            self.preparations.append(event)
+            return
         self.events.append(event)
         if self._callback is not None:
             self._callback(event)
@@ -361,6 +366,12 @@ async def test_streaming_success_emits_before_single_model_commit(tmp_path: Path
 
     assert result.outcome is RuntimeActivationOutcome.COMPLETED
     assert provider.requests == []
+    assert len(sink.preparations) == 1
+    assert sink.preparations[0].phase == "ready"
+    assert sink.preparations[0].run_id == activation.run_id
+    assert sink.preparations[0].selected_tool_names == tuple(
+        tool.name for tool in provider.stream_requests[0].tools
+    )
     assert len(provider.stream_requests) == 1
     assert provider.stream_requests[0].stream is True
     assert len(commits.model_commits) == 1
@@ -764,8 +775,8 @@ async def test_sink_error_propagates_without_model_commit(tmp_path: Path) -> Non
         pass
 
     class FailingSink(RecordingSink):
-        def emit(self, event: RuntimeStreamEvent) -> None:
-            if event.kind == "model.event":
+        def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
+            if isinstance(event, RuntimeStreamEvent) and event.kind == "model.event":
                 raise SinkError("publisher failed")
             super().emit(event)
 
