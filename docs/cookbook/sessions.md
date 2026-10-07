@@ -145,7 +145,7 @@ session:
 
 新进程打开相同 SQLite 数据库后，可用 `runner.get_session(session_id)` 读取当前已提交消息。若该会话还有非终态 Run，不能直接创建另一个 Run：先处理其 waiting 或遗留 active 状态。`runner.store.load_session_lane(session_id)` 可取得当前非终态 Run ID，没有时返回 `None`。
 
-SessionManager 自己的排队输入和投递回执不持久化。新建 Manager 不会重建原有队列，也不自动附着数据库中的旧 Run。恢复旧任务使用 Runner，待会话空闲后再通过新的 Manager 接收输入。
+SessionManager 自己的排队输入和投递回执不持久化。新建 Manager 不会重建原有队列，也不自动附着数据库中的旧 Run。用户选择继续旧任务时，显式调用 `await manager.restore(run_id, expected_activation_id=observed_activation_id)`；WAITING 仅附着待回答交互，ACTIVE 的 fence 和恢复由 Runner 裁决。之后的 steer、回答及取消继续经过同一 Manager。
 
 ## 查历史与创建分支
 

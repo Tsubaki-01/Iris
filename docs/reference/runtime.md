@@ -189,6 +189,21 @@ SessionManager(
 
 显式 steer 不接收 options；auto 在忙碌分支忽略 options。follow-up 有独立的未来 Run ID，在当前 Run terminal 前没有真正创建 Run。waiting 仍属于忙碌。
 
+### 显式恢复接管
+
+`await manager.restore(run_id, expected_activation_id=None) -> RestoreReceipt` 显式接管 bound
+session 的当前 lane，不由 snapshot 或历史读取触发。回执含 run_id、disposition 和 control。
+
+- 同一 Run 的 managed task 仍存活：`already_managed`，不另建任务。
+- WAITING 的 interaction 仍为 PENDING：`attached_waiting`，仅附着，之后通过同一 Manager 回答。
+- ACTIVE 无存活 task，或已回答的 WAITING proxy：交给 Runner recover，返回
+  `recovery_started` 或立即结算后的 `settled`。ACTIVE 的 exact activation fence 及 pending
+  cleanup 优先处理仍由 Runner 裁决；仅保留 current_run_id 不算幂等。
+- 已终态：`settled`，不绑定为新运行。不属于 bound session 或已有另一 owner 时拒绝。
+
+restore 不自动 arm Goal；后续轮次需要显式 Goal resume。恢复采用当前 Runner 的配置，
+不会重建过去的进程环境或重发未投递的进程内输入。
+
 ### 只读控制快照
 
 `manager.snapshot() -> SessionControlSnapshot` 同步返回最近完整的不可变投影，不等准入锁、
@@ -198,6 +213,7 @@ SessionManager(
 `driver_state`、`pending` 与 `allowed_commands`。driver_state 为 idle、admitting、running、
 settling、detached 或 closed；命令列表用于界面提示，实际准入仍由 Manager 检查。
 durable WAITING 已提交但旧任务仍在收尾时不开放 resume，任务结束后再更新控制视图。
+`interaction_status` 区分真正待回答与已保存回答的 proxy，后者需要 restore 而不是再次回答。
 
 `PendingSubmission` 包含 submission_id、run_id、mode、input、stage、submitted_at。
 stage 为 queued、committing 或 admitting；已 claim 未确认的 steer 和已出队但仍在准入的

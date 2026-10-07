@@ -1133,11 +1133,13 @@ async def test_reminder_target_survives_subagent_proxy_wait_and_completion(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("nondefault,drift", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("managed", [False, True])
 async def test_recover_resolved_proxy_uses_stored_response_and_same_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     nondefault: bool,
     drift: bool,
+    managed: bool,
 ) -> None:
     from iris.harness._subagent import HarnessSubagentController
 
@@ -1209,7 +1211,20 @@ async def test_recover_resolved_proxy_uses_stored_response_and_same_child(
         store=SQLiteStore(db),
         child_provider_factory=factory,
     )
-    completed = await restarted.recover("parent")
+    if managed:
+        from iris.harness import SessionManager
+
+        manager = SessionManager(restarted, first.run.session_id)
+        # 模拟旧 managed task 已退出但保留相同 current owner 的路径。
+        manager._current_run_id = "parent"
+        restored = await manager.restore("parent")
+        assert restored.disposition in {"recovery_started", "settled"}
+        if manager._current_task is not None:
+            await manager._current_task
+        completed = restarted.get_result("parent")
+        await manager.close()
+    else:
+        completed = await restarted.recover("parent")
     assert factory.configs[0][1] == tmp_path / ("broken.yaml" if nondefault else "child.yaml")
     assert completed.assistant_message.text == "Parent recovered"
     assert restarted.store.load_subagent_link("parent", "delegate").child_run_id == child_id

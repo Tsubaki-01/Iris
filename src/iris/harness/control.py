@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from ..hitl import InteractionStatus
 from ..lifecycle import RunSnapshot
 from ..message import DataBlock
 
@@ -35,6 +36,16 @@ class SessionControlSnapshot:
     pending: tuple[PendingSubmission, ...] = ()
     allowed_commands: tuple[str, ...] = ()
     pending_scope: Literal["process_local"] = "process_local"
+    interaction_status: InteractionStatus | None = None
 
 
-__all__ = ["PendingSubmission", "SessionControlSnapshot"]
+@dataclass(frozen=True, slots=True)
+class RestoreReceipt:
+    """显式接管达到的状态；不表示整个 Run 已完成。"""
+
+    run_id: str
+    disposition: Literal["already_managed", "attached_waiting", "recovery_started", "settled"]
+    control: SessionControlSnapshot
+
+
+__all__ = ["PendingSubmission", "RestoreReceipt", "SessionControlSnapshot"]

@@ -12,6 +12,10 @@ pending 覆盖 queued、claim 后尚未确认及 follow-up admitting 输入；WA
 收尾后才开放 resume。可选 publisher 发布 critical `session.control.changed`；详情见
 [运行参考](../../../docs/reference/runtime.md#只读控制快照)。
 
+`await manager.restore(run_id, expected_activation_id=...)` 显式接管旧 lane：PENDING WAITING
+只附着，ACTIVE/已回答 proxy 复用 Runner recovery。仅存活 managed task 可以幂等复用；
+Goal 不因此自动 arm，历史读取也不会触发 restore。
+
 ## 快速入门
 
 `from_config*()` 接受 `observability=` 完整服务注入；同一实例交给 runtime、工具执行器和

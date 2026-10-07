@@ -38,7 +38,7 @@ from pydantic import (
 from ..exceptions import IrisCommandCleanupError, IrisRunNotFoundError, IrisRunStateError
 from ..goal.models import GoalChanged
 from ..goal.session import GoalSession
-from ..hitl import HumanInteractionResponse
+from ..hitl import HumanInteractionResponse, InteractionStatus
 from ..lifecycle import (
     AgentRunOptions,
     AgentRunRequest,
@@ -52,7 +52,7 @@ from ..lifecycle.models import normalize_run_input
 from ..message import DataBlock, Msg
 from ..runtime import SteeringInput
 from ._goal import _GoalControl
-from .control import PendingSubmission, SessionControlSnapshot
+from .control import PendingSubmission, RestoreReceipt, SessionControlSnapshot
 from .runner import AgentRunner
 
 if TYPE_CHECKING:
@@ -794,10 +794,19 @@ class SessionManager:
         from .streaming import SessionControlChanged
 
         previous = self._control
+        interaction_status = previous.interaction_status
+        if run is not None:
+            interaction = (
+                self._runner.store.load_interaction(run.pending_interaction_id)
+                if run.pending_interaction_id is not None
+                else None
+            )
+            interaction_status = interaction.status if interaction is not None else None
         if run is None and previous.current_run_id == self._current_run_id:
             run = previous.run
         if self._current_run_id is None:
             run = None
+            interaction_status = None
         active_task = self._current_task is not None and not self._current_task.done()
         admitting = active_task and (
             self._admission_started is not None and not self._admission_started.is_set()
@@ -845,7 +854,11 @@ class SessionManager:
             if run is not None and run.phase is not RunPhase.TERMINAL:
                 if run.cancellation_requested_at is None:
                     commands = ("steer", *commands)
-        elif run is not None and run.phase is RunPhase.WAITING:
+        elif (
+            run is not None
+            and run.phase is RunPhase.WAITING
+            and interaction_status is InteractionStatus.PENDING
+        ):
             state, commands = "idle", ("resume", "steer", "follow_up", "interrupt", "close")
         else:
             state, commands = "detached", ("restore", "interrupt", "close")
@@ -856,6 +869,7 @@ class SessionManager:
             driver_state=state,
             pending=tuple(pending),
             allowed_commands=commands,
+            interaction_status=interaction_status,
         )
         if current == previous:
             return
@@ -1100,6 +1114,78 @@ class SessionManager:
             self._refresh_control(run=snapshot)
             await self._wait_for_admission(task, started)
         return ResumeReceipt(run_id=run_id, interaction_id=interaction_id.strip()), task
+
+    async def restore(
+        self, run_id: str, *, expected_activation_id: str | None = None
+    ) -> RestoreReceipt:
+        """显式接管当前 session lane，恢复裁决仍由原 Runner 负责。
+
+        PENDING WAITING 只附着；ACTIVE 与已回答 proxy 通过 managed recover 驱动。
+        只有同一 Run 的 managed task 尚未结束才幂等。此操作不启动 Goal 后继轮次。
+        """
+        async with self._lock:
+            self._require_open()
+            run = self._runner.get_run(run_id)
+            run_id = run.run_id
+            if run.session_id != self._session_id:
+                raise IrisRunStateError("restore 目标不属于 bound session", run_id=run_id)
+            if self._current_run_id not in (None, run_id):
+                raise IrisRunStateError("manager 已拥有另一 Run", run_id=self._current_run_id)
+            if self._current_task is not None and not self._current_task.done():
+                return RestoreReceipt(run_id, "already_managed", self._control)
+            if run.phase is RunPhase.TERMINAL:
+                if self._current_run_id == run_id:
+                    await self._reconcile_locked()
+                return RestoreReceipt(run_id, "settled", self._control)
+            if self._runner.store.load_session_lane(self._session_id) != run_id:
+                raise IrisRunStateError("restore 目标不是当前 session lane", run_id=run_id)
+            previous_run_id = self._current_run_id
+            buffer = self._event_buffer
+            new_tracker = buffer is not None and run_id not in buffer._run_trackers
+            if new_tracker and not buffer.try_register_run(
+                run_id, after_sequence=run.last_event_sequence
+            ):
+                raise IrisRunStateError("durable run tracker 容量已满")
+            self._current_run_id = run_id
+            self._current_task = None
+            self._refresh_control(run=run)
+            if run.phase is RunPhase.WAITING and (
+                self._control.interaction_status is InteractionStatus.PENDING
+            ):
+                return RestoreReceipt(run_id, "attached_waiting", self._control)
+            started = asyncio.Event()
+            task = asyncio.create_task(
+                self._runner._recover_managed(
+                    run_id,
+                    expected_activation_id=expected_activation_id,
+                    steering=self._steering,
+                    durable_event_callback=self._relay_run_event,
+                    activation_started=started,
+                )
+            )
+            self._current_task = task
+            self._admission_started = started
+            self._attach_settlement_callback(task, run_id, submission=None)
+            self._refresh_control()
+            try:
+                await self._wait_for_admission(task, started)
+            except Exception:
+                current = self._runner.get_run(run_id)
+                if current.revision == run.revision:
+                    self._current_run_id = previous_run_id
+                    self._current_task = None
+                    if new_tracker:
+                        buffer.discard_run(run_id)
+                self._refresh_control(run=current)
+                raise
+            current = self._runner.get_run(run_id)
+            if current.phase is RunPhase.TERMINAL:
+                await self._reconcile_locked()
+                disposition: Literal["recovery_started", "settled"] = "settled"
+            else:
+                disposition = "recovery_started"
+                self._refresh_control(run=current)
+            return RestoreReceipt(run_id, disposition, self._control)
 
     async def interrupt(self, *, reason: str | None = None) -> RunSnapshot | None:
         """请求取消 facade 当前 exact run，并保留 follow-up 到真实 terminal。

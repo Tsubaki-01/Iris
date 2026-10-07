@@ -18,7 +18,10 @@ from .test_session_manager import _wait_until
 
 
 @pytest.mark.asyncio
-async def test_active_cleanup_failure_interrupt_retries_before_follow_up(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restore", [False, True])
+async def test_active_cleanup_failure_interrupt_retries_before_follow_up(
+    tmp_path: Path, restore: bool
+) -> None:
     runner = AgentRunner(
         runtime=build_runtime(tmp_path, provider=FailedProvider()), store=InMemoryLifecycleStore()
     )
@@ -40,7 +43,11 @@ async def test_active_cleanup_failure_interrupt_retries_before_follow_up(tmp_pat
     service.fail = False
     service.release()
     try:
-        await manager.interrupt()
+        if restore:
+            receipt = await manager.restore(current.run_id)
+            assert receipt.disposition == "settled"
+        else:
+            await manager.interrupt()
         await _wait_until(lambda: runner.get_run(current.run_id).phase is RunPhase.TERMINAL)
         assert runner.get_result(current.run_id).error.code == "PROVIDER_ERROR"
         await _wait_until(lambda: runner.store.load_run(follow_up.run_id) is not None)
