@@ -550,6 +550,23 @@ class SQLiteStore:
         )
         return run, tool
 
+    def load_parent_link(self, child_run_id: str) -> SubagentRunLink | None:
+        """利用 child 唯一索引读取持久父关系。"""
+
+        def read(connection: sqlite3.Connection) -> SubagentRunLink | None:
+            row = connection.execute(
+                "SELECT * FROM subagent_run_links WHERE child_run_id = ?", (child_run_id,)
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else _decode_row(
+                    _subagent_link_from_row, row, path=self.path, operation="load_parent_link"
+                )
+            )
+
+        return self._read("load_parent_link", read)
+
     def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink:
         """在一个 IMMEDIATE transaction 中创建 child 与 link；重入优先复用 link。"""
         with self._lock:

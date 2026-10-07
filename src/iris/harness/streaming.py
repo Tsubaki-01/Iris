@@ -15,6 +15,7 @@ from typing import Protocol
 
 from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
+from ..lifecycle.history import RunLineage
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from .control import SessionControlSnapshot
 from .session_manager import SubmissionEvent
@@ -51,14 +52,33 @@ class CommandCleanupFailed:
     error: RunErrorInfo
 
 
-type LiveFact = (
+@dataclass(frozen=True, slots=True)
+class SubagentLinked:
+    """Admission 已确认的持久 child 关系。"""
+
+    lineage: RunLineage
+
+
+type UnscopedLiveFact = (
     RuntimeStreamEvent
     | RunEvent
     | SessionSubmissionEvent
     | CommandCleanupFailed
     | GoalChanged
     | SessionControlChanged
+    | SubagentLinked
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LineagedLiveFact:
+    """原事实及固定 lineage；不改写原 run/session 身份。"""
+
+    fact: UnscopedLiveFact
+    lineage: RunLineage
+
+
+type LiveFact = UnscopedLiveFact | LineagedLiveFact
 
 
 class LivePublisher(Protocol):
@@ -83,7 +103,24 @@ class _RuntimeLiveSink(RuntimeEventSink):
         self._publisher.publish(event)
 
 
+class _LineagePublisher:
+    """Child 借用的 publisher，在发布时补充已固定的关系。"""
+
+    def __init__(self, publisher: LivePublisher, lineage: RunLineage) -> None:
+        self._publisher = publisher
+        self.lineage = lineage
+
+    def publish(self, fact: LiveFact) -> None:
+        """嵌套 child 已携带自身关系时原样转交。"""
+        self._publisher.publish(
+            fact if isinstance(fact, LineagedLiveFact) else LineagedLiveFact(fact, self.lineage)
+        )
+
+
 __all__ = [
+    "RunLineage",
+    "SubagentLinked",
+    "LineagedLiveFact",
     "CommandCleanupFailed",
     "LiveFact",
     "LivePublisher",

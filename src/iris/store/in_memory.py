@@ -340,6 +340,18 @@ class InMemoryLifecycleStore:
         with self._lock:
             return self._subagent_links.get((parent_run_id, parent_tool_call_id))
 
+    def load_parent_link(self, child_run_id: str) -> SubagentRunLink | None:
+        """在锁内读取唯一 child 的父关系。"""
+        with self._lock:
+            return next(
+                (
+                    link
+                    for link in self._subagent_links.values()
+                    if link.child_run_id == child_run_id
+                ),
+                None,
+            )
+
     def admit_child_run(self, command: AdmitChildRun) -> SubagentRunLink:
         """在同一把锁中创建 child 普通事实与 link；重入直接复用 link。"""
         command = deepcopy(command)

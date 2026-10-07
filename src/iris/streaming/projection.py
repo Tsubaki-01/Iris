@@ -10,7 +10,7 @@ Example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, assert_never, cast
 
 from pydantic import JsonValue, TypeAdapter
@@ -19,11 +19,15 @@ from ..goal.models import GoalChanged, GoalView
 from ..harness.control import SessionControlSnapshot
 from ..harness.streaming import (
     CommandCleanupFailed,
+    LineagedLiveFact,
     LiveFact,
     SessionControlChanged,
     SessionSubmissionEvent,
+    SubagentLinked,
+    UnscopedLiveFact,
 )
 from ..lifecycle import RunEvent
+from ..lifecycle.history import RunLineage
 from ..message import (
     ModelBlockCompleted,
     ModelBlockDelta,
@@ -44,13 +48,14 @@ from ..tools import ToolResult
 
 _GOAL_VIEW_ADAPTER = TypeAdapter(GoalView)
 _CONTROL_ADAPTER = TypeAdapter(SessionControlSnapshot)
+_LINEAGE_ADAPTER = TypeAdapter(RunLineage)
 
 
 @dataclass(frozen=True, slots=True)
 class _ProjectedLiveFact:
     """Broker 分配 sequence 前的一条 remote-safe scope fact。"""
 
-    scope: Literal["run", "session"]
+    scope: Literal["run", "session", "session_tree", "resource"]
     scope_id: str
     kind: str
     run_id: str | None
@@ -60,9 +65,30 @@ class _ProjectedLiveFact:
     payload: dict[str, JsonValue]
     critical: bool
     coalescing_key: tuple[str, ...] | None = None
+    lineage: RunLineage | None = None
 
 
 def project_live_fact(fact: LiveFact) -> tuple[_ProjectedLiveFact, ...]:
+    """原 scope 保持精确身份，额外投影到根会话树。"""
+    lineage = fact.lineage if isinstance(fact, LineagedLiveFact) else None
+    original = fact.fact if isinstance(fact, LineagedLiveFact) else fact
+    projected = _project_fact(original)
+    output: list[_ProjectedLiveFact] = []
+    for item in projected:
+        item = replace(item, lineage=lineage)
+        output.append(item)
+        if item.scope == "session":
+            output.append(
+                replace(
+                    item,
+                    scope="session_tree",
+                    scope_id=lineage.root_session_id if lineage is not None else item.scope_id,
+                )
+            )
+    return tuple(output)
+
+
+def _project_fact(fact: UnscopedLiveFact) -> tuple[_ProjectedLiveFact, ...]:
     """把一条 trusted fact 投影到一个或两个 remote scopes。
 
     Args:
@@ -71,6 +97,21 @@ def project_live_fact(fact: LiveFact) -> tuple[_ProjectedLiveFact, ...]:
     Returns:
         tuple[_ProjectedLiveFact, ...]: Allowlisted run/session projections。
     """
+    if isinstance(fact, SubagentLinked):
+        lineage = fact.lineage
+        return _run_and_session(
+            _ProjectedLiveFact(
+                scope="run",
+                scope_id=lineage.child_run_id,
+                kind="subagent.linked",
+                run_id=lineage.child_run_id,
+                session_id=lineage.child_session_id,
+                activation_id=None,
+                durable_sequence=None,
+                payload={"lineage": _LINEAGE_ADAPTER.dump_python(lineage, mode="json")},
+                critical=True,
+            )
+        )
     if isinstance(fact, RunEvent):
         projected = _project_run_event(fact)
         return _run_and_session(projected)

@@ -92,6 +92,7 @@ from ..lifecycle import (
 from ..lifecycle.history import (
     ChildRunPage,
     RunCursor,
+    RunLineage,
     RunPage,
     SessionCursor,
     SessionMessagePage,
@@ -668,6 +669,7 @@ class AgentRunner:
         if controller is not None:
             controller.command_lifecycle = runner._command_lifecycle
             controller.observability = runtime.environment.observability
+            controller.live_publisher = live_publisher
         return runner
 
     # endregion
@@ -2164,6 +2166,27 @@ class AgentRunner:
         run_id = self.store.load_session_lane(self._required_id(session_id))
         return self.get_run(run_id) if run_id is not None else None
 
+    def get_run_lineage(self, run_id: str) -> RunLineage | None:
+        """从持久父关系读取 lineage；root 返回 None，不维护并行目录。"""
+        child = self.get_run(run_id)
+        link = self.store.load_parent_link(child.run_id)
+        if link is None:
+            return None
+        root = self.get_run(link.parent_run_id)
+        ancestor = self.store.load_parent_link(root.run_id)
+        while ancestor is not None:
+            root = self.get_run(ancestor.parent_run_id)
+            ancestor = self.store.load_parent_link(root.run_id)
+        return RunLineage(
+            root.session_id,
+            root.run_id,
+            link.parent_run_id,
+            link.parent_tool_call_id,
+            child.run_id,
+            child.session_id,
+            link.agent_selector,
+        )
+
     def get_run_control(self, run_id: str) -> RunControlSnapshot:
         """读取 run 的窄控制快照，不加载完整请求、选项和模型输出。"""
         control = self.store.load_run_control(self._required_id(run_id))
@@ -2923,7 +2946,7 @@ class AgentRunner:
     def _publish_live_fact(self, fact: LiveFact) -> None:
         """Best-effort 发布 runner fact，不影响 runtime 或 durable settlement。"""
         from ..goal.models import GoalChanged
-        from .streaming import CommandCleanupFailed
+        from .streaming import CommandCleanupFailed, LineagedLiveFact
 
         publisher = self._live_publisher
         if publisher is None:
@@ -2955,6 +2978,10 @@ class AgentRunner:
             session_id = fact.session_id
             activation_id = None
         try:
+            if isinstance(fact, CommandCleanupFailed):
+                lineage = self.get_run_lineage(fact.run_id)
+                if lineage is not None:
+                    fact = LineagedLiveFact(fact, lineage)
             publisher.publish(fact)
         except Exception:
             logger.warning(

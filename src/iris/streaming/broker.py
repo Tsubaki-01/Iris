@@ -375,6 +375,7 @@ class LiveStreamBroker(LivePublisher):
             activation_id=projected.activation_id,
             durable_sequence=projected.durable_sequence,
             payload=projected.payload,
+            lineage=projected.lineage,
         )
         stored = _StoredEnvelope(
             envelope=envelope,

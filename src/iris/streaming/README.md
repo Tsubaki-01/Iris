@@ -49,7 +49,7 @@ gateway = StreamingGateway(
 因无人消费 mixed stream 而占用下一轮 admission 容量。需要本地 mixed stream 的 host 可使用默认
 `observation_mode="mixed"`，并持续消费 `manager.events()`。
 
-启用 Goal 时，同一个 session publisher 还接收 `GoalChanged`，投影为仅 session scope 的
+启用 Goal 时，同一个 session publisher 还接收 `GoalChanged`，投影为 session 及 session_tree 的
 `goal.changed`，`payload.view` 是当时的 GoalView。没有 Run 的创建、暂停或清除也能通知；
 envelope 不虚构 run/activation identity 或 durable sequence。快照按 session 合并，不能用它
 重放每次操作；重连后通过 `manager.goal.get()` 读取当前状态，不新增远程 Goal commands。

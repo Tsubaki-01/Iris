@@ -36,6 +36,7 @@ from iris.lifecycle import (
     ReserveModelStep,
     RunCheckpoint,
     RunErrorInfo,
+    RunEvent,
     RunLimits,
     RunPhase,
     RunResult,
@@ -250,7 +251,9 @@ class StreamingStaticProvider(StaticProvider):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("flow", ["active", "proxy", "error", "linked"])
-async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, flow: str) -> None:
+async def test_subagent_live_plane_preserves_parent_and_child_identity(
+    tmp_path: Path, flow: str
+) -> None:
     publisher = RecordingPublisher()
     parent = StreamingStaticProvider(
         *(
@@ -264,7 +267,7 @@ async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, fl
         ),
         text_response("Parent done"),
     )
-    child = StaticProvider(
+    child = StreamingStaticProvider(
         *(
             [
                 tool_response(
@@ -299,7 +302,20 @@ async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, fl
                 response=QuestionInteractionResponse(answer="Continue"),
             )
     assert result.run.stop_reason == RunStopReason.COMPLETED, result.error
-    assert all(fact.run_id == "parent" for fact in publisher.facts)
+    from iris.harness.streaming import LineagedLiveFact, SubagentLinked
+
+    children = [fact for fact in publisher.facts if isinstance(fact, LineagedLiveFact)]
+    assert bool(children) == (flow != "error")
+    assert all(
+        fact.run_id == "parent"
+        for fact in publisher.facts
+        if not isinstance(fact, LineagedLiveFact)
+    )
+    if children:
+        assert isinstance(children[0].fact, SubagentLinked)
+        link = runner.store.load_subagent_link("parent", "delegate")
+        assert all(fact.lineage.child_run_id == link.child_run_id for fact in children)
+        assert all(fact.lineage.root_run_id == "parent" for fact in children)
     starts = [
         fact
         for fact in publisher.facts
@@ -314,8 +330,14 @@ async def test_subagent_live_plane_contains_parent_facts_only(tmp_path: Path, fl
     assert len(finals) == 1 and finals[0].tool_call_id == "delegate"
     assert finals[0].tool_result.is_error == (flow == "error")
     if flow == "proxy":
-        assert any(fact.kind == "interaction.suspended" for fact in publisher.facts)
-        assert any(fact.kind == "interaction.resolved" for fact in publisher.facts)
+        assert any(
+            isinstance(fact, RunEvent) and fact.kind == "interaction.suspended"
+            for fact in publisher.facts
+        )
+        assert any(
+            isinstance(fact, RunEvent) and fact.kind == "interaction.resolved"
+            for fact in publisher.facts
+        )
 
 
 @pytest.mark.asyncio

@@ -342,8 +342,9 @@ settlement task 完成后才 terminal。`settlement_timeout` 覆盖 child 等待
 Child interaction/deadline 或 outer tool timeout 先结算 child，再提交 `SUBAGENT_TIMEOUT`。
 Outer timeout 以 durable `child.created_at` 为起点，权限等待不计入，resume/rebind/recover
 不重置。Proxy 保存的 expiry owner 决定停止 parent 还是继续处理工具错误；parent 同刻到期优先。
-Parent stream 只含 parent start/proxy/final facts；linked recovery 不重复 started，child 内部
-stream 与 usage 不转发，错误仍用带 `is_error` 的 `tool.completed`。
+精确 parent session stream 只含 parent facts；session_tree 同时转发带固定 lineage 的 child
+内部流与 usage。child 身份不改写，linked recovery 不重复父 started，错误仍用带
+`is_error` 的 `tool.completed`。关系可通过 `list_child_runs` 和 `get_run_lineage` 补读。
 Parent 保留最终回答权，只得到 child 的最终文本；child usage 留在 child run。
 结果 metadata 仅含 `agent_selector`、admission 后的 `child_run_id` 和普通 artifact metadata。
 Live event 是 best-effort，不承诺跨进程 exactly-once。

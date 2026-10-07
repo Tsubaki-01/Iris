@@ -37,10 +37,11 @@ from ..lifecycle import (
     RunToolCallRecord,
     validate_json_safe,
 )
+from ..lifecycle.history import RunLineage
 
 # endregion
 
-type LiveScope = Literal["run", "session"]
+type LiveScope = Literal["run", "session", "session_tree", "resource"]
 type ReplayGapReason = Literal[
     "epoch_changed",
     "cursor_expired",
@@ -92,6 +93,7 @@ class LiveEnvelope(_FrozenWireModel):
     activation_id: _NonEmptyString | None = None
     durable_sequence: int | None = Field(default=None, ge=1, strict=True)
     payload: dict[str, JsonValue] = Field(default_factory=dict)
+    lineage: RunLineage | None = None
 
     @field_validator("payload")
     @classmethod

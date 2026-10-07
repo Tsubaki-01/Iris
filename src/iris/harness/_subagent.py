@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from ..prompts import PromptSource
     from ._command_lifecycle import CommandLifecycle
     from .runner import AgentRunner, Clock
+    from .streaming import LivePublisher
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class HarnessSubagentController:
         self.command_lifecycle: CommandLifecycle | None = None
         # root 在 assembly 完成后交接同一实例，此前 controller 不执行 child。
         self.observability: Observability
+        self.live_publisher: LivePublisher | None = None
         self._live_children: dict[str, tuple[AgentRunner, asyncio.Task[RunResult]]] = {}
 
     def _parent_observation(
@@ -128,6 +130,7 @@ class HarnessSubagentController:
         )
         route = invocation.call.route
         if link is not None:
+            route = self.routes.routes[link.agent_selector]
             return await self._continue_linked(
                 route, parent, link.child_run_id, parent_call.parent_tool_call_id
             )
@@ -246,13 +249,32 @@ class HarnessSubagentController:
             boundary=boundary,
             context_access=ContextAccess(self.store),
         )
-        runner = AgentRunner(runtime=runtime, store=self.store, clock=self.clock)
+        runner = AgentRunner(
+            runtime=runtime, store=self.store, clock=self.clock, live_publisher=self.live_publisher
+        )
         runner._command_lifecycle = cast("CommandLifecycle", self.command_lifecycle)
         runner._hook_lifecycle = runner._command_lifecycle.root._hook_lifecycle
         runner._command_target = ChildCommandTarget(self, route)
         if runner._subagent_controller is not None:
             runner._subagent_controller.command_lifecycle = self.command_lifecycle
         return runner
+
+    def _bind_child_live(self, runner: AgentRunner, run_id: str) -> None:
+        """执行前读取一次持久关系，此后每个 token 直接使用固定 lineage。"""
+        if self.live_publisher is None:
+            return
+        from .streaming import SubagentLinked, _LineagePublisher
+
+        lineage = runner.get_run_lineage(run_id)
+        assert lineage is not None
+        publisher = _LineagePublisher(self.live_publisher, lineage)
+        runner._live_publisher = publisher
+        if runner._subagent_controller is not None:
+            runner._subagent_controller.live_publisher = publisher
+        try:
+            publisher.publish(SubagentLinked(lineage))
+        except Exception:
+            logger.warning("live publisher 处理子任务关系失败", exc_info=True)
 
     @asynccontextmanager
     async def open_command_target(
@@ -264,6 +286,7 @@ class HarnessSubagentController:
             yield live[0]
             return
         async with self._owned_child_runner(self._assemble_child(route)) as runner:
+            self._bind_child_live(runner, run_id)
             yield runner
 
     def _handoff_settlement_receipt(
@@ -368,6 +391,7 @@ class HarnessSubagentController:
         operation: Callable[[], Coroutine[Any, Any, RunResult]],
     ) -> SubagentExecutionOutcome:
         """本次调用持有 child task；absolute timer 与取消都先完成 child settlement。"""
+        self._bind_child_live(runner, child.run_id)
         deadline = _outer_deadline(parent, child)
         # WAITING continuation 没有 parent activation timer，仍需在 child await 期间响应 deadline。
         parent_deadline = parent.options.limits.deadline_at
@@ -437,11 +461,9 @@ class HarnessSubagentController:
                 await runner.cancel(child.run_id, reason=reason)
                 await asyncio.gather(task, return_exceptions=True)
             elif child.phase is not RunPhase.TERMINAL:
-                tool = self.store.load_tool_call(parent_run_id, parent_tool_call_id)
-                route = self.routes.routes[
-                    cast(str, tool.arguments.get("agent") or self.routes.default)
-                ]
+                route = self.routes.routes[link.agent_selector]
                 async with self._owned_child_runner(self._assemble_child(route)) as runner:
+                    self._bind_child_live(runner, child.run_id)
                     cancelled = runner.request_cancel(child.run_id, reason=reason)
                     if cancelled.phase is RunPhase.ACTIVE:
                         await runner.recover(
@@ -489,6 +511,7 @@ class HarnessSubagentController:
                     async with self._owned_child_runner(
                         self._assemble_child(self.routes.routes[selector])
                     ) as runner:
+                        self._bind_child_live(runner, child.run_id)
                         await runner.recover(
                             child.run_id, expected_activation_id=child.current_activation_id
                         )

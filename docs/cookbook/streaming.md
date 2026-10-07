@@ -1,5 +1,10 @@
 # 把运行过程接入流式宿主
 
+需要同时观察子任务时，订阅当前根会话的 `session_tree` scope。每条事件仍有原始
+run/session 身份，child 额外带 lineage；中央会话可以保持 root，仅在子任务面板展示
+child 过程。不要等到父工具完成才订阅 child，否则可能错过短任务的首包。精确 scope、
+持久补读与父 proxy 规则见[流式参考](../reference/streaming-observability.md)。
+
 如果只需要终端交互，`iris chat` 已经展示文字增量。自己的 Web 或桌面应用可以把 Runner 的 live facts 接到 `LiveStreamBroker`，再通过 gateway 消费事件或适配为 SSE/WebSocket。
 
 Iris 提供嵌入式接口，不会启动 HTTP 服务器。你的宿主负责路由、连接和界面，Runner 继续负责运行状态。

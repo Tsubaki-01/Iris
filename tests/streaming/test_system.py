@@ -105,7 +105,7 @@ def test_image_tool_completed_uses_text_projection(tmp_path: Path, name: str | N
     )
     projected = project_live_fact(fact)
     expected_image = f"[image: {name}]" if name else "[image]"
-    assert len(projected) == 2
+    assert len(projected) == 3
     for item in projected:
         assert item.payload["content"] == ["诊断失败", expected_image, "请检查输入"]
         assert item.payload["error"] == {
@@ -1267,7 +1267,7 @@ async def test_sqlite_restart_uses_new_epoch_and_per_run_durable_sync(
             )
         }
         dump = "\n".join(connection.iterdump())
-    assert identity == [("agent_lifecycle", 11)]
+    assert identity == [("agent_lifecycle", 12)]
     expected_tables = {
         "goals",
         "goal_runs",

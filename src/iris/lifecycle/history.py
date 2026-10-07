@@ -163,6 +163,19 @@ class ChildRunSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class RunLineage:
+    """由持久 link 固定的根会话与父工具身份。"""
+
+    root_session_id: str
+    root_run_id: str
+    parent_run_id: str
+    parent_tool_call_id: str
+    child_run_id: str
+    child_session_id: str
+    agent_selector: str
+
+
+@dataclass(frozen=True, slots=True)
 class ChildRunPage:
     """父 Run 的直接 child 页；后代按各自父 Run 继续查询。"""
 
@@ -171,6 +184,7 @@ class ChildRunPage:
 
 
 __all__ = [
+    "RunLineage",
     "SessionCursor",
     "SessionSummary",
     "SessionPage",

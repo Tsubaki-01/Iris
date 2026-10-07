@@ -4,6 +4,16 @@
 
 ## Broker 与订阅
 
+scope 包括 `run`（精确 Run）、`session`（精确会话）、`session_tree`（根会话及 child）和
+`resource`（独立维护资源）。root 事实同时投影到自身 session_tree；child publisher 在执行前
+固定持久 lineage，首先发布 critical `subagent.linked`。后续 envelope 保留 child 原来的
+run_id/session_id/activation_id，并附 `RunLineage`，不会改写成父身份或逐 token 查询 Store。
+
+`StreamingGateway` 可订阅 bound session 的 session_tree；已知 child 的 sync/snapshot
+通过持久父关系核对根会话。resource 订阅由宿主使用对应资源的 broker，不能伪装成会话。
+重连可用 `runner.list_child_runs()` / `get_run_lineage()` 补读关系，人工回答仍经父 proxy。
+开启 live publisher 时 child provider 也须满足与 root 相同的 streaming provider 契约。
+
 从 `iris.streaming` 导入：
 
 ```text

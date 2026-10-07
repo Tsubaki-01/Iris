@@ -394,8 +394,9 @@ the cleanup task; follow-ups start only after true parent terminal settlement.
 Child interaction/deadline expiry and outer tool timeout settle the child, then commit
 `SUBAGENT_TIMEOUT`. The outer timer starts at durable `child.created_at`, excludes permission waits,
 and never resets on resume/rebind/recover. The stored proxy expiry owner determines whether the
-parent stops or handles a tool error; parent expiry wins ties. Parent streams contain only parent
-start/proxy/final facts, without child streams or usage. Linked recovery does not repeat started;
+parent stops or handles a tool error; parent expiry wins ties. Exact parent session streams contain
+only parent facts. The session_tree scope also forwards child streams and usage with fixed lineage
+and original child identities. Linked recovery does not repeat the parent's started event;
 errors still use `tool.completed` with `is_error`.
 The parent retains the final answer and receives only the child's final text. Usage stays on the
 child run. Result metadata contains only `agent_selector`, admitted `child_run_id`, and ordinary

@@ -129,6 +129,7 @@ runner.list_runs(session_id, after=None, limit=50)  # RunPage，全部 phase
 runner.list_child_runs(parent_run_id, after=None, limit=50)  # ChildRunPage，直接 child
 runner.read_session_messages(session_id, start=0, limit=50)  # SessionMessagePage
 runner.get_session_lane(session_id)  # RunSnapshot | None
+runner.get_run_lineage(run_id)  # RunLineage | None，root 返回 None
 ```
 
 三个导航页的 items 为 tuple，next_cursor 为下一页位置或 None。session 按 latest_run_at、
@@ -137,6 +138,7 @@ child 按 created_at、run_id 升序。SessionSummary 含 revision、message_cou
 Run 身份及 fork 来源；child 项含自身 RunSnapshot、parent_run_id、parent_tool_call_id 和
 admission 实际采用的 agent_selector。每页只承诺本次读取快照，连续多页不冻结活动数据库。
 过滤和 limit 校验只由 Store 执行，SQLite 在查询内应用 LIMIT，不先加载完整数据库。
+`load_parent_link(child_run_id)` 为 Store 的直接父关系读面，lineage 从该持久关系产生。
 `list_fork_points` 仍只返回可分支的终态顶层 Run。
 
 生命周期 SQLite 当前为 schema 12，持久 child link 增加 agent_selector；不读取或迁移旧

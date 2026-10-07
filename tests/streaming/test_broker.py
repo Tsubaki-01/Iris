@@ -50,7 +50,8 @@ def test_cleanup_failure_projects_live_error_to_exact_run_and_session() -> None:
             details={"private_path": "/host/private", "stdout": "private command output"},
         ),
     )
-    run, session = project_live_fact(fact)
+    run, session, tree = project_live_fact(fact)
+    assert tree.scope == "session_tree" and tree.scope_id == "session-cleanup"
     assert (run.scope, run.scope_id) == ("run", "run-cleanup")
     assert (session.scope, session.scope_id) == ("session", "session-cleanup")
     assert run.kind == session.kind == "command.cleanup.failed"
@@ -408,7 +409,7 @@ async def test_subscribing_refreshes_replay_scope_lru_position() -> None:
     broker = LiveStreamBroker(
         replay_capacity_per_scope=2,
         subscription_capacity=8,
-        max_replay_scopes=3,
+        max_replay_scopes=4,
     )
     broker.publish(_run_event(1, run_id="run-first"))
     broker.publish(_run_event(1, run_id="run-second"))

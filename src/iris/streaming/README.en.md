@@ -93,8 +93,9 @@ commit and precedes the main `model.step.started`; the final run result explains
 prints only the short live statuses and ignores durable events to avoid duplicate completion output.
 
 `StreamingGateway` binds the exact runner, manager, broker, and session supplied at construction.
-A session scope must match the bound session. For run scopes and durable cursors, the runner must
-confirm that the run belongs to that session. The gateway never calls `SessionManager.events()`
+A session or session_tree scope must match the bound session. For run scopes and durable cursors,
+the runner checks the session or its durable child lineage. Resource subscriptions use the host's
+resource-bound broker. The gateway never calls `SessionManager.events()`
 and does not mutate the store or perform recovery directly.
 
 ```python

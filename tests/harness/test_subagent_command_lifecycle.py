@@ -19,8 +19,10 @@ from iris.command import (
 )
 from iris.exceptions import IrisCommandCleanupError
 from iris.harness import AgentRunner, CommandCleanupFailed
+from iris.harness.streaming import LineagedLiveFact
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import (
+    AdmitChildRun,
     AgentRunOptions,
     AgentRunRequest,
     CreateRun,
@@ -36,7 +38,17 @@ from iris.runtime import RuntimeCursor
 
 from .fakes import RecordingPublisher, StaticProvider, text_response, tool_response
 from .test_command_settlement import ControlledService, FailedProvider, bind_service
-from .test_runner_subagent import ChildProviders, _parent_provider, _write_configs
+from .test_runner_subagent import (
+    ChildProviders,
+    StreamingStaticProvider,
+    _parent_provider,
+    _prepare_parent,
+    _write_configs,
+)
+
+
+class StreamingFailedProvider(FailedProvider, StreamingStaticProvider):
+    """通过 typed stream 复用原始 provider 失败。"""
 
 
 @pytest.mark.asyncio
@@ -192,7 +204,7 @@ async def test_child_pending_survives_close_and_retry_preserves_original_failure
 ) -> None:
     """关闭临时 child 不丢 pending；重建后的 cancel 只补清理并保留 provider 原因。"""
     publisher = RecordingPublisher()
-    provider = FailedProvider()
+    provider = StreamingFailedProvider()
     runner = AgentRunner.from_config_path(
         _write_configs(tmp_path),
         provider=_parent_provider(),
@@ -209,17 +221,42 @@ async def test_child_pending_survives_close_and_retry_preserves_original_failure
     )
     route = controller.routes.routes["researcher"]
     child = controller._assemble_child(route)
+    _prepare_parent(runner)
+    parent = runner.store.load_run("parent")
+    child_create, _ = child._build_start_facts(
+        AgentRunRequest(input="child", run_id="child", session_id="child-session"), options=None
+    )
+    runner.store.admit_child_run(
+        AdmitChildRun(
+            parent_run_id="parent",
+            expected_parent_run_revision=parent.revision,
+            parent_activation_id=parent.current_activation_id,
+            parent_tool_call_id="delegate",
+            expected_parent_tool_version=1,
+            child_create=child_create,
+            agent_selector=route.selector,
+        )
+    )
+    controller._bind_child_live(child, "child")
     try:
         with pytest.raises(IrisCommandCleanupError):
-            await child.start(
-                AgentRunRequest(input="child", run_id="child", session_id="child-session")
+            await child._run_admitted_start(
+                run_id="child", activation_id=child_create.start_activation_id
             )
         await child.aclose()
         assert child._resources_closed
         assert "child" in runner._command_lifecycle.pending
         assert runner.store.load_run("child").phase is RunPhase.ACTIVE
         assert (
-            len([fact for fact in publisher.facts if isinstance(fact, CommandCleanupFailed)]) == 1
+            len(
+                [
+                    fact
+                    for fact in publisher.facts
+                    if isinstance(fact, LineagedLiveFact)
+                    and isinstance(fact.fact, CommandCleanupFailed)
+                ]
+            )
+            == 1
         )
         service.fail = False
         service.release()
@@ -229,7 +266,11 @@ async def test_child_pending_survives_close_and_retry_preserves_original_failure
         assert result.error is not None and result.error.code == "PROVIDER_ERROR"
         assert provider.calls == 1
         assert "child" not in runner._command_lifecycle.pending
-        failures = [fact for fact in publisher.facts if isinstance(fact, CommandCleanupFailed)]
+        failures = [
+            fact.fact
+            for fact in publisher.facts
+            if isinstance(fact, LineagedLiveFact) and isinstance(fact.fact, CommandCleanupFailed)
+        ]
         assert len(failures) == 1 and failures[0].run_id == "child"
     finally:
         service.fail = False

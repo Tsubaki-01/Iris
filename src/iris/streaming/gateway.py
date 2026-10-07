@@ -317,8 +317,7 @@ class StreamingGateway:
         """
         runs = [self._runner.get_run(run_id) for run_id in run_ids]
         for run in runs:
-            if run.session_id != self._session_id:
-                raise IrisRunConflictError("run 不属于 gateway bound session")
+            self._require_scope_binding("run", run.run_id)
         return DurableSnapshot.model_construct(
             session_id=self._session_id,
             runs=tuple(
@@ -335,13 +334,17 @@ class StreamingGateway:
 
     def _require_scope_binding(self, scope: str, scope_id: str) -> None:
         """验证 subscription scope 只属于 bound session。"""
-        if scope == "session":
+        if scope in {"session", "session_tree"}:
             if scope_id != self._session_id:
                 raise IrisRunConflictError("session scope 不属于 gateway bound session")
             return
+        if scope == "resource":
+            raise IrisRunConflictError("resource 订阅应由宿主的资源绑定 broker 提供")
         run = self._runner.get_run_control(scope_id)
         if run.session_id != self._session_id:
-            raise IrisRunConflictError("run scope 不属于 gateway bound session")
+            lineage = self._runner.get_run_lineage(scope_id)
+            if lineage is None or lineage.root_session_id != self._session_id:
+                raise IrisRunConflictError("run scope 不属于 gateway bound session tree")
 
     def _filter_tool_calls(
         self,

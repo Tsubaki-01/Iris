@@ -35,7 +35,8 @@ def _changed(objective: str, *, session_id: str = "session") -> GoalChanged:
 def test_goal_projection_is_session_only_and_keeps_actual_view() -> None:
     """无 Run 也能通知，不编造运行身份或 durable sequence。"""
     event = _changed("完成目标")
-    (projected,) = project_live_fact(event)
+    projected, tree = project_live_fact(event)
+    assert tree.scope == "session_tree" and tree.payload == projected.payload
     assert (projected.scope, projected.scope_id, projected.kind) == (
         "session",
         "session",
