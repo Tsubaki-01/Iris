@@ -49,9 +49,26 @@ class EffectiveConfiguration:
     prepared: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ConfigurationApplied:
+    """本次真实 activation 采用的完整 Runner 配置，可直接类型化序列化。"""
+
+    configuration_snapshot_id: str
+    run_id: str
+    session_id: str
+    activation_id: str
+    agent_id: str
+    configuration: EffectiveConfiguration
+
+
 def snapshot_tool_catalog(view: ToolRegistryView) -> tuple[ToolDefinition, ...]:
     """冻结实际可用目录，保留 eager/deferred 与 group 声明。"""
     return tuple(deepcopy(tool.definition) for tool in view.available_tools)
 
 
-__all__ = ["ConfigurationDependency", "LifecycleStorageDescription", "EffectiveConfiguration"]
+__all__ = [
+    "ConfigurationApplied",
+    "ConfigurationDependency",
+    "LifecycleStorageDescription",
+    "EffectiveConfiguration",
+]

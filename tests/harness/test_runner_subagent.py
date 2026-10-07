@@ -302,8 +302,8 @@ async def test_subagent_live_plane_preserves_parent_and_child_identity(
                 response=QuestionInteractionResponse(answer="Continue"),
             )
     assert result.run.stop_reason == RunStopReason.COMPLETED, result.error
+    from iris.harness.configuration import ConfigurationApplied
     from iris.harness.streaming import LineagedLiveFact, SubagentLinked
-    from iris.observability.facts import ConfigurationApplied
 
     children = [fact for fact in publisher.facts if isinstance(fact, LineagedLiveFact)]
     assert bool(children) == (flow != "error")

@@ -3,10 +3,11 @@
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 
 from iris.agents import AgentConfig
-from iris.harness import AgentRunner, AgentRunRequest
-from iris.observability.facts import ConfigurationApplied, SourceAdopted, bind_fact_scope
+from iris.harness import AgentRunner, AgentRunRequest, ConfigurationApplied
+from iris.observability.facts import SourceAdopted, bind_fact_scope
 from iris.skill.tool import LoadSkillInput, LoadSkillTool
 from iris.store import SQLiteStore
 from iris.tools import ToolExecutionContext
@@ -46,6 +47,9 @@ async def test_configuration_description_preserves_loaded_sources_and_actual_act
     assert len(applied) == 1
     assert applied[0].configuration_snapshot_id == before.configuration_snapshot_id
     assert applied[0].configuration == before
+    encoded = TypeAdapter(ConfigurationApplied).dump_python(applied[0], mode="json")
+    assert encoded["configuration"]["agent_config"]["system"] == "original"
+    assert encoded["configuration"]["configuration_snapshot_id"] == before.configuration_snapshot_id
     assert applied[0].activation_id == next(
         event.activation_id
         for event in runner.list_events("run")

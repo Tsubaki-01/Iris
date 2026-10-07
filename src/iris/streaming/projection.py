@@ -16,6 +16,7 @@ from typing import Literal, assert_never, cast
 from pydantic import JsonValue, TypeAdapter
 
 from ..goal.models import GoalChanged, GoalView
+from ..harness.configuration import ConfigurationApplied
 from ..harness.control import SessionControlSnapshot
 from ..harness.maintenance_models import MaintenanceChanged, ResourceMaintenanceView
 from ..harness.streaming import (
@@ -42,7 +43,7 @@ from ..message import (
     ModelUsageUpdated,
     TextBlock,
 )
-from ..observability.facts import ConfigurationApplied, SourceAdopted
+from ..observability.facts import SourceAdopted
 from ..runtime import RuntimeStreamEvent
 from ..runtime.diagnostics import ContextPreparation
 from ..tools import ToolResult

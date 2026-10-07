@@ -101,7 +101,7 @@ from ..lifecycle.history import (
 )
 from ..memory import MemoryService
 from ..message import ImageBlock, Msg, image_block_from_saved
-from ..observability.facts import ConfigurationApplied, SourceAdopted, bind_fact_scope
+from ..observability.facts import SourceAdopted, bind_fact_scope
 from ..prompts import PromptSource
 from ..providers import CompletionProvider
 from ..runtime import (
@@ -146,6 +146,7 @@ from ._goal import validate_goal_options
 from ._hooks import HookLifecycle, HookStartControl, run_started
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .configuration import (
+    ConfigurationApplied,
     ConfigurationDependency,
     EffectiveConfiguration,
     LifecycleStorageDescription,

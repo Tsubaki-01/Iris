@@ -17,7 +17,7 @@ from ..lifecycle import (
     RunUsage,
 )
 from ._subagent import ChildProviderFactory
-from .configuration import EffectiveConfiguration
+from .configuration import ConfigurationApplied, EffectiveConfiguration
 from .control import PendingSubmission, RestoreReceipt, SessionControlSnapshot
 from .evolution import build_project_evolution_binding
 from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding, ProjectEvolutionBinding
@@ -35,6 +35,7 @@ from .session_manager import (
 from .streaming import CommandCleanupFailed, LiveFact, LivePublisher, SessionSubmissionEvent
 
 __all__ = [
+    "ConfigurationApplied",
     "EffectiveConfiguration",
     "GoalChanged",
     "GoalControlResult",

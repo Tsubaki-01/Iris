@@ -18,7 +18,7 @@ kind、original_path、text 与 status。MCP 的 env/header 凭据字段以 reda
 未使用的非 UTF-8 冻结源标 not_utf8，不因此改变模板按需加载行为。有这类缺口时完整性为
 partial。完整性描述来源采集范围，不意味着能还原外部 Python 对象或远程服务。
 
-每次 activation 发布 `ConfigurationApplied`。原始 fact 携带完整 configuration，便于宿主
+每次 activation 发布 `iris.harness.ConfigurationApplied`。原始 fact 携带完整 configuration，便于宿主
 保存临时 child 的实际配置；网络 `configuration.applied` 只包含配置 ID 与 agent_id。
 恢复旧 Run 会采用当前恢复 Runner 的配置，原 activation 和恢复 activation 的关联各自保留。
 

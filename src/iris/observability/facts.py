@@ -10,27 +10,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from threading import get_ident
-from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ..utils.sources import SourceDocument
 
-if TYPE_CHECKING:
-    from ..harness.configuration import EffectiveConfiguration
-
 _logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class ConfigurationApplied:
-    """本次真实 activation 采用的 Runner 配置实例。"""
-
-    configuration_snapshot_id: str
-    run_id: str
-    session_id: str
-    activation_id: str
-    agent_id: str
-    configuration: EffectiveConfiguration
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,14 +38,11 @@ class SourceAdopted:
     source_versions: tuple[tuple[str, str | None], ...] = ()
 
 
-type SourceFact = ConfigurationApplied | SourceAdopted
-
-
 @dataclass(frozen=True, slots=True)
 class _FactScope:
     """真实执行 owner 的进程内观察关联，线程 worker 借用同一出口。"""
 
-    publish: Callable[[SourceFact], None]
+    publish: Callable[[SourceAdopted], None]
     loop: asyncio.AbstractEventLoop
     thread_id: int
     configuration_snapshot_id: str | None = None
@@ -79,7 +60,7 @@ _SCOPE: ContextVar[_FactScope | None] = ContextVar("iris_source_adoption", defau
 
 @contextmanager
 def bind_fact_scope(
-    publish: Callable[[SourceFact], None],
+    publish: Callable[[SourceAdopted], None],
     *,
     configuration_snapshot_id: str | None = None,
     run_id: str | None = None,
@@ -164,7 +145,6 @@ def record_source_adoption(
 
 
 __all__ = [
-    "ConfigurationApplied",
     "SourceAdopted",
     "bind_fact_scope",
     "bind_fact_step",

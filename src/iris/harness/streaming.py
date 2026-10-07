@@ -16,9 +16,10 @@ from typing import Protocol
 from ..goal.models import GoalChanged
 from ..lifecycle import RunErrorInfo, RunEvent
 from ..lifecycle.history import RunLineage
-from ..observability.facts import ConfigurationApplied, SourceAdopted
+from ..observability.facts import SourceAdopted
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from ..runtime.diagnostics import ContextPreparation
+from .configuration import ConfigurationApplied
 from .control import SessionControlSnapshot
 from .maintenance_models import MaintenanceChanged
 from .session_manager import SubmissionEvent
