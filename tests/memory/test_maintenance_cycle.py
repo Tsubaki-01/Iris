@@ -8,14 +8,77 @@ import pytest
 
 import iris.memory.service as memory_service
 from iris.exceptions import IrisMemoryError
-from iris.memory import MemoryMaintenanceScope, MemoryService, SQLiteMemoryStore
+from iris.memory import MemoryMaintenanceScope, MemoryObserveInput, MemoryService, SQLiteMemoryStore
 from iris.memory.generation_models import GenerationResult, GenerationState, MemorySource
 from iris.prompts import PromptSnapshot, PromptSource
+
+from .test_generation import Provider
+from .test_generation import service as generation_service
+from .test_generation_store import _episode, _flush
 
 
 async def _eligible(sources: tuple[MemorySource, ...]) -> bool:
     """本测试不含生命周期来源。"""
     return True
+
+
+@pytest.mark.asyncio
+async def test_cycle_returns_completed_dream_revision(tmp_path: Path) -> None:
+    """周期结果采用真实完成返回值，不能保留生成前快照的版本。"""
+    provider = Provider(
+        lambda source: {
+            "operations": [
+                {
+                    "action": "add",
+                    "new_key": "new-item",
+                    "text": "use uv",
+                    "category": "reference",
+                    "kind": "fact",
+                    "reason": "record",
+                    "evidence": source["observations"][0]["evidence"],
+                }
+            ],
+            "resolutions": [
+                {
+                    "observation_id": source["observations"][0]["id"],
+                    "target_id": "new-item",
+                    "reason": "stored",
+                }
+            ],
+        }
+    )
+    service = generation_service(tmp_path, provider)
+    _flush(service.store, _episode(service.store))
+    cycle = await service.maintain_cycle(
+        "project", scope=MemoryMaintenanceScope(frozenset(), _eligible), cycle_id="cycle"
+    )
+    (result,) = cycle.results
+    stored = next(
+        item for item in service.list_generation_results("project").items if item.id == result.id
+    )
+    assert result.status == "completed" and result.stage == "dream"
+    assert (
+        result.item_revision
+        == stored.item_revision
+        == service.generation_state("project").item_revision
+        == 1
+    )
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cycle_preserves_flush_remaining_work(tmp_path: Path) -> None:
+    """长原文只处理一个有界批次，阶段 has_more 使用消费后返回值。"""
+    provider = Provider(lambda _: {"observations": []})
+    service = generation_service(tmp_path, provider, flush_input_budget_tokens=1400)
+    service.observe(MemoryObserveInput(text="a" * 4000))
+    cycle = await service.maintain_cycle(
+        "project", scope=MemoryMaintenanceScope(frozenset(), _eligible), cycle_id="partial"
+    )
+    (result,) = cycle.results
+    assert result.stage == "flush" and result.has_more and cycle.has_more
+    assert 0 < result.consumed_ranges[0].end < 4000
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -66,10 +129,13 @@ async def test_cycle_dreams_existing_input_first_then_repairs_projection(
         calls.append("projection")
         state = replace(state, projection_revision=1)
 
-    async def overview(namespace: str, prompt_snapshot: PromptSnapshot) -> None:
+    async def overview(
+        namespace: str, prompt_snapshot: PromptSnapshot
+    ) -> tuple[object, GenerationResult]:
         nonlocal state
         calls.append("overview")
         state = replace(state, overview_revision=1)
+        return object(), GenerationResult(namespace=namespace, stage="overview", status="completed")
 
     monkeypatch.setattr(service, "ageneration_state", read)
     monkeypatch.setattr(memory_service, "flush", flush)
@@ -82,6 +148,9 @@ async def test_cycle_dreams_existing_input_first_then_repairs_projection(
         "overview",
     ]
     assert result.has_more is existing_observation
+    assert [item.stage for item in result.results] == (
+        ["dream"] if existing_observation else ["flush", "dream"]
+    ) + ["overview"]
 
 
 @pytest.mark.asyncio

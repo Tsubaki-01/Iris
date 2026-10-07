@@ -76,8 +76,8 @@ from .store import MemoryStore
 
 ResultT = TypeVar("ResultT")
 logger = logging.getLogger(__name__)
-_cycle_results: ContextVar[list[GenerationResult] | None] = ContextVar(
-    "iris_memory_cycle_results", default=None
+_cycle_failures: ContextVar[list[GenerationResult] | None] = ContextVar(
+    "iris_memory_cycle_failures", default=None
 )
 
 
@@ -242,8 +242,8 @@ class MemoryService:
     def _observe_generation_result(self, result: GenerationResult) -> GenerationResult:
         """报告实际阶段结果；观测服务决定当前是否有本领域的维护区间。"""
         self.observability.maintenance_result("memory", result.stage, result.status)
-        results = _cycle_results.get()
-        if results is not None:
+        results = _cycle_failures.get()
+        if results is not None and result.status in {"failed", "cancelled"}:
             results.append(result)
         return result
 
@@ -252,15 +252,15 @@ class MemoryService:
     ) -> MemoryCycleResult:
         """执行一轮有界维护，返回真实阶段与当前范围的剩余积压。"""
         results: list[GenerationResult] = []
-        token = _cycle_results.set(results)
+        token = _cycle_failures.set(results)
         try:
-            await self._maintain_cycle(namespace, scope=scope)
+            await self._maintain_cycle(namespace, scope=scope, results=results)
         except Exception:
             # 已有领域失败结果时将它返回给周期调用方；无阶段结果的 IO 错误继续抛出。
             if not results or results[-1].status != "failed":
                 raise
         finally:
-            _cycle_results.reset(token)
+            _cycle_failures.reset(token)
         state = await self.ageneration_state(namespace, scope=scope)
         more = bool(
             state.pending_episodes
@@ -276,7 +276,9 @@ class MemoryService:
         )
         return MemoryCycleResult(cycle_id, tuple(results), more)
 
-    async def _maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> None:
+    async def _maintain_cycle(
+        self, namespace: str, *, scope: MemoryMaintenanceScope, results: list[GenerationResult]
+    ) -> None:
         """领域顺序只执行一批学习与需要的投影，不根据观察结果重放。"""
         await self.run_async_io(
             lambda: self.store.retry_blocked(
@@ -295,15 +297,18 @@ class MemoryService:
         )
         if state.pending_observations or state.pending_changes:
             result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
+            results.append(result)
             if result.status in {"failed", "cancelled", "conflict"}:
                 return
         elif state.pending_episodes:
             result = await flush(self, namespace, prompt_snapshot=prompts, scope=scope)
+            results.append(result)
             if result.status in {"failed", "cancelled", "conflict"}:
                 return
             state = await self.ageneration_state(namespace, scope=scope)
             if state.pending_observations or state.pending_changes:
                 result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
+                results.append(result)
                 if result.status in {"failed", "cancelled", "conflict"}:
                     return
         state = await self.ageneration_state(namespace, scope=scope)
@@ -313,7 +318,8 @@ class MemoryService:
                     lambda: self.mirror.rebuild_from_store(self.store, namespace)
                 )
             if state.item_revision and state.overview_revision != state.item_revision:
-                await self._refresh_overview(namespace, prompts)
+                _, overview_result = await self._refresh_overview(namespace, prompts)
+                results.append(overview_result)
 
     # endregion
 
@@ -759,11 +765,12 @@ class MemoryService:
             boundary="memory_overview",
             documents=prompts.source_documents(),
         )
-        return await self._refresh_overview(namespace, prompts)
+        overview, _ = await self._refresh_overview(namespace, prompts)
+        return overview
 
     async def _refresh_overview(
         self, namespace: str, prompt_snapshot: PromptSnapshot
-    ) -> MemoryOverviewGenerationResult:
+    ) -> tuple[MemoryOverviewGenerationResult, GenerationResult]:
         """在调用方固定的提示快照下生成和发布概览。"""
         if self.mirror is None or self.overview_provider is None or self.overview_model is None:
             raise IrisMemoryError("memory 概览生成依赖未配置", namespace=namespace)
@@ -846,7 +853,7 @@ class MemoryService:
         )
         self._observe_generation_result(result)
         raise_if_generation_cancelled()
-        return MemoryOverviewGenerationResult(
+        overview = MemoryOverviewGenerationResult(
             namespace=namespace,
             path=self.mirror.namespace_directory(namespace) / "Memory.md",
             source_revision=snapshot.state.item_revision,
@@ -858,6 +865,7 @@ class MemoryService:
             usage=usage,
             elapsed_seconds=perf_counter() - started,
         )
+        return overview, result
 
     def _rebuild_committed(
         self, namespace: str, *, generation_result_id: str | None = None

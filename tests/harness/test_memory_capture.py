@@ -464,7 +464,7 @@ async def test_external_service_revision_during_overview_schedules_republication
 
     async def observe_refresh(namespace: str, prompt_snapshot: PromptSnapshot) -> object:
         result = await refresh(namespace, prompt_snapshot)
-        if result.source_revision == 2:
+        if result[0].source_revision == 2:
             refreshed.set()
         return result
 
