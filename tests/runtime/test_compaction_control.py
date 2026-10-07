@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,35 @@ async def test_terminal_provider_failure_keeps_previous_projection(
 
 
 @pytest.mark.asyncio
+async def test_failed_later_batch_only_reports_successful_fragment(tmp_path: Path) -> None:
+    """后续批次失败时，候选记录只描述真正消费过的序列化片段。"""
+    provider = _Provider([_response("A"), IrisAuthenticationError("失败")])
+    runtime, activation, commits, cancellation = _case(tmp_path, provider, history_chars=16000)
+    preparations: list[ContextPreparation] = []
+
+    class Sink:
+        def emit(self, event: RuntimeStreamEvent | ContextPreparation) -> None:
+            if isinstance(event, ContextPreparation):
+                preparations.append(event)
+
+    result = await runtime.execute(
+        activation, commits=commits, cancellation=cancellation, stream_sink=Sink()
+    )
+    assert result.outcome is RuntimeActivationOutcome.FAILED
+    stages = [stage for stage in preparations[0].stages if stage.kind == "summary"]
+    assert len(stages) == 1 and stages[0].outcome == "candidate"
+    fragment = re.search(
+        r"text_coverage=partial \[0,(\d+)\)/16000", provider.summaries[0].messages[-1].text
+    )
+    assert fragment is not None
+    decision = stages[0].decisions[0]
+    assert decision.subject_kind == "summary_batch"
+    assert decision.subject_ref == f"records:0:0..0:{fragment[1]}"
+    assert decision.related_ref == "messages:0:1"
+    assert not commits.compaction_commits
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "response",
     [
@@ -204,8 +234,8 @@ async def test_invalid_summary_still_saves_usage(tmp_path: Path, response: LLMRe
 async def test_operation_timeout_is_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    provider = _Provider([_response()], delay=0.1)
-    runtime, activation, commits, cancellation = _case(tmp_path, provider, operation_timeout=0.01)
+    provider = _Provider([_response()], delay=0.3)
+    runtime, activation, commits, cancellation = _case(tmp_path, provider, operation_timeout=0.1)
     # 本例只验证 provider 操作超时，排除 Windows 模板文件读取的调度抖动。
     monkeypatch.setattr(
         "iris.runtime.runtime.snapshot_prompts", lambda source: runtime.environment.prompt_snapshot
@@ -213,7 +243,7 @@ async def test_operation_timeout_is_not_retried(
     result = await runtime.execute(activation, commits=commits, cancellation=cancellation)
     assert result.error.code == "CONTEXT_COMPACTION_TIMEOUT"
     assert len(provider.summaries) == 1
-    assert 0 < provider.summaries[0].timeout <= 0.010001
+    assert 0 < provider.summaries[0].timeout <= 0.100001
     assert not commits.compaction_usages
 
 
@@ -230,10 +260,18 @@ async def test_short_request_timeout_is_retried_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_all_batches_share_one_operation_timeout(tmp_path: Path) -> None:
-    provider = _Provider([_response("A"), _response("B")], delay=0.08)
+async def test_all_batches_share_one_operation_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _Provider([_response("A"), _response("B")])
+    provider.on_summary = lambda: setattr(
+        provider, "delay", 0.02 if len(provider.summaries) == 1 else 1
+    )
     runtime, activation, commits, cancellation = _case(
-        tmp_path, provider, history_chars=16000, operation_timeout=0.12
+        tmp_path, provider, history_chars=16000, operation_timeout=0.3
+    )
+    monkeypatch.setattr(
+        "iris.runtime.runtime.snapshot_prompts", lambda source: runtime.environment.prompt_snapshot
     )
     result = await runtime.execute(activation, commits=commits, cancellation=cancellation)
     assert result.error.code == "CONTEXT_COMPACTION_TIMEOUT"

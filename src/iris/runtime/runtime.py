@@ -1858,7 +1858,12 @@ class AgentRuntime:
                     outcome="candidate",
                     decisions=(
                         ContextDecision(
-                            "history", f"messages:{start}:{end}", "summarized", "summary_coverage"
+                            "summary_batch",
+                            f"records:{position[0]}:{position[1]}.."
+                            f"{batch.next_position[0]}:{batch.next_position[1]}",
+                            "summarized",
+                            "summary_batch_consumed",
+                            related_ref=f"messages:{start}:{end}",
                         ),
                     ),
                     compaction_ref=response.id,
