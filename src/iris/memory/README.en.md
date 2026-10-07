@@ -83,8 +83,9 @@ one `iris.maintenance.result` event. Empty, blocked, and conflict outcomes remai
 stages without a model request produce no model span. A stage failure marks its maintenance cycle
 without changing an already successful model call. Cancellation after commit retains the committed
 stage status. Standalone SDK calls and foreground overview generation retain actual model traces
-without adding maintenance results to ordinary host spans or creating cycles. The bool returned by
-`maintain_cycle()` still reports only whether eligible work remains.
+without adding maintenance results to ordinary host spans or creating cycles.
+`maintain_cycle(namespace, scope=..., cycle_id=...)` returns a `MemoryCycleResult` containing
+the actual stage results and remaining work. An empty cycle has no generated results.
 
 ## Architecture and lifecycle
 
@@ -226,7 +227,7 @@ reselection and counts; generation checks actual batch sources before model call
 Published knowledge remains available for comparisons, projections, and overview repair.
 
 After the quiet interval, the coordinator acquires the database/namespace OS lock and calls
-`maintain_cycle(namespace, scope=...)`: dream existing observations or changes first; otherwise flush,
+`maintain_cycle(namespace, scope=..., cycle_id=...)`: dream existing observations or changes first; otherwise flush,
 then dream, then repair projections and the overview. Each cycle is bounded and returns whether
 eligible work remains. New foreground input cancels uncommitted generation without waiting for the
 model; the task slot and lock remain held until actual synchronous work finishes. Closing one runner

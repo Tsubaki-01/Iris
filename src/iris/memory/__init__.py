@@ -10,6 +10,7 @@ from .generation import generation_prompt_descriptions
 from .generation_models import (
     GenerationResult,
     GenerationState,
+    MemoryCycleResult,
     MemoryGenerationConfig,
     MemoryMaintenanceScope,
     MemorySource,
@@ -69,6 +70,7 @@ __all__ = [
     "overview_prompt_description",
     "GenerationResult",
     "GenerationState",
+    "MemoryCycleResult",
     "MemoryGenerationConfig",
     "MemoryMaintenanceScope",
     "MemorySource",

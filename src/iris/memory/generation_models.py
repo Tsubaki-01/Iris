@@ -61,6 +61,15 @@ class GenerationResult(BaseModel):
     created_at: str = Field(default_factory=_now_iso)
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryCycleResult:
+    """一轮有界维护的真实阶段结果；空轮次不伪造生成记录。"""
+
+    cycle_id: str
+    results: tuple[GenerationResult, ...]
+    has_more: bool
+
+
 class MemoryCaptureSource(BaseModel):
     """一个 lifecycle run 的持久捕获水位。"""
 

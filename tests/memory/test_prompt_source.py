@@ -79,7 +79,7 @@ async def test_cycle_keeps_one_snapshot_and_next_cycle_adopts_changes(tmp_path: 
     )
     scope = MemoryMaintenanceScope(frozenset(), _eligible)
     memory.observe(MemoryObserveInput(text="本项目使用 uv"))
-    await memory.maintain_cycle("project", scope=scope)
+    await memory.maintain_cycle("project", scope=scope, cycle_id="first-cycle")
     assert len(provider.requests) == 3
     for request, stage, response_model in zip(
         provider.requests,
@@ -91,7 +91,7 @@ async def test_cycle_keeps_one_snapshot_and_next_cycle_adopts_changes(tmp_path: 
         assert prompt.startswith(f"old-{stage}")
         assert json.dumps(response_model.model_json_schema(), ensure_ascii=False) in prompt
     memory.observe(MemoryObserveInput(text="第二轮仍使用 uv"))
-    await memory.maintain_cycle("project", scope=scope)
+    await memory.maintain_cycle("project", scope=scope, cycle_id="next-cycle")
     assert all(request.messages[0].text.startswith("new-") for request in provider.requests[3:])
 
 

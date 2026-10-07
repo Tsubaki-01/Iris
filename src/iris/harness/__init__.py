@@ -21,6 +21,7 @@ from .configuration import EffectiveConfiguration
 from .control import PendingSubmission, RestoreReceipt, SessionControlSnapshot
 from .evolution import build_project_evolution_binding
 from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding, ProjectEvolutionBinding
+from .maintenance_models import MaintenanceChanged, MaintenanceSnapshot, ResourceMaintenanceView
 from .observer import RunEventObserver
 from .runner import AgentRunner
 from .session_history import SessionHistory
@@ -47,6 +48,9 @@ __all__ = [
     "LiveFact",
     "LivePublisher",
     "MaintenanceCoordinator",
+    "MaintenanceChanged",
+    "MaintenanceSnapshot",
+    "ResourceMaintenanceView",
     "MemoryMaintenanceBinding",
     "ProjectEvolutionBinding",
     "build_project_evolution_binding",

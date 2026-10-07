@@ -76,7 +76,8 @@ INLINE 的同步操作仍会占用事件循环，后台维护不会覆盖这个�
 empty、blocked、conflict 保持非错误，没有模型请求就没有模型节点。阶段失败只影响所属
 维护区间，不会把已经成功的模型调用改成失败。提交后取消保留已经提交的阶段状态。
 独立 SDK 或前台概览仍有实际模型记录，但不会向宿主普通 span 添加维护结果，也不创建维护周期；
-`maintain_cycle()` 的 bool 仍只表示是否有后续积压。
+`maintain_cycle(namespace, scope=..., cycle_id=...)` 返回 `MemoryCycleResult`，
+其中 results 为本轮真实阶段结果，has_more 表示范围内的后续积压；空轮次 results 为空。
 
 ## 架构与数据流
 
@@ -198,7 +199,7 @@ Run；当前 WAITING 的会话连同其旧材料暂不维护，其他会话正�
 范围只限制待消费输入，已发布知识仍可用于比较、投影和概览。
 
 协调器在安静期后持对应数据库/namespace 的跨进程 OS 锁，调用
-`maintain_cycle(namespace, scope=...)`：已有观察或变更优先 dream，否则 flush 后 dream，
+`maintain_cycle(namespace, scope=..., cycle_id=...)`：已有观察或变更优先 dream，否则 flush 后 dream，
 最后修复必要投影与概览。每轮有界，返回是否仍有合格积压；生成失败保留输入。
 新前台取消尚未提交的生成但不等待模型；锁和维护位置保留到真实同步作业结束。
 runner 关闭只解除自身绑定并补捕获，宿主先关闭协调器再关闭共享资源，不在 close 生成。

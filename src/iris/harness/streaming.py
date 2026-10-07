@@ -20,6 +20,7 @@ from ..observability.facts import ConfigurationApplied, SourceAdopted
 from ..runtime import RuntimeEventSink, RuntimeStreamEvent
 from ..runtime.diagnostics import ContextPreparation
 from .control import SessionControlSnapshot
+from .maintenance_models import MaintenanceChanged
 from .session_manager import SubmissionEvent
 
 # endregion
@@ -72,6 +73,7 @@ type UnscopedLiveFact = (
     | ContextPreparation
     | ConfigurationApplied
     | SourceAdopted
+    | MaintenanceChanged
 )
 
 

@@ -17,6 +17,7 @@ from pydantic import JsonValue, TypeAdapter
 
 from ..goal.models import GoalChanged, GoalView
 from ..harness.control import SessionControlSnapshot
+from ..harness.maintenance_models import MaintenanceChanged, ResourceMaintenanceView
 from ..harness.streaming import (
     CommandCleanupFailed,
     LineagedLiveFact,
@@ -51,6 +52,7 @@ from ..tools import ToolResult
 _GOAL_VIEW_ADAPTER = TypeAdapter(GoalView)
 _CONTROL_ADAPTER = TypeAdapter(SessionControlSnapshot)
 _LINEAGE_ADAPTER = TypeAdapter(RunLineage)
+_MAINTENANCE_ADAPTER = TypeAdapter(ResourceMaintenanceView)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +101,26 @@ def _project_fact(fact: UnscopedLiveFact) -> tuple[_ProjectedLiveFact, ...]:
     Returns:
         tuple[_ProjectedLiveFact, ...]: Allowlisted run/session projections。
     """
+    if isinstance(fact, MaintenanceChanged):
+        return (
+            _ProjectedLiveFact(
+                scope="resource",
+                scope_id=fact.resource.resource_ref,
+                kind="maintenance.changed",
+                run_id=None,
+                session_id=None,
+                activation_id=None,
+                durable_sequence=None,
+                payload={
+                    "coordinator_id": fact.coordinator_id,
+                    "revision": fact.revision,
+                    "foreground_count": fact.foreground_count,
+                    "resource": _MAINTENANCE_ADAPTER.dump_python(fact.resource, mode="json"),
+                },
+                critical=False,
+                coalescing_key=("maintenance", fact.resource.resource_ref),
+            ),
+        )
     if isinstance(fact, ConfigurationApplied):
         return _run_and_session(
             _ProjectedLiveFact(

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 from filelock import FileLock, Timeout
 
@@ -26,9 +29,19 @@ from ..evolution.service import EvolutionService
 from ..exceptions import IrisConfigError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
 from ..memory import MemoryService
-from ..memory.generation_models import MemoryMaintenanceScope, MemorySource
+from ..memory.generation_models import MemoryCycleResult, MemoryMaintenanceScope, MemorySource
+from ..observability.facts import bind_fact_scope
 from ..observability.service import Observability
 from ..utils.generation_worker import GenerationWorker, generation_worker
+from .maintenance_models import (
+    MaintenanceChanged,
+    MaintenanceSnapshot,
+    MaintenanceState,
+    ResourceMaintenanceView,
+)
+
+if TYPE_CHECKING:
+    from .streaming import LiveFact, LivePublisher
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +69,17 @@ class _MemoryResource:
 
     binding: MemoryMaintenanceBinding
     lock_path: Path
+    resource_ref: str
     dirty: bool = True
     revision: int = 0
     ready_at: float = 0
     listener: Callable[[str], None] | None = None
     attachments: int = 0
+    request: asyncio.Future[MemoryCycleResult] | None = None
+    request_id: str | None = None
+    cycle_id: str | None = None
+    lock_waiting: bool = False
+    last_result_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +96,16 @@ class _EvolutionResource:
 
     binding: ProjectEvolutionBinding
     lock_path: Path
+    resource_ref: str
     dirty: bool = True
     revision: int = 0
     ready_at: float = 0
     attachments: int = 0
     request: asyncio.Future[EvolutionResult] | None = None
+    request_id: str | None = None
+    cycle_id: str | None = None
+    lock_waiting: bool = False
+    last_result_ref: str | None = None
     revision_requests: dict[str, _RevisionWaiter] = field(default_factory=dict)
 
 
@@ -89,19 +113,26 @@ class MaintenanceCoordinator:
     """一个宿主共享空闲计时与资格，两类维护分别持有任务、worker 和锁。"""
 
     def __init__(
-        self, *, idle_seconds: float = 300, observability: Observability | None = None
+        self,
+        *,
+        idle_seconds: float = 300,
+        observability: Observability | None = None,
+        live_publisher: LivePublisher | None = None,
     ) -> None:
         """创建协调器；实际任务和监听在 runner 准备时启动。"""
         if not 0 <= idle_seconds < math.inf:
             raise IrisConfigError("maintenance.idle_seconds 必须为有限非负数")
         self.idle_seconds = idle_seconds
         self.observability = observability if observability is not None else Observability()
+        self.live_publisher = live_publisher
+        self._snapshot = MaintenanceSnapshot(f"coordinator_{uuid4().hex}", 0, 0)
+        self._clock_origin: datetime | None = None
         self._resources: dict[tuple[str, str], _MemoryResource] = {}
         self._projects: dict[str, _EvolutionResource] = {}
         self._readers: dict[str, LifecycleStore] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._timer: asyncio.TimerHandle | None = None
-        self._task: asyncio.Task[None] | None = None
+        self._task: asyncio.Task[MemoryCycleResult | None] | None = None
         self._active_resource: _MemoryResource | None = None
         self._worker = GenerationWorker(on_idle=self._schedule)
         self._evolution_task: asyncio.Task[EvolutionResult | None] | None = None
@@ -112,6 +143,79 @@ class MaintenanceCoordinator:
         self._quiet_until = 0.0
         self._next_resource = 0
         self._closed = False
+
+    def snapshot(self) -> MaintenanceSnapshot:
+        """返回 owner 最后替换的不可变投影，不取锁、不读盘也不执行调度。"""
+        return self._snapshot
+
+    def _publish(self, fact: LiveFact) -> None:
+        if self.live_publisher is not None:
+            try:
+                self.live_publisher.publish(fact)
+            except Exception:
+                logger.warning("维护观察事实发布失败", exc_info=True)
+
+    def _resource_view(
+        self, resource: _MemoryResource | _EvolutionResource
+    ) -> ResourceMaintenanceView:
+        pending = resource.request_id
+        if isinstance(resource, _EvolutionResource):
+            pending = pending or next(iter(resource.revision_requests), None)
+        active = resource is self._active_resource or resource is self._active_project
+        state: MaintenanceState
+        if self._closed:
+            state = "closing"
+        elif active:
+            state = "running" if resource.cycle_id is not None else "waiting_for_lock"
+        elif self._foreground and (resource.dirty or pending is not None):
+            state = "waiting_for_foreground"
+        elif resource.lock_waiting:
+            state = "waiting_for_lock"
+        else:
+            state = "waiting_for_idle" if resource.dirty else "idle"
+        eligible = None
+        if resource.dirty and not self._foreground and self._clock_origin is not None:
+            eligible = self._clock_origin + timedelta(
+                seconds=max(resource.ready_at, 0 if pending is not None else self._quiet_until)
+            )
+        return ResourceMaintenanceView(
+            resource.resource_ref,
+            state,
+            pending,
+            resource.cycle_id,
+            eligible,
+            resource.last_result_ref,
+        )
+
+    def _refresh_snapshot(self) -> None:
+        resources = tuple(
+            self._resource_view(resource)
+            for resource in (*self._resources.values(), *self._projects.values())
+        )
+        previous = self._snapshot
+        if resources == previous.resources and self._foreground == previous.foreground_count:
+            return
+        self._snapshot = MaintenanceSnapshot(
+            previous.coordinator_id, previous.revision + 1, self._foreground, resources
+        )
+        old = {view.resource_ref: view for view in previous.resources}
+        for view in resources:
+            prior = old.pop(view.resource_ref, None)
+            if prior != view or previous.foreground_count != self._foreground:
+                self._publish(
+                    MaintenanceChanged(
+                        previous.coordinator_id, self._snapshot.revision, self._foreground, view
+                    )
+                )
+        for view in old.values():
+            self._publish(
+                MaintenanceChanged(
+                    previous.coordinator_id,
+                    self._snapshot.revision,
+                    self._foreground,
+                    replace(view, state="closing"),
+                )
+            )
 
     def _attach(
         self,
@@ -142,6 +246,7 @@ class MaintenanceCoordinator:
                 resource = _MemoryResource(
                     binding=binding,
                     lock_path=path.with_name(f".{path.name}.iris-memory-{namespace}.lock"),
+                    resource_ref="memory:" + json.dumps(key, ensure_ascii=False),
                 )
                 self._resources[key] = resource
                 if self._loop is not None:
@@ -152,6 +257,7 @@ class MaintenanceCoordinator:
                 project = _EvolutionResource(
                     binding=evolution,
                     lock_path=Path(project_key) / ".iris" / "evolution.lock",
+                    resource_ref=f"evolution:{project_key}",
                 )
                 self._projects[project_key] = project
             project.attachments += 1
@@ -174,6 +280,8 @@ class MaintenanceCoordinator:
         if self._active_resource is resource:
             self._cancel_task()
             await asyncio.gather(self._task, return_exceptions=True)
+        self._fail_memory_request(resource, IrisRunStateError("Memory 维护绑定已撤销"))
+        self._schedule()
 
     async def unbind_evolution(self, binding: ProjectEvolutionBinding) -> None:
         """撤销已无 runner 借用的项目，排空该类作业但不关闭宿主服务。"""
@@ -188,6 +296,25 @@ class MaintenanceCoordinator:
         await project.binding.service.wait_pending_io()
         self._fail_request(project, IrisRunStateError("项目经验维护绑定已撤销"))
         self._fail_revisions(project, IrisRunStateError("项目经验维护绑定已撤销"))
+        self._schedule()
+
+    async def request_memory_cycle(self, binding: MemoryMaintenanceBinding) -> MemoryCycleResult:
+        """合并同资源请求并完成一轮有界维护，仍受前台、资格及资源锁约束。"""
+        await self.prepare()
+        key = (os.path.normcase(str(binding.database_path.resolve())), binding.namespace)
+        resource = self._resources[key]
+        if resource.binding.service is not binding.service:
+            raise IrisConfigError("主动整理必须使用已绑定的 Memory 服务")
+        if resource.request is None:
+            resource.request = asyncio.get_running_loop().create_future()
+            resource.request.add_done_callback(_consume_request_error)
+            resource.request_id = f"maintenance_request_{uuid4().hex}"
+            resource.ready_at = 0
+        request = resource.request
+        if self._active_resource is not resource:
+            self._wake(resource)
+        self._refresh_snapshot()
+        return await asyncio.shield(request)
 
     async def request_project_experience(self, binding: ProjectEvolutionBinding) -> EvolutionResult:
         """合并同项目主动请求，跳过普通 idle；前台、资格和项目锁仍然有效。"""
@@ -198,10 +325,12 @@ class MaintenanceCoordinator:
         if project.request is None:
             project.request = asyncio.get_running_loop().create_future()
             project.request.add_done_callback(_consume_request_error)
+            project.request_id = f"maintenance_request_{uuid4().hex}"
             project.ready_at = 0
         request = project.request
         if self._active_project is not project:
             self._wake(project)
+        self._refresh_snapshot()
         return await asyncio.shield(request)
 
     async def request_revision(
@@ -234,6 +363,7 @@ class MaintenanceCoordinator:
             raise IrisRunStateError("维护协调器已关闭")
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
+            self._clock_origin = datetime.now(UTC) - timedelta(seconds=self._loop.time())
             self._quiet_until = self._loop.time() + self.idle_seconds
             for resource in self._resources.values():
                 self._subscribe(resource)
@@ -273,6 +403,7 @@ class MaintenanceCoordinator:
             self._timer = None
         self._cancel_task()
         self._cancel_evolution_task()
+        self._refresh_snapshot()
 
     def _foreground_exit(self) -> None:
         """完整前台退出后重新计算宿主的安静时间。"""
@@ -295,11 +426,12 @@ class MaintenanceCoordinator:
 
     def _schedule(self) -> None:
         """所有资源共享一个 timer；锁忙的资源延迟后轮流再试。"""
+        self._refresh_snapshot()
         if self._closed or self._loop is None or self._foreground:
             return
         ready = (
             [
-                max(self._quiet_until, resource.ready_at)
+                max(0 if resource.request is not None else self._quiet_until, resource.ready_at)
                 for resource in self._resources.values()
                 if resource.dirty
             ]
@@ -330,7 +462,10 @@ class MaintenanceCoordinator:
         for offset in range(len(resources)):
             index = (self._next_resource + offset) % len(resources)
             resource = resources[index]
-            if resource.dirty and max(resource.ready_at, self._quiet_until) <= self._loop.time():
+            ready_at = max(
+                resource.ready_at, 0 if resource.request is not None else self._quiet_until
+            )
+            if resource.dirty and ready_at <= self._loop.time():
                 self._next_resource = (index + 1) % len(resources)
                 self._active_resource = resource
                 resource.dirty = False
@@ -407,14 +542,10 @@ class MaintenanceCoordinator:
         return eligible
 
     @contextmanager
-    def _observe_cycle(
-        self, binding: MemoryMaintenanceBinding | ProjectEvolutionBinding
-    ) -> Iterator[None]:
+    def _observe_cycle(self, resource: _MemoryResource | _EvolutionResource) -> Iterator[None]:
         """获锁后记录独立资源周期，调用方退出前完成真实 worker 排空和锁释放。"""
         observation = self.observability
-        if not observation.enabled:
-            yield
-            return
+        binding = resource.binding
         attributes = (
             {
                 "iris.maintenance.kind": "memory",
@@ -427,7 +558,14 @@ class MaintenanceCoordinator:
                 "iris.maintenance.workspace": str(binding.workspace_root),
             }
         )
+        attributes["iris.maintenance.cycle_id"] = cast(str, resource.cycle_id)
+        attributes["iris.resource.ref"] = resource.resource_ref
         with (
+            bind_fact_scope(
+                self._publish,
+                maintenance_cycle_id=resource.cycle_id,
+                resource_ref=resource.resource_ref,
+            ),
             observation.detached(),
             observation.bind(attributes),
             observation.scope("iris.maintenance.cycle") as span,
@@ -444,16 +582,20 @@ class MaintenanceCoordinator:
             finally:
                 observation.attributes(span, {"iris.driver.outcome": outcome})
 
-    async def _run_cycle(self, resource: _MemoryResource) -> None:
+    async def _run_cycle(self, resource: _MemoryResource) -> MemoryCycleResult | None:
         """有界周期持有 OS 锁，取消后直到真实 worker 排空才释放。"""
         lock = FileLock(resource.lock_path, timeout=0)
         try:
             lock.acquire()
         except Timeout:
             resource.dirty = True
+            resource.lock_waiting = True
             resource.ready_at = self._loop.time() + max(self.idle_seconds, 1)
-            return
-        with self._observe_cycle(resource.binding):
+            return None
+        resource.lock_waiting = False
+        resource.cycle_id = f"maintenance_cycle_{uuid4().hex}"
+        self._refresh_snapshot()
+        with self._observe_cycle(resource):
             revision = resource.revision
             try:
                 with self._worker.bind():
@@ -469,9 +611,18 @@ class MaintenanceCoordinator:
                         ),
                         check=partial(self._eligible, resource),
                     )
-                    more = await service.maintain_cycle(resource.binding.namespace, scope=scope)
-                    resource.dirty = more or resource.revision != revision
+                    result = await service.maintain_cycle(
+                        resource.binding.namespace, scope=scope, cycle_id=resource.cycle_id
+                    )
+                    failed = any(
+                        item.status in {"failed", "cancelled", "conflict"}
+                        for item in result.results
+                    )
+                    resource.dirty = (
+                        result.has_more and not failed
+                    ) or resource.revision != revision
                     resource.ready_at = self._loop.time() + self.idle_seconds
+                    return result
             except (Exception, asyncio.CancelledError):
                 resource.dirty = resource.revision != revision
                 raise
@@ -479,13 +630,32 @@ class MaintenanceCoordinator:
                 await self._worker.wait_idle()
                 lock.release()
 
-    def _finished(self, task: asyncio.Task[None]) -> None:
+    def _finished(self, task: asyncio.Task[MemoryCycleResult | None]) -> None:
         """真实作业收尾完成后才释放本地任务位置。"""
+        resource = cast(_MemoryResource, self._active_resource)
         self._task = None
         self._active_resource = None
-        if not task.cancelled() and task.exception() is not None:
-            logger.error("共享 Memory 维护失败", exc_info=task.exception())
+        resource.cycle_id = None
+        if task.cancelled():
+            self._fail_memory_request(resource, asyncio.CancelledError())
+        elif (error := task.exception()) is not None:
+            self._fail_memory_request(resource, error)
+            logger.error("共享 Memory 维护失败", exc_info=error)
+        elif (result := task.result()) is not None:
+            if result.results:
+                resource.last_result_ref = result.results[-1].id
+            if resource.request is not None:
+                resource.request.set_result(result)
+                resource.request = None
+                resource.request_id = None
         self._schedule()
+
+    @staticmethod
+    def _fail_memory_request(resource: _MemoryResource, error: BaseException) -> None:
+        if resource.request is not None:
+            resource.request.set_exception(error)
+            resource.request = None
+            resource.request_id = None
 
     async def _run_project_cycle(self, project: _EvolutionResource) -> EvolutionResult | None:
         """一个有界 A 或 B 持项目锁；真实短 IO 排空前不释放该类位置。"""
@@ -494,9 +664,13 @@ class MaintenanceCoordinator:
             lock.acquire()
         except Timeout:
             project.dirty = True
+            project.lock_waiting = True
             project.ready_at = self._loop.time() + max(self.idle_seconds, 1)
             return None
-        with self._observe_cycle(project.binding):
+        project.lock_waiting = False
+        project.cycle_id = f"maintenance_cycle_{uuid4().hex}"
+        self._refresh_snapshot()
+        with self._observe_cycle(project):
             revision = project.revision
             try:
                 with self._evolution_worker.bind():
@@ -554,6 +728,7 @@ class MaintenanceCoordinator:
         project = cast(_EvolutionResource, self._active_project)
         self._evolution_task = None
         self._active_project = None
+        project.cycle_id = None
         if task.cancelled():
             self._fail_request(project, asyncio.CancelledError())
         elif (error := task.exception()) is not None:
@@ -561,10 +736,12 @@ class MaintenanceCoordinator:
             self._fail_revisions(project, error)
             logger.error("项目经验维护失败", exc_info=error)
         elif (result := task.result()) is not None:
+            project.last_result_ref = result.revision_id
             completed_request = False
             if result.stage == "experience" and project.request is not None:
                 project.request.set_result(result)
                 project.request = None
+                project.request_id = None
                 completed_request = True
             if result.revision_id in project.revision_requests:
                 project.revision_requests.pop(result.revision_id).future.set_result(result)
@@ -586,6 +763,7 @@ class MaintenanceCoordinator:
         if project.request is not None:
             project.request.set_exception(error)
             project.request = None
+            project.request_id = None
 
     @staticmethod
     def _fail_revisions(project: _EvolutionResource, error: BaseException) -> None:
@@ -599,6 +777,7 @@ class MaintenanceCoordinator:
         if self._closed:
             return
         self._closed = True
+        self._refresh_snapshot()
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
@@ -611,6 +790,8 @@ class MaintenanceCoordinator:
             await asyncio.gather(self._task, return_exceptions=True)
         if self._evolution_task is not None:
             await asyncio.gather(self._evolution_task, return_exceptions=True)
+        for resource in self._resources.values():
+            self._fail_memory_request(resource, IrisRunStateError("维护协调器已关闭"))
         for project in self._projects.values():
             await project.binding.service.wait_pending_io()
             self._fail_request(project, IrisRunStateError("维护协调器已关闭"))
@@ -660,7 +841,7 @@ class MaintenanceAttachment:
             self._detached = True
 
 
-def _consume_request_error(request: asyncio.Future[EvolutionResult]) -> None:
+def _consume_request_error[T](request: asyncio.Future[T]) -> None:
     """外部等待者全部取消时，也回收最终共享请求的异常。"""
     if not request.cancelled():
         request.exception()

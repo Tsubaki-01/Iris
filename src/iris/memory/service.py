@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import replace
 from enum import StrEnum
 from time import perf_counter
@@ -33,6 +34,7 @@ from .generation import before_generation_commit, dream, flush, raise_if_generat
 from .generation_models import (
     GenerationResult,
     GenerationState,
+    MemoryCycleResult,
     MemoryGenerationConfig,
     MemoryMaintenanceScope,
     MemorySource,
@@ -65,6 +67,9 @@ from .store import MemoryStore
 
 ResultT = TypeVar("ResultT")
 logger = logging.getLogger(__name__)
+_cycle_results: ContextVar[list[GenerationResult] | None] = ContextVar(
+    "iris_memory_cycle_results", default=None
+)
 
 
 class MemoryIOExecutionMode(StrEnum):
@@ -228,10 +233,42 @@ class MemoryService:
     def _observe_generation_result(self, result: GenerationResult) -> GenerationResult:
         """报告实际阶段结果；观测服务决定当前是否有本领域的维护区间。"""
         self.observability.maintenance_result("memory", result.stage, result.status)
+        results = _cycle_results.get()
+        if results is not None:
+            results.append(result)
         return result
 
-    async def maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> bool:
-        """执行一轮有界学习与投影修复，返回本范围是否仍有可执行积压。"""
+    async def maintain_cycle(
+        self, namespace: str, *, scope: MemoryMaintenanceScope, cycle_id: str
+    ) -> MemoryCycleResult:
+        """执行一轮有界维护，返回真实阶段与当前范围的剩余积压。"""
+        results: list[GenerationResult] = []
+        token = _cycle_results.set(results)
+        try:
+            await self._maintain_cycle(namespace, scope=scope)
+        except Exception:
+            # 已有领域失败结果时将它返回给周期调用方；无阶段结果的 IO 错误继续抛出。
+            if not results or results[-1].status != "failed":
+                raise
+        finally:
+            _cycle_results.reset(token)
+        state = await self.ageneration_state(namespace, scope=scope)
+        more = bool(
+            state.pending_episodes
+            or state.pending_observations
+            or state.pending_changes
+            or (
+                self.mirror is not None
+                and (
+                    state.projection_revision != state.item_revision
+                    or (state.item_revision and state.overview_revision != state.item_revision)
+                )
+            )
+        )
+        return MemoryCycleResult(cycle_id, tuple(results), more)
+
+    async def _maintain_cycle(self, namespace: str, *, scope: MemoryMaintenanceScope) -> None:
+        """领域顺序只执行一批学习与需要的投影，不根据观察结果重放。"""
         await self.run_async_io(
             lambda: self.store.retry_blocked(
                 namespace,
@@ -250,16 +287,16 @@ class MemoryService:
         if state.pending_observations or state.pending_changes:
             result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
             if result.status in {"failed", "cancelled", "conflict"}:
-                return False
+                return
         elif state.pending_episodes:
             result = await flush(self, namespace, prompt_snapshot=prompts, scope=scope)
             if result.status in {"failed", "cancelled", "conflict"}:
-                return False
+                return
             state = await self.ageneration_state(namespace, scope=scope)
             if state.pending_observations or state.pending_changes:
                 result = await dream(self, namespace, prompt_snapshot=prompts, scope=scope)
                 if result.status in {"failed", "cancelled", "conflict"}:
-                    return False
+                    return
         state = await self.ageneration_state(namespace, scope=scope)
         if self.mirror is not None:
             if state.projection_revision != state.item_revision:
@@ -268,17 +305,6 @@ class MemoryService:
                 )
             if state.item_revision and state.overview_revision != state.item_revision:
                 await self._refresh_overview(namespace, prompts)
-        state = await self.ageneration_state(namespace, scope=scope)
-        return bool(
-            state.pending_episodes
-            or state.pending_observations
-            or state.pending_changes
-            or (
-                self.mirror is not None
-                and state.item_revision
-                and state.overview_revision != state.item_revision
-            )
-        )
 
     # endregion
 

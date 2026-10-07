@@ -646,6 +646,9 @@ BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的�
 `bind_maintenance()` 借用它。`from_config*` 不创建私人维护循环；启用功能却没有绑定时，
 首次准备或运行会报告配置错误。协调器的 `idle_seconds` 来自宿主选定的
 `config.maintenance.idle_seconds`，默认 300 秒。
+`snapshot()` 同步读取不可变的资源状态；`request_memory_cycle(binding)` 合并同资源请求，
+跳过普通 idle 并返回一轮实际阶段结果与 has_more，仍遵守前台、资格、资源锁及 worker 排空。
+可注入 `live_publisher` 观察 resource scope 的 `maintenance.changed` 和来源采用事实。
 未启用 Memory 的 runner 也可调用 `runner.bind_maintenance(coordinator)`，只贡献前台状态，
 使同宿主其他 runner 的维护及时让位；不会创建 Memory 资源或捕获材料。
 

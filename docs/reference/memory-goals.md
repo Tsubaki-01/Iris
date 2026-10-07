@@ -195,7 +195,7 @@ register_memory_tools(
 | `projection_warning(namespace)` | `str \| None`；分类投影的新鲜度说明 |
 | `file_access(read_namespaces)` | `MemoryFileAccess \| None`；供通用文件工具使用的只读路径/版本能力 |
 | `list_pending_sources(namespace)` / `await alist_pending_sources(...)` | `tuple[MemorySource, ...]`；待消费输入的 lifecycle 来源 |
-| `await maintain_cycle(namespace, *, scope)` | `bool`；有界维护周期后是否还有本范围可执行积压，调度器调用入口 |
+| `await maintain_cycle(namespace, *, scope, cycle_id)` | `MemoryCycleResult`；一个有界周期的实际阶段结果、周期 ID 和剩余积压，调度器调用入口 |
 
 `GenerationResult` 有 `id`、`namespace`、`stage`（capture/flush/dream/overview）、`status`（completed/empty/failed/cancelled/conflict/blocked）、`usage`、`elapsed_seconds`、`error`、`input_ids`、`consumed_ranges`、`counts`、`item_revision`、`has_more`、`created_at`。这些成本独立于主 Run usage。
 
@@ -231,7 +231,7 @@ Sessions/session_items.md
 以下入口从 `iris.harness` 导入：
 
 ```text
-MaintenanceCoordinator(*, idle_seconds=300, observability=None)
+MaintenanceCoordinator(*, idle_seconds=300, observability=None, live_publisher=None)
 MemoryMaintenanceBinding(*, service, database_path: Path, namespace: str)
 ProjectEvolutionBinding(*, workspace_root: Path, service)
 
@@ -253,6 +253,8 @@ runner.bind_maintenance(coordinator, *, memory=None, evolution=None) -> None
 | 协调器方法 | 结果与约定 |
 | --- | --- |
 | `await prepare()` | 绑定当前事件循环，启动必要监听与调度；runner 准备时会调用 |
+| `snapshot()` | `MaintenanceSnapshot`；同步返回最近的不可变控制投影，不取锁、不读盘 |
+| `await request_memory_cycle(binding)` | `MemoryCycleResult`；同资源请求合并，完成一个有界周期；跳过普通 idle，仍遵守前台、来源资格、锁和 worker 排空 |
 | `await request_project_experience(binding)` | `EvolutionResult`；同项目请求合并，跳过普通 idle，仍检查前台/资格/锁 |
 | `await request_revision(binding, request)` | `EvolutionResult`；保存请求并等这一项自己的结算 |
 | `await unbind_memory(binding)` | 先关闭借用 runner；排空本资源维护，不关闭 service |
@@ -260,6 +262,17 @@ runner.bind_maintenance(coordinator, *, memory=None, evolution=None) -> None
 | `await aclose()` | 停止派发、取消生成并排空 IO；不关闭宿主注入的服务、reader 和观测资源 |
 
 同一协调器对同一 DB/namespace 或同一项目要求共享同一服务实例。Memory 与 Evolution 各有最多一个作业位置；所有前台工作共用空闲计数。来源 Run 要求 TERMINAL，来源 session 当前不能 WAITING。显式请求可不关联 session；有关联时也检查该 session 的真实等待状态。取消调用方等待不会取消已经保存的共享请求。
+
+`MaintenanceSnapshot` 提供 coordinator_id、revision、foreground_count 和 resources。每个
+`ResourceMaintenanceView` 包含稳定的 resource_ref、state、pending_request_id、cycle_id、
+next_eligible_at 和 last_result_ref。状态为 idle、waiting_for_idle、waiting_for_foreground、
+waiting_for_lock、running 或 closing，只投影现有调度事实。
+`maintenance.changed` 只发送对应资源的视图到 resource scope；维护来源采用事实和 trace
+共用 cycle_id，不归到任意前台 Run。
+
+`MemoryCycleResult(cycle_id, results, has_more)` 保留原 `GenerationResult.status`。
+空资源的 results 为空，不伪造生成成功。has_more 描述剩余积压；失败后的剩余输入仍可为 true，
+协调器不会因此进入失败重试循环。宿主需要继续时可再次请求一轮。
 
 从 `iris.evolution` 导入：
 

@@ -68,6 +68,10 @@ submit/resume 接受不表示任务完成。cancel 在只暂停 Goal 续跑意�
 recorder 保存原始 `SourceAdopted.documents`，通过 adoption_id 读取实际正文。运行来源使用
 run/session/session_tree，维护来源使用 resource scope。采用事实不依赖 OTel 是否启用。
 
+`MaintenanceCoordinator(live_publisher=broker)` 向 resource scope 发布可合并的
+`maintenance.changed`，包含 coordinator_id、revision、foreground_count 及单资源视图。
+完整状态由 `coordinator.snapshot()` 读取，阶段结果由 Memory/Evolution 领域服务读取。
+
 `ContextPreparation` 是原始 publisher 接收的完整上下文准备快照；其网络事件
 `context.preparation` 仅包含索引与计量摘要，可按 step 合并。Host recorder 应在投影前保存
 原始事实；字段及计量含义见[Context 参考](context.md#观察真实准备过程)。

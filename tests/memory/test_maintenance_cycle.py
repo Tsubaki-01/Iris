@@ -76,12 +76,12 @@ async def test_cycle_dreams_existing_input_first_then_repairs_projection(
     monkeypatch.setattr(memory_service, "dream", dream)
     monkeypatch.setattr(service, "_refresh_overview", overview)
     service.mirror = SimpleNamespace(rebuild_from_store=projection)
-    more = await service.maintain_cycle("project", scope=scope)
+    result = await service.maintain_cycle("project", scope=scope, cycle_id="test-cycle")
     assert calls == (["dream"] if existing_observation else ["flush", "dream"]) + [
         "projection",
         "overview",
     ]
-    assert more is existing_observation
+    assert result.has_more is existing_observation
 
 
 @pytest.mark.asyncio
@@ -105,5 +105,5 @@ async def test_projection_only_failure_propagates_without_starting_learning(
     monkeypatch.setattr(service, "ageneration_state", read)
     service.mirror = SimpleNamespace(rebuild_from_store=projection)
     with pytest.raises(IrisMemoryError, match="投影写入失败"):
-        await service.maintain_cycle("project", scope=scope)
+        await service.maintain_cycle("project", scope=scope, cycle_id="test-cycle")
     assert calls == ["projection"]
