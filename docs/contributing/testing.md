@@ -1,4 +1,4 @@
-# 测试、示例与研究实验
+# 测试、示例与评测
 
 验证应回答本次改动带来的问题。确定性测试适合检查契约与状态转换，真实模型示例适合确认服务集成，评测则需要明确题集与评价目标。它们的成功不能相互替代。
 
@@ -40,7 +40,7 @@ uv run pytest tests/harness/test_session_history.py
 
 文档里的完整例子应交代凭据、文件、可选服务和工作目录。输出不确定时描述成功条件；不要用固定模型文本作为验收断言。
 
-## Inspect AI 与检索实验
+## Inspect AI 接入
 
 [evals](../../evals/README.md) 提供仓库级 `iris_solver()`，让 Inspect 调用真实 AgentRunner、投影结果与用量并收尾资源。它不随 Iris Python 包发布，使用时在仓库根目录安装 `eval` 依赖组：
 
@@ -48,7 +48,13 @@ uv run pytest tests/harness/test_session_history.py
 uv sync --group eval
 ```
 
-当前 Inspect 接入本身不附带完整题集、benchmark adapter 或评分器。另有独立 Jev 工具检索实验；它们的候选目录、题集、调用费用和评价范围在各实验说明中维护，不作为默认 Agent 的效果保证。
+当前接入不附带题集、benchmark adapter 或评分器。`eval` 组包含 Inspect AI 和用于取消收尾的 AnyIO；普通 Iris 用户无需安装。安装后可运行接入测试：
+
+```shell
+uv run --group eval pytest tests/evals/test_iris_solver.py
+```
+
+测试使用确定性 provider 和真实 SDK，验证默认输入、回调、状态与用量投影、取消和资源收尾，不调用真实模型，也不代表 benchmark 成绩。
 
 增加评测时先明确想测的行为、固定输入与预算、结果记录和评分方式。报告实际运行条件，区分检索选对工具、工具执行正确与最终任务完成。
 

@@ -140,7 +140,7 @@ init_config(
 | `uv sync` | 核心运行与默认开发依赖 |
 | `uv sync --extra sandbox` | Docker 命令环境的可选依赖 |
 | `uv sync --extra observability` | OTel SDK 与 OTLP HTTP 导出 |
-| `uv sync --group eval` | 仓库内 Inspect AI 评测接入辅助代码 |
+| `uv sync --group eval` | 仓库内 [Inspect AI 接入](../../evals/README.md)及取消收尾所需的 AnyIO |
 
 多个 extra 可以同时传入。普通文件工具和 Native 命令不需要 Docker；安装 Docker extra 也不会替你启动引擎或构建镜像。
 
