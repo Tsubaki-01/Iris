@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -73,6 +74,7 @@ class RevisionItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(default_factory=lambda: uuid4().hex)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     description: str = Field(pattern=r"\S")
     targets: tuple[RevisionTarget, ...] = Field(min_length=1)
     evidence: tuple[RevisionEvidence, ...] = ()
@@ -181,4 +183,5 @@ class EvolutionResult(BaseModel):
     has_more: bool = False
     effect: str = ""
     revision_id: str | None = None
+    publication_id: str | None = None
     targets: tuple[RevisionTarget, ...] = ()

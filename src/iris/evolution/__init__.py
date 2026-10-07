@@ -1,6 +1,13 @@
 """项目经验学习的轻量配置与材料契约。"""
 
 from .config import EvolutionConfig
+from .history import (
+    EvolutionHistoryCursor,
+    PublicationDocument,
+    PublicationPage,
+    PublicationRecord,
+    RevisionRequestPage,
+)
 from .models import (
     EvolutionCaptureBlock,
     EvolutionMaintenanceScope,
@@ -21,6 +28,11 @@ from .models import (
 )
 
 __all__ = [
+    "EvolutionHistoryCursor",
+    "PublicationDocument",
+    "PublicationPage",
+    "PublicationRecord",
+    "RevisionRequestPage",
     "EvolutionConfig",
     "EvolutionCaptureBlock",
     "EvolutionMaintenanceScope",

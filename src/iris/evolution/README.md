@@ -146,8 +146,17 @@ A 正文。A 可以在 Skill no-change 时产生问题；普通事实缺失或�
 
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
 成功/no-change 才确认实际处理范围，失败或取消不消费。文件原子发布与进度提交不是多文件
-事务；若文件已发布后进度失败，下次在项目锁内读取当前文件重新合并，不承诺 exactly-once。
-保留小型进度、pending 问题/请求和简短结果，不保存模型请求、完整响应、历史版本或调用档案。
+事务。原发布 owner 先把基线与候选保存到 `.iris/evolution/publications/`，再写目标文件并
+确认 after 正文与 published_at；确认后完成材料消费和 pending 清理。若文件已发布而结算失败，
+本进程保留实际收据，下一轮在同一项目锁内完成结算，不重新调用模型或重写目标。
+已持久确认的发布重启后也只补结算；A 的消费与发布 ID 在同一 progress 写入中确认，
+清理中断后的重试不重复推进原文位置。
+
+重启后缺少确认的记录保留 `publication_state=unconfirmed`，返回
+`publication_unconfirmed` 并保存 observed_documents；即使当前文件等于候选，也不填
+after_documents 或 published_at。该未确认记录阻止自动重放本项目修改，材料继续保留。
+档案的 settled 表示原材料/请求结算已完成；它不是另一份 Run 生命周期。
+完整模型请求与响应仍由宿主观测记录，领域档案保存正文、证据及发布事实。
 
 ## B 修订与独立结算
 
@@ -164,7 +173,14 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 发布前再次检查来源/session 资格和文件基线。失败、取消或 conflict 保留 B，不重跑 A；
 成功/no-change 独立结算本请求。A 已清理的正文不会删除问题中保留的必要片段。
 重启后若收窄开放目标，旧请求保持 pending；只选择目标仍全部开放的项，不阻塞其他合格 A/B。
-当前磁盘值不等于历史运行采用值，缺失的历史明确标为未知；不建立运行对象跟踪或调用归档。
+当前磁盘值不等于历史运行采用值；配置与来源采用事实由实际消费者发布，发布档案不能替代采用证明。
+
+`list_publications(after=None, limit=50)`、`get_publication(publication_id)` 与
+`list_revision_requests(after=None, limit=50)` 同时提供同步及 `a` 前缀的 async 读取。
+分页按原创建时刻和 ID 排序，limit 为 1–100；确认更新不移动历史位置。
+已完成请求的描述/evidence、选中材料与 before/candidate/after 正文不依赖 pending 文件；
+请求历史在 `.iris/evolution/requests/`。A 的固定 Skill 路径由文档 path 描述，
+B 另保留原请求及有限 targets。`EvolutionResult.publication_id` 指向这份档案。
 
 `EvolutionResult` 返回 `updated/no_change/empty/failed/cancelled/conflict` 状态、简短原因、
 实际消费区间、usage、`has_more` 和生效说明；`stage` 区分 experience/revision，B 结果另有

@@ -36,7 +36,8 @@ from iris.tools import ToolExecutionContext
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-    from iris.evolution.models import EvolutionMaterial, EvolutionResult, RevisionItem
+    from iris.evolution.history import PublicationRecord
+    from iris.evolution.models import EvolutionResult
 
 
 class Provider:
@@ -365,13 +366,12 @@ async def test_experience_cancelled_after_commit_keeps_committed_result_event(
     original = service._commit
 
     def commit(
-        selected: tuple[EvolutionMaterial, ...],
         baseline: str | None,
         content: str | None,
         result: EvolutionResult,
-        issue: RevisionItem | None,
+        publication: PublicationRecord,
     ) -> EvolutionResult:
-        stored = original(selected, baseline, content, result, issue)
+        stored = original(baseline, content, result, publication)
         committed.append(stored)
         entered.set()
         release.wait()

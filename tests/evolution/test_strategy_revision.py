@@ -32,6 +32,8 @@ from .test_project_skill import eligible_session, prepare
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+    from iris.evolution.history import PublicationRecord
+
 
 @pytest.mark.asyncio
 async def test_invalid_issue_reference_keeps_a_file_and_materials(tmp_path: Path) -> None:
@@ -442,9 +444,12 @@ async def test_revision_cancelled_after_commit_reports_original_result_once(
     original = service._commit_revision
 
     def commit(
-        revision: RevisionItem, candidate: PreparedRevision, usage: dict[str, int]
+        revision: RevisionItem,
+        candidate: PreparedRevision,
+        usage: dict[str, int],
+        publication: PublicationRecord,
     ) -> EvolutionResult:
-        result = original(revision, candidate, usage)
+        result = original(revision, candidate, usage, publication)
         committed.append(result)
         entered.set()
         release.wait()

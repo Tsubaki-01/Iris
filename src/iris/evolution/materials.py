@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -12,6 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ..exceptions import IrisEvolutionError
 from ..utils.files import atomic_write_text
 from ..utils.generation_worker import check_generation_cancelled
+from .history import (
+    EvolutionHistoryCursor,
+    EvolutionHistoryPage,
+    PublicationPage,
+    PublicationRecord,
+    RevisionRequestPage,
+)
 from .models import (
     EvolutionCaptureBlock,
     EvolutionMaterial,
@@ -43,6 +51,7 @@ class _Progress(BaseModel):
     latest_step: EvolutionResult | None = None
     issues: dict[str, RevisionItem] = Field(default_factory=dict)
     settled_revisions: dict[str, EvolutionResult] = Field(default_factory=dict)
+    settled_publications: tuple[str, ...] = ()
 
 
 def _key(source: EvolutionSource) -> str:
@@ -67,6 +76,27 @@ def _write(path: Path, model: BaseModel) -> None:
         raise IrisEvolutionError("项目材料发布失败", path=str(path), error=str(exc)) from exc
 
 
+def _archive_name(created_at: datetime, record_id: str) -> str:
+    """文件排序只使用原创建时刻，后续确认和结算不改变分页位置。"""
+    return f"{created_at.astimezone(UTC):%Y%m%dT%H%M%S%fZ}_{record_id}.json"
+
+
+def _history_page[RecordT: BaseModel](
+    directory: Path, schema: type[RecordT], after: EvolutionHistoryCursor | None, limit: int
+) -> EvolutionHistoryPage[RecordT]:
+    """文件型领域存储先选页，再读取这一页正文。"""
+    if not 1 <= limit <= 100:
+        raise IrisEvolutionError("历史分页 limit 必须在 1 到 100 之间")
+    paths = sorted(
+        path for path in directory.glob("*.json") if after is None or path.name > after.key
+    )
+    selected = paths[:limit]
+    return EvolutionHistoryPage(
+        tuple(_read(path, schema) for path in selected),
+        EvolutionHistoryCursor(selected[-1].name) if len(paths) > limit else None,
+    )
+
+
 class EvolutionMaterialStore:
     """保存自有材料；资格和项目锁由宿主与生成服务拥有。"""
 
@@ -78,6 +108,41 @@ class EvolutionMaterialStore:
         self._blocks = self.root / "blocks"
         self._requests = self.root / "requests"
         self._progress_path = self.root / "progress.json"
+        self._publications = self.root.parent / "publications"
+        self._request_history = self.root.parent / "requests"
+
+    def save_publication(self, record: PublicationRecord) -> None:
+        """原发布 owner 在同一个项目锁内保存阶段与确认事实。"""
+        _write(self._publications / _archive_name(record.created_at, record.publication_id), record)
+
+    def list_publications(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> PublicationPage:
+        """按创建时刻读取发布档案，正文读取限于当前页。"""
+        return _history_page(self._publications, PublicationRecord, after, limit)
+
+    def get_publication(self, publication_id: str) -> PublicationRecord | None:
+        """只从自有发布目录按原始 ID 读取，不以当前文件重建历史。"""
+        for path in self._publications.glob("*.json"):
+            if path.stem.endswith(f"_{publication_id}"):
+                return _read(path, PublicationRecord)
+        return None
+
+    def list_unsettled_publications(self) -> tuple[PublicationRecord, ...]:
+        """项目锁内查找仍需原 owner 处理的发布结算。"""
+        records = (
+            _read(path, PublicationRecord) for path in sorted(self._publications.glob("*.json"))
+        )
+        return tuple(record for record in records if not record.settled)
+
+    def list_revision_requests(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> RevisionRequestPage:
+        """读取全部已登记请求，完成后的 pending 清理不删除正文历史。"""
+        return _history_page(self._request_history, RevisionItem, after, limit)
+
+    def _archive_request(self, item: RevisionItem) -> None:
+        _write(self._request_history / _archive_name(item.created_at, item.id), item)
 
     def register_source(
         self, source: EvolutionSource, initial_message_count: int
@@ -144,6 +209,7 @@ class EvolutionMaterialStore:
     def enqueue_revision(self, item: RevisionItem) -> None:
         """独立发布宿主请求，不在项目锁外覆盖 A/B 的共享进度。"""
         _write(self._requests / f"{item.id}.json", item)
+        self._archive_request(item)
 
     def _pending_revisions(self) -> tuple[RevisionItem, ...]:
         """合并 A 进度中的问题与独立宿主请求，排除已经结算的 ID。"""
@@ -277,6 +343,9 @@ class EvolutionMaterialStore:
         progress = self._read_progress()
         states, captures = self._load_sources(progress)
         consumed = dict(progress.consumed)
+        if step.publication_id is not None and step.publication_id in progress.settled_publications:
+            self._clean_consumed_bodies(captures, consumed)
+            return
         for item in selected:
             key = _key(item.source)
             state = states[key]
@@ -289,6 +358,7 @@ class EvolutionMaterialStore:
         issues = dict(progress.issues)
         if issue is not None:
             issues[issue.id] = issue
+            self._archive_request(issue)
         _write(
             self._progress_path,
             progress.model_copy(
@@ -296,9 +366,20 @@ class EvolutionMaterialStore:
                     "consumed": consumed,
                     "latest_step": step,
                     "issues": issues,
+                    "settled_publications": (
+                        (*progress.settled_publications, step.publication_id)
+                        if step.publication_id is not None
+                        else progress.settled_publications
+                    ),
                 }
             ),
         )
+        self._clean_consumed_bodies(captures, consumed)
+
+    def _clean_consumed_bodies(
+        self, captures: list[tuple[Path, EvolutionCaptureBlock]], consumed: dict[str, int]
+    ) -> None:
+        """原进度已经确认的正文可幂等完成清理，不重复学习或推进水位。"""
         for path, capture in captures:
             key = _key(capture.source)
             if capture.end_message_count <= consumed.get(key, capture.initial_message_count):

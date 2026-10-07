@@ -736,7 +736,7 @@ class MaintenanceCoordinator:
             self._fail_revisions(project, error)
             logger.error("项目经验维护失败", exc_info=error)
         elif (result := task.result()) is not None:
-            project.last_result_ref = result.revision_id
+            project.last_result_ref = result.publication_id or result.revision_id
             completed_request = False
             if result.stage == "experience" and project.request is not None:
                 project.request.set_result(result)

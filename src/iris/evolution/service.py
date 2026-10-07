@@ -23,7 +23,15 @@ from ..utils.background_io import BackgroundIO
 from ..utils.files import atomic_write_text
 from ..utils.generation_worker import check_generation_cancelled
 from ..utils.sources import SourceDocument
+from ._publication import PublicationJournal
 from .config import EvolutionConfig
+from .history import (
+    EvolutionHistoryCursor,
+    PublicationDocument,
+    PublicationPage,
+    PublicationRecord,
+    RevisionRequestPage,
+)
 from .materials import EvolutionMaterialStore
 from .models import (
     EvolutionMaintenanceScope,
@@ -144,6 +152,41 @@ class EvolutionService:
             + [("config", name) for name in config.config_targets]
         )
         self._background_io = BackgroundIO()
+        self._publications = PublicationJournal(store)
+
+    def list_publications(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> PublicationPage:
+        """读取发布时保存的基线、候选及确认正文。"""
+        return self.store.list_publications(after=after, limit=limit)
+
+    async def alist_publications(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> PublicationPage:
+        """异步读取项目发布档案页。"""
+        return await self.run_async_io(lambda: self.list_publications(after=after, limit=limit))
+
+    def get_publication(self, publication_id: str) -> PublicationRecord | None:
+        """读取一份完整发布记录，不重读当前目标来替代历史。"""
+        return self.store.get_publication(publication_id)
+
+    async def aget_publication(self, publication_id: str) -> PublicationRecord | None:
+        """异步读取原始 ID 对应的发布记录。"""
+        return await self.run_async_io(lambda: self.get_publication(publication_id))
+
+    def list_revision_requests(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> RevisionRequestPage:
+        """读取已登记请求的完整描述与证据，包含已清理 pending 的请求。"""
+        return self.store.list_revision_requests(after=after, limit=limit)
+
+    async def alist_revision_requests(
+        self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
+    ) -> RevisionRequestPage:
+        """异步读取请求历史页。"""
+        return await self.run_async_io(
+            lambda: self.list_revision_requests(after=after, limit=limit)
+        )
 
     async def run_async_io(
         self, operation: Callable[[], ResultT], *, complete_on_cancel: bool = False
@@ -310,32 +353,44 @@ class EvolutionService:
 
     def _commit(
         self,
-        selected: tuple[EvolutionMaterial, ...],
         baseline: str | None,
         content: str | None,
         result: EvolutionResult,
-        issue: RevisionItem | None,
+        publication: PublicationRecord,
     ) -> EvolutionResult:
         """短同步发布与确认消费；已写文件不因后续进度失败回滚。"""
         check_generation_cancelled()
+        self._publications.begin(publication)
         try:
             if self._read_skill() != baseline:
                 conflict = EvolutionResult(
-                    status="conflict", reason="项目经验文件在生成期间已被修改", usage=result.usage
+                    status="conflict",
+                    reason="项目经验文件在生成期间已被修改",
+                    usage=result.usage,
+                    publication_id=publication.publication_id,
                 )
-                self.store.record_step(conflict)
-                return conflict
+                return self._publications.complete(publication, conflict)
             if content is not None:
                 atomic_write_text(self.skill_path, content)
         except (OSError, UnicodeError) as exc:
             raise IrisEvolutionError(
                 "项目经验文件发布失败", path=str(self.skill_path), error=str(exc)
             ) from exc
-        self.store.consume(selected, result, issue=issue)
-        return result
+        return self._publications.complete(publication, result)
 
     async def maintain_cycle(self, *, scope: EvolutionMaintenanceScope) -> EvolutionResult:
         """每次项目锁只执行一项 A 或 B；B 成功或失败均不重新消费 A。"""
+        resumed = await self.run_async_io(self._publications.resume, complete_on_cancel=True)
+        if resumed is not None:
+            has_more = (
+                await self.run_async_io(lambda: self._remaining(scope))
+                if resumed.status in {"updated", "no_change"}
+                else False
+            )
+            self.observability.maintenance_result(
+                "evolution", resumed.stage, resumed.status, revision_id=resumed.revision_id
+            )
+            return resumed.model_copy(update={"has_more": has_more})
         if not scope.experience_only:
             revisions = await self.run_async_io(
                 lambda: self.store.read_pending_revisions(
@@ -357,6 +412,9 @@ class EvolutionService:
         """整理一批 A，问题与本次消费同一进度提交后结束本轮。"""
         usage: dict[str, int] = {}
         recorded = False
+        publication = PublicationRecord(
+            stage="experience", origin="experience", description="从本批真实材料整理项目经验。"
+        )
         try:
             pending = await self.run_async_io(
                 lambda: self.store.read_pending(allowed_sources=scope.allowed_sources)
@@ -366,6 +424,20 @@ class EvolutionService:
                 return EvolutionResult(status="empty")
             baseline, selected, request = await self.run_async_io(
                 lambda: self._prepare(pending.items)
+            )
+            publication = publication.model_copy(
+                update={
+                    "before_documents": (
+                        PublicationDocument(path=str(self.skill_path), text=baseline),
+                    ),
+                    "materials": selected,
+                    "evidence_refs": tuple(
+                        RevisionEvidence(ref=record.ref, quote=record.text)
+                        for material in selected
+                        for record in material.records
+                        if record.text.strip()
+                    ),
+                }
             )
             sources = tuple(dict.fromkeys(item.source for item in selected))
             _check_cancelled()
@@ -388,6 +460,7 @@ class EvolutionService:
             if not await scope.check(sources):
                 raise asyncio.CancelledError
             result = EvolutionResult(
+                publication_id=publication.publication_id,
                 status="updated" if content is not None else "no_change",
                 reason=parsed.reason,
                 consumed_ranges=tuple(
@@ -404,8 +477,21 @@ class EvolutionService:
                 or len(selected) < len(pending.items),
                 effect=_EFFECT if content is not None else "项目 Skill 保持原样。",
             )
+            publication = publication.model_copy(
+                update={
+                    "candidate_documents": (
+                        PublicationDocument(path=str(self.skill_path), text=content),
+                    )
+                    if content is not None
+                    else (),
+                    "proposed_issue": issue,
+                    "usage": usage,
+                    "reason": result.reason,
+                    "effect": result.effect,
+                }
+            )
             result = await self.run_async_io(
-                lambda: self._commit(selected, baseline, content, result, issue),
+                lambda: self._commit(baseline, content, result, publication),
                 complete_on_cancel=True,
             )
             recorded = True
@@ -415,12 +501,14 @@ class EvolutionService:
         except (Exception, asyncio.CancelledError) as exc:
             if not recorded:
                 failure = EvolutionResult(
+                    publication_id=publication.publication_id,
                     status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
                     reason=str(exc) or type(exc).__name__,
                     usage=usage,
                 )
                 await self.run_async_io(
-                    lambda: self.store.record_step(failure), complete_on_cancel=True
+                    lambda: self._publications.failure(publication, failure),
+                    complete_on_cancel=True,
                 )
                 self.observability.maintenance_result("evolution", failure.stage, failure.status)
             raise
@@ -463,13 +551,19 @@ class EvolutionService:
         return await scope.check_session(item.origin.session)
 
     def _commit_revision(
-        self, item: RevisionItem, candidate: PreparedRevision, usage: dict[str, int]
+        self,
+        item: RevisionItem,
+        candidate: PreparedRevision,
+        usage: dict[str, int],
+        publication: PublicationRecord,
     ) -> EvolutionResult:
         """短 IO 发布候选并独立结算 B，不重新提交 A 进度。"""
+        self._publications.begin(publication)
         published = publish_revision(candidate)
         result = EvolutionResult(
             stage="revision",
             revision_id=item.id,
+            publication_id=publication.publication_id,
             targets=candidate.targets,
             status=("no_change" if candidate.action == "no_change" else "updated")
             if published
@@ -478,11 +572,7 @@ class EvolutionService:
             usage=usage,
             effect=candidate.effect if published else "原文件与待处理问题保持原样。",
         )
-        if published:
-            self.store.settle_revision(item.id, result)
-        else:
-            self.store.record_step(result)
-        return result
+        return self._publications.complete(publication, result)
 
     def _remaining(self, scope: EvolutionMaintenanceScope) -> bool:
         """仅把本轮合格范围内的剩余 A/B 交回调度器。"""
@@ -500,8 +590,25 @@ class EvolutionService:
         """处理单个 B；失败或取消带本请求身份返回，保留 pending。"""
         usage: dict[str, int] = {}
         committed: EvolutionResult | None = None
+        publication = PublicationRecord(
+            stage="revision",
+            revision_id=item.id,
+            origin="experience" if item.origin.kind == "experience" else "host_request",
+            description=item.description,
+            evidence_refs=item.evidence,
+            targets=item.targets,
+            request=item,
+        )
         try:
             context, request = await self.run_async_io(lambda: self._prepare_review(item))
+            publication = publication.model_copy(
+                update={
+                    "before_documents": tuple(
+                        PublicationDocument(path=str(path), text=text)
+                        for path, text in context.baselines.items()
+                    ),
+                }
+            )
             _check_cancelled()
             if not await self._revision_eligible(item, scope):
                 raise asyncio.CancelledError
@@ -514,11 +621,24 @@ class EvolutionService:
             }
             _check_cancelled()
             candidate = await self.run_async_io(lambda: prepare_candidate(response, context))
+            publication = publication.model_copy(
+                update={
+                    "candidate_documents": (
+                        (PublicationDocument(path=str(candidate.path), text=candidate.content),)
+                        if candidate.path is not None
+                        else ()
+                    ),
+                    "usage": usage,
+                    "reason": candidate.reason,
+                    "effect": candidate.effect,
+                }
+            )
             _check_cancelled()
             if not await self._revision_eligible(item, scope):
                 raise asyncio.CancelledError
             committed = await self.run_async_io(
-                lambda: self._commit_revision(item, candidate, usage), complete_on_cancel=True
+                lambda: self._commit_revision(item, candidate, usage, publication),
+                complete_on_cancel=True,
             )
             if committed.status == "conflict":
                 return committed
@@ -531,12 +651,13 @@ class EvolutionService:
             failure = EvolutionResult(
                 stage="revision",
                 revision_id=item.id,
+                publication_id=publication.publication_id,
                 targets=item.targets,
                 status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
                 reason=str(exc) or type(exc).__name__,
                 usage=usage,
             )
             await self.run_async_io(
-                lambda: self.store.record_step(failure), complete_on_cancel=True
+                lambda: self._publications.failure(publication, failure), complete_on_cancel=True
             )
             return failure

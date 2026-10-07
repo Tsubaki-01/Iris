@@ -300,9 +300,32 @@ RevisionRequest(description: str, targets: tuple[RevisionTarget, ...], session=N
 
 description 和目标名称不可为空白；targets 至少一个，必须在配置开放范围内。无 session 的宿主请求不伪造经历或 Run；有 session 时传入真实 store.source_id 与 session ID。`RevisionEvidence(ref, quote)` 用于经历问题的原文证据，经验整理会检查 ref 和逐字片段确实来自本批材料。
 
-`EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
+`EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
 `ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料保存在 `.iris/evolution/pending/` 的 sources/captures/blocks/requests 与 progress.json，属于内部维护格式，不建议应用直接改写。
+
+| Evolution 历史入口 | 结果 |
+| --- | --- |
+| `list_publications(*, after=None, limit=50)` / `await alist_publications(...)` | `PublicationPage`；按 created_at/ID 升序的发布档案 |
+| `get_publication(publication_id)` / `await aget_publication(...)` | `PublicationRecord \| None` |
+| `list_revision_requests(*, after=None, limit=50)` / `await alist_revision_requests(...)` | `RevisionRequestPage`；包括完成后原 pending 已清理的 `RevisionItem` |
+
+页包含 items/next_cursor，游标为 `EvolutionHistoryCursor`，limit 为 1–100，由材料存储校验。
+`RevisionItem` 包含原 id、created_at、description、targets、evidence、origin；
+指定请求的结算结果继续由 `store.revision_result(id)` 读取。
+
+`PublicationRecord` 保存 publication_id、revision_id、stage、created_at、outcome、
+publication_state、origin、description、evidence_refs、consumed_ranges、targets，
+以及 before_documents、candidate_documents、after_documents、reason、usage、effect、published_at。
+文档保存 path/text，缺失基线用 text=None。实际处理材料保存在 materials，原请求和产生的问题
+保存在 request/proposed_issue；A 的固定 Skill 目标见文档 path。记录位于
+`.iris/evolution/publications/`，请求历史位于 `.iris/evolution/requests/`。
+
+publication_state 为 not_published、confirmed 或 unconfirmed。只有原文件写入返回成功才记录
+after_documents/published_at；no_change、conflict、failed 不冒充 updated。settled 表示原材料/请求
+结算已完成，consumed_ranges 在材料进度提交后填写。已确认写入的结算重试不重跑模型或文件修改。
+重启后无法确认的发布保留 unconfirmed，返回 `publication_unconfirmed`，并在 observed_documents
+保存读到的当前正文；不因正文等于候选就推断过去成功。未确认发布期间不自动重放项目修改。
 
 ## Goal SDK
 
