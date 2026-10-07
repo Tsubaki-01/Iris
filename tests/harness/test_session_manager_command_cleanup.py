@@ -57,6 +57,45 @@ async def test_active_cleanup_failure_interrupt_retries_before_follow_up(
 
 
 @pytest.mark.asyncio
+async def test_waiting_cancel_cleanup_failure_keeps_answer_and_steer_disabled(
+    tmp_path: Path,
+) -> None:
+    """取消清理失败仍保留 durable cancellation，控制投影不重新开放输入。"""
+    registry = ToolRegistry()
+    registry.register_function(lambda: "write", name="write", capabilities={ToolCapability.WRITE})
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            registry=registry,
+            provider=StaticProvider(
+                tool_response(ToolUseBlock(id="write", name="write", input={})),
+            ),
+        ),
+        store=InMemoryLifecycleStore(),
+    )
+    service = ControlledService()
+    bind_service(runner, service)
+    manager = SessionManager(runner, "waiting-cancel")
+    await manager.submit("写入")
+    await _wait_until(lambda: "resume" in manager.snapshot().allowed_commands)
+    service.fail = True
+    await manager.interrupt()
+    task = manager._interrupt_task
+    with pytest.raises(IrisCommandCleanupError):
+        await task
+    await _wait_until(lambda: manager._current_task is None)
+    snapshot = manager.snapshot()
+    assert snapshot.run.cancellation_requested_at is not None
+    assert snapshot.driver_state == "detached"
+    assert not {"steer", "resume"}.intersection(snapshot.allowed_commands)
+    service.fail = False
+    service.release()
+    assert (await manager.restore(snapshot.current_run_id)).disposition == "settled"
+    await manager.close(cancel_run=True)
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
 async def test_manager_close_cleanup_failure_can_retry_without_reopening_admission(
     tmp_path: Path,
 ) -> None:

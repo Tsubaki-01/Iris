@@ -186,6 +186,40 @@ async def test_follow_up_admission_retains_pending_body(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_submit_waiter_does_not_leave_delivered_input_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消 HTTP 等待者后，manager 持有的任务继续并在准入完成时清除 pending。"""
+    provider = BlockingProvider()
+    runner = AgentRunner(
+        runtime=build_runtime(tmp_path, provider=provider), store=InMemoryLifecycleStore()
+    )
+    manager = SessionManager(runner, "cancelled-waiter")
+    original = runner._start_managed
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked(request: AgentRunRequest, **kwargs: object) -> RunResult:
+        entered.set()
+        await release.wait()
+        return await original(request, **kwargs)
+
+    monkeypatch.setattr(runner, "_start_managed", blocked)
+    waiter = asyncio.create_task(manager.submit("已接纳输入"))
+    await entered.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    release.set()
+    await provider.started.wait()
+    assert manager.snapshot().driver_state == "running"
+    assert manager.snapshot().pending == ()
+    assert runner.get_session("cancelled-waiter").messages[0].text == "已接纳输入"
+    provider.release.set()
+    await _wait_until(lambda: manager.snapshot().current_run_id is None)
+    await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_control_snapshot_does_not_read_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

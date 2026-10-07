@@ -794,6 +794,8 @@ class SessionManager:
         from .streaming import SessionControlChanged
 
         previous = self._control
+        if self._admission_started is not None and self._admission_started.is_set():
+            self._admitting_submission = None
         interaction_status = previous.interaction_status
         if run is not None:
             interaction = (
@@ -858,6 +860,7 @@ class SessionManager:
             run is not None
             and run.phase is RunPhase.WAITING
             and interaction_status is InteractionStatus.PENDING
+            and run.cancellation_requested_at is None
         ):
             state, commands = "idle", ("resume", "steer", "follow_up", "interrupt", "close")
         else:
@@ -1151,6 +1154,7 @@ class SessionManager:
             self._refresh_control(run=run)
             if run.phase is RunPhase.WAITING and (
                 self._control.interaction_status is InteractionStatus.PENDING
+                and run.cancellation_requested_at is None
             ):
                 return RestoreReceipt(run_id, "attached_waiting", self._control)
             started = asyncio.Event()
