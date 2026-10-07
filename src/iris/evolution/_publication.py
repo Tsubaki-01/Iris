@@ -2,12 +2,11 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
 from ..exceptions import IrisEvolutionError
 from .history import PublicationDocument, PublicationRecord
 from .materials import EvolutionMaterialStore
-from .models import EvolutionRange, EvolutionResult
+from .models import EvolutionResult
 
 
 class PublicationJournal:
@@ -28,7 +27,6 @@ class PublicationJournal:
             update={
                 "outcome": result.model_copy(update={"consumed_ranges": ()}),
                 "publication_state": "confirmed" if published else "not_published",
-                "after_documents": record.candidate_documents if published else (),
                 "published_at": datetime.now(UTC) if published else None,
                 "reason": result.reason,
                 "usage": result.usage,
@@ -39,36 +37,8 @@ class PublicationJournal:
         return self._finish(confirmed)
 
     def _finish(self, record: PublicationRecord) -> EvolutionResult:
-        result = cast(EvolutionResult, record.outcome)
         self.store.save_publication(record)
-        if result.status in {"updated", "no_change"}:
-            if record.stage == "revision":
-                self.store.settle_revision(cast(str, record.revision_id), result)
-            else:
-                result = result.model_copy(
-                    update={
-                        "consumed_ranges": tuple(
-                            EvolutionRange.model_construct(
-                                source=item.source,
-                                start_message_count=item.start_message_count,
-                                end_message_count=item.end_message_count,
-                            )
-                            for item in record.materials
-                        )
-                    }
-                )
-                self.store.consume(record.materials, result, issue=record.proposed_issue)
-        else:
-            self.store.record_step(result)
-        self.store.save_publication(
-            record.model_copy(
-                update={
-                    "settled": True,
-                    "outcome": result,
-                    "consumed_ranges": result.consumed_ranges,
-                }
-            )
-        )
+        result = self.store.settle_publication(record)
         self._receipts.pop(record.publication_id, None)
         return result
 

@@ -157,7 +157,7 @@ class EvolutionService:
     def list_publications(
         self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
     ) -> PublicationPage:
-        """读取发布时保存的基线、候选及确认正文。"""
+        """读取发布历史摘要，完整正文通过 get_publication 按 ID 查询。"""
         return self.store.list_publications(after=after, limit=limit)
 
     async def alist_publications(
@@ -177,7 +177,7 @@ class EvolutionService:
     def list_revision_requests(
         self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
     ) -> RevisionRequestPage:
-        """读取已登记请求的完整描述与证据，包含已清理 pending 的请求。"""
+        """读取请求历史摘要，包含已结算请求；完整证据由详情接口返回。"""
         return self.store.list_revision_requests(after=after, limit=limit)
 
     async def alist_revision_requests(
@@ -187,6 +187,14 @@ class EvolutionService:
         return await self.run_async_io(
             lambda: self.list_revision_requests(after=after, limit=limit)
         )
+
+    def get_revision_request(self, revision_id: str) -> RevisionItem | None:
+        """按 ID 读取完整修订请求及证据，不改变处理状态。"""
+        return self.store.get_revision_request(revision_id)
+
+    async def aget_revision_request(self, revision_id: str) -> RevisionItem | None:
+        """在线程中读取完整修订请求及证据。"""
+        return await self.run_async_io(lambda: self.get_revision_request(revision_id))
 
     async def run_async_io(
         self, operation: Callable[[], ResultT], *, complete_on_cancel: bool = False

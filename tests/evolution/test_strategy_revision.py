@@ -27,6 +27,7 @@ from iris.evolution.service import EvolutionService
 from iris.exceptions import IrisEvolutionError
 from iris.observability.service import Observability
 
+from .test_materials import body_count
 from .test_project_skill import eligible_session, prepare
 
 if TYPE_CHECKING:
@@ -96,7 +97,7 @@ async def test_a_issue_survives_cleanup_and_failed_b_does_not_repeat_a(tmp_path:
     assert a.stage == "experience" and a.status == "no_change" and a.has_more
     assert len(provider.requests) == 1
     assert service.store.read_pending(allowed_sources=scope.allowed_sources).items == ()
-    assert list((service.store.root / "blocks").glob("*.json")) == []
+    assert body_count(service.store) == 0
     (pending,) = service.store.read_pending_revisions(
         allowed_sources=scope.allowed_sources,
         allowed_sessions=frozenset(),

@@ -11,6 +11,7 @@ from .models import (
     EvolutionMaterial,
     EvolutionRange,
     EvolutionResult,
+    EvolutionStatus,
     RevisionEvidence,
     RevisionItem,
     RevisionTarget,
@@ -42,7 +43,6 @@ class PublicationRecord(BaseModel):
     targets: tuple[RevisionTarget, ...] = ()
     before_documents: tuple[PublicationDocument, ...] = ()
     candidate_documents: tuple[PublicationDocument, ...] = ()
-    after_documents: tuple[PublicationDocument, ...] = ()
     observed_documents: tuple[PublicationDocument, ...] = ()
     reason: str = ""
     usage: dict[str, int] = Field(default_factory=dict)
@@ -53,12 +53,48 @@ class PublicationRecord(BaseModel):
     materials: tuple[EvolutionMaterial, ...] = ()
     proposed_issue: RevisionItem | None = None
 
+    @property
+    def after_documents(self) -> tuple[PublicationDocument, ...]:
+        """仅从原发布确认投影已写正文，不再次序列化候选副本。"""
+        return self.candidate_documents if self.publication_state == "confirmed" else ()
+
+
+class PublicationSummary(BaseModel):
+    """历史列表的短元数据，不读取或携带正文、材料与证据。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    publication_id: str
+    revision_id: str | None
+    created_at: datetime
+    stage: Literal["experience", "revision"]
+    origin: Literal["host_request", "experience"]
+    description: str
+    targets: tuple[RevisionTarget, ...]
+    status: EvolutionStatus | None
+    publication_state: Literal["not_published", "confirmed", "unconfirmed"]
+    reason: str
+    published_at: datetime | None
+    settled: bool
+
+
+class RevisionRequestSummary(BaseModel):
+    """修订请求列表的短元数据，status 仅表示请求的最终结算结果。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: str
+    created_at: datetime
+    description: str
+    targets: tuple[RevisionTarget, ...]
+    origin: Literal["host", "experience"]
+    status: EvolutionStatus | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class EvolutionHistoryCursor:
-    """按创建时刻和原始 ID 排序的文件位置，只用于下一页读取。"""
+    """按创建时刻和原始 ID 排序的数据库游标。"""
 
-    key: str
+    created_at: datetime
+    id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,5 +105,5 @@ class EvolutionHistoryPage[T]:
     next_cursor: EvolutionHistoryCursor | None
 
 
-type PublicationPage = EvolutionHistoryPage[PublicationRecord]
-type RevisionRequestPage = EvolutionHistoryPage[RevisionItem]
+type PublicationPage = EvolutionHistoryPage[PublicationSummary]
+type RevisionRequestPage = EvolutionHistoryPage[RevisionRequestSummary]

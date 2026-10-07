@@ -6,7 +6,9 @@ from .history import (
     PublicationDocument,
     PublicationPage,
     PublicationRecord,
+    PublicationSummary,
     RevisionRequestPage,
+    RevisionRequestSummary,
 )
 from .models import (
     EvolutionCaptureBlock,
@@ -32,7 +34,9 @@ __all__ = [
     "PublicationDocument",
     "PublicationPage",
     "PublicationRecord",
+    "PublicationSummary",
     "RevisionRequestPage",
+    "RevisionRequestSummary",
     "EvolutionConfig",
     "EvolutionCaptureBlock",
     "EvolutionMaintenanceScope",

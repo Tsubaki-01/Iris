@@ -1,28 +1,32 @@
-"""项目经历的独立捕获块、封源事实与项目锁内消费进度。"""
+"""项目经历、修订请求和发布历史的独立 SQLite 存储。"""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..exceptions import IrisEvolutionError
-from ..utils.files import atomic_write_text
 from ..utils.generation_worker import check_generation_cancelled
+from ._sqlite import connection, encode, initialize
 from .history import (
     EvolutionHistoryCursor,
     EvolutionHistoryPage,
     PublicationPage,
     PublicationRecord,
+    PublicationSummary,
     RevisionRequestPage,
+    RevisionRequestSummary,
 )
 from .models import (
     EvolutionCaptureBlock,
     EvolutionMaterial,
+    EvolutionRange,
     EvolutionRecord,
     EvolutionResult,
     EvolutionSession,
@@ -34,201 +38,270 @@ from .models import (
     RevisionItem,
 )
 
+_DETAIL_FIELDS = {
+    "before_documents",
+    "candidate_documents",
+    "evidence_refs",
+    "request",
+    "materials",
+    "proposed_issue",
+}
+
 
 class _Registration(BaseModel):
-    """不可变来源登记，不保存共享的捕获水位。"""
+    """来源登记与消费位置在数据库读取边界一起校验。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     source: EvolutionSource
     initial_message_count: int = Field(ge=0)
-
-
-class _Progress(BaseModel):
-    """只在项目锁内替换的消费位置与最近一次简短结果。"""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    consumed: dict[str, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
-    latest_step: EvolutionResult | None = None
-    issues: dict[str, RevisionItem] = Field(default_factory=dict)
-    settled_revisions: dict[str, EvolutionResult] = Field(default_factory=dict)
-    settled_publications: tuple[str, ...] = ()
+    consumed_until: int = Field(ge=0)
 
 
 def _key(source: EvolutionSource) -> str:
-    """编码稳定的 lifecycle/run 身份，session 保留在来源中。"""
     return json.dumps([source.lifecycle_source_id, source.run_id], separators=(",", ":"))
 
 
-def _read[ModelT: BaseModel](path: Path, schema: type[ModelT]) -> ModelT:
-    """持久 JSON 回到可信域时完整解析一次。"""
-    try:
-        return schema.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValidationError) as exc:
-        raise IrisEvolutionError("项目材料读取失败", path=str(path), error=str(exc)) from exc
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
-def _write(path: Path, model: BaseModel) -> None:
-    """在持久化出口序列化一次，再完整发布。"""
-    try:
-        content = json.dumps(model.model_dump(mode="json"), ensure_ascii=False, allow_nan=False)
-        atomic_write_text(path, content)
-    except (OSError, TypeError, ValueError) as exc:
-        raise IrisEvolutionError("项目材料发布失败", path=str(path), error=str(exc)) from exc
-
-
-def _archive_name(created_at: datetime, record_id: str) -> str:
-    """文件排序只使用原创建时刻，后续确认和结算不改变分页位置。"""
-    return f"{created_at.astimezone(UTC):%Y%m%dT%H%M%S%fZ}_{record_id}.json"
-
-
-def _history_page[RecordT: BaseModel](
-    directory: Path, schema: type[RecordT], after: EvolutionHistoryCursor | None, limit: int
-) -> EvolutionHistoryPage[RecordT]:
-    """文件型领域存储先选页，再读取这一页正文。"""
-    if not 1 <= limit <= 100:
-        raise IrisEvolutionError("历史分页 limit 必须在 1 到 100 之间")
-    paths = sorted(
-        path for path in directory.glob("*.json") if after is None or path.name > after.key
+def _publication_summary(record: PublicationRecord) -> PublicationSummary:
+    return PublicationSummary.model_construct(
+        publication_id=record.publication_id,
+        revision_id=record.revision_id,
+        created_at=record.created_at,
+        stage=record.stage,
+        origin=record.origin,
+        description=record.description,
+        targets=record.targets,
+        status=record.outcome.status if record.outcome is not None else None,
+        publication_state=record.publication_state,
+        reason=record.reason,
+        published_at=record.published_at,
+        settled=record.settled,
     )
-    selected = paths[:limit]
-    return EvolutionHistoryPage(
-        tuple(_read(path, schema) for path in selected),
-        EvolutionHistoryCursor(selected[-1].name) if len(paths) > limit else None,
+
+
+def _publication(row: sqlite3.Row) -> PublicationRecord:
+    return PublicationRecord.model_validate(
+        {**json.loads(row["state_json"]), **json.loads(row["detail_json"])}
     )
 
 
 class EvolutionMaterialStore:
-    """保存自有材料；资格和项目锁由宿主与生成服务拥有。"""
+    """管理独立 evolution.db；运行资格和项目锁仍由宿主与生成服务拥有。"""
 
     def __init__(self, workspace_root: Path) -> None:
-        """绑定项目固定 pending 目录，不创建额外数据库。"""
-        self.root = workspace_root.resolve() / ".iris" / "evolution" / "pending"
-        self._sources = self.root / "sources"
-        self._captures = self.root / "captures"
-        self._blocks = self.root / "blocks"
-        self._requests = self.root / "requests"
-        self._progress_path = self.root / "progress.json"
-        self._publications = self.root.parent / "publications"
-        self._request_history = self.root.parent / "requests"
+        """绑定项目 SQLite，初始化当前结构，不迁移旧 JSON。"""
+        self.root = workspace_root.resolve() / ".iris" / "evolution"
+        self.path = self.root / "evolution.db"
+        initialize(self.path)
 
     def save_publication(self, record: PublicationRecord) -> None:
-        """原发布 owner 在同一个项目锁内保存阶段与确认事实。"""
-        _write(self._publications / _archive_name(record.created_at, record.publication_id), record)
+        """首次插入候选档案；确认和结算只更新状态，不重写静态正文。"""
+        with connection(self.path, write=True) as database:
+            self._save_publication(database, record)
+
+    @staticmethod
+    def _save_publication(database: sqlite3.Connection, record: PublicationRecord) -> None:
+        summary = encode(_publication_summary(record).model_dump(mode="json"))
+        state = encode(record.model_dump(mode="json", exclude=_DETAIL_FIELDS))
+        updated = database.execute(
+            "UPDATE publications SET settled=?,summary_json=?,state_json=? WHERE id=?",
+            (record.settled, summary, state, record.publication_id),
+        )
+        if updated.rowcount == 0:
+            database.execute(
+                "INSERT INTO publications VALUES (?,?,?,?,?)",
+                (
+                    record.publication_id,
+                    _timestamp(record.created_at),
+                    record.settled,
+                    summary,
+                    state,
+                ),
+            )
+            database.execute(
+                "INSERT INTO publication_details VALUES (?,?)",
+                (
+                    record.publication_id,
+                    encode(record.model_dump(mode="json", include=_DETAIL_FIELDS)),
+                ),
+            )
 
     def list_publications(
         self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
     ) -> PublicationPage:
-        """按创建时刻读取发布档案，正文读取限于当前页。"""
-        return _history_page(self._publications, PublicationRecord, after, limit)
+        """数据库按创建时刻分页，只读取短摘要列。"""
+        return self._history_page("publications", PublicationSummary, after, limit)
 
     def get_publication(self, publication_id: str) -> PublicationRecord | None:
-        """只从自有发布目录按原始 ID 读取，不以当前文件重建历史。"""
-        for path in self._publications.glob("*.json"):
-            if path.stem.endswith(f"_{publication_id}"):
-                return _read(path, PublicationRecord)
-        return None
+        """按主键读取完整档案，after 正文由已确认候选投影。"""
+        with connection(self.path) as database:
+            row = database.execute(
+                "SELECT p.state_json,d.detail_json FROM publications p "
+                "JOIN publication_details d ON d.publication_id=p.id WHERE p.id=?",
+                (publication_id,),
+            ).fetchone()
+            return _publication(row) if row is not None else None
 
     def list_unsettled_publications(self) -> tuple[PublicationRecord, ...]:
-        """项目锁内查找仍需原 owner 处理的发布结算。"""
-        records = (
-            _read(path, PublicationRecord) for path in sorted(self._publications.glob("*.json"))
-        )
-        return tuple(record for record in records if not record.settled)
+        """仅加载尚待原 owner 收尾的完整档案。"""
+        with connection(self.path) as database:
+            return tuple(
+                _publication(row)
+                for row in database.execute(
+                    "SELECT p.state_json,d.detail_json FROM publications p "
+                    "JOIN publication_details d ON d.publication_id=p.id WHERE p.settled=0 "
+                    "ORDER BY p.created_at,p.id"
+                )
+            )
 
     def list_revision_requests(
         self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
     ) -> RevisionRequestPage:
-        """读取全部已登记请求，完成后的 pending 清理不删除正文历史。"""
-        return _history_page(self._request_history, RevisionItem, after, limit)
+        """读取请求摘要，正文与证据留给详情接口。"""
+        return self._history_page("requests", RevisionRequestSummary, after, limit)
 
-    def _archive_request(self, item: RevisionItem) -> None:
-        _write(self._request_history / _archive_name(item.created_at, item.id), item)
+    def get_revision_request(self, revision_id: str) -> RevisionItem | None:
+        """按原始 ID 读取完整请求，结算后仍保留历史。"""
+        with connection(self.path) as database:
+            row = database.execute(
+                "SELECT payload FROM requests WHERE id=?", (revision_id,)
+            ).fetchone()
+            return RevisionItem.model_validate_json(row[0]) if row is not None else None
+
+    def _history_page[SummaryT: BaseModel](
+        self, table: str, schema: type[SummaryT], after: EvolutionHistoryCursor | None, limit: int
+    ) -> EvolutionHistoryPage[SummaryT]:
+        if not 1 <= limit <= 100:
+            raise IrisEvolutionError("历史分页 limit 必须在 1 到 100 之间")
+        where = "" if after is None else " WHERE (created_at,id) > (?,?)"
+        params = () if after is None else (_timestamp(after.created_at), after.id)
+        with connection(self.path) as database:
+            rows = database.execute(
+                f"SELECT id,created_at,summary_json FROM {table}{where} "
+                "ORDER BY created_at,id LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+            page = rows[:limit]
+            return EvolutionHistoryPage(
+                tuple(schema.model_validate_json(row["summary_json"]) for row in page),
+                EvolutionHistoryCursor(
+                    datetime.fromisoformat(page[-1]["created_at"]), page[-1]["id"]
+                )
+                if len(rows) > limit
+                else None,
+            )
 
     def register_source(
         self, source: EvolutionSource, initial_message_count: int
     ) -> EvolutionSourceState:
-        """首条原文前登记来源，重复登记不修改捕获或消费进度。"""
-        states, _ = self._load_sources(self._read_progress())
-        if _key(source) in states:
+        """原子登记来源，重复登记不重置消费或捕获位置。"""
+        with connection(self.path, write=True) as database:
+            database.execute(
+                "INSERT OR IGNORE INTO sources VALUES (?,?,?)",
+                (
+                    _key(source),
+                    encode(
+                        {
+                            "source": source.model_dump(mode="json"),
+                            "initial_message_count": initial_message_count,
+                        }
+                    ),
+                    initial_message_count,
+                ),
+            )
+            states, _ = self._load_sources(database)
             return states[_key(source)]
-        _write(
-            self._sources / f"{uuid4().hex}.json",
-            _Registration.model_construct(
-                source=source, initial_message_count=initial_message_count
-            ),
-        )
-        states, _ = self._load_sources(self._read_progress())
-        return states[_key(source)]
 
     def list_capture_sources(self, lifecycle_source_id: str) -> tuple[EvolutionSourceState, ...]:
-        """只返回同一 reader 仍需补采的来源，已封源项由待处理入口提供。"""
-        states, _ = self._load_sources(self._read_progress())
-        return tuple(
-            state
-            for state in states.values()
-            if state.source.lifecycle_source_id == lifecycle_source_id
-            and state.terminal_message_count is None
-        )
+        """只返回同一 reader 尚未连续封源的来源。"""
+        with connection(self.path) as database:
+            states, _ = self._load_sources(database)
+            return tuple(
+                state
+                for state in states.values()
+                if state.source.lifecycle_source_id == lifecycle_source_id
+                and state.terminal_message_count is None
+            )
 
     def commit_capture(self, block: EvolutionCaptureBlock) -> EvolutionSourceState:
-        """独立发布完整正文及收据；跨进程重叠由消费读取去重。"""
-        name = f"{uuid4().hex}.json"
-        body = self._blocks / name
-        _write(body, block)
-        _write(self._captures / name, block.model_copy(update={"records": ()}))
-        states, _ = self._load_sources(self._read_progress())
-        state = states[_key(block.source)]
-        if block.end_message_count <= state.consumed_until:
-            self._remove_body(body)
-        return state
+        """正文和收据同事务发布，允许跨进程重叠捕获。"""
+        with connection(self.path, write=True) as database:
+            database.execute(
+                "INSERT INTO captures VALUES (?,?,?,?,?)",
+                (
+                    uuid4().hex,
+                    _key(block.source),
+                    block.end_message_count,
+                    encode(block.model_copy(update={"records": ()}).model_dump(mode="json")),
+                    encode(block.model_dump(mode="json")),
+                ),
+            )
+            self._clean_consumed_bodies(database)
+            states, _ = self._load_sources(database)
+            return states[_key(block.source)]
 
     def list_pending_sources(self) -> tuple[EvolutionSource, ...]:
-        """列出连续到终态且尚未全部消费的来源，不判断 lifecycle 资格。"""
-        states, _ = self._load_sources(self._read_progress())
-        sources = {
-            _key(state.source): state.source
-            for state in states.values()
-            if state.terminal_message_count is not None
-            and state.consumed_until < state.terminal_message_count
-        }
-        for item in self._pending_revisions():
-            if isinstance(item.origin, ExperienceOrigin):
-                sources.update((_key(source), source) for source in item.origin.sources)
-        return tuple(sources.values())
+        """合并已封源未消费的材料与待处理经历问题的来源。"""
+        with connection(self.path) as database:
+            states, _ = self._load_sources(database)
+            sources = {
+                _key(state.source): state.source
+                for state in states.values()
+                if state.terminal_message_count is not None
+                and state.consumed_until < state.terminal_message_count
+            }
+            for item in self._pending_revisions(database):
+                if isinstance(item.origin, ExperienceOrigin):
+                    sources.update((_key(source), source) for source in item.origin.sources)
+            return tuple(sources.values())
 
     def list_pending_sessions(self) -> tuple[EvolutionSession, ...]:
-        """列出宿主请求携带的会话身份，实际状态仍由 lifecycle reader 判断。"""
-        return tuple(
-            dict.fromkeys(
-                item.origin.session
-                for item in self._pending_revisions()
-                if isinstance(item.origin, HostOrigin) and item.origin.session is not None
+        """列出未结算宿主请求的真实会话身份。"""
+        with connection(self.path) as database:
+            return tuple(
+                dict.fromkeys(
+                    item.origin.session
+                    for item in self._pending_revisions(database)
+                    if isinstance(item.origin, HostOrigin) and item.origin.session is not None
+                )
             )
-        )
 
     def enqueue_revision(self, item: RevisionItem) -> None:
-        """独立发布宿主请求，不在项目锁外覆盖 A/B 的共享进度。"""
-        _write(self._requests / f"{item.id}.json", item)
-        self._archive_request(item)
+        """一条记录同时承担请求队列和历史，不复制两份请求正文。"""
+        with connection(self.path, write=True) as database:
+            self._insert_request(database, item)
 
-    def _pending_revisions(self) -> tuple[RevisionItem, ...]:
-        """合并 A 进度中的问题与独立宿主请求，排除已经结算的 ID。"""
-        progress = self._read_progress()
-        items = dict(progress.issues)
-        for path in sorted(self._requests.glob("*.json")):
-            if path.stem in progress.settled_revisions:
-                continue
-            try:
-                item = _read(path, RevisionItem)
-            except IrisEvolutionError as exc:
-                if (
-                    isinstance(exc.__cause__, FileNotFoundError)
-                    and path.stem in self._read_progress().settled_revisions
-                ):
-                    continue
-                raise
-            items[item.id] = item
-        return tuple(item for item in items.values() if item.id not in progress.settled_revisions)
+    @staticmethod
+    def _insert_request(database: sqlite3.Connection, item: RevisionItem) -> None:
+        summary = RevisionRequestSummary.model_construct(
+            id=item.id,
+            created_at=item.created_at,
+            description=item.description,
+            targets=item.targets,
+            origin=item.origin.kind,
+            status=None,
+        )
+        database.execute(
+            "INSERT INTO requests (id,created_at,summary_json,payload) VALUES (?,?,?,?)",
+            (
+                item.id,
+                _timestamp(item.created_at),
+                encode(summary.model_dump(mode="json")),
+                encode(item.model_dump(mode="json")),
+            ),
+        )
+
+    @staticmethod
+    def _pending_revisions(database: sqlite3.Connection) -> tuple[RevisionItem, ...]:
+        return tuple(
+            RevisionItem.model_validate_json(row[0])
+            for row in database.execute(
+                "SELECT payload FROM requests WHERE result_json IS NULL ORDER BY created_at,id"
+            )
+        )
 
     def read_pending_revisions(
         self,
@@ -239,98 +312,116 @@ class EvolutionMaterialStore:
         limit: int = 1,
         requested_revision_id: str | None = None,
     ) -> tuple[RevisionItem, ...]:
-        """先按来源与当前开放目标过滤，再优先本次显式请求并限量。"""
-        eligible = []
-        for item in self._pending_revisions():
-            origin = item.origin
-            if isinstance(origin, ExperienceOrigin):
-                allowed = all(
-                    (source.lifecycle_source_id, source.run_id) in allowed_sources
-                    for source in origin.sources
-                )
-            else:
-                allowed = (
-                    origin.session is None
-                    or (origin.session.lifecycle_source_id, origin.session.session_id)
-                    in allowed_sessions
-                )
-            if allowed and all(
-                (target.kind, target.name) in allowed_targets for target in item.targets
-            ):
-                eligible.append(item)
-        if requested_revision_id is not None:
-            eligible.sort(key=lambda item: item.id != requested_revision_id)
-        return tuple(eligible[:limit])
+        """来源和目标过滤先于限额，显式请求优先。"""
+        with connection(self.path) as database:
+            eligible = []
+            for item in self._pending_revisions(database):
+                origin = item.origin
+                if isinstance(origin, ExperienceOrigin):
+                    allowed = all(
+                        (source.lifecycle_source_id, source.run_id) in allowed_sources
+                        for source in origin.sources
+                    )
+                else:
+                    allowed = (
+                        origin.session is None
+                        or (origin.session.lifecycle_source_id, origin.session.session_id)
+                        in allowed_sessions
+                    )
+                if allowed and all(
+                    (target.kind, target.name) in allowed_targets for target in item.targets
+                ):
+                    eligible.append(item)
+            if requested_revision_id is not None:
+                eligible.sort(key=lambda item: item.id != requested_revision_id)
+            return tuple(eligible[:limit])
 
     def settle_revision(self, item_id: str, step: EvolutionResult) -> None:
-        """项目锁内结算一项 B，不重写 A 消费位置，也不保留已完成问题正文。"""
-        progress = self._read_progress()
-        _write(
-            self._progress_path,
-            progress.model_copy(
-                update={
-                    "issues": {
-                        key: item for key, item in progress.issues.items() if key != item_id
-                    },
-                    "settled_revisions": {**progress.settled_revisions, item_id: step},
-                    "latest_step": step,
-                }
+        """原子记录请求结果与最近步骤，保留请求正文供历史读取。"""
+        with connection(self.path, write=True) as database:
+            self._settle_revision(database, item_id, step)
+
+    def _settle_revision(
+        self, database: sqlite3.Connection, item_id: str, step: EvolutionResult
+    ) -> None:
+        row = database.execute(
+            "SELECT summary_json FROM requests WHERE id=?", (item_id,)
+        ).fetchone()
+        summary = RevisionRequestSummary.model_validate_json(row[0]).model_copy(
+            update={"status": step.status}
+        )
+        database.execute(
+            "UPDATE requests SET result_json=?,summary_json=? WHERE id=?",
+            (
+                encode(step.model_dump(mode="json")),
+                encode(summary.model_dump(mode="json")),
+                item_id,
             ),
         )
-        self._remove_body(self._requests / f"{item_id}.json")
+        self._record_step(database, step)
 
     def revision_result(self, item_id: str) -> EvolutionResult | None:
-        """读取指定请求的简短已结算结果，允许宿主观察另一进程的完成。"""
-        return self._read_progress().settled_revisions.get(item_id)
+        """读取跨进程可见的最终请求结果。"""
+        with connection(self.path) as database:
+            row = database.execute(
+                "SELECT result_json FROM requests WHERE id=?", (item_id,)
+            ).fetchone()
+            return (
+                EvolutionResult.model_validate_json(row[0]) if row and row[0] is not None else None
+            )
 
     def read_pending(
         self, *, allowed_sources: frozenset[tuple[str, str]], limit: int = 128
     ) -> PendingMaterials:
-        """项目锁内按合格来源读取完整消息，重叠区间只出现一次。"""
-        states, captures = self._load_sources(self._read_progress())
-        items: list[EvolutionMaterial] = []
-        for key, state in states.items():
-            if (
-                (state.source.lifecycle_source_id, state.source.run_id) not in allowed_sources
-                or state.terminal_message_count is None
-                or state.consumed_until >= state.terminal_message_count
-            ):
-                continue
-            through = min(
-                state.terminal_message_count, state.consumed_until + limit + 1 - len(items)
-            )
-            messages: dict[int, tuple[EvolutionRecord, ...]] = {}
-            for path, capture in captures:
-                check_generation_cancelled()
+        """在同一快照按合格来源读取完整消息，重叠区间只出现一次。"""
+        with connection(self.path) as database:
+            states, captures = self._load_sources(database)
+            items: list[EvolutionMaterial] = []
+            for key, state in states.items():
                 if (
-                    _key(capture.source) != key
-                    or capture.end_message_count <= state.consumed_until
-                    or capture.start_message_count >= through
+                    (state.source.lifecycle_source_id, state.source.run_id) not in allowed_sources
+                    or state.terminal_message_count is None
+                    or state.consumed_until >= state.terminal_message_count
                 ):
                     continue
-                block = _read(self._blocks / path.name, EvolutionCaptureBlock)
-                grouped: dict[int, list[EvolutionRecord]] = {}
-                for record in block.records:
-                    grouped.setdefault(record.message_ordinal, []).append(record)
-                for ordinal in range(
-                    max(state.consumed_until, block.start_message_count),
-                    min(through, block.end_message_count),
-                ):
-                    messages.setdefault(ordinal, tuple(grouped.get(ordinal, ())))
-                if len(messages) == through - state.consumed_until:
-                    break
-            for ordinal in sorted(messages):
-                items.append(
-                    EvolutionMaterial.model_construct(
-                        source=state.source,
-                        start_message_count=ordinal,
-                        end_message_count=ordinal + 1,
-                        records=messages[ordinal],
-                    )
+                through = min(
+                    state.terminal_message_count, state.consumed_until + limit + 1 - len(items)
                 )
-                if len(items) > limit:
-                    return PendingMaterials(tuple(items[:limit]), True)
-        return PendingMaterials(tuple(items), False)
+                messages: dict[int, tuple[EvolutionRecord, ...]] = {}
+                for identity, capture in captures:
+                    check_generation_cancelled()
+                    if (
+                        _key(capture.source) != key
+                        or capture.end_message_count <= state.consumed_until
+                        or capture.start_message_count >= through
+                    ):
+                        continue
+                    row = database.execute(
+                        "SELECT body_json FROM captures WHERE id=?", (identity,)
+                    ).fetchone()
+                    block = EvolutionCaptureBlock.model_validate_json(row[0])
+                    grouped: dict[int, list[EvolutionRecord]] = {}
+                    for record in block.records:
+                        grouped.setdefault(record.message_ordinal, []).append(record)
+                    for ordinal in range(
+                        max(state.consumed_until, block.start_message_count),
+                        min(through, block.end_message_count),
+                    ):
+                        messages.setdefault(ordinal, tuple(grouped.get(ordinal, ())))
+                    if len(messages) == through - state.consumed_until:
+                        break
+                for ordinal in sorted(messages):
+                    items.append(
+                        EvolutionMaterial.model_construct(
+                            source=state.source,
+                            start_message_count=ordinal,
+                            end_message_count=ordinal + 1,
+                            records=messages[ordinal],
+                        )
+                    )
+                    if len(items) > limit:
+                        return PendingMaterials(tuple(items[:limit]), True)
+            return PendingMaterials(tuple(items), False)
 
     def consume(
         self,
@@ -339,75 +430,119 @@ class EvolutionMaterialStore:
         *,
         issue: RevisionItem | None = None,
     ) -> None:
-        """项目锁内确认实际选中范围，先保存消费位置再清理完整已读正文。"""
-        progress = self._read_progress()
-        states, captures = self._load_sources(progress)
-        consumed = dict(progress.consumed)
-        if step.publication_id is not None and step.publication_id in progress.settled_publications:
-            self._clean_consumed_bodies(captures, consumed)
+        """消费进度、提炼请求与正文清理在一个事务中完成。"""
+        with connection(self.path, write=True) as database:
+            self._consume(database, selected, step, issue=issue)
+
+    def _consume(
+        self,
+        database: sqlite3.Connection,
+        selected: tuple[EvolutionMaterial, ...],
+        step: EvolutionResult,
+        *,
+        issue: RevisionItem | None,
+    ) -> None:
+        if (
+            step.publication_id is not None
+            and database.execute(
+                "SELECT 1 FROM consumed_publications WHERE publication_id=?",
+                (step.publication_id,),
+            ).fetchone()
+        ):
             return
+        states, _ = self._load_sources(database)
+        consumed = {key: state.consumed_until for key, state in states.items()}
         for item in selected:
             key = _key(item.source)
-            state = states[key]
-            position = consumed.get(key, state.initial_message_count)
-            if item.start_message_count != position:
+            if item.start_message_count != consumed[key]:
                 raise IrisEvolutionError(
-                    "项目材料消费范围不连续", run_id=item.source.run_id, consumed_until=position
+                    "项目材料消费范围不连续",
+                    run_id=item.source.run_id,
+                    consumed_until=consumed[key],
                 )
             consumed[key] = item.end_message_count
-        issues = dict(progress.issues)
+            database.execute(
+                "UPDATE sources SET consumed_until=? WHERE source_key=?",
+                (item.end_message_count, key),
+            )
         if issue is not None:
-            issues[issue.id] = issue
-            self._archive_request(issue)
-        _write(
-            self._progress_path,
-            progress.model_copy(
-                update={
-                    "consumed": consumed,
-                    "latest_step": step,
-                    "issues": issues,
-                    "settled_publications": (
-                        (*progress.settled_publications, step.publication_id)
-                        if step.publication_id is not None
-                        else progress.settled_publications
-                    ),
-                }
-            ),
-        )
-        self._clean_consumed_bodies(captures, consumed)
+            self._insert_request(database, issue)
+        if step.publication_id is not None:
+            database.execute("INSERT INTO consumed_publications VALUES (?)", (step.publication_id,))
+        self._record_step(database, step)
+        self._clean_consumed_bodies(database)
 
-    def _clean_consumed_bodies(
-        self, captures: list[tuple[Path, EvolutionCaptureBlock]], consumed: dict[str, int]
-    ) -> None:
-        """原进度已经确认的正文可幂等完成清理，不重复学习或推进水位。"""
-        for path, capture in captures:
-            key = _key(capture.source)
-            if capture.end_message_count <= consumed.get(key, capture.initial_message_count):
-                self._remove_body(self._blocks / path.name)
+    def settle_publication(self, record: PublicationRecord) -> EvolutionResult:
+        """把已确认发布的材料或请求结算与档案收尾原子提交，不重放文件写入。"""
+        result = cast(EvolutionResult, record.outcome)
+        with connection(self.path, write=True) as database:
+            if result.status in {"updated", "no_change"}:
+                if record.stage == "revision":
+                    self._settle_revision(database, cast(str, record.revision_id), result)
+                else:
+                    result = result.model_copy(
+                        update={
+                            "consumed_ranges": tuple(
+                                EvolutionRange.model_construct(
+                                    source=item.source,
+                                    start_message_count=item.start_message_count,
+                                    end_message_count=item.end_message_count,
+                                )
+                                for item in record.materials
+                            )
+                        }
+                    )
+                    self._consume(database, record.materials, result, issue=record.proposed_issue)
+            else:
+                self._record_step(database, result)
+            self._save_publication(
+                database,
+                record.model_copy(
+                    update={
+                        "settled": True,
+                        "outcome": result,
+                        "consumed_ranges": result.consumed_ranges,
+                    }
+                ),
+            )
+        return result
+
+    @staticmethod
+    def _clean_consumed_bodies(database: sqlite3.Connection) -> None:
+        database.execute(
+            "UPDATE captures SET body_json=NULL WHERE body_json IS NOT NULL AND end_count <= "
+            "(SELECT consumed_until FROM sources WHERE source_key=captures.source_key)"
+        )
 
     def record_step(self, step: EvolutionResult) -> None:
-        """项目锁内覆盖简短结果，失败记录不推进任何消费位置。"""
-        progress = self._read_progress()
-        _write(self._progress_path, progress.model_copy(update={"latest_step": step}))
+        """记录简短结果，失败不推进消费位置。"""
+        with connection(self.path, write=True) as database:
+            self._record_step(database, step)
 
-    def _read_progress(self) -> _Progress:
-        """读取当前消费位置，尚未有步骤时返回空进度。"""
-        if not self._progress_path.exists():
-            return _Progress()
-        return _read(self._progress_path, _Progress)
+    @staticmethod
+    def _record_step(database: sqlite3.Connection, step: EvolutionResult) -> None:
+        database.execute(
+            "INSERT INTO progress VALUES (1,?) ON CONFLICT(id) DO UPDATE SET "
+            "latest_step=excluded.latest_step",
+            (encode(step.model_dump(mode="json")),),
+        )
 
+    @staticmethod
     def _load_sources(
-        self,
-        progress: _Progress,
-    ) -> tuple[dict[str, EvolutionSourceState], list[tuple[Path, EvolutionCaptureBlock]]]:
-        """仅从不可变登记/收据推导连续捕获位置，正文清理不会改变它。"""
+        database: sqlite3.Connection,
+    ) -> tuple[dict[str, EvolutionSourceState], list[tuple[str, EvolutionCaptureBlock]]]:
         captures = [
-            (path, _read(path, EvolutionCaptureBlock))
-            for path in sorted(self._captures.glob("*.json"))
+            (row["id"], EvolutionCaptureBlock.model_validate_json(row["receipt_json"]))
+            for row in database.execute("SELECT id,receipt_json FROM captures ORDER BY id")
         ]
-        states: dict[str, EvolutionSourceState] = {}
-        for path in sorted(self._sources.glob("*.json")):
-            registration = _read(path, _Registration)
+        states = {}
+        for row in database.execute("SELECT * FROM sources ORDER BY source_key"):
+            registration = _Registration.model_validate(
+                {
+                    **json.loads(row["registration_json"]),
+                    "consumed_until": row["consumed_until"],
+                }
+            )
             key = _key(registration.source)
             position = registration.initial_message_count
             terminal: int | None = None
@@ -419,28 +554,16 @@ class EvolutionMaterialStore:
                 if capture.start_message_count <= position:
                     position = max(position, capture.end_message_count)
                 if capture.terminal_message_count is not None:
-                    terminal = capture.terminal_message_count
-                    outcome = capture.outcome
-            consumed = progress.consumed.get(key, registration.initial_message_count)
-            if not registration.initial_message_count <= consumed <= position:
-                raise IrisEvolutionError("项目材料消费位置与捕获范围不一致", path=str(path))
+                    terminal, outcome = capture.terminal_message_count, capture.outcome
+            if not registration.initial_message_count <= registration.consumed_until <= position:
+                raise IrisEvolutionError("项目材料消费位置与捕获范围不一致", source=key)
             sealed = terminal is not None and position == terminal
             states[key] = EvolutionSourceState(
                 source=registration.source,
                 initial_message_count=registration.initial_message_count,
                 captured_until=position,
-                consumed_until=consumed,
+                consumed_until=registration.consumed_until,
                 terminal_message_count=terminal if sealed else None,
                 outcome=outcome if sealed else None,
             )
         return states, captures
-
-    @staticmethod
-    def _remove_body(path: Path) -> None:
-        """消费进度已经落盘，正文删除可在重试时幂等完成。"""
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            raise IrisEvolutionError(
-                "已消费项目材料清理失败", path=str(path), error=str(exc)
-            ) from exc

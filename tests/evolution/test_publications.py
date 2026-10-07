@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,10 +16,10 @@ from iris.evolution.revision import PromptTarget
 from iris.evolution.service import EvolutionService
 from iris.exceptions import IrisEvolutionError
 
+from .test_materials import body_count
 from .test_project_skill import prepare
 
 if TYPE_CHECKING:
-    from iris.evolution.models import EvolutionMaterial, EvolutionResult, RevisionItem
     from iris.evolution.revision import PreparedRevision
 
 
@@ -49,7 +50,7 @@ async def test_experience_archive_survives_consumed_body_cleanup(tmp_path: Path)
     assert (
         record.published_at is not None and record.materials[0].records[0].text == "本项目使用 uv"
     )
-    assert not list((service.store.root / "blocks").glob("*.json"))
+    assert body_count(service.store) == 0
     assert reopen(service).get_publication(record.publication_id) == record
     assert len(provider.requests) == 1
 
@@ -95,7 +96,8 @@ async def test_revision_archives_request_and_distinguishes_outcomes(
     else:
         assert record.publication_state == "not_published"
         assert record.after_documents == () and record.published_at is None
-    assert (await service.alist_revision_requests()).items == (request,)
+    assert (await service.alist_revision_requests()).items[0].id == request.id
+    assert await service.aget_revision_request(request.id) == request
     assert reopen(service).get_publication(record.publication_id) == record
 
 
@@ -152,29 +154,29 @@ async def test_confirmation_gap_uses_receipt_only_in_original_process(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("after_progress", [False, True])
+@pytest.mark.parametrize("failure", ["progress", "archive"])
 async def test_confirmed_experience_resumes_settlement_without_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, after_progress: bool
+    tmp_path: Path, failure: str
 ) -> None:
     service, provider, scope = prepare(tmp_path)
-    consume = service.store.consume
-
-    def interrupted(
-        selected: tuple[EvolutionMaterial, ...],
-        step: EvolutionResult,
-        *,
-        issue: RevisionItem | None = None,
-    ) -> None:
-        if after_progress:
-            consume(selected, step, issue=issue)
-        raise IrisEvolutionError("材料结算中断")
-
-    monkeypatch.setattr(service.store, "consume", interrupted)
-    with pytest.raises(IrisEvolutionError, match="材料结算中断"):
+    event = (
+        "BEFORE INSERT ON progress"
+        if failure == "progress"
+        else "BEFORE UPDATE ON publications WHEN NEW.settled=1"
+    )
+    with sqlite3.connect(service.store.path) as database:
+        database.execute(
+            f"CREATE TRIGGER fail_settlement {event} "
+            "BEGIN SELECT RAISE(ABORT, 'settlement interrupted'); END"
+        )
+    with pytest.raises(IrisEvolutionError, match="settlement interrupted"):
         await service.maintain_cycle(scope=scope)
-    record = service.list_publications().items[0]
+    record = service.get_publication(service.list_publications().items[0].publication_id)
     assert record.publication_state == "confirmed" and not record.settled
     assert record.consumed_ranges == () and record.outcome.consumed_ranges == ()
+    assert body_count(service.store) > 0
+    with sqlite3.connect(service.store.path) as database:
+        database.execute("DROP TRIGGER fail_settlement")
     resumed = reopen(service)
     result = await resumed.maintain_cycle(scope=scope)
     assert result.status == "updated" and result.publication_id == record.publication_id
@@ -206,7 +208,7 @@ async def test_candidate_archive_precedes_original_file_publisher(
     publish = service_module.publish_revision
 
     def checked(candidate: PreparedRevision) -> bool:
-        record = service.list_publications().items[0]
+        record = service.get_publication(service.list_publications().items[0].publication_id)
         assert record.publication_state == "unconfirmed" and record.outcome is None
         assert record.candidate_documents[0].text == "新策略"
         assert record.after_documents == () and record.published_at is None
@@ -243,6 +245,8 @@ def test_publication_and_request_pages_use_stable_order(tmp_path: Path) -> None:
             )
         )
     first = store.list_publications(limit=2)
+    # 状态更新仍处于原创建位置，不影响后续游标页。
+    store.save_publication(store.get_publication("a").model_copy(update={"reason": "已更新"}))
     rest = store.list_publications(after=first.next_cursor, limit=2)
     assert [record.publication_id for record in (*first.items, *rest.items)] == ["a", "b", "c"]
     assert rest.next_cursor is None
@@ -251,3 +255,18 @@ def test_publication_and_request_pages_use_stable_order(tmp_path: Path) -> None:
     assert [item.id for item in (*requests.items, *last.items)] == ["a", "b", "c"]
     with pytest.raises(IrisEvolutionError):
         store.list_publications(limit=0)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_settlement_retry_does_not_duplicate_issue(tmp_path: Path) -> None:
+    """结算已提交而调用方重试时，不重复消费或创建 A 提出的修订请求。"""
+    from .test_strategy_revision import issue_output
+
+    service, provider, scope = prepare(tmp_path, prompt_targets=["compaction"])
+    provider.output = issue_output()
+    first = await service.maintain_cycle(scope=scope)
+    record = service.get_publication(first.publication_id)
+    assert service.store.settle_publication(record) == first
+    assert len(service.list_revision_requests().items) == 1
+    assert body_count(service.store) == 0
+    assert len(provider.requests) == 1

@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from iris.agents import AgentConfig, load_agent_config
+from iris.evolution.history import PublicationRecord
 from iris.evolution.models import EvolutionResult, RevisionRequest, RevisionTarget
 from iris.harness import AgentRunner, MaintenanceCoordinator
 from iris.harness.evolution import build_project_evolution_binding
@@ -197,13 +198,15 @@ async def test_terminal_experience_automatically_produces_and_settles_revision(
     )
     settled = asyncio.Event()
     loop = asyncio.get_running_loop()
-    original_settle = binding.service.store.settle_revision
+    original_settle = binding.service.store.settle_publication
 
-    def observe_settle(item_id: str, result: EvolutionResult) -> None:
-        original_settle(item_id, result)
-        loop.call_soon_threadsafe(settled.set)
+    def observe_settle(record: PublicationRecord) -> EvolutionResult:
+        result = original_settle(record)
+        if result.stage == "revision":
+            loop.call_soon_threadsafe(settled.set)
+        return result
 
-    monkeypatch.setattr(binding.service.store, "settle_revision", observe_settle)
+    monkeypatch.setattr(binding.service.store, "settle_publication", observe_settle)
     coordinator = MaintenanceCoordinator(idle_seconds=0)
     runner = AgentRunner.from_config(
         config,

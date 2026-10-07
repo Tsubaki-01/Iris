@@ -1,16 +1,12 @@
 """项目经验材料的连续捕获、跨进程重复与持久消费。"""
 
-import json
+import sqlite3
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
 
 import pytest
-from pydantic import BaseModel
 
-import iris.evolution.materials as material_module
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import (
     EvolutionCaptureBlock,
@@ -89,6 +85,14 @@ def _issue(source: EvolutionSource, *, item_id: str = "issue") -> RevisionItem:
     )
 
 
+def body_count(store: EvolutionMaterialStore) -> int:
+    """读取仍待消费的材料正文数量。"""
+    with sqlite3.connect(store.path) as database:
+        return database.execute(
+            "SELECT count(*) FROM captures WHERE body_json IS NOT NULL"
+        ).fetchone()[0]
+
+
 def test_a_progress_preserves_issue_before_body_cleanup_and_b_settles_independently(
     tmp_path: Path,
 ) -> None:
@@ -100,7 +104,7 @@ def test_a_progress_preserves_issue_before_body_cleanup_and_b_settles_independen
     selected = store.read_pending(allowed_sources=allowed).items
     issue = _issue(source)
     store.consume(selected, _result(selected), issue=issue)
-    assert list((store.root / "blocks").glob("*.json")) == []
+    assert body_count(store) == 0
     restarted = EvolutionMaterialStore(tmp_path)
     assert restarted.read_pending(allowed_sources=allowed).items == ()
     assert restarted.read_pending_revisions(
@@ -161,85 +165,6 @@ def test_host_request_is_independent_and_origin_filter_precedes_limit(tmp_path: 
     assert store.revision_result(waiting.id) is None
 
 
-@pytest.mark.parametrize("settled", [False, True])
-def test_host_request_cleanup_during_pending_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settled: bool
-) -> None:
-    """枚举后的正文消失只有在已有完成收据时才可跳过。"""
-    store = EvolutionMaterialStore(tmp_path)
-    item = RevisionItem(
-        description="明确宿主请求",
-        targets=(RevisionTarget(kind="prompt", name="compaction"),),
-        origin=HostOrigin(),
-    )
-    store.enqueue_revision(item)
-    reached, release = Event(), Event()
-    original_read = material_module._read
-
-    def read(path: Path, schema: type[BaseModel]) -> BaseModel:
-        if path.parent.name == "requests":
-            reached.set()
-            assert release.wait(timeout=10)
-        return original_read(path, schema)
-
-    monkeypatch.setattr(material_module, "_read", read)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(
-            store.read_pending_revisions,
-            allowed_sources=frozenset(),
-            allowed_sessions=frozenset(),
-            allowed_targets=frozenset({("prompt", "compaction")}),
-        )
-        try:
-            assert reached.wait(timeout=10)
-            if settled:
-                store.settle_revision(
-                    item.id,
-                    EvolutionResult(status="no_change", stage="revision", revision_id=item.id),
-                )
-                assert list((store.root / "requests").glob("*.json")) == []
-            else:
-                next((store.root / "requests").glob("*.json")).unlink()
-            release.set()
-            if settled:
-                assert pending.result(timeout=10) == ()
-            else:
-                with pytest.raises(IrisEvolutionError, match="读取失败"):
-                    pending.result(timeout=10)
-        finally:
-            release.set()
-
-
-def test_failed_a_progress_does_not_publish_issue_or_consume(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = EvolutionMaterialStore(tmp_path)
-    source = _source()
-    store.register_source(source, 2)
-    store.commit_capture(_block(source, 2, 3, terminal=3))
-    allowed = frozenset({("lifecycle", "run")})
-    selected = store.read_pending(allowed_sources=allowed).items
-    original = material_module.atomic_write_text
-
-    def fail_progress(path: Path, content: str) -> None:
-        if path.name == "progress.json":
-            raise OSError("not published")
-        original(path, content)
-
-    monkeypatch.setattr(material_module, "atomic_write_text", fail_progress)
-    with pytest.raises(IrisEvolutionError):
-        store.consume(selected, _result(selected), issue=_issue(source))
-    assert store.read_pending(allowed_sources=allowed).items == selected
-    assert (
-        store.read_pending_revisions(
-            allowed_sources=allowed,
-            allowed_sessions=frozenset(),
-            allowed_targets=frozenset({("prompt", "compaction")}),
-        )
-        == ()
-    )
-
-
 def test_only_contiguous_terminal_sources_become_pending(tmp_path: Path) -> None:
     store = EvolutionMaterialStore(tmp_path)
     source = _source()
@@ -296,7 +221,7 @@ def test_successful_ranges_survive_body_cleanup_and_restart(tmp_path: Path) -> N
     remaining = restarted.read_pending(allowed_sources=allowed).items
     assert [item.start_message_count for item in remaining] == [3, 4]
     restarted.consume(remaining, _result(remaining))
-    assert list((restarted.root / "blocks").glob("*.json")) == []
+    assert body_count(restarted) == 0
 
     after_cleanup = EvolutionMaterialStore(tmp_path)
     assert after_cleanup.list_pending_sources() == ()
@@ -304,99 +229,6 @@ def test_successful_ranges_survive_body_cleanup_and_restart(tmp_path: Path) -> N
     assert final.captured_until == final.consumed_until == final.terminal_message_count == 5
     assert after_cleanup.commit_capture(block).consumed_until == 5
     assert after_cleanup.read_pending(allowed_sources=allowed).items == ()
-
-
-@pytest.mark.parametrize("failed_directory", ["blocks", "captures"])
-def test_failed_block_publication_does_not_advance_capture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_directory: str
-) -> None:
-    store = EvolutionMaterialStore(tmp_path)
-    source = _source()
-    store.register_source(source, 2)
-    original_write = material_module.atomic_write_text
-
-    def fail_body(path: Path, content: str) -> None:
-        if path.parent.name == failed_directory:
-            raise OSError("正文未发布")
-        original_write(path, content)
-
-    monkeypatch.setattr(material_module, "atomic_write_text", fail_body)
-    with pytest.raises(IrisEvolutionError, match="发布"):
-        store.commit_capture(_block(source, 2, 4, terminal=4))
-    assert store.list_capture_sources("lifecycle")[0].captured_until == 2
-    assert store.list_pending_sources() == ()
-
-
-def test_failed_progress_publication_keeps_bodies_and_pending(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = EvolutionMaterialStore(tmp_path)
-    source = _source()
-    store.register_source(source, 2)
-    store.commit_capture(_block(source, 2, 4, terminal=4))
-    selected = store.read_pending(allowed_sources=frozenset({("lifecycle", "run")})).items
-    original_write = material_module.atomic_write_text
-
-    def fail_progress(path: Path, content: str) -> None:
-        if path.name == "progress.json":
-            raise OSError("进度未发布")
-        original_write(path, content)
-
-    monkeypatch.setattr(material_module, "atomic_write_text", fail_progress)
-    with pytest.raises(IrisEvolutionError):
-        store.consume(selected, _result(selected))
-    assert store.register_source(source, 2).consumed_until == 2
-    assert store.read_pending(allowed_sources=frozenset({("lifecycle", "run")})).items == selected
-
-
-def test_capture_progress_remains_readable_during_body_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """捕获线程已经开始读收据时，消费方清理正文也不删除它依赖的进度来源。"""
-    store = EvolutionMaterialStore(tmp_path)
-    source = _source()
-    store.register_source(source, 2)
-    store.commit_capture(_block(source, 2, 4, terminal=4))
-    selected = store.read_pending(allowed_sources=frozenset({("lifecycle", "run")})).items
-    reached = Event()
-    release = Event()
-    original_read = material_module._read
-
-    def read(path: Path, schema: type[BaseModel]) -> BaseModel:
-        if path.parent.name == "captures" and not reached.is_set():
-            reached.set()
-            assert release.wait(timeout=10)
-        return original_read(path, schema)
-
-    monkeypatch.setattr(material_module, "_read", read)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        pending = executor.submit(store.register_source, source, 2)
-        try:
-            assert reached.wait(timeout=10)
-            store.consume(selected, _result(selected))
-            assert list((store.root / "blocks").glob("*.json")) == []
-            release.set()
-            assert pending.result(timeout=10).captured_until == 4
-        finally:
-            release.set()
-    assert store.register_source(source, 2).consumed_until == 4
-    assert store.list_capture_sources("lifecycle") == ()
-
-
-def test_failed_step_retains_pending_and_corrupt_progress_fails_at_load(tmp_path: Path) -> None:
-    store = EvolutionMaterialStore(tmp_path)
-    source = _source()
-    store.register_source(source, 2)
-    store.commit_capture(_block(source, 2, 3, terminal=3))
-    store.record_step(EvolutionResult(status="failed", reason="provider failed"))
-    assert store.list_pending_sources() == (source,)
-    progress = store.root / "progress.json"
-    payload = json.loads(progress.read_text(encoding="utf-8"))
-    assert payload["latest_step"]["status"] == "failed"
-    payload["consumed"] = {'["lifecycle","run"]': "invalid"}
-    progress.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(IrisEvolutionError):
-        EvolutionMaterialStore(tmp_path).list_pending_sources()
 
 
 def test_two_processes_publish_complete_duplicate_ranges(tmp_path: Path) -> None:
@@ -434,5 +266,86 @@ store.commit_capture(block)
     store = EvolutionMaterialStore(tmp_path)
     pending = store.read_pending(allowed_sources=frozenset({("lifecycle", "run")}))
     assert [item.start_message_count for item in pending.items] == [2, 3, 4, 5]
-    assert len(list((store.root / "blocks").glob("*.json"))) == 2
+    assert body_count(store) == 2
     assert store.register_source(source, 2).captured_until == 6
+
+
+@pytest.mark.parametrize("failure", ["progress", "cleanup"])
+def test_consume_rolls_back_progress_issue_and_cleanup(tmp_path: Path, failure: str) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    source = _source()
+    store.register_source(source, 2)
+    store.commit_capture(_block(source, 2, 4, terminal=4))
+    allowed = frozenset({("lifecycle", "run")})
+    selected = store.read_pending(allowed_sources=allowed).items
+    issue = _issue(source)
+    event = (
+        "BEFORE INSERT ON progress"
+        if failure == "progress"
+        else "BEFORE UPDATE OF body_json ON captures"
+    )
+    with sqlite3.connect(store.path) as database:
+        database.execute(
+            f"CREATE TRIGGER fail_consume {event} "
+            "BEGIN SELECT RAISE(ABORT, 'consume interrupted'); END"
+        )
+    with pytest.raises(IrisEvolutionError, match="consume interrupted"):
+        store.consume(selected, _result(selected), issue=issue)
+    restarted = EvolutionMaterialStore(tmp_path)
+    assert restarted.register_source(source, 2).consumed_until == 2
+    assert restarted.read_pending(allowed_sources=allowed).items == selected
+    assert restarted.get_revision_request(issue.id) is None
+    assert body_count(restarted) == 1
+
+
+def test_failed_capture_does_not_advance_source(tmp_path: Path) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    source = _source()
+    store.register_source(source, 2)
+    with sqlite3.connect(store.path) as database:
+        database.execute(
+            "CREATE TRIGGER fail_capture AFTER INSERT ON captures "
+            "BEGIN SELECT RAISE(ABORT, 'capture interrupted'); END"
+        )
+    with pytest.raises(IrisEvolutionError, match="capture interrupted"):
+        store.commit_capture(_block(source, 2, 4, terminal=4))
+    assert store.list_capture_sources("lifecycle")[0].captured_until == 2
+    assert store.list_pending_sources() == ()
+    assert body_count(store) == 0
+
+
+def test_failed_request_settlement_keeps_request_pending(tmp_path: Path) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    item = RevisionItem(
+        description="保留约束",
+        targets=(RevisionTarget(kind="prompt", name="compaction"),),
+        origin=HostOrigin(),
+    )
+    store.enqueue_revision(item)
+    with sqlite3.connect(store.path) as database:
+        database.execute(
+            "CREATE TRIGGER fail_settle BEFORE INSERT ON progress "
+            "BEGIN SELECT RAISE(ABORT, 'settlement interrupted'); END"
+        )
+    with pytest.raises(IrisEvolutionError, match="settlement interrupted"):
+        store.settle_revision(item.id, EvolutionResult(status="no_change", stage="revision"))
+    assert store.revision_result(item.id) is None
+    assert store.list_revision_requests().items[0].status is None
+    assert store.get_revision_request(item.id) == item
+
+
+def test_failed_step_retains_pending_and_corrupt_progress_fails_at_load(tmp_path: Path) -> None:
+    store = EvolutionMaterialStore(tmp_path)
+    source = _source()
+    store.register_source(source, 2)
+    store.commit_capture(_block(source, 2, 3, terminal=3))
+    store.record_step(EvolutionResult(status="failed", reason="provider failed"))
+    assert store.list_pending_sources() == (source,)
+    with sqlite3.connect(store.path) as database:
+        result = EvolutionResult.model_validate_json(
+            database.execute("SELECT latest_step FROM progress").fetchone()[0]
+        )
+        assert result.status == "failed"
+        database.execute("UPDATE sources SET consumed_until='invalid'")
+    with pytest.raises(IrisEvolutionError):
+        EvolutionMaterialStore(tmp_path).list_pending_sources()

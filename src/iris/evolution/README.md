@@ -123,7 +123,9 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 
 ## 材料与一次 A 操作
 
-捕获材料位于 root workspace 的 `.iris/evolution/pending/`。独立、完整发布的块保留
+材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
+`EvolutionMaterialStore` 管理 schema 1；不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。
+独立、完整发布的块保留
 source/run/session、消息半开区间和原始引用；跨进程可以重复捕获同一区间，项目锁内按
 已消费范围去重。捕获位置与消费位置分开，正文清理后仍保留来源、封源与进度。
 
@@ -145,19 +147,21 @@ token 估算选择预算内的消息前缀，最多调用模型一次；未读�
 A 正文。A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败不强制触发 B。
 
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
-成功/no-change 才确认实际处理范围，失败或取消不消费。文件原子发布与进度提交不是多文件
-事务。原发布 owner 先把基线与候选保存到 `.iris/evolution/publications/`，再写目标文件并
-确认 after 正文与 published_at；确认后完成材料消费和 pending 清理。若文件已发布而结算失败，
+成功/no-change 才确认实际处理范围，失败或取消不消费。原发布 owner 先把基线与候选存入
+SQLite，再写目标文件并保存 confirmed 与 published_at；after_documents 由已确认候选投影，
+不重复保存正文。确认后材料消费或请求结算、材料正文清理及档案收尾在一个 SQLite 事务中提交。
+目标文件写入与数据库确认仍不属于同一个事务。若文件已发布而结算失败，
 本进程保留实际收据，下一轮在同一项目锁内完成结算，不重新调用模型或重写目标。
-已持久确认的发布重启后也只补结算；A 的消费与发布 ID 在同一 progress 写入中确认，
-清理中断后的重试不重复推进原文位置。
+已持久确认的发布重启后也只补结算；A 的消费与发布 ID 在同一数据库事务中确认，
+重试不重复推进原文位置或重复创建问题。
 
 重启后缺少确认的记录保留 `publication_state=unconfirmed`，返回
 `publication_unconfirmed` 并保存 observed_documents；即使当前文件等于候选，也不填
 after_documents 或 published_at。该未确认记录阻止自动重放本项目修改，材料继续保留。
 失败结果通过 `error_code=publication_unconfirmed` 明示此状态；协调器结束因此受阻的手动等待，
 保留持久请求并停止反复自动调度，后续显式调用仍可读取这个未确认事实。
-档案的 settled 表示原材料/请求结算已完成；它不是另一份 Run 生命周期。
+档案的 settled 表示本次尝试收尾已完成；失败或冲突的原请求仍可待处理，最终结果用
+store.revision_result(id) 查询。它不是另一份 Run 生命周期。
 完整模型请求与响应仍由宿主观测记录，领域档案保存正文、证据及发布事实。
 
 ## B 修订与独立结算
@@ -177,11 +181,15 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 重启后若收窄开放目标，旧请求保持 pending；只选择目标仍全部开放的项，不阻塞其他合格 A/B。
 当前磁盘值不等于历史运行采用值；配置与来源采用事实由实际消费者发布，发布档案不能替代采用证明。
 
-`list_publications(after=None, limit=50)`、`get_publication(publication_id)` 与
-`list_revision_requests(after=None, limit=50)` 同时提供同步及 `a` 前缀的 async 读取。
-分页按原创建时刻和 ID 排序，limit 为 1–100；确认更新不移动历史位置。
-已完成请求的描述/evidence、选中材料与 before/candidate/after 正文不依赖 pending 文件；
-请求历史在 `.iris/evolution/requests/`。A 的固定 Skill 路径由文档 path 描述，
+`list_publications(after=None, limit=50)` 返回 `PublicationSummary` 页；
+`list_revision_requests(after=None, limit=50)` 返回 `RevisionRequestSummary` 页。
+列表 SQL 不读取正文和证据；详情通过 `get_publication(publication_id)` 与
+`get_revision_request(revision_id)` 获取。四个入口均提供同步及 `a` 前缀的 async 读取。
+分页使用 `EvolutionHistoryCursor(created_at, id)`，按原创建时刻和 ID 升序，limit 为 1–100；
+确认更新不移动历史位置。请求摘要 status 仅表示最终结算结果，未结算时为 None。
+已完成请求的描述/evidence、选中材料与 before/candidate 正文保留在数据库中；静态档案正文
+与状态分表，仅首次入库，后续确认和结算只更新状态表。`after_documents` 是只读 Python 属性，不进入
+`model_dump()`；confirmed 时等于候选，否则为空。A 的固定 Skill 路径由文档 path 描述，
 B 另保留原请求及有限 targets。`EvolutionResult.publication_id` 指向这份档案。
 
 `EvolutionResult` 返回 `updated/no_change/empty/failed/cancelled/conflict` 状态、简短原因、

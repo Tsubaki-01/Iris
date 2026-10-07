@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+type EvolutionStatus = Literal["updated", "no_change", "empty", "failed", "cancelled", "conflict"]
+
 
 class EvolutionSource(BaseModel):
     """真实经历的 lifecycle 身份，不复制运行资格。"""
@@ -176,7 +178,7 @@ class EvolutionResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     stage: Literal["experience", "revision"] = "experience"
-    status: Literal["updated", "no_change", "empty", "failed", "cancelled", "conflict"]
+    status: EvolutionStatus
     reason: str = ""
     consumed_ranges: tuple[EvolutionRange, ...] = ()
     usage: dict[str, int] = Field(default_factory=dict)

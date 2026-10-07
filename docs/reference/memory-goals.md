@@ -302,28 +302,38 @@ description 和目标名称不可为空白；targets 至少一个，必须在配
 
 `EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
-`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料保存在 `.iris/evolution/pending/` 的 sources/captures/blocks/requests 与 progress.json，属于内部维护格式，不建议应用直接改写。
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 1，不读取、迁移或删除旧 JSON 数据；应用应通过 SDK 查询，不直接改写内部表。
 
 | Evolution 历史入口 | 结果 |
 | --- | --- |
-| `list_publications(*, after=None, limit=50)` / `await alist_publications(...)` | `PublicationPage`；按 created_at/ID 升序的发布档案 |
+| `list_publications(*, after=None, limit=50)` / `await alist_publications(...)` | `PublicationPage`；items 为 `PublicationSummary`，按 created_at/ID 升序 |
 | `get_publication(publication_id)` / `await aget_publication(...)` | `PublicationRecord \| None` |
-| `list_revision_requests(*, after=None, limit=50)` / `await alist_revision_requests(...)` | `RevisionRequestPage`；包括完成后原 pending 已清理的 `RevisionItem` |
+| `list_revision_requests(*, after=None, limit=50)` / `await alist_revision_requests(...)` | `RevisionRequestPage`；items 为 `RevisionRequestSummary`，包括已结算请求 |
+| `get_revision_request(revision_id)` / `await aget_revision_request(...)` | `RevisionItem \| None`；完整请求及证据 |
 
-页包含 items/next_cursor，游标为 `EvolutionHistoryCursor`，limit 为 1–100，由材料存储校验。
+页包含 items/next_cursor，游标为 `EvolutionHistoryCursor(created_at, id)`，limit 为 1–100，由材料存储校验。
+列表 SQL 只读取摘要列，不加载正文、材料或证据。`PublicationSummary` 包含 publication_id、
+revision_id、created_at、stage、origin、description、targets、status、publication_state、reason、
+published_at、settled；status 在尚无结果时为 None。`RevisionRequestSummary` 包含 id、created_at、
+description、targets、origin 和 status；origin 为 host/experience，status 在请求尚未最终结算时为 None。
 `RevisionItem` 包含原 id、created_at、description、targets、evidence、origin；
 指定请求的结算结果继续由 `store.revision_result(id)` 读取。
 
 `PublicationRecord` 保存 publication_id、revision_id、stage、created_at、outcome、
 publication_state、origin、description、evidence_refs、consumed_ranges、targets，
-以及 before_documents、candidate_documents、after_documents、reason、usage、effect、published_at。
+以及 before_documents、candidate_documents、observed_documents、reason、usage、effect、published_at、settled。
 文档保存 path/text，缺失基线用 text=None。实际处理材料保存在 materials，原请求和产生的问题
-保存在 request/proposed_issue；A 的固定 Skill 目标见文档 path。记录位于
-`.iris/evolution/publications/`，请求历史位于 `.iris/evolution/requests/`。
+保存在 request/proposed_issue；A 的固定 Skill 目标见文档 path。静态正文与状态分表保存，首次入库后不随确认和结算重写。
+`after_documents` 是只读 Python 属性：仅 confirmed 时返回 candidate_documents，否则为空；
+它不属于持久化字段，也不出现在 `model_dump()` 中。宿主可用此属性展示已确认正文，
+或根据 publication_state 和 candidate_documents 构造自己的输出。
 
 publication_state 为 not_published、confirmed 或 unconfirmed。只有原文件写入返回成功才记录
-after_documents/published_at；no_change、conflict、failed 不冒充 updated。settled 表示原材料/请求
-结算已完成，consumed_ranges 在材料进度提交后填写。已确认写入的结算重试不重跑模型或文件修改。
+confirmed/published_at；no_change、conflict、failed 不冒充 updated。settled 表示本次尝试的收尾已完成，
+失败或冲突的原请求仍可保持待处理，最终结算以 `store.revision_result(id)` 为准。
+成功/no_change 时，材料消费或请求结算、正文清理和档案收尾在一个 SQLite 事务中完成，
+consumed_ranges 随材料消费提交。已确认写入的结算重试不重跑模型或文件修改。
+实际目标文件写入与 SQLite 确认仍是两个操作，不构成跨资源事务。
 重启后无法确认的发布保留 unconfirmed，返回 `publication_unconfirmed`，并在 observed_documents
 保存读到的当前正文；不因正文等于候选就推断过去成功。未确认发布期间不自动重放项目修改。
 该失败结果的 error_code 为 `publication_unconfirmed`。它阻止其他维护请求时，协调器以

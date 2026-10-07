@@ -154,7 +154,7 @@ uv run python run_evolution.py
 
 结束前先停止或等待前台运行；上例在所有调用返回后关闭协调器，再关闭 runner。协调器停止派发并等待真实 IO 收尾，runner 解除借用关系。协调器不替宿主关闭注入的 lifecycle reader、服务或观测资源。若只移除一项资源，先关闭借用它的 runner，再调用 `unbind_memory()` 或 `unbind_evolution()`。
 
-经验材料及进度位于 `.iris/evolution/pending/`；它们是维护内部材料，不是额外的长期知识数据库。模型读回的记忆和 Skill 正文不会再次被复制为新事实，后续真实反馈仍能成为材料。对外使用的经验产物是 Skill，修订产物是明确开放的文件。
+经验材料、进度和发布历史位于 `.iris/evolution/evolution.db`；它们用于维护推进，不提供记忆 Search/Fetch。模型读回的记忆和 Skill 正文不会再次被复制为新事实，后续真实反馈仍能成为材料。对外使用的经验产物是 Skill，修订产物是明确开放的文件。历史列表返回摘要，查看正文时按 ID 调用详情接口，见[历史查询契约](../reference/memory-goals.md#维护协调器与-evolution-sdk)。
 
 下一步：阅读[经验与修订设计](../design/evolution.md)，理解独立维护与采用时机；配置、请求和结果的完整规则见[长期能力参考](../reference/memory-goals.md)。
 
