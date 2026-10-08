@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Annotated, cast
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..exceptions import IrisEvolutionError
 from ..utils.generation_worker import check_generation_cancelled
@@ -36,6 +37,7 @@ from .models import (
     HostOrigin,
     PendingMaterials,
     RevisionItem,
+    RevisionTarget,
 )
 
 _DETAIL_FIELDS = {
@@ -55,6 +57,54 @@ class _Registration(BaseModel):
     source: EvolutionSource
     initial_message_count: int = Field(ge=0)
     consumed_until: int = Field(ge=0)
+    captured_until: int = Field(ge=0)
+    observed_terminal: int | None = Field(default=None, ge=0)
+    observed_outcome: str | None = None
+
+    @model_validator(mode="after")
+    def _positions(self) -> _Registration:
+        if not self.initial_message_count <= self.consumed_until <= self.captured_until:
+            raise ValueError("项目材料消费位置与捕获范围不一致")
+        return self
+
+    def state(self) -> EvolutionSourceState:
+        """仅在连续捕获到终点后向宿主暴露封源事实。"""
+        sealed = self.observed_terminal == self.captured_until
+        return EvolutionSourceState(
+            source=self.source,
+            initial_message_count=self.initial_message_count,
+            captured_until=self.captured_until,
+            consumed_until=self.consumed_until,
+            terminal_message_count=self.observed_terminal if sealed else None,
+            outcome=self.observed_outcome if sealed else None,
+        )
+
+
+class _RevisionRouting(BaseModel):
+    """请求调度只解析来源与目标，不携带问题正文和证据。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    origin: Annotated[ExperienceOrigin | HostOrigin, Field(discriminator="kind")]
+    targets: tuple[RevisionTarget, ...]
+
+
+def _registration(row: sqlite3.Row) -> _Registration:
+    return _Registration.model_validate(
+        {
+            **json.loads(row["registration_json"]),
+            "consumed_until": row["consumed_until"],
+            "captured_until": row["captured_until"],
+            "observed_terminal": row["observed_terminal"],
+            "observed_outcome": row["observed_outcome"],
+        }
+    )
+
+
+def _source_keys(sources: frozenset[tuple[str, str]]) -> str:
+    return encode([json.dumps(pair, separators=(",", ":")) for pair in sorted(sources)])
+
+
+_PENDING_SOURCE = "captured_until=observed_terminal AND consumed_until < observed_terminal"
 
 
 def _key(source: EvolutionSource) -> str:
@@ -200,7 +250,9 @@ class EvolutionMaterialStore:
         """原子登记来源，重复登记不重置消费或捕获位置。"""
         with connection(self.path, write=True) as database:
             database.execute(
-                "INSERT OR IGNORE INTO sources VALUES (?,?,?)",
+                "INSERT OR IGNORE INTO sources "
+                "(source_key,registration_json,consumed_until,lifecycle_source_id,captured_until) "
+                "VALUES (?,?,?,?,?)",
                 (
                     _key(source),
                     encode(
@@ -210,50 +262,79 @@ class EvolutionMaterialStore:
                         }
                     ),
                     initial_message_count,
+                    source.lifecycle_source_id,
+                    initial_message_count,
                 ),
             )
-            states, _ = self._load_sources(database)
-            return states[_key(source)]
+            return self._read_source(database, _key(source)).state()
 
     def list_capture_sources(self, lifecycle_source_id: str) -> tuple[EvolutionSourceState, ...]:
         """只返回同一 reader 尚未连续封源的来源。"""
         with connection(self.path) as database:
-            states, _ = self._load_sources(database)
             return tuple(
-                state
-                for state in states.values()
-                if state.source.lifecycle_source_id == lifecycle_source_id
-                and state.terminal_message_count is None
+                _registration(row).state()
+                for row in database.execute(
+                    "SELECT * FROM sources WHERE lifecycle_source_id=? AND "
+                    "(observed_terminal IS NULL OR captured_until < observed_terminal) "
+                    "ORDER BY source_key",
+                    (lifecycle_source_id,),
+                )
             )
 
     def commit_capture(self, block: EvolutionCaptureBlock) -> EvolutionSourceState:
         """正文和收据同事务发布，允许跨进程重叠捕获。"""
         with connection(self.path, write=True) as database:
+            key = _key(block.source)
+            current = self._read_source(database, key)
             database.execute(
-                "INSERT INTO captures VALUES (?,?,?,?,?)",
+                "INSERT INTO captures VALUES (?,?,?,?,?,?)",
                 (
                     uuid4().hex,
-                    _key(block.source),
+                    key,
+                    block.start_message_count,
                     block.end_message_count,
                     encode(block.model_copy(update={"records": ()}).model_dump(mode="json")),
-                    encode(block.model_dump(mode="json")),
+                    encode(block.model_dump(mode="json"))
+                    if block.end_message_count > current.consumed_until
+                    else None,
                 ),
             )
-            self._clean_consumed_bodies(database)
-            states, _ = self._load_sources(database)
-            return states[_key(block.source)]
+            position = current.captured_until
+            for row in database.execute(
+                "SELECT start_count,end_count FROM captures WHERE source_key=? AND end_count>? "
+                "ORDER BY start_count,end_count",
+                (key, position),
+            ):
+                if row["start_count"] > position:
+                    break
+                position = max(position, row["end_count"])
+            terminal = current.observed_terminal
+            outcome = current.observed_outcome
+            if block.terminal_message_count is not None:
+                terminal, outcome = block.terminal_message_count, block.outcome
+            database.execute(
+                "UPDATE sources SET captured_until=?,observed_terminal=?,observed_outcome=? "
+                "WHERE source_key=?",
+                (position, terminal, outcome, key),
+            )
+            return current.model_copy(
+                update={
+                    "captured_until": position,
+                    "observed_terminal": terminal,
+                    "observed_outcome": outcome,
+                }
+            ).state()
 
     def list_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """合并已封源未消费的材料与待处理经历问题的来源。"""
         with connection(self.path) as database:
-            states, _ = self._load_sources(database)
             sources = {
-                _key(state.source): state.source
-                for state in states.values()
-                if state.terminal_message_count is not None
-                and state.consumed_until < state.terminal_message_count
+                row["source_key"]: _registration(row).source
+                for row in database.execute(
+                    f"SELECT * FROM sources WHERE {_PENDING_SOURCE} ORDER BY source_key"
+                )
             }
-            for item in self._pending_revisions(database):
+            for _, item in self._pending_routing(database):
                 if isinstance(item.origin, ExperienceOrigin):
                     sources.update((_key(source), source) for source in item.origin.sources)
             return tuple(sources.values())
@@ -264,7 +345,7 @@ class EvolutionMaterialStore:
             return tuple(
                 dict.fromkeys(
                     item.origin.session
-                    for item in self._pending_revisions(database)
+                    for _, item in self._pending_routing(database)
                     if isinstance(item.origin, HostOrigin) and item.origin.session is not None
                 )
             )
@@ -285,23 +366,75 @@ class EvolutionMaterialStore:
             status=None,
         )
         database.execute(
-            "INSERT INTO requests (id,created_at,summary_json,payload) VALUES (?,?,?,?)",
+            "INSERT INTO requests (id,created_at,summary_json,payload,routing_json) "
+            "VALUES (?,?,?,?,?)",
             (
                 item.id,
                 _timestamp(item.created_at),
                 encode(summary.model_dump(mode="json")),
                 encode(item.model_dump(mode="json")),
+                encode(item.model_dump(mode="json", include={"origin", "targets"})),
             ),
         )
 
     @staticmethod
-    def _pending_revisions(database: sqlite3.Connection) -> tuple[RevisionItem, ...]:
-        return tuple(
-            RevisionItem.model_validate_json(row[0])
-            for row in database.execute(
-                "SELECT payload FROM requests WHERE result_json IS NULL ORDER BY created_at,id"
-            )
-        )
+    def _pending_routing(
+        database: sqlite3.Connection, requested_revision_id: str | None = None
+    ) -> Iterator[tuple[str, _RevisionRouting]]:
+        if requested_revision_id is not None:
+            row = database.execute(
+                "SELECT id,routing_json FROM requests WHERE id=? AND result_json IS NULL",
+                (requested_revision_id,),
+            ).fetchone()
+            if row is not None:
+                yield row["id"], _RevisionRouting.model_validate_json(row["routing_json"])
+        cursor: tuple[str, str] | None = None
+        while True:
+            clause = "" if cursor is None else " AND (created_at,id) > (?,?)"
+            rows = database.execute(
+                "SELECT id,created_at,routing_json FROM requests WHERE result_json IS NULL"
+                + clause
+                + " ORDER BY created_at,id LIMIT 64",
+                () if cursor is None else cursor,
+            ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                if row["id"] != requested_revision_id:
+                    yield row["id"], _RevisionRouting.model_validate_json(row["routing_json"])
+            cursor = rows[-1]["created_at"], rows[-1]["id"]
+
+    @staticmethod
+    def _eligible_revisions(
+        database: sqlite3.Connection,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        allowed_sessions: frozenset[tuple[str, str]],
+        allowed_targets: frozenset[tuple[str, str]],
+        requested_revision_id: str | None = None,
+    ) -> Iterator[str]:
+        for identity, item in EvolutionMaterialStore._pending_routing(
+            database, requested_revision_id
+        ):
+            origin = item.origin
+            if isinstance(origin, ExperienceOrigin):
+                allowed = all(
+                    (source.lifecycle_source_id, source.run_id) in allowed_sources
+                    for source in origin.sources
+                )
+            else:
+                allowed = (
+                    origin.session is None
+                    or (
+                        origin.session.lifecycle_source_id,
+                        origin.session.session_id,
+                    )
+                    in allowed_sessions
+                )
+            if allowed and all(
+                (target.kind, target.name) in allowed_targets for target in item.targets
+            ):
+                yield identity
 
     def read_pending_revisions(
         self,
@@ -315,26 +448,54 @@ class EvolutionMaterialStore:
         """来源和目标过滤先于限额，显式请求优先。"""
         with connection(self.path) as database:
             eligible = []
-            for item in self._pending_revisions(database):
-                origin = item.origin
-                if isinstance(origin, ExperienceOrigin):
-                    allowed = all(
-                        (source.lifecycle_source_id, source.run_id) in allowed_sources
-                        for source in origin.sources
-                    )
-                else:
-                    allowed = (
-                        origin.session is None
-                        or (origin.session.lifecycle_source_id, origin.session.session_id)
-                        in allowed_sessions
-                    )
-                if allowed and all(
-                    (target.kind, target.name) in allowed_targets for target in item.targets
-                ):
-                    eligible.append(item)
-            if requested_revision_id is not None:
-                eligible.sort(key=lambda item: item.id != requested_revision_id)
-            return tuple(eligible[:limit])
+            for identity in self._eligible_revisions(
+                database,
+                allowed_sources=allowed_sources,
+                allowed_sessions=allowed_sessions,
+                allowed_targets=allowed_targets,
+                requested_revision_id=requested_revision_id,
+            ):
+                row = database.execute(
+                    "SELECT payload FROM requests WHERE id=?", (identity,)
+                ).fetchone()
+                eligible.append(RevisionItem.model_validate_json(row[0]))
+                if len(eligible) == limit:
+                    break
+            return tuple(eligible)
+
+    def has_pending_revisions(
+        self,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        allowed_sessions: frozenset[tuple[str, str]],
+        allowed_targets: frozenset[tuple[str, str]],
+    ) -> bool:
+        """只查询合格请求是否存在，不加载问题正文或证据。"""
+        with connection(self.path) as database:
+            return (
+                next(
+                    self._eligible_revisions(
+                        database,
+                        allowed_sources=allowed_sources,
+                        allowed_sessions=allowed_sessions,
+                        allowed_targets=allowed_targets,
+                    ),
+                    None,
+                )
+                is not None
+            )
+
+    def has_pending_materials(self, *, allowed_sources: frozenset[tuple[str, str]]) -> bool:
+        """只查询已连续封源且未消费的来源，不读取材料正文。"""
+        with connection(self.path) as database:
+            return (
+                database.execute(
+                    f"SELECT 1 FROM sources WHERE {_PENDING_SOURCE} "
+                    "AND source_key IN (SELECT value FROM json_each(?)) LIMIT 1",
+                    (_source_keys(allowed_sources),),
+                ).fetchone()
+                is not None
+            )
 
     def settle_revision(self, item_id: str, step: EvolutionResult) -> None:
         """原子记录请求结果与最近步骤，保留请求正文供历史读取。"""
@@ -375,31 +536,28 @@ class EvolutionMaterialStore:
     ) -> PendingMaterials:
         """在同一快照按合格来源读取完整消息，重叠区间只出现一次。"""
         with connection(self.path) as database:
-            states, captures = self._load_sources(database)
             items: list[EvolutionMaterial] = []
-            for key, state in states.items():
-                if (
-                    (state.source.lifecycle_source_id, state.source.run_id) not in allowed_sources
-                    or state.terminal_message_count is None
-                    or state.consumed_until >= state.terminal_message_count
-                ):
-                    continue
+            for row in database.execute(
+                f"SELECT * FROM sources WHERE {_PENDING_SOURCE} "
+                "AND source_key IN (SELECT value FROM json_each(?)) ORDER BY source_key",
+                (_source_keys(allowed_sources),),
+            ):
+                if len(items) == limit:
+                    return PendingMaterials(tuple(items), True)
+                state = _registration(row).state()
+                key = row["source_key"]
                 through = min(
-                    state.terminal_message_count, state.consumed_until + limit + 1 - len(items)
+                    cast(int, state.terminal_message_count),
+                    state.consumed_until + limit - len(items),
                 )
                 messages: dict[int, tuple[EvolutionRecord, ...]] = {}
-                for identity, capture in captures:
+                for capture in database.execute(
+                    "SELECT body_json FROM captures WHERE source_key=? AND end_count>? "
+                    "AND start_count<? ORDER BY id",
+                    (key, state.consumed_until, through),
+                ):
                     check_generation_cancelled()
-                    if (
-                        _key(capture.source) != key
-                        or capture.end_message_count <= state.consumed_until
-                        or capture.start_message_count >= through
-                    ):
-                        continue
-                    row = database.execute(
-                        "SELECT body_json FROM captures WHERE id=?", (identity,)
-                    ).fetchone()
-                    block = EvolutionCaptureBlock.model_validate_json(row[0])
+                    block = EvolutionCaptureBlock.model_validate_json(capture[0])
                     grouped: dict[int, list[EvolutionRecord]] = {}
                     for record in block.records:
                         grouped.setdefault(record.message_ordinal, []).append(record)
@@ -419,8 +577,8 @@ class EvolutionMaterialStore:
                             records=messages[ordinal],
                         )
                     )
-                    if len(items) > limit:
-                        return PendingMaterials(tuple(items[:limit]), True)
+                if through < cast(int, state.terminal_message_count):
+                    return PendingMaterials(tuple(items), True)
             return PendingMaterials(tuple(items), False)
 
     def consume(
@@ -450,10 +608,11 @@ class EvolutionMaterialStore:
             ).fetchone()
         ):
             return
-        states, _ = self._load_sources(database)
-        consumed = {key: state.consumed_until for key, state in states.items()}
+        consumed: dict[str, int] = {}
         for item in selected:
             key = _key(item.source)
+            if key not in consumed:
+                consumed[key] = self._read_source(database, key).consumed_until
             if item.start_message_count != consumed[key]:
                 raise IrisEvolutionError(
                     "项目材料消费范围不连续",
@@ -461,16 +620,17 @@ class EvolutionMaterialStore:
                     consumed_until=consumed[key],
                 )
             consumed[key] = item.end_message_count
+        for key, position in consumed.items():
             database.execute(
                 "UPDATE sources SET consumed_until=? WHERE source_key=?",
-                (item.end_message_count, key),
+                (position, key),
             )
         if issue is not None:
             self._insert_request(database, issue)
         if step.publication_id is not None:
             database.execute("INSERT INTO consumed_publications VALUES (?)", (step.publication_id,))
         self._record_step(database, step)
-        self._clean_consumed_bodies(database)
+        self._clean_consumed_bodies(database, consumed)
 
     def settle_publication(self, record: PublicationRecord) -> EvolutionResult:
         """把已确认发布的材料或请求结算与档案收尾原子提交，不重放文件写入。"""
@@ -508,10 +668,11 @@ class EvolutionMaterialStore:
         return result
 
     @staticmethod
-    def _clean_consumed_bodies(database: sqlite3.Connection) -> None:
-        database.execute(
-            "UPDATE captures SET body_json=NULL WHERE body_json IS NOT NULL AND end_count <= "
-            "(SELECT consumed_until FROM sources WHERE source_key=captures.source_key)"
+    def _clean_consumed_bodies(database: sqlite3.Connection, consumed: dict[str, int]) -> None:
+        database.executemany(
+            "UPDATE captures SET body_json=NULL WHERE source_key=? AND end_count<=? "
+            "AND body_json IS NOT NULL",
+            consumed.items(),
         )
 
     def record_step(self, step: EvolutionResult) -> None:
@@ -528,42 +689,7 @@ class EvolutionMaterialStore:
         )
 
     @staticmethod
-    def _load_sources(
-        database: sqlite3.Connection,
-    ) -> tuple[dict[str, EvolutionSourceState], list[tuple[str, EvolutionCaptureBlock]]]:
-        captures = [
-            (row["id"], EvolutionCaptureBlock.model_validate_json(row["receipt_json"]))
-            for row in database.execute("SELECT id,receipt_json FROM captures ORDER BY id")
-        ]
-        states = {}
-        for row in database.execute("SELECT * FROM sources ORDER BY source_key"):
-            registration = _Registration.model_validate(
-                {
-                    **json.loads(row["registration_json"]),
-                    "consumed_until": row["consumed_until"],
-                }
-            )
-            key = _key(registration.source)
-            position = registration.initial_message_count
-            terminal: int | None = None
-            outcome: str | None = None
-            for capture in sorted(
-                (capture for _, capture in captures if _key(capture.source) == key),
-                key=lambda item: (item.start_message_count, item.end_message_count),
-            ):
-                if capture.start_message_count <= position:
-                    position = max(position, capture.end_message_count)
-                if capture.terminal_message_count is not None:
-                    terminal, outcome = capture.terminal_message_count, capture.outcome
-            if not registration.initial_message_count <= registration.consumed_until <= position:
-                raise IrisEvolutionError("项目材料消费位置与捕获范围不一致", source=key)
-            sealed = terminal is not None and position == terminal
-            states[key] = EvolutionSourceState(
-                source=registration.source,
-                initial_message_count=registration.initial_message_count,
-                captured_until=position,
-                consumed_until=registration.consumed_until,
-                terminal_message_count=terminal if sealed else None,
-                outcome=outcome if sealed else None,
-            )
-        return states, captures
+    def _read_source(database: sqlite3.Connection, key: str) -> _Registration:
+        return _registration(
+            database.execute("SELECT * FROM sources WHERE source_key=?", (key,)).fetchone()
+        )

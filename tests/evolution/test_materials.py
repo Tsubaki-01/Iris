@@ -348,4 +348,4 @@ def test_failed_step_retains_pending_and_corrupt_progress_fails_at_load(tmp_path
         assert result.status == "failed"
         database.execute("UPDATE sources SET consumed_until='invalid'")
     with pytest.raises(IrisEvolutionError):
-        EvolutionMaterialStore(tmp_path).list_pending_sources()
+        EvolutionMaterialStore(tmp_path).register_source(source, 2)
