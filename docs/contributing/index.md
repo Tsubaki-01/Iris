@@ -12,7 +12,7 @@ uv sync
 
 需要 Python 3.12 或更新版本。Docker 和 OTel 导出分别按需安装 `sandbox`、`observability` extra，不必为了编辑普通工具把所有外部服务都部署起来。新增依赖使用 `uv add`，同步提交依赖声明与锁文件的必要变化。
 
-先读取仓库[工作规范](../../.codex/AGENTS.md)。它约束代码风格和工作方式；其中的架构概览仍需与当前实现核对。模块职责的当前阅读入口是[源码地图](source-map.md)。
+模块职责的当前阅读入口是[源码地图](source-map.md)。
 
 ## 根据目的选择入口
 
@@ -37,8 +37,6 @@ uv sync
 ## 代码和提交约定
 
 公开模块、类与方法提供 docstring，中文说明中保留 Google Style 的 `Args:`、`Returns:` 等关键字。参数和返回值有类型注解；项目内部导入使用相对路径。日志复用标准 `logging`，领域错误使用 `iris.exceptions` 的对应类型。
-
-修改模型或 runtime 错误映射前，分别阅读 [models 规范](../../.codex/code-principles/models.md)和[错误规范](../../.codex/code-principles/runtime-errors.md)。
 
 提交信息包含 subject 和 body，例如：
 
