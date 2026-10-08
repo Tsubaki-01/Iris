@@ -124,14 +124,20 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 ## 材料与一次 A 操作
 
 材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
-`EvolutionMaterialStore` 管理 schema 1；不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。
-独立、完整发布的块保留
-source/run/session、消息半开区间和原始引用；跨进程可以重复捕获同一区间，项目锁内按
-已消费范围去重。捕获位置与消费位置分开，正文清理后仍保留来源、封源与进度。
+`EvolutionMaterialStore` 管理 schema 2，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
+不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。独立、完整发布的块保留
+source/run/session、消息半开区间和原始引用；跨进程可以重复或重叠捕获同一区间，读取时同一
+消息只出现一次。捕获位置、消费位置与已观察终点分别持久保存，每次捕获只合并当前来源的
+连续区间。先收到带终态的后段但前面仍有缺口时，来源仍未封闭，harness 会继续补采；补齐后
+才暴露终态与 outcome。正文清理后仍保留来源、封源与进度，查询不重建全部历史收据。
 
 仅终态且捕获完整、其 session 当前不在 WAITING 的来源可生成；缺少 lifecycle reader 的
 材料保持 pending。fork 继承前缀、child 内部轨迹，以及作为新事实的 Memory/Skill 读回正文
 由捕获侧排除。服务不复制一套生命周期资格，也不读取 Memory 私有表。
+
+`read_pending(allowed_sources=..., limit=128)` 先筛选合格来源，再按来源和消息顺序读取所需
+捕获块，返回完整消息；过滤后 records 为空的消息仍占一个区间。`has_pending_materials()` 与
+`has_pending_revisions()` 只检查短状态，供剩余工作判定使用，不加载材料正文或请求证据。
 
 每轮重读当前经验并固定 `project_skill_update.j2` 的项目快照与策略 Skill。按完整请求
 token 估算选择预算内的消息前缀，最多调用模型一次；未读范围不消费，第一条完整消息也
@@ -143,8 +149,9 @@ token 估算选择预算内的消息前缀，最多调用模型一次；未读�
 不超过 1000 行和 50000 字符，保证普通 `load_skill` 能完整读取。
 
 `issue` 只保存问题描述、开放目标、真实记录引用和必要原文片段。程序核对引用及片段后绑定
-实际来源；坏引用会使整个 A 响应失败，不先发布 Skill。问题与 A 消费进度同次保存，再清理
-A 正文。A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败不强制触发 B。
+实际来源；坏引用会使整个 A 响应失败，不先发布 Skill。问题与 A 消费进度同次保存，只清理
+本次推进来源中已经完整消费的捕获块正文；迟到的已消费重复块不恢复正文副本。
+A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败不强制触发 B。
 
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
 成功/no-change 才确认实际处理范围，失败或取消不消费。原发布 owner 先把基线与候选存入
@@ -179,6 +186,9 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 发布前再次检查来源/session 资格和文件基线。失败、取消或 conflict 保留 B，不重跑 A；
 成功/no-change 独立结算本请求。A 已清理的正文不会删除问题中保留的必要片段。
 重启后若收窄开放目标，旧请求保持 pending；只选择目标仍全部开放的项，不阻塞其他合格 A/B。
+请求选择与来源/session 概览读取短调度字段，先判断来源、session 和当前开放目标，再应用
+数量上限；只有选中请求才读取完整证据。指定请求 ID 是优先项，该项不存在、已结算或不合格
+时仍继续选择普通合格候选，不因队首不合格就忽略后面的请求。
 当前磁盘值不等于历史运行采用值；配置与来源采用事实由实际消费者发布，发布档案不能替代采用证明。
 
 `list_publications(after=None, limit=50)` 返回 `PublicationSummary` 页；

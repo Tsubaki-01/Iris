@@ -9,6 +9,7 @@ import pytest
 from iris.evolution.history import PublicationDocument, PublicationRecord
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import EvolutionResult, HostOrigin, RevisionItem, RevisionTarget
+from iris.exceptions import IrisEvolutionError
 
 
 def publication() -> PublicationRecord:
@@ -108,3 +109,31 @@ def test_request_detail_survives_settlement(tmp_path: Path) -> None:
     assert restarted.get_revision_request(item.id) == item
     assert restarted.list_revision_requests().items[0].status == "no_change"
     assert restarted.revision_result(item.id) == result
+
+
+def test_current_schema_is_created_and_reopened(tmp_path: Path) -> None:
+    """当前结构版本与重新打开的同一份状态一致。"""
+    store = EvolutionMaterialStore(tmp_path)
+    record = publication()
+    store.save_publication(record)
+    with sqlite3.connect(store.path) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert EvolutionMaterialStore(tmp_path).get_publication(record.publication_id) == record
+
+
+def test_old_schema_is_rejected_without_rewriting_it(tmp_path: Path) -> None:
+    """旧持久契约明确拒绝，原表和版本都不被自动迁移。"""
+    path = tmp_path / ".iris" / "evolution" / "evolution.db"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as database:
+        database.execute("CREATE TABLE old_schema (value TEXT)")
+        database.execute("INSERT INTO old_schema VALUES ('preserved')")
+        database.execute("PRAGMA user_version=1")
+    with pytest.raises(IrisEvolutionError, match="schema 2"):
+        EvolutionMaterialStore(tmp_path)
+    with sqlite3.connect(path) as database:
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert database.execute("SELECT value FROM old_schema").fetchone()[0] == "preserved"
+        assert database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [
+            ("old_schema",)
+        ]

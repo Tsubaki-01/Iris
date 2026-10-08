@@ -584,13 +584,11 @@ class EvolutionService:
 
     def _remaining(self, scope: EvolutionMaintenanceScope) -> bool:
         """仅把本轮合格范围内的剩余 A/B 交回调度器。"""
-        return bool(
-            self.store.read_pending_revisions(
-                allowed_sources=scope.allowed_sources,
-                allowed_sessions=scope.allowed_sessions,
-                allowed_targets=self._allowed_targets,
-            )
-        ) or bool(self.store.read_pending(allowed_sources=scope.allowed_sources, limit=1).items)
+        return self.store.has_pending_revisions(
+            allowed_sources=scope.allowed_sources,
+            allowed_sessions=scope.allowed_sessions,
+            allowed_targets=self._allowed_targets,
+        ) or self.store.has_pending_materials(allowed_sources=scope.allowed_sources)
 
     async def _maintain_revision(
         self, item: RevisionItem, scope: EvolutionMaintenanceScope

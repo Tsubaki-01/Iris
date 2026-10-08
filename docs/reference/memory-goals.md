@@ -302,7 +302,12 @@ description 和目标名称不可为空白；targets 至少一个，必须在配
 
 `EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
-`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 1，不读取、迁移或删除旧 JSON 数据；应用应通过 SDK 查询，不直接改写内部表。
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 2，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
+
+来源的连续捕获位置、消费位置与已观察终点持久保存；看到终态但捕获区间有缺口时仍需补采，
+补齐才作为完整来源参与维护。材料按合格来源和未消费范围有界读取；消费事务只清理本次推进
+来源的完整已消费块。来源/session 调度概览与剩余工作检查只读取短状态，不加载材料正文或
+请求证据；完整请求先按来源、session 和当前开放目标过滤，再应用数量上限。
 
 | Evolution 历史入口 | 结果 |
 | --- | --- |
