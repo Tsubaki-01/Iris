@@ -51,8 +51,8 @@ def initialize(path: Path) -> None:
         tables = database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         version = database.execute("PRAGMA user_version").fetchone()[0]
         if tables:
-            if version != 2:
-                raise IrisEvolutionError("Evolution 数据库要求 schema 2", version=version)
+            if version != 3:
+                raise IrisEvolutionError("Evolution 数据库要求 schema 3", version=version)
             return
         statements = (
             "CREATE TABLE sources (source_key TEXT PRIMARY KEY, registration_json TEXT NOT NULL, "
@@ -80,7 +80,7 @@ def initialize(path: Path) -> None:
             "CREATE INDEX publications_unsettled ON publications(created_at,id) WHERE settled=0",
             "CREATE TABLE consumed_publications (publication_id TEXT PRIMARY KEY)",
             "CREATE TABLE progress (id INTEGER PRIMARY KEY CHECK(id=1), latest_step TEXT NOT NULL)",
-            "PRAGMA user_version=2",
+            "PRAGMA user_version=3",
         )
         for statement in statements:
             database.execute(statement)

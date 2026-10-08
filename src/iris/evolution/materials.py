@@ -36,6 +36,7 @@ from .models import (
     ExperienceOrigin,
     HostOrigin,
     PendingMaterials,
+    RevisionEvidence,
     RevisionItem,
     RevisionTarget,
 )
@@ -43,11 +44,10 @@ from .models import (
 _DETAIL_FIELDS = {
     "before_documents",
     "candidate_documents",
-    "evidence_refs",
-    "request",
     "materials",
     "proposed_issue",
 }
+_DERIVED_FIELDS = {"evidence_refs", "request"}
 
 
 class _Registration(BaseModel):
@@ -132,10 +132,26 @@ def _publication_summary(record: PublicationRecord) -> PublicationSummary:
     )
 
 
-def _publication(row: sqlite3.Row) -> PublicationRecord:
-    return PublicationRecord.model_validate(
+def _publication(database: sqlite3.Connection, row: sqlite3.Row) -> PublicationRecord:
+    """在同一读取快照解析持久事实，再投影不重复保存的请求与证据。"""
+    record = PublicationRecord.model_validate(
         {**json.loads(row["state_json"]), **json.loads(row["detail_json"])}
     )
+    if record.stage == "revision":
+        request_row = database.execute(
+            "SELECT payload FROM requests WHERE id=?", (record.revision_id,)
+        ).fetchone()
+        if request_row is None:
+            raise IrisEvolutionError("发布档案引用的修订请求不存在", revision_id=record.revision_id)
+        request = RevisionItem.model_validate_json(request_row[0])
+        return record.model_copy(update={"request": request, "evidence_refs": request.evidence})
+    evidence = tuple(
+        RevisionEvidence.model_construct(ref=entry.ref, quote=entry.text)
+        for material in record.materials
+        for entry in material.records
+        if entry.text.strip()
+    )
+    return record.model_copy(update={"evidence_refs": evidence})
 
 
 class EvolutionMaterialStore:
@@ -155,7 +171,7 @@ class EvolutionMaterialStore:
     @staticmethod
     def _save_publication(database: sqlite3.Connection, record: PublicationRecord) -> None:
         summary = encode(_publication_summary(record).model_dump(mode="json"))
-        state = encode(record.model_dump(mode="json", exclude=_DETAIL_FIELDS))
+        state = encode(record.model_dump(mode="json", exclude=_DETAIL_FIELDS | _DERIVED_FIELDS))
         updated = database.execute(
             "UPDATE publications SET settled=?,summary_json=?,state_json=? WHERE id=?",
             (record.settled, summary, state, record.publication_id),
@@ -193,13 +209,13 @@ class EvolutionMaterialStore:
                 "JOIN publication_details d ON d.publication_id=p.id WHERE p.id=?",
                 (publication_id,),
             ).fetchone()
-            return _publication(row) if row is not None else None
+            return _publication(database, row) if row is not None else None
 
     def list_unsettled_publications(self) -> tuple[PublicationRecord, ...]:
         """仅加载尚待原 owner 收尾的完整档案。"""
         with connection(self.path) as database:
             return tuple(
-                _publication(row)
+                _publication(database, row)
                 for row in database.execute(
                     "SELECT p.state_json,d.detail_json FROM publications p "
                     "JOIN publication_details d ON d.publication_id=p.id WHERE p.settled=0 "

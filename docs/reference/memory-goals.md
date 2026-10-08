@@ -302,7 +302,7 @@ description 和目标名称不可为空白；targets 至少一个，必须在配
 
 `EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
-`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 2，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 3，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
 
 来源的连续捕获位置、消费位置与已观察终点持久保存；看到终态但捕获区间有缺口时仍需补采，
 补齐才作为完整来源参与维护。材料按合格来源和未消费范围有界读取；消费事务只清理本次推进
@@ -324,11 +324,15 @@ description、targets、origin 和 status；origin 为 host/experience，status 
 `RevisionItem` 包含原 id、created_at、description、targets、evidence、origin；
 指定请求的结算结果继续由 `store.revision_result(id)` 读取。
 
-`PublicationRecord` 保存 publication_id、revision_id、stage、created_at、outcome、
+`PublicationRecord` 详情包含 publication_id、revision_id、stage、created_at、outcome、
 publication_state、origin、description、evidence_refs、consumed_ranges、targets，
 以及 before_documents、candidate_documents、observed_documents、reason、usage、effect、published_at、settled。
-文档保存 path/text，缺失基线用 text=None。实际处理材料保存在 materials，原请求和产生的问题
-保存在 request/proposed_issue；A 的固定 Skill 目标见文档 path。静态正文与状态分表保存，首次入库后不随确认和结算重写。
+文档保存 path/text，缺失基线用 text=None。A 档案持久保存本批 materials，evidence_refs 在读取时
+从 `text.strip()` 非空的 record 投影，保持原 ref、完整 quote 与顺序。B 档案只引用 revision_id，
+在同一读快照中从不可变请求实体组装 request/evidence_refs，不重复持久化这些字段。
+A 的 proposed_issue 仍在发布前保存，供确认后恢复结算；正式请求仅在 A 成功或 no_change
+消费时创建。公开详情返回形状保持完整；A 的固定 Skill 目标见文档 path。静态正文与状态分表保存，
+首次入库后不随确认和结算重写。
 `after_documents` 是只读 Python 属性：仅 confirmed 时返回 candidate_documents，否则为空；
 它不属于持久化字段，也不出现在 `model_dump()` 中。宿主可用此属性展示已确认正文，
 或根据 publication_state 和 candidate_documents 构造自己的输出。

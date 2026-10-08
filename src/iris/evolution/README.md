@@ -124,7 +124,7 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 ## 材料与一次 A 操作
 
 材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
-`EvolutionMaterialStore` 管理 schema 2，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
+`EvolutionMaterialStore` 管理 schema 3，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
 不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。独立、完整发布的块保留
 source/run/session、消息半开区间和原始引用；跨进程可以重复或重叠捕获同一区间，读取时同一
 消息只出现一次。捕获位置、消费位置与已观察终点分别持久保存，每次捕获只合并当前来源的
@@ -143,14 +143,17 @@ source/run/session、消息半开区间和原始引用；跨进程可以重复�
 token 估算选择预算内的消息前缀，最多调用模型一次；未读范围不消费，第一条完整消息也
 放不下时报告预算错误。空过滤区间不调用模型。项目模板仅表达可编辑策略，最终请求始终
 追加领域固定说明与由响应模型生成的 JSON Schema。
+本轮每条材料只序列化一次，构造候选前缀时复用这些片段；每个前缀仍按完整请求估算 token，
+到首条无法容纳的消息即停止，不把片段 token 数相加当作最终预算。
 
 模型返回 `body`、`reason` 和可选 `issue`。`body=null` 表示 no-change；否则返回完整 Markdown 正文，
 由代码拼接稳定 name/description/frontmatter。正文受 `skill_max_chars` 限制，完整文件须
 不超过 1000 行和 50000 字符，保证普通 `load_skill` 能完整读取。
 
 `issue` 只保存问题描述、开放目标、真实记录引用和必要原文片段。程序核对引用及片段后绑定
-实际来源；坏引用会使整个 A 响应失败，不先发布 Skill。问题与 A 消费进度同次保存，只清理
-本次推进来源中已经完整消费的捕获块正文；迟到的已消费重复块不恢复正文副本。
+实际来源；坏引用会使整个 A 响应失败，不先发布 Skill。提案以 `proposed_issue` 随发布候选
+先存入档案，供已确认但未结算的发布恢复；正式待处理请求仍与 A 消费进度同次提交。结算只
+清理本次推进来源中已经完整消费的捕获块正文；迟到的已消费重复块不恢复正文副本。
 A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败不强制触发 B。
 
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
@@ -198,9 +201,12 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 分页使用 `EvolutionHistoryCursor(created_at, id)`，按原创建时刻和 ID 升序，limit 为 1–100；
 确认更新不移动历史位置。请求摘要 status 仅表示最终结算结果，未结算时为 None。
 已完成请求的描述/evidence、选中材料与 before/candidate 正文保留在数据库中；静态档案正文
-与状态分表，仅首次入库，后续确认和结算只更新状态表。`after_documents` 是只读 Python 属性，不进入
-`model_dump()`；confirmed 时等于候选，否则为空。A 的固定 Skill 路径由文档 path 描述，
-B 另保留原请求及有限 targets。`EvolutionResult.publication_id` 指向这份档案。
+与状态分表，仅首次入库，后续确认和结算只更新状态表。A 档案保存本批 `materials`，读取时
+从非空 record 正文按原顺序投影 `evidence_refs`，不再保存一份整批 quote。B 档案通过
+`revision_id` 引用插入后不再修改的请求实体，在同一读快照中组装 `request/evidence_refs`，
+不在每次尝试中复制它们；请求结算不改变原请求正文。公开详情仍返回完整 `PublicationRecord`。
+`after_documents` 是只读 Python 属性，不进入 `model_dump()`；confirmed 时等于候选，否则为空。
+A 的固定 Skill 路径由文档 path 描述，B 另含有限 targets。`EvolutionResult.publication_id` 指向这份档案。
 
 `EvolutionResult` 返回 `updated/no_change/empty/failed/cancelled/conflict` 状态、简短原因、
 实际消费区间、usage、`has_more` 和生效说明；`stage` 区分 experience/revision，B 结果另有

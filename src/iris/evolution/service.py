@@ -273,11 +273,28 @@ class EvolutionService:
             current_body = split_frontmatter(baseline)[1] if baseline is not None else ""
         except (OSError, UnicodeError, IrisSkillError) as exc:
             raise IrisEvolutionError("项目经验策略或当前 Skill 读取失败", error=str(exc)) from exc
+        prefix = (
+            json.dumps(
+                {"current_skill": current_body, "skill_max_chars": self.config.skill_max_chars},
+                ensure_ascii=False,
+            )[:-1]
+            + ', "materials": ['
+        )
+        suffix = (
+            '], "open_targets": '
+            + json.dumps(
+                {"prompt": self.config.prompt_targets, "config": self.config.config_targets},
+                ensure_ascii=False,
+            )
+            + "}"
+        )
         selected: list[EvolutionMaterial] = []
-        request = self._request(prompt, current_body, ())
+        serialized: list[str] = []
+        request = self._request(prompt, prefix + suffix)
         for material in materials:
             check_generation_cancelled()
-            candidate = self._request(prompt, current_body, (*selected, material))
+            serialized.append(json.dumps(material.model_dump(mode="json"), ensure_ascii=False))
+            candidate = self._request(prompt, prefix + ", ".join(serialized) + suffix)
             if self.provider.estimate_input_tokens(candidate) > self.config.input_budget_tokens:
                 if not selected:
                     raise IrisEvolutionError("项目经验输入预算不足以容纳完整消息与策略")
@@ -286,28 +303,10 @@ class EvolutionService:
             request = candidate
         return baseline, tuple(selected), request
 
-    def _request(
-        self, prompt: str, current_body: str, selected: tuple[EvolutionMaterial, ...]
-    ) -> LLMRequest:
+    def _request(self, prompt: str, content: str) -> LLMRequest:
         return LLMRequest(
             model=self.model,
-            messages=[
-                Msg.system(prompt),
-                Msg.user(
-                    json.dumps(
-                        {
-                            "current_skill": current_body,
-                            "skill_max_chars": self.config.skill_max_chars,
-                            "materials": [item.model_dump(mode="json") for item in selected],
-                            "open_targets": {
-                                "prompt": self.config.prompt_targets,
-                                "config": self.config.config_targets,
-                            },
-                        },
-                        ensure_ascii=False,
-                    )
-                ),
-            ],
+            messages=[Msg.system(prompt), Msg.user(content)],
             max_tokens=self.config.output_budget_tokens,
             temperature=0,
             response_format="json_object",
@@ -439,12 +438,6 @@ class EvolutionService:
                         PublicationDocument(path=str(self.skill_path), text=baseline),
                     ),
                     "materials": selected,
-                    "evidence_refs": tuple(
-                        RevisionEvidence(ref=record.ref, quote=record.text)
-                        for material in selected
-                        for record in material.records
-                        if record.text.strip()
-                    ),
                 }
             )
             sources = tuple(dict.fromkeys(item.source for item in selected))
@@ -601,9 +594,7 @@ class EvolutionService:
             revision_id=item.id,
             origin="experience" if item.origin.kind == "experience" else "host_request",
             description=item.description,
-            evidence_refs=item.evidence,
             targets=item.targets,
-            request=item,
         )
         try:
             context, request = await self.run_async_io(lambda: self._prepare_review(item))
