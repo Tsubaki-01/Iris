@@ -28,6 +28,7 @@ from .config import EvolutionConfig
 from .history import (
     EvolutionHistoryCursor,
     PublicationDocument,
+    PublicationHistoryEntry,
     PublicationPage,
     PublicationRecord,
     RevisionRequestPage,
@@ -166,11 +167,11 @@ class EvolutionService:
         """异步读取项目发布档案页。"""
         return await self.run_async_io(lambda: self.list_publications(after=after, limit=limit))
 
-    def get_publication(self, publication_id: str) -> PublicationRecord | None:
-        """读取一份完整发布记录，不重读当前目标来替代历史。"""
+    def get_publication(self, publication_id: str) -> PublicationHistoryEntry | None:
+        """读取完整或过期的发布历史，不重读当前目标来替代原正文。"""
         return self.store.get_publication(publication_id)
 
-    async def aget_publication(self, publication_id: str) -> PublicationRecord | None:
+    async def aget_publication(self, publication_id: str) -> PublicationHistoryEntry | None:
         """异步读取原始 ID 对应的发布记录。"""
         return await self.run_async_io(lambda: self.get_publication(publication_id))
 

@@ -43,7 +43,7 @@ async def test_experience_archive_survives_consumed_body_cleanup(tmp_path: Path)
     service, provider, scope = prepare(tmp_path)
     result = await service.maintain_cycle(scope=scope)
     assert result.status == "updated"
-    record = await service.aget_publication(result.publication_id)
+    record = (await service.aget_publication(result.publication_id)).detail
     assert record.publication_state == "confirmed" and record.settled
     assert record.before_documents[0].text is None
     assert record.after_documents[0].text == service.skill_path.read_text(encoding="utf-8")
@@ -51,7 +51,7 @@ async def test_experience_archive_survives_consumed_body_cleanup(tmp_path: Path)
         record.published_at is not None and record.materials[0].records[0].text == "本项目使用 uv"
     )
     assert body_count(service.store) == 0
-    assert reopen(service).get_publication(record.publication_id) == record
+    assert reopen(service).get_publication(record.publication_id).detail == record
     assert len(provider.requests) == 1
 
 
@@ -84,7 +84,7 @@ async def test_revision_archives_request_and_distinguishes_outcomes(
         provider.on_complete = lambda: path.write_text("人工修订", encoding="utf-8")
     result = await service.maintain_cycle(scope=scope)
     assert result.status == mode
-    record = service.get_publication(result.publication_id)
+    record = service.get_publication(result.publication_id).detail
     assert record.revision_id == request.id and record.description == request.description
     assert record.before_documents[0].text == before
     assert record.outcome.status == mode
@@ -98,7 +98,7 @@ async def test_revision_archives_request_and_distinguishes_outcomes(
         assert record.after_documents == () and record.published_at is None
     assert (await service.alist_revision_requests()).items[0].id == request.id
     assert await service.aget_revision_request(request.id) == request
-    assert reopen(service).get_publication(record.publication_id) == record
+    assert reopen(service).get_publication(record.publication_id).detail == record
 
 
 @pytest.mark.asyncio
@@ -132,12 +132,12 @@ async def test_confirmation_gap_uses_receipt_only_in_original_process(
     monkeypatch.setattr(service.store, "save_publication", fail_confirmation)
     first = await service.maintain_cycle(scope=scope)
     assert first.status == "failed"
-    record = service.get_publication(first.publication_id)
+    record = service.get_publication(first.publication_id).detail
     assert record.publication_state == "unconfirmed" and record.after_documents == ()
     assert (service.prompt_source.root / "compaction.j2").read_text(encoding="utf-8") == "新策略"
     resumed = reopen(service) if restart else service
     second = await resumed.maintain_cycle(scope=scope)
-    record = resumed.get_publication(first.publication_id)
+    record = resumed.get_publication(first.publication_id).detail
     assert len(provider.requests) == 1
     if restart:
         assert second.status == "failed" and "publication_unconfirmed" in second.reason
@@ -171,7 +171,7 @@ async def test_confirmed_experience_resumes_settlement_without_generation(
         )
     with pytest.raises(IrisEvolutionError, match="settlement interrupted"):
         await service.maintain_cycle(scope=scope)
-    record = service.get_publication(service.list_publications().items[0].publication_id)
+    record = service.get_publication(service.list_publications().items[0].publication_id).detail
     assert record.publication_state == "confirmed" and not record.settled
     assert record.consumed_ranges == () and record.outcome.consumed_ranges == ()
     assert body_count(service.store) > 0
@@ -181,8 +181,11 @@ async def test_confirmed_experience_resumes_settlement_without_generation(
     result = await resumed.maintain_cycle(scope=scope)
     assert result.status == "updated" and result.publication_id == record.publication_id
     assert len(provider.requests) == 1
-    assert resumed.get_publication(record.publication_id).settled
-    assert resumed.get_publication(record.publication_id).consumed_ranges == result.consumed_ranges
+    assert resumed.get_publication(record.publication_id).summary.settled
+    assert (
+        resumed.get_publication(record.publication_id).detail.consumed_ranges
+        == result.consumed_ranges
+    )
     assert not resumed.store.list_pending_sources()
 
 
@@ -208,7 +211,7 @@ async def test_candidate_archive_precedes_original_file_publisher(
     publish = service_module.publish_revision
 
     def checked(candidate: PreparedRevision) -> bool:
-        record = service.get_publication(service.list_publications().items[0].publication_id)
+        record = service.get_publication(service.list_publications().items[0].publication_id).detail
         assert record.publication_state == "unconfirmed" and record.outcome is None
         assert record.candidate_documents[0].text == "新策略"
         assert record.after_documents == () and record.published_at is None
@@ -232,7 +235,6 @@ def test_publication_and_request_pages_use_stable_order(tmp_path: Path) -> None:
                 stage="experience",
                 origin="experience",
                 description=identity,
-                settled=True,
             )
         )
         store.enqueue_revision(
@@ -246,7 +248,9 @@ def test_publication_and_request_pages_use_stable_order(tmp_path: Path) -> None:
         )
     first = store.list_publications(limit=2)
     # 状态更新仍处于原创建位置，不影响后续游标页。
-    store.save_publication(store.get_publication("a").model_copy(update={"reason": "已更新"}))
+    store.save_publication(
+        store.get_publication("a").detail.model_copy(update={"reason": "已更新"})
+    )
     rest = store.list_publications(after=first.next_cursor, limit=2)
     assert [record.publication_id for record in (*first.items, *rest.items)] == ["a", "b", "c"]
     assert rest.next_cursor is None
@@ -265,7 +269,7 @@ async def test_confirmed_settlement_retry_does_not_duplicate_issue(tmp_path: Pat
     service, provider, scope = prepare(tmp_path, prompt_targets=["compaction"])
     provider.output = issue_output()
     first = await service.maintain_cycle(scope=scope)
-    record = service.get_publication(first.publication_id)
+    record = service.get_publication(first.publication_id).detail
     assert service.store.settle_publication(record) == first
     assert len(service.list_revision_requests().items) == 1
     assert body_count(service.store) == 0

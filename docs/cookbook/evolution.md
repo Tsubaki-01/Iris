@@ -148,6 +148,29 @@ uv run python run_evolution.py
 
 `request_project_experience()` 跳过普通空闲计时，仍等待前台退出、合格来源和项目锁；它整理经验，不代替显式修订请求。`request_revision()` 等待本次持久请求自己的结果，不会误把另一次维护完成当成本次完成。
 
+## 查看发布历史
+
+`evolution.service.list_publications()` 返回摘要页；按 publication_id 查询时，返回的是包含
+摘要和详情状态的 `PublicationHistoryEntry`。以下片段可放在上例 `main()` 中取得 revision 后：
+
+```python
+if revision.publication_id is not None:
+    entry = await evolution.service.aget_publication(revision.publication_id)
+    if entry is None:
+        print("发布记录不存在")
+    elif entry.detail is None:
+        print("完整详情已过期", entry.summary.status, entry.evidence)
+    else:
+        print(entry.detail.before_documents)
+        print(entry.detail.candidate_documents)
+        print(entry.detail.after_documents)
+```
+
+每个 workspace 保留经验整理与修订合计最近十次已收尾、非 unconfirmed 尝试的完整详情，
+失败、取消和冲突也计数；未确认或未结算的恢复数据额外保留。更旧的记录仍有摘要和必要证据，
+但 detail_status 为 expired，detail 为 None。待处理修订请求本身仍保留，不会因为某次失败
+候选过期而消失。这里限制的是完整历史数量，不是数据库大小；详见[历史查询契约](../reference/memory-goals.md#维护协调器与-evolution-sdk)。
+
 ## 宿主何时可以关闭
 
 一个宿主可以让多个 runner 绑定同一个协调器；同一数据库与 namespace 使用同一记忆服务，同一 workspace 使用同一经验服务。任一前台运行进入时都会撤销正在进行的后台生成；已开始的短 IO 要排空后才释放资源。

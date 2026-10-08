@@ -128,7 +128,7 @@ async def test_settled_old_conflict_allows_new_revision_waiter_to_continue(tmp_p
     try:
         result = await asyncio.wait_for(coordinator.request_revision(binding, request("新请求")), 1)
         assert result.revision_id != old.id and result.status == "no_change"
-        assert service.get_publication(record.publication_id).settled
+        assert service.get_publication(record.publication_id).summary.settled
         assert coordinator.snapshot().resources[0].pending_request_id is None
     finally:
         await coordinator.aclose()

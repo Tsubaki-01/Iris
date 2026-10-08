@@ -17,6 +17,8 @@ from ._sqlite import connection, encode, initialize
 from .history import (
     EvolutionHistoryCursor,
     EvolutionHistoryPage,
+    ProposedIssueSummary,
+    PublicationHistoryEntry,
     PublicationPage,
     PublicationRecord,
     PublicationSummary,
@@ -92,6 +94,15 @@ class _StoredMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     message_ordinal: int = Field(ge=0)
     records: tuple[EvolutionRecord, ...]
+
+
+class _PublicationReceipt(BaseModel):
+    """完整详情过期后仍可独立读取的结算事实与必要问题证据。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    result: EvolutionResult | None = None
+    evidence: tuple[RevisionEvidence, ...] = ()
+    proposed_issue_summary: ProposedIssueSummary | None = None
 
 
 def _read_messages(
@@ -172,7 +183,9 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
-def _publication_summary(record: PublicationRecord) -> PublicationSummary:
+def _publication_summary(
+    record: PublicationRecord, proposed_revision_id: str | None = None
+) -> PublicationSummary:
     return PublicationSummary.model_construct(
         publication_id=record.publication_id,
         revision_id=record.revision_id,
@@ -186,7 +199,32 @@ def _publication_summary(record: PublicationRecord) -> PublicationSummary:
         reason=record.reason,
         published_at=record.published_at,
         settled=record.settled,
+        proposed_revision_id=proposed_revision_id,
     )
+
+
+def _publication_receipt(
+    record: PublicationRecord, proposed_revision_id: str | None
+) -> _PublicationReceipt:
+    issue = record.proposed_issue if proposed_revision_id is None else None
+    return _PublicationReceipt.model_construct(
+        result=record.outcome if record.settled else None,
+        evidence=issue.evidence if issue is not None else (),
+        proposed_issue_summary=ProposedIssueSummary.model_construct(
+            description=issue.description, targets=issue.targets
+        )
+        if issue is not None
+        else None,
+    )
+
+
+def _publication_request(database: sqlite3.Connection, revision_id: str | None) -> RevisionItem:
+    request_row = database.execute(
+        "SELECT payload FROM requests WHERE id=?", (revision_id,)
+    ).fetchone()
+    if request_row is None:
+        raise IrisEvolutionError("发布档案引用的修订请求不存在", revision_id=revision_id)
+    return RevisionItem.model_validate_json(request_row[0])
 
 
 def _publication(database: sqlite3.Connection, row: sqlite3.Row) -> PublicationRecord:
@@ -195,12 +233,7 @@ def _publication(database: sqlite3.Connection, row: sqlite3.Row) -> PublicationR
         {**json.loads(row["state_json"]), **json.loads(row["detail_json"])}
     )
     if record.stage == "revision":
-        request_row = database.execute(
-            "SELECT payload FROM requests WHERE id=?", (record.revision_id,)
-        ).fetchone()
-        if request_row is None:
-            raise IrisEvolutionError("发布档案引用的修订请求不存在", revision_id=record.revision_id)
-        request = RevisionItem.model_validate_json(request_row[0])
+        request = _publication_request(database, record.revision_id)
         return record.model_copy(update={"request": request, "evidence_refs": request.evidence})
     materials = _publication_materials(database, record.publication_id)
     evidence = tuple(
@@ -221,28 +254,67 @@ class EvolutionMaterialStore:
         self.path = self.root / "evolution.db"
         initialize(self.path)
 
-    def save_publication(self, record: PublicationRecord) -> None:
-        """首次插入候选档案；确认和结算只更新状态，不重写静态正文。"""
+    def save_publication(self, record: PublicationRecord) -> EvolutionResult | None:
+        """保存候选或真实确认；旧收据不得覆盖已经完成的持久结算。"""
         with connection(self.path, write=True) as database:
+            if record.settled:
+                return self._settle_publication(database, record)
+            _, settled = self._read_publication_result(database, record.publication_id)
+            if settled is not None:
+                return settled
             self._save_publication(database, record)
+            return None
 
     @staticmethod
-    def _save_publication(database: sqlite3.Connection, record: PublicationRecord) -> None:
-        summary = encode(_publication_summary(record).model_dump(mode="json"))
+    def _read_publication_result(
+        database: sqlite3.Connection, publication_id: str
+    ) -> tuple[bool, EvolutionResult | None]:
+        """读取 mutation 前的存在事实与已结算结果，不加载完整详情。"""
+        row = database.execute(
+            "SELECT settled,receipt_json FROM publications WHERE id=?", (publication_id,)
+        ).fetchone()
+        if row is None:
+            return False, None
+        result = (
+            EvolutionResult.model_validate(json.loads(row["receipt_json"])["result"])
+            if row["settled"]
+            else None
+        )
+        return True, result
+
+    @staticmethod
+    def _save_publication(
+        database: sqlite3.Connection,
+        record: PublicationRecord,
+        proposed_revision_id: str | None = None,
+    ) -> None:
+        summary = encode(_publication_summary(record, proposed_revision_id).model_dump(mode="json"))
+        receipt = encode(_publication_receipt(record, proposed_revision_id).model_dump(mode="json"))
         state = encode(record.model_dump(mode="json", exclude=_DETAIL_FIELDS | _DERIVED_FIELDS))
         updated = database.execute(
-            "UPDATE publications SET settled=?,summary_json=?,state_json=? WHERE id=?",
-            (record.settled, summary, state, record.publication_id),
+            "UPDATE publications SET settled=?,publication_state=?,summary_json=?,state_json=?,"
+            "receipt_json=? WHERE id=?",
+            (
+                record.settled,
+                record.publication_state,
+                summary,
+                state,
+                receipt,
+                record.publication_id,
+            ),
         )
         if updated.rowcount == 0:
             database.execute(
-                "INSERT INTO publications VALUES (?,?,?,?,?)",
+                "INSERT INTO publications VALUES (?,?,?,?,?,?,?,?)",
                 (
                     record.publication_id,
                     _timestamp(record.created_at),
                     record.settled,
+                    record.publication_state,
+                    "available",
                     summary,
                     state,
+                    receipt,
                 ),
             )
             database.execute(
@@ -272,15 +344,42 @@ class EvolutionMaterialStore:
         """数据库按创建时刻分页，只读取短摘要列。"""
         return self._history_page("publications", PublicationSummary, after, limit)
 
-    def get_publication(self, publication_id: str) -> PublicationRecord | None:
-        """按主键读取完整档案，after 正文由已确认候选投影。"""
+    def get_publication(self, publication_id: str) -> PublicationHistoryEntry | None:
+        """区分不存在与详情过期；所有历史投影在同一个读取快照中组装。"""
         with connection(self.path) as database:
             row = database.execute(
-                "SELECT p.state_json,d.detail_json FROM publications p "
-                "JOIN publication_details d ON d.publication_id=p.id WHERE p.id=?",
+                "SELECT summary_json,receipt_json FROM publications WHERE id=?",
                 (publication_id,),
             ).fetchone()
-            return _publication(database, row) if row is not None else None
+            if row is None:
+                return None
+            summary = PublicationSummary.model_validate_json(row["summary_json"])
+            receipt = _PublicationReceipt.model_validate_json(row["receipt_json"])
+            detail = None
+            if summary.detail_status == "available":
+                detail = _publication(
+                    database,
+                    database.execute(
+                        "SELECT p.state_json,d.detail_json FROM publications p "
+                        "JOIN publication_details d ON d.publication_id=p.id WHERE p.id=?",
+                        (publication_id,),
+                    ).fetchone(),
+                )
+            revision_id = summary.revision_id or summary.proposed_revision_id
+            evidence = receipt.evidence
+            if revision_id is not None:
+                request = (
+                    detail.request
+                    if detail is not None and detail.request is not None
+                    else _publication_request(database, revision_id)
+                )
+                evidence = request.evidence
+            return PublicationHistoryEntry.model_construct(
+                summary=summary,
+                detail=detail,
+                evidence=evidence,
+                proposed_issue_summary=receipt.proposed_issue_summary,
+            )
 
     def list_unsettled_publications(self) -> tuple[PublicationRecord, ...]:
         """仅加载尚待原 owner 收尾的完整档案。"""
@@ -712,38 +811,87 @@ class EvolutionMaterialStore:
 
     def settle_publication(self, record: PublicationRecord) -> EvolutionResult:
         """把已确认发布的材料或请求结算与档案收尾原子提交，不重放文件写入。"""
-        result = cast(EvolutionResult, record.outcome)
         with connection(self.path, write=True) as database:
-            if result.status in {"updated", "no_change"}:
-                if record.stage == "revision":
-                    self._settle_revision(database, cast(str, record.revision_id), result)
-                else:
-                    result = result.model_copy(
-                        update={
-                            "consumed_ranges": tuple(
-                                EvolutionRange.model_construct(
-                                    source=item.source,
-                                    start_message_count=item.start_message_count,
-                                    end_message_count=item.end_message_count,
-                                )
-                                for item in record.materials
-                            )
-                        }
-                    )
-                    self._consume(database, record.materials, result, issue=record.proposed_issue)
+            return self._settle_publication(database, record)
+
+    def _settle_publication(
+        self, database: sqlite3.Connection, record: PublicationRecord
+    ) -> EvolutionResult:
+        exists, settled = self._read_publication_result(database, record.publication_id)
+        if settled is not None:
+            return settled
+        result = cast(EvolutionResult, record.outcome)
+        # 尚无候选时先建立档案关联，消费时才能保护其原文。
+        if not exists:
+            self._save_publication(database, record.model_copy(update={"settled": False}))
+        proposed_revision_id = None
+        if result.status in {"updated", "no_change"}:
+            if record.stage == "revision":
+                self._settle_revision(database, cast(str, record.revision_id), result)
             else:
-                self._record_step(database, result)
-            self._save_publication(
-                database,
-                record.model_copy(
+                result = result.model_copy(
                     update={
-                        "settled": True,
-                        "outcome": result,
-                        "consumed_ranges": result.consumed_ranges,
+                        "consumed_ranges": tuple(
+                            EvolutionRange.model_construct(
+                                source=item.source,
+                                start_message_count=item.start_message_count,
+                                end_message_count=item.end_message_count,
+                            )
+                            for item in record.materials
+                        )
                     }
-                ),
-            )
+                )
+                self._consume(database, record.materials, result, issue=record.proposed_issue)
+                if record.proposed_issue is not None:
+                    proposed_revision_id = record.proposed_issue.id
+        else:
+            self._record_step(database, result)
+        self._save_publication(
+            database,
+            record.model_copy(
+                update={
+                    "settled": True,
+                    "outcome": result,
+                    "consumed_ranges": result.consumed_ranges,
+                }
+            ),
+            proposed_revision_id,
+        )
+        self._expire_publications(database)
         return result
+
+    def _expire_publications(self, database: sqlite3.Connection) -> None:
+        """仅裁剪刚离开十次完整窗口的档案，并回收这些档案触达的无引用原文。"""
+        rows = database.execute(
+            "SELECT id,summary_json FROM publications WHERE settled=1 "
+            "AND publication_state!='unconfirmed' AND detail_status='available' "
+            "ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET 10"
+        ).fetchall()
+        for row in rows:
+            publication_id = row["id"]
+            ranges = tuple(
+                (item["source_key"], item["start_count"], item["end_count"])
+                for item in database.execute(
+                    "SELECT source_key,start_count,end_count FROM publication_materials "
+                    "WHERE publication_id=?",
+                    (publication_id,),
+                )
+            )
+            summary = PublicationSummary.model_validate_json(row["summary_json"]).model_copy(
+                update={"detail_status": "expired"}
+            )
+            database.execute(
+                "DELETE FROM publication_details WHERE publication_id=?", (publication_id,)
+            )
+            database.execute(
+                "DELETE FROM publication_materials WHERE publication_id=?", (publication_id,)
+            )
+            database.execute(
+                "UPDATE publications SET detail_status='expired',summary_json=?,"
+                "state_json=json_remove(state_json,'$.observed_documents') WHERE id=?",
+                (encode(summary.model_dump(mode="json")), publication_id),
+            )
+            self._collect_messages(database, ranges)
 
     @staticmethod
     def _collect_messages(

@@ -3,7 +3,9 @@
 from .config import EvolutionConfig
 from .history import (
     EvolutionHistoryCursor,
+    ProposedIssueSummary,
     PublicationDocument,
+    PublicationHistoryEntry,
     PublicationPage,
     PublicationRecord,
     PublicationSummary,
@@ -31,7 +33,9 @@ from .models import (
 
 __all__ = [
     "EvolutionHistoryCursor",
+    "ProposedIssueSummary",
     "PublicationDocument",
+    "PublicationHistoryEntry",
     "PublicationPage",
     "PublicationRecord",
     "PublicationSummary",
