@@ -52,6 +52,8 @@ def test_publication_projects_evidence_and_request_without_storing_copies(
             evidence_refs=issue.evidence,
         )
     else:
+        store.register_source(source, 2)
+        store.commit_capture(block.model_copy(update={"records": materials[0].records}))
         record = PublicationRecord(
             stage="experience",
             origin="experience",
@@ -73,6 +75,7 @@ def test_publication_projects_evidence_and_request_without_storing_copies(
     for payload in (json.loads(state_json), json.loads(detail_json)):
         assert "evidence_refs" not in payload
         assert "request" not in payload
+        assert "materials" not in payload
     if stage == "experience":
         assert json.loads(detail_json)["proposed_issue"]["id"] == issue.id
     else:

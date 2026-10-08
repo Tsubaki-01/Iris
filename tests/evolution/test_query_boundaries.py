@@ -35,7 +35,7 @@ def _deny_large_columns(monkeypatch: pytest.MonkeyPatch) -> None:
             trigger_name: str | None,
         ) -> int:
             if action == sqlite3.SQLITE_READ and (
-                (table == "captures" and column in {"receipt_json", "body_json"})
+                (table == "messages" and column == "records_json")
                 or (table == "requests" and column == "payload")
                 or table == "publication_details"
             ):
@@ -48,10 +48,10 @@ def _deny_large_columns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sqlite3, "connect", connect_without_bodies)
 
 
-def test_capture_uses_short_watermarks_without_replaying_receipts(
+def test_capture_uses_short_watermarks_without_loading_message_bodies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """历史收据不可读时仍能登记新来源、捕获和重读封源水位。"""
+    """历史正文不可读时仍能登记新来源、捕获和重读封源水位。"""
     store = EvolutionMaterialStore(tmp_path)
     history = _source("history")
     store.register_source(history, 2)
@@ -74,7 +74,7 @@ def test_capture_uses_short_watermarks_without_replaying_receipts(
 def test_scheduling_reads_short_metadata_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    """存在性和来源概览不读取捕获正文、收据或请求证据。"""
+    """存在性和来源概览不读取消息正文或请求证据。"""
     store = EvolutionMaterialStore(tmp_path)
     pending = _source("pending")
     store.register_source(pending, 2)
@@ -162,8 +162,8 @@ def test_revision_priority_fills_limit_after_eligibility_filtering(
     assert sorted(parsed) == sorted(expected)
 
 
-def test_consumption_does_not_update_an_unrelated_source_body(tmp_path: Path) -> None:
-    """本轮消费只能更新所选来源，其他来源仍可按原文学习。"""
+def test_consumption_does_not_delete_an_unrelated_source_body(tmp_path: Path) -> None:
+    """本轮消费只能清理所选来源，其他来源仍可按原文学习。"""
     store = EvolutionMaterialStore(tmp_path)
     current, unrelated = _source("current"), _source("unrelated")
     for source in (current, unrelated):
@@ -174,19 +174,23 @@ def test_consumption_does_not_update_an_unrelated_source_body(tmp_path: Path) ->
     unrelated_key = json.dumps(["lifecycle", "unrelated"], separators=(",", ":"))
     with sqlite3.connect(store.path) as database:
         unrelated_body = database.execute(
-            "SELECT body_json FROM captures WHERE source_key=?", (unrelated_key,)
-        ).fetchone()[0]
+            "SELECT message_ordinal,records_json FROM messages WHERE source_key=? "
+            "ORDER BY message_ordinal",
+            (unrelated_key,),
+        ).fetchall()
         database.execute(
-            "CREATE TRIGGER preserve_unrelated BEFORE UPDATE OF body_json ON captures "
+            "CREATE TRIGGER preserve_unrelated BEFORE DELETE ON messages "
             'WHEN OLD.source_key=\'["lifecycle","unrelated"]\' '
-            "BEGIN SELECT RAISE(ABORT, 'unrelated body updated'); END"
+            "BEGIN SELECT RAISE(ABORT, 'unrelated body deleted'); END"
         )
     store.consume(selected, _result(selected))
     with sqlite3.connect(store.path) as database:
         assert (
             database.execute(
-                "SELECT body_json FROM captures WHERE source_key=?", (unrelated_key,)
-            ).fetchone()[0]
+                "SELECT message_ordinal,records_json FROM messages WHERE source_key=? "
+                "ORDER BY message_ordinal",
+                (unrelated_key,),
+            ).fetchall()
             == unrelated_body
         )
     remaining = store.read_pending(allowed_sources=frozenset({("lifecycle", "unrelated")}))

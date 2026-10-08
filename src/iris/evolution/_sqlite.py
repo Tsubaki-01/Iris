@@ -51,8 +51,8 @@ def initialize(path: Path) -> None:
         tables = database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         version = database.execute("PRAGMA user_version").fetchone()[0]
         if tables:
-            if version != 3:
-                raise IrisEvolutionError("Evolution 数据库要求 schema 3", version=version)
+            if version != 4:
+                raise IrisEvolutionError("Evolution 数据库要求 schema 4", version=version)
             return
         statements = (
             "CREATE TABLE sources (source_key TEXT PRIMARY KEY, registration_json TEXT NOT NULL, "
@@ -62,11 +62,9 @@ def initialize(path: Path) -> None:
             "observed_terminal IS NULL OR captured_until < observed_terminal",
             "CREATE INDEX sources_pending ON sources(source_key) WHERE "
             "captured_until=observed_terminal AND consumed_until < observed_terminal",
-            "CREATE TABLE captures (id TEXT PRIMARY KEY, source_key TEXT NOT NULL REFERENCES "
-            "sources(source_key), start_count INTEGER NOT NULL, end_count INTEGER NOT NULL, "
-            "receipt_json TEXT NOT NULL, "
-            "body_json TEXT)",
-            "CREATE INDEX captures_source ON captures(source_key,end_count,start_count)",
+            "CREATE TABLE messages (source_key TEXT NOT NULL REFERENCES sources(source_key), "
+            "message_ordinal INTEGER NOT NULL, records_json TEXT NOT NULL, "
+            "PRIMARY KEY(source_key,message_ordinal))",
             "CREATE TABLE requests (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, "
             "summary_json TEXT NOT NULL, payload TEXT NOT NULL, result_json TEXT, "
             "routing_json TEXT NOT NULL)",
@@ -76,11 +74,17 @@ def initialize(path: Path) -> None:
             "settled INTEGER NOT NULL, summary_json TEXT NOT NULL, state_json TEXT NOT NULL)",
             "CREATE TABLE publication_details (publication_id TEXT PRIMARY KEY REFERENCES "
             "publications(id), detail_json TEXT NOT NULL)",
+            "CREATE TABLE publication_materials (publication_id TEXT NOT NULL REFERENCES "
+            "publications(id), position INTEGER NOT NULL, source_key TEXT NOT NULL REFERENCES "
+            "sources(source_key), start_count INTEGER NOT NULL, end_count INTEGER NOT NULL, "
+            "PRIMARY KEY(publication_id,position))",
+            "CREATE INDEX publication_material_sources ON "
+            "publication_materials(source_key,start_count,end_count)",
             "CREATE INDEX publications_history ON publications(created_at,id)",
             "CREATE INDEX publications_unsettled ON publications(created_at,id) WHERE settled=0",
             "CREATE TABLE consumed_publications (publication_id TEXT PRIMARY KEY)",
             "CREATE TABLE progress (id INTEGER PRIMARY KEY CHECK(id=1), latest_step TEXT NOT NULL)",
-            "PRAGMA user_version=3",
+            "PRAGMA user_version=4",
         )
         for statement in statements:
             database.execute(statement)

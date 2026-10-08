@@ -302,11 +302,12 @@ description 和目标名称不可为空白；targets 至少一个，必须在配
 
 `EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
-`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 3，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 4，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
 
 来源的连续捕获位置、消费位置与已观察终点持久保存；看到终态但捕获区间有缺口时仍需补采，
-补齐才作为完整来源参与维护。材料按合格来源和未消费范围有界读取；消费事务只清理本次推进
-来源的完整已消费块。来源/session 调度概览与剩余工作检查只读取短状态，不加载材料正文或
+补齐才作为完整来源参与维护。过滤后的消息原文按来源和消息序号唯一保存，材料按合格来源和
+未消费范围有界读取。消费推进水位，已消费且无档案引用的消息才局部回收；已回收的旧范围
+不会因重复捕获重新保存正文。来源/session 调度概览与剩余工作检查只读取短状态，不加载材料正文或
 请求证据；完整请求先按来源、session 和当前开放目标过滤，再应用数量上限。
 
 | Evolution 历史入口 | 结果 |
@@ -327,8 +328,10 @@ description、targets、origin 和 status；origin 为 host/experience，status 
 `PublicationRecord` 详情包含 publication_id、revision_id、stage、created_at、outcome、
 publication_state、origin、description、evidence_refs、consumed_ranges、targets，
 以及 before_documents、candidate_documents、observed_documents、reason、usage、effect、published_at、settled。
-文档保存 path/text，缺失基线用 text=None。A 档案持久保存本批 materials，evidence_refs 在读取时
-从 `text.strip()` 非空的 record 投影，保持原 ref、完整 quote 与顺序。B 档案只引用 revision_id，
+文档保存 path/text，缺失基线用 text=None。A 档案持久保存本批实际选中的有序材料区间引用，
+在同一读快照中从 Evolution 自有消息重组完整 materials；evidence_refs 从 `text.strip()` 非空的
+record 投影，保持原 ref、完整 quote 与顺序。多次尝试引用同一份消息原文，不依赖外部 lifecycle
+回读；当前完整历史关联保留，材料消费后仍可查询详情。B 档案只引用 revision_id，
 在同一读快照中从不可变请求实体组装 request/evidence_refs，不重复持久化这些字段。
 A 的 proposed_issue 仍在发布前保存，供确认后恢复结算；正式请求仅在 A 成功或 no_change
 消费时创建。公开详情返回形状保持完整；A 的固定 Skill 目标见文档 path。静态正文与状态分表保存，
@@ -340,7 +343,7 @@ A 的 proposed_issue 仍在发布前保存，供确认后恢复结算；正式�
 publication_state 为 not_published、confirmed 或 unconfirmed。只有原文件写入返回成功才记录
 confirmed/published_at；no_change、conflict、failed 不冒充 updated。settled 表示本次尝试的收尾已完成，
 失败或冲突的原请求仍可保持待处理，最终结算以 `store.revision_result(id)` 为准。
-成功/no_change 时，材料消费或请求结算、正文清理和档案收尾在一个 SQLite 事务中完成，
+成功/no_change 时，材料消费或请求结算、无引用正文回收和档案收尾在一个 SQLite 事务中完成，
 consumed_ranges 随材料消费提交。已确认写入的结算重试不重跑模型或文件修改。
 实际目标文件写入与 SQLite 确认仍是两个操作，不构成跨资源事务。
 重启后无法确认的发布保留 unconfirmed，返回 `publication_unconfirmed`，并在 observed_documents

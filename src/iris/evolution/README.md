@@ -124,10 +124,11 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 ## 材料与一次 A 操作
 
 材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
-`EvolutionMaterialStore` 管理 schema 3，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
-不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。独立、完整发布的块保留
-source/run/session、消息半开区间和原始引用；跨进程可以重复或重叠捕获同一区间，读取时同一
-消息只出现一次。捕获位置、消费位置与已观察终点分别持久保存，每次捕获只合并当前来源的
+`EvolutionMaterialStore` 管理 schema 4，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
+不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。`messages` 按 `(source_key, message_ordinal)`
+保存每条消息经过捕获过滤后的 records，保留原始 record.ref；重复或重叠捕获按这个身份幂等
+插入，不覆盖已保存正文。过滤后 records 为空的消息也保留其捕获位置。捕获位置、消费位置
+与已观察终点分别持久保存，每次捕获只合并当前来源的
 连续区间。先收到带终态的后段但前面仍有缺口时，来源仍未封闭，harness 会继续补采；补齐后
 才暴露终态与 outcome。正文清理后仍保留来源、封源与进度，查询不重建全部历史收据。
 
@@ -136,7 +137,7 @@ source/run/session、消息半开区间和原始引用；跨进程可以重复�
 由捕获侧排除。服务不复制一套生命周期资格，也不读取 Memory 私有表。
 
 `read_pending(allowed_sources=..., limit=128)` 先筛选合格来源，再按来源和消息顺序读取所需
-捕获块，返回完整消息；过滤后 records 为空的消息仍占一个区间。`has_pending_materials()` 与
+消息，返回完整 records；过滤后 records 为空的消息仍占一个区间。`has_pending_materials()` 与
 `has_pending_revisions()` 只检查短状态，供剩余工作判定使用，不加载材料正文或请求证据。
 
 每轮重读当前经验并固定 `project_skill_update.j2` 的项目快照与策略 Skill。按完整请求
@@ -152,14 +153,14 @@ token 估算选择预算内的消息前缀，最多调用模型一次；未读�
 
 `issue` 只保存问题描述、开放目标、真实记录引用和必要原文片段。程序核对引用及片段后绑定
 实际来源；坏引用会使整个 A 响应失败，不先发布 Skill。提案以 `proposed_issue` 随发布候选
-先存入档案，供已确认但未结算的发布恢复；正式待处理请求仍与 A 消费进度同次提交。结算只
-清理本次推进来源中已经完整消费的捕获块正文；迟到的已消费重复块不恢复正文副本。
+先存入档案，供已确认但未结算的发布恢复；正式待处理请求仍与 A 消费进度同次提交。消费推进
+来源水位；正文只有在已经消费且没有档案引用时才局部回收，迟到的已消费重复捕获不会将它恢复。
 A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败不强制触发 B。
 
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
 成功/no-change 才确认实际处理范围，失败或取消不消费。原发布 owner 先把基线与候选存入
 SQLite，再写目标文件并保存 confirmed 与 published_at；after_documents 由已确认候选投影，
-不重复保存正文。确认后材料消费或请求结算、材料正文清理及档案收尾在一个 SQLite 事务中提交。
+不重复保存正文。确认后材料消费或请求结算、无引用正文回收及档案收尾在一个 SQLite 事务中提交。
 目标文件写入与数据库确认仍不属于同一个事务。若文件已发布而结算失败，
 本进程保留实际收据，下一轮在同一项目锁内完成结算，不重新调用模型或重写目标。
 已持久确认的发布重启后也只补结算；A 的消费与发布 ID 在同一数据库事务中确认，
@@ -187,7 +188,7 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 序列化不保证保留注释或排版。
 
 发布前再次检查来源/session 资格和文件基线。失败、取消或 conflict 保留 B，不重跑 A；
-成功/no-change 独立结算本请求。A 已清理的正文不会删除问题中保留的必要片段。
+成功/no-change 独立结算本请求。源材料正文的回收不会删除问题中保留的必要片段。
 重启后若收窄开放目标，旧请求保持 pending；只选择目标仍全部开放的项，不阻塞其他合格 A/B。
 请求选择与来源/session 概览读取短调度字段，先判断来源、session 和当前开放目标，再应用
 数量上限；只有选中请求才读取完整证据。指定请求 ID 是优先项，该项不存在、已结算或不合格
@@ -201,8 +202,11 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 分页使用 `EvolutionHistoryCursor(created_at, id)`，按原创建时刻和 ID 升序，limit 为 1–100；
 确认更新不移动历史位置。请求摘要 status 仅表示最终结算结果，未结算时为 None。
 已完成请求的描述/evidence、选中材料与 before/candidate 正文保留在数据库中；静态档案正文
-与状态分表，仅首次入库，后续确认和结算只更新状态表。A 档案保存本批 `materials`，读取时
-从非空 record 正文按原顺序投影 `evidence_refs`，不再保存一份整批 quote。B 档案通过
+与状态分表，仅首次入库，后续确认和结算只更新状态表。A 档案在 `publication_materials` 保存
+本批实际选中材料的有序来源/消息区间引用，不再复制 records 全文。读取时在同一快照中从
+`messages` 重组 `materials`，并从非空 record 正文按原顺序投影 `evidence_refs`。多个尝试可
+引用同一份原文；当前完整历史关联继续保留，即使材料已消费、原 lifecycle reader 已消失，
+详情也能从 Evolution 自有存储读取。旧 captures 的 body/receipt 副本不再保存。B 档案通过
 `revision_id` 引用插入后不再修改的请求实体，在同一读快照中组装 `request/evidence_refs`，
 不在每次尝试中复制它们；请求结算不改变原请求正文。公开详情仍返回完整 `PublicationRecord`。
 `after_documents` 是只读 Python 属性，不进入 `model_dump()`；confirmed 时等于候选，否则为空。
