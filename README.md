@@ -6,6 +6,8 @@
 
 Iris 是面向 Python 开发者的本地优先 Agent Kit。它把模型调用、工具执行、上下文管理、人工交互和运行状态组织在一个可组合的内核中，让你从终端里的第一个助手开始，再接入自己的脚本或界面。
 
+[官网与版本文档](https://tsubaki-01.github.io/iris-web/)
+
 [开始使用](docs/getting-started/quickstart.md) · [理解设计](docs/design/architecture.md) · [文档首页](docs/index.md) · [参与贡献](docs/contributing/index.md)
 
 ## 为什么使用 Iris
