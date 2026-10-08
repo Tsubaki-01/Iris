@@ -162,6 +162,23 @@ class PendingMaterials:
 
 
 @dataclass(frozen=True, slots=True)
+class EvolutionLearningSource:
+    """仍有原文积压的来源事实，不复制宿主当前运行资格。"""
+
+    source: EvolutionSource
+    complete: bool
+    admitted: bool
+    has_content: bool
+
+
+@dataclass(frozen=True, slots=True)
+class EvolutionLearningReadiness:
+    """领域短状态快照；新 Run 数量由调用方当前合格范围派生。"""
+
+    sources: tuple[EvolutionLearningSource, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class EvolutionMaintenanceScope:
     """宿主传入的合格来源范围与提交前资格检查。"""
 
@@ -169,6 +186,7 @@ class EvolutionMaintenanceScope:
     check: Callable[[tuple[EvolutionSource, ...]], Awaitable[bool]]
     allowed_sessions: frozenset[tuple[str, str]]
     check_session: Callable[[EvolutionSession | None], Awaitable[bool]]
+    experience_sources: frozenset[tuple[str, str]]
     requested_revision_id: str | None = None
     experience_only: bool = False
 

@@ -16,6 +16,7 @@ from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot
 from ..providers.protocols import CompletionProvider
 from ..utils.generation_worker import check_generation_cancelled
+from ._learning import has_learning_text
 from ._prompts import memory_output_contract, structured_memory_prompt
 from .generation_models import (
     DreamOperation,
@@ -228,9 +229,7 @@ def _flush_input(
             (i, record) for i, record in enumerate(episode.records) if record.id == piece.record_id
         )
         projected: dict[str, object] = {
-            "ref": f"e{index}"
-            if record.text and record.metadata.get("evidence_allowed", True)
-            else None,
+            "ref": f"e{index}" if has_learning_text(record, piece.start) else None,
             "episode_ref": episode_refs[episode.id],
             "role": record.role,
             "start": piece.start,
@@ -275,6 +274,7 @@ def _select_flush(
 ) -> tuple[tuple[EpisodeSlice, ...], LLMRequest]:
     """先按记录选片，单条超长才二分截取固定字符区间。"""
     slices: list[EpisodeSlice] = []
+    has_evidence = False
 
     def build(pieces: list[EpisodeSlice]) -> LLMRequest:
         return _request(
@@ -291,11 +291,16 @@ def _select_flush(
             start = progress.cursor.text_offset if index == progress.cursor.record_index else 0
             end = len(record.text)
             piece = EpisodeSlice(progress.episode.id, record.id, start, end, record.text[start:end])
+            if not has_evidence and not has_learning_text(record, start):
+                # 无证据前缀只推进原文游标，不受无需调用模型的请求预算限制。
+                slices.append(piece)
+                continue
             if (
                 provider.estimate_input_tokens(build([*slices, piece]))
                 <= config.flush_input_budget_tokens
             ):
                 slices.append(piece)
+                has_evidence = has_evidence or has_learning_text(record, start)
                 continue
             if slices:
                 return tuple(slices), build(slices)
@@ -342,7 +347,7 @@ async def flush(
         progresses = tuple(
             await service.run_async_io(
                 lambda: service.store.list_pending_episodes(
-                    namespace, allowed_sources=None if scope is None else scope.allowed_sources
+                    namespace, allowed_sources=None if scope is None else scope.episode_sources
                 )
             )
         )
@@ -388,8 +393,7 @@ async def flush(
                 end=piece.end,
             )
             for i, piece in enumerate(slices)
-            if piece.text
-            and records[piece.episode_id, piece.record_id].metadata.get("evidence_allowed", True)
+            if has_learning_text(records[piece.episode_id, piece.record_id], piece.start)
         }
         await _check_sources(scope, sources)
         if refs:

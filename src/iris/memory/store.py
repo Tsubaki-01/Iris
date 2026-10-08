@@ -13,6 +13,7 @@ from .generation_models import (
     GenerationResult,
     GenerationState,
     MemoryCaptureSource,
+    MemoryLearningReadiness,
     MemorySource,
     ObservationState,
 )
@@ -148,6 +149,18 @@ class MemoryStore(Protocol):
     def list_pending_sources(self, namespace: str) -> tuple[MemorySource, ...]:
         """读取未消费原文、观察及工具变更的来源投影。"""
 
+    def read_learning_readiness(self, namespace: str) -> MemoryLearningReadiness:
+        """只读取原文来源、剩余有效内容与准入事实，不加载正文。"""
+
+    def admit_learning_sources(
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        threshold: int,
+    ) -> MemoryLearningReadiness:
+        """达到合格新 Run 数量后，在同一事务中准入当前全部候选。"""
+
     def register_source(self, source: MemoryCaptureSource) -> MemoryCaptureSource:
         """登记或读取同一个 run 的捕获水位。"""
 
@@ -213,9 +226,13 @@ class MemoryStore(Protocol):
         """保存独立阶段状态及已发生用量。"""
 
     def generation_state(
-        self, namespace: str, *, allowed_sources: frozenset[tuple[str, str]] | None = None
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+        episode_sources: frozenset[tuple[str, str]] | None = None,
     ) -> GenerationState:
-        """读取生成状态与最近阶段结果。"""
+        """原文按 episode_sources 计数，下游按 allowed_sources 计数。"""
 
 
 __all__ = ["MemoryStore"]

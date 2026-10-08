@@ -12,6 +12,8 @@ from .generation_models import (
     GenerationState,
     MemoryCycleResult,
     MemoryGenerationConfig,
+    MemoryLearningReadiness,
+    MemoryLearningSource,
     MemoryMaintenanceScope,
     MemorySource,
 )
@@ -86,6 +88,8 @@ __all__ = [
     "GenerationState",
     "MemoryCycleResult",
     "MemoryGenerationConfig",
+    "MemoryLearningReadiness",
+    "MemoryLearningSource",
     "MemoryMaintenanceScope",
     "MemorySource",
     "FileMemoryMirror",

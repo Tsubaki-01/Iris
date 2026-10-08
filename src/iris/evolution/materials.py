@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, cast
@@ -27,6 +28,8 @@ from .history import (
 )
 from .models import (
     EvolutionCaptureBlock,
+    EvolutionLearningReadiness,
+    EvolutionLearningSource,
     EvolutionMaterial,
     EvolutionRange,
     EvolutionRecord,
@@ -60,6 +63,7 @@ class _Registration(BaseModel):
     captured_until: int = Field(ge=0)
     observed_terminal: int | None = Field(default=None, ge=0)
     observed_outcome: str | None = None
+    admitted: bool
 
     @model_validator(mode="after")
     def _positions(self) -> _Registration:
@@ -164,6 +168,7 @@ def _registration(row: sqlite3.Row) -> _Registration:
             "captured_until": row["captured_until"],
             "observed_terminal": row["observed_terminal"],
             "observed_outcome": row["observed_outcome"],
+            "admitted": row["admitted"],
         }
     )
 
@@ -476,7 +481,7 @@ class EvolutionMaterialStore:
             for record in block.records:
                 grouped.setdefault(record.message_ordinal, []).append(record)
             database.executemany(
-                "INSERT OR IGNORE INTO messages VALUES (?,?,?)",
+                "INSERT OR IGNORE INTO messages VALUES (?,?,?,?)",
                 (
                     (
                         key,
@@ -484,6 +489,7 @@ class EvolutionMaterialStore:
                         encode(
                             [record.model_dump(mode="json") for record in grouped.get(ordinal, ())]
                         ),
+                        any(record.text.strip() for record in grouped.get(ordinal, ())),
                     )
                     for ordinal in range(
                         max(block.start_message_count, current.consumed_until),
@@ -516,6 +522,61 @@ class EvolutionMaterialStore:
                     "observed_outcome": outcome,
                 }
             ).state()
+
+    def read_learning_readiness(self) -> EvolutionLearningReadiness:
+        """只读取仍有原文积压的来源与剩余正文短事实，不加载消息或请求正文。"""
+        with connection(self.path) as database:
+            return self._learning_readiness(database)
+
+    @staticmethod
+    def _learning_readiness(database: sqlite3.Connection) -> EvolutionLearningReadiness:
+        sources: list[EvolutionLearningSource] = []
+        for row in database.execute(
+            "SELECT s.*,EXISTS(SELECT 1 FROM messages m WHERE m.source_key=s.source_key "
+            "AND m.message_ordinal>=s.consumed_until AND m.has_content=1) AS remaining_content "
+            "FROM sources s WHERE EXISTS(SELECT 1 FROM messages m WHERE m.source_key=s.source_key "
+            "AND m.message_ordinal>=s.consumed_until) ORDER BY s.source_key"
+        ):
+            registration = _registration(row)
+            sources.append(
+                EvolutionLearningSource(
+                    source=registration.source,
+                    complete=registration.captured_until == registration.observed_terminal,
+                    admitted=registration.admitted,
+                    has_content=bool(row["remaining_content"]),
+                )
+            )
+        return EvolutionLearningReadiness(tuple(sources))
+
+    def admit_learning_sources(
+        self, *, allowed_sources: frozenset[tuple[str, str]], threshold: int
+    ) -> EvolutionLearningReadiness:
+        """在写事务内重读合格的新来源，达到阈值后一次准入当时的全部候选。"""
+        with connection(self.path, write=True) as database:
+            readiness = self._learning_readiness(database)
+            selected = frozenset(
+                (item.source.lifecycle_source_id, item.source.run_id)
+                for item in readiness.sources
+                if item.complete
+                and item.has_content
+                and not item.admitted
+                and (item.source.lifecycle_source_id, item.source.run_id) in allowed_sources
+            )
+            if len(selected) < threshold:
+                return readiness
+            database.execute(
+                "UPDATE sources SET admitted=1 WHERE source_key IN "
+                "(SELECT value FROM json_each(?))",
+                (_source_keys(selected),),
+            )
+            return EvolutionLearningReadiness(
+                tuple(
+                    replace(item, admitted=True)
+                    if (item.source.lifecycle_source_id, item.source.run_id) in selected
+                    else item
+                    for item in readiness.sources
+                )
+            )
 
     def list_pending_sources(self) -> tuple[EvolutionSource, ...]:
         """合并已封源未消费的材料与待处理经历问题的来源。"""

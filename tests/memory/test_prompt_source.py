@@ -77,7 +77,7 @@ async def test_cycle_keeps_one_snapshot_and_next_cycle_adopts_changes(tmp_path: 
         overview_provider=provider,
         overview_model="test",
     )
-    scope = MemoryMaintenanceScope(frozenset(), _eligible)
+    scope = MemoryMaintenanceScope(frozenset(), _eligible, frozenset())
     memory.observe(MemoryObserveInput(text="本项目使用 uv"))
     await memory.maintain_cycle("project", scope=scope, cycle_id="first-cycle")
     assert len(provider.requests) == 3

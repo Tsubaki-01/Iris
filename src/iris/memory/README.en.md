@@ -62,7 +62,7 @@ enabled, it returns the injected object unchanged or builds a SQLite service if 
 An injected service keeps its store, mirror, provider/model, and IO mode. Configured memory root and
 database paths must resolve inside the caller-supplied workspace. Default local search uses SQLite FTS5: initialization
 and query errors raise `IrisMemoryError`, and no matches return an empty result without LIKE fallback.
-New databases use schema version 6; older versions are rejected at initialization without migration,
+New databases use schema version 7; older versions are rejected at initialization without migration,
 version overwrite, or deletion. Configured SQLite services use `MemoryIOExecutionMode.THREAD`;
 directly constructed services default to `INLINE`, preserving the host's execution choice.
 Each THREAD async read or write runs connection setup, SQL, and result construction in one worker job.
@@ -226,10 +226,27 @@ Capture records committed source text without learning. Automatic learning selec
 fully captured runs. A WAITING session excludes its own earlier material, while other sessions can
 continue. Tool changes resolve complete call identities through captured records; incomplete or unmatched changes
 remain pending. Explicit SDK content without a Run keeps its existing semantics.
-`list_pending_sources()` exposes source references. The host supplies `MemoryMaintenanceScope` with
-allowed source/run pairs and an async eligibility check. The store filters before limits, including
-reselection and counts; generation checks actual batch sources before model calls and input commits.
-Published knowledge remains available for comparisons, projections, and overview repair.
+`list_pending_sources()` exposes source references. The host supplies all three required
+`MemoryMaintenanceScope` fields: `allowed_sources`, `check`, and `episode_sources`. Only Episode flush
+and its remaining count use episode_sources; observations, explicit changes, and retry_blocked keep
+allowed_sources. Explicit observe input without a Run is not excluded by the Episode source set.
+The store filters before limits, including reselection and counts; generation checks actual batch
+sources before model calls and input commits. Published knowledge remains available for comparisons,
+projections, and overview repair.
+
+The store's `read_learning_readiness(namespace)` returns `MemoryLearningReadiness` using only source
+identities, completion, admitted, and remaining-content columns, without reading Episode, Observation,
+or Event payloads. Multiple Episodes from one Run form one candidate; has_unsourced identifies explicit
+input without a Run. The snapshot also includes item_revision, projection_revision, and a
+has_pending_derived hint for pending observations or changes; the hint does not replace source checks.
+The service exposes `await aread_learning_readiness(namespace)`.
+`admit_learning_sources(namespace, allowed_sources=..., threshold=...)` rereads candidates in a write
+transaction. When at least threshold eligible, fully captured new Runs still have evidence text, it
+persistently admits all current candidates. The async service entry point is `aadmit_learning_sources`.
+Capture and consumption preserve admission across reopening. Remaining content follows the character
+cursor. Empty or evidence-disabled prefixes advance without model budget estimation or model calls,
+while retaining source checks and CAS. The host selects the admission threshold; these read APIs do
+not start maintenance.
 
 After the quiet interval, the coordinator acquires the database/namespace OS lock and calls
 `maintain_cycle(namespace, scope=..., cycle_id=...)`: dream existing observations or changes first; otherwise flush,

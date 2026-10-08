@@ -14,6 +14,8 @@ from .history import (
 )
 from .models import (
     EvolutionCaptureBlock,
+    EvolutionLearningReadiness,
+    EvolutionLearningSource,
     EvolutionMaintenanceScope,
     EvolutionMaterial,
     EvolutionRange,
@@ -43,6 +45,8 @@ __all__ = [
     "RevisionRequestSummary",
     "EvolutionConfig",
     "EvolutionCaptureBlock",
+    "EvolutionLearningReadiness",
+    "EvolutionLearningSource",
     "EvolutionMaintenanceScope",
     "EvolutionMaterial",
     "EvolutionRange",

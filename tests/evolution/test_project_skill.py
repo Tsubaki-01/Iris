@@ -114,7 +114,11 @@ def prepare(
         service,
         provider,
         EvolutionMaintenanceScope(
-            frozenset({("host", "run")}), eligible, frozenset(), eligible_session
+            frozenset({("host", "run")}),
+            eligible,
+            frozenset(),
+            eligible_session,
+            experience_sources=frozenset({("host", "run")}),
         ),
     )
 
@@ -144,7 +148,11 @@ def append_source(service: EvolutionService, run_id: str) -> EvolutionMaintenanc
         )
     )
     return EvolutionMaintenanceScope(
-        frozenset({("host", "run"), ("host", run_id)}), eligible, frozenset(), eligible_session
+        frozenset({("host", "run"), ("host", run_id)}),
+        eligible,
+        frozenset(),
+        eligible_session,
+        experience_sources=frozenset({("host", "run"), ("host", run_id)}),
     )
 
 
@@ -246,7 +254,11 @@ async def test_manual_edit_and_expired_eligibility_cannot_be_overwritten(tmp_pat
     with pytest.raises(asyncio.CancelledError):
         await service.maintain_cycle(
             scope=EvolutionMaintenanceScope(
-                scope.allowed_sources, expire, frozenset(), eligible_session
+                scope.allowed_sources,
+                expire,
+                frozenset(),
+                eligible_session,
+                experience_sources=scope.experience_sources,
             )
         )
     assert service.store.list_pending_sources()

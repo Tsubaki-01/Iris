@@ -50,7 +50,9 @@ async def test_cycle_returns_completed_dream_revision(tmp_path: Path) -> None:
     service = generation_service(tmp_path, provider)
     _flush(service.store, _episode(service.store))
     cycle = await service.maintain_cycle(
-        "project", scope=MemoryMaintenanceScope(frozenset(), _eligible), cycle_id="cycle"
+        "project",
+        scope=MemoryMaintenanceScope(frozenset(), _eligible, frozenset()),
+        cycle_id="cycle",
     )
     (result,) = cycle.results
     stored = next(
@@ -73,7 +75,9 @@ async def test_cycle_preserves_flush_remaining_work(tmp_path: Path) -> None:
     service = generation_service(tmp_path, provider, flush_input_budget_tokens=1400)
     service.observe(MemoryObserveInput(text="a" * 4000))
     cycle = await service.maintain_cycle(
-        "project", scope=MemoryMaintenanceScope(frozenset(), _eligible), cycle_id="partial"
+        "project",
+        scope=MemoryMaintenanceScope(frozenset(), _eligible, frozenset()),
+        cycle_id="partial",
     )
     (result,) = cycle.results
     assert result.stage == "flush" and result.has_more and cycle.has_more
@@ -89,7 +93,7 @@ async def test_cycle_dreams_existing_input_first_then_repairs_projection(
     service = MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"), prompt_source=PromptSource.initialize(tmp_path)
     )
-    scope = MemoryMaintenanceScope(frozenset(), _eligible)
+    scope = MemoryMaintenanceScope(frozenset(), _eligible, frozenset())
     state = replace(
         service.generation_state("project"),
         pending_episodes=1,
@@ -160,7 +164,7 @@ async def test_projection_only_failure_propagates_without_starting_learning(
     service = MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"), prompt_source=PromptSource.initialize(tmp_path)
     )
-    scope = MemoryMaintenanceScope(frozenset(), _eligible)
+    scope = MemoryMaintenanceScope(frozenset(), _eligible, frozenset())
     state = replace(service.generation_state("project"), item_revision=1, overview_revision=1)
     calls = []
 

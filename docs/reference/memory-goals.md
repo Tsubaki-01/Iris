@@ -204,7 +204,7 @@ register_memory_tools(
 
 上述分页结果提供 items 和 next_cursor。`MemoryHistoryCursor(created_at, id)` 按创建时间和
 原始 ID 升序定位；limit 为 1–100，由 MemoryStore 唯一校验，Service 直接委托。
-Memory SQLite 当前为 schema 6，旧 schema 在初始化时拒绝，不迁移或回填历史发布记录。
+Memory SQLite 当前为 schema 7，旧 schema 在初始化时拒绝，不迁移或回填历史发布记录。
 
 `MemoryPublicationRecord` 包含 publication_id、kind（projection/overview）、namespace、
 item_revision、projection_revision、generation_result_id、created_at、status、documents 和 error。
@@ -219,7 +219,7 @@ unconfirmed。只有完整发布完成才标 published。记录与文件不具�
 
 `MemoryOverviewGenerationResult` 包含 namespace/path、source_revision/current_revision/projection_revision、item_count、published/publication_reason、usage、elapsed_seconds。`published=false` 不等于数据库写入丢失，应查看 publication_reason。`MemoryOverviewDocument` 提供 namespace/path、source_revision、text、navigation、warning。
 
-高级宿主可用 `MemoryMaintenanceScope(allowed_sources, check)`，其中来源集合是 `(lifecycle_source_id, run_id)`，异步 `check(tuple[MemorySource, ...]) -> bool` 在消费前复查资格。常规集成应使用协调器，不必自行构造此范围。服务还提供 `add_change_listener(callback)`、`remove_change_listener(callback)`；回调在实际写入线程执行。
+高级宿主可用 `MemoryMaintenanceScope`，显式传入 `allowed_sources`、`episode_sources` 和 `check`。来源集合均由 `(lifecycle_source_id, run_id)` 组成：`episode_sources` 限定本次可 flush 的原文；`allowed_sources` 保留给 Observation、显式 change 与 dream 的资格判断。缩小原文范围不会把已有下游材料一起排除；无 Run 来源的显式 observe 输入保留原处理语义。异步 `check(tuple[MemorySource, ...]) -> bool` 在消费前复查实际来源资格。常规集成应使用协调器，不必自行构造此范围。服务还提供 `add_change_listener(callback)`、`remove_change_listener(callback)`；回调在实际写入线程执行。
 
 ### 文件格式
 
@@ -302,7 +302,9 @@ description 和目标名称不可为空白；targets 至少一个，必须在配
 
 `EvolutionResult` 字段：`stage` 为 experience/revision；`status` 为 updated/no_change/empty/failed/cancelled/conflict；还有 `reason`、`consumed_ranges`、`usage`、`has_more`、`effect`、`revision_id`、`publication_id`、`targets`。`effect` 描述后续采用时机，不是效果提升评分。
 
-`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 5，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
+`ProjectEvolutionBinding.service` 提供 `await alist_pending_sources()`、`await alist_pending_sessions()`、`await enqueue_revision(request)`、`await maintain_cycle(scope=...)` 和 `await wait_pending_io()` 等领域入口。普通宿主用协调器请求，以保留资格与项目锁边界。材料、请求、进度和发布档案统一保存在 root workspace 的 `.iris/evolution/evolution.db`，由 `EvolutionMaterialStore` 管理，不依赖 Memory 数据库。当前 SQLite schema 为 6，只接受新空库或当前版本，旧版 SQLite 在初始化时拒绝；不读取、迁移或删除旧 JSON 数据。应用应通过 SDK 查询，不直接改写内部表。
+
+高级宿主构造 `EvolutionMaintenanceScope` 时必须显式提供 `experience_sources`，用于 A 的原文选材和剩余材料判断。`allowed_sources`、`allowed_sessions` 继续用于 B 的请求资格，发布恢复也保持原有语义；不能为了限制新原文而缩小整个维护范围。两类领域存储分别持久保存原文准入与剩余有效内容事实，资格仍由宿主读取当前 lifecycle 状态决定，准入标记不会绕过前台或 WAITING 约束。
 
 来源的连续捕获位置、消费位置与已观察终点持久保存；看到终态但捕获区间有缺口时仍需补采，
 补齐才作为完整来源参与维护。过滤后的消息原文按来源和消息序号唯一保存，材料按合格来源和
