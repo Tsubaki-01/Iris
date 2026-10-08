@@ -16,8 +16,8 @@ def publication() -> PublicationRecord:
     """一份已准备好写入的完整档案。"""
     return PublicationRecord(
         publication_id="publication",
-        stage="revision",
-        origin="host_request",
+        stage="experience",
+        origin="experience",
         description="保留未完成事项",
         publication_state="unconfirmed",
         before_documents=(PublicationDocument(path="compaction.j2", text="旧正文"),),
@@ -49,7 +49,7 @@ def test_state_update_does_not_rewrite_publication_body(tmp_path: Path) -> None:
         update={
             "publication_state": "confirmed",
             "published_at": datetime.now(UTC),
-            "outcome": EvolutionResult(stage="revision", status="updated"),
+            "outcome": EvolutionResult(stage="experience", status="updated"),
         }
     )
     store.save_publication(confirmed)
@@ -117,22 +117,23 @@ def test_current_schema_is_created_and_reopened(tmp_path: Path) -> None:
     record = publication()
     store.save_publication(record)
     with sqlite3.connect(store.path) as database:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
     assert EvolutionMaterialStore(tmp_path).get_publication(record.publication_id) == record
 
 
-def test_old_schema_is_rejected_without_rewriting_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_schema_is_rejected_without_rewriting_it(tmp_path: Path, version: int) -> None:
     """旧持久契约明确拒绝，原表和版本都不被自动迁移。"""
     path = tmp_path / ".iris" / "evolution" / "evolution.db"
     path.parent.mkdir(parents=True)
     with sqlite3.connect(path) as database:
         database.execute("CREATE TABLE old_schema (value TEXT)")
         database.execute("INSERT INTO old_schema VALUES ('preserved')")
-        database.execute("PRAGMA user_version=1")
-    with pytest.raises(IrisEvolutionError, match="schema 2"):
+        database.execute(f"PRAGMA user_version={version}")
+    with pytest.raises(IrisEvolutionError, match="schema 3"):
         EvolutionMaterialStore(tmp_path)
     with sqlite3.connect(path) as database:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert database.execute("PRAGMA user_version").fetchone()[0] == version
         assert database.execute("SELECT value FROM old_schema").fetchone()[0] == "preserved"
         assert database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [
             ("old_schema",)
