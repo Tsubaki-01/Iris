@@ -1,0 +1,214 @@
+{
+  "groups": [
+    {
+      "text": "文档",
+      "items": [
+        {
+          "path": "index.md",
+          "text": "文档概览"
+        }
+      ]
+    },
+    {
+      "text": "开始使用",
+      "items": [
+        {
+          "path": "getting-started/quickstart.md",
+          "text": "运行第一个 Agent"
+        },
+        {
+          "path": "getting-started/concepts.md",
+          "text": "必要概念"
+        },
+        {
+          "path": "getting-started/python-sdk.md",
+          "text": "接入 Python 应用"
+        }
+      ]
+    },
+    {
+      "text": "理解设计",
+      "items": [
+        {
+          "path": "design/architecture.md",
+          "text": "架构总览"
+        },
+        {
+          "path": "design/lifecycle.md",
+          "text": "运行与持久化"
+        },
+        {
+          "path": "design/human-interaction.md",
+          "text": "人工交互"
+        },
+        {
+          "path": "design/context-engineering.md",
+          "text": "上下文工程"
+        },
+        {
+          "path": "design/tool-execution.md",
+          "text": "工具执行与发现"
+        },
+        {
+          "path": "design/delegation.md",
+          "text": "Skill 与委派"
+        },
+        {
+          "path": "design/memory.md",
+          "text": "长期记忆"
+        },
+        {
+          "path": "design/evolution.md",
+          "text": "经验与修订"
+        },
+        {
+          "path": "design/goals.md",
+          "text": "Goal 与 Todo"
+        },
+        {
+          "path": "design/messages-media.md",
+          "text": "消息与媒体"
+        },
+        {
+          "path": "design/streaming-observability.md",
+          "text": "流式与观测"
+        },
+        {
+          "path": "design/extensions.md",
+          "text": "扩展点"
+        },
+        {
+          "path": "project-tour.md",
+          "text": "项目导览"
+        }
+      ]
+    },
+    {
+      "text": "Cookbook",
+      "items": [
+        {
+          "path": "cookbook/configure-agent.md",
+          "text": "配置 Agent"
+        },
+        {
+          "path": "cookbook/tools.md",
+          "text": "编写工具"
+        },
+        {
+          "path": "cookbook/mcp.md",
+          "text": "MCP 与检索"
+        },
+        {
+          "path": "cookbook/commands.md",
+          "text": "命令与执行环境"
+        },
+        {
+          "path": "cookbook/skills-subagents.md",
+          "text": "Skill 与子 Agent"
+        },
+        {
+          "path": "cookbook/sessions.md",
+          "text": "管理会话"
+        },
+        {
+          "path": "cookbook/hitl-recovery.md",
+          "text": "人工交互与恢复"
+        },
+        {
+          "path": "cookbook/context.md",
+          "text": "提供上下文"
+        },
+        {
+          "path": "cookbook/memory.md",
+          "text": "启用长期记忆"
+        },
+        {
+          "path": "cookbook/evolution.md",
+          "text": "使用项目经验"
+        },
+        {
+          "path": "cookbook/goals-todos.md",
+          "text": "目标与清单"
+        },
+        {
+          "path": "cookbook/media.md",
+          "text": "图片与语音"
+        },
+        {
+          "path": "cookbook/streaming.md",
+          "text": "流式宿主"
+        },
+        {
+          "path": "cookbook/observability.md",
+          "text": "观测"
+        },
+        {
+          "path": "cookbook/extensions.md",
+          "text": "Hook 与 Middleware"
+        }
+      ]
+    },
+    {
+      "text": "Reference",
+      "items": [
+        {
+          "path": "reference/configuration.md",
+          "text": "配置参考"
+        },
+        {
+          "path": "reference/context.md",
+          "text": "Context 与模板"
+        },
+        {
+          "path": "reference/runtime.md",
+          "text": "运行与会话 SDK"
+        },
+        {
+          "path": "reference/tools.md",
+          "text": "工具与扩展"
+        },
+        {
+          "path": "reference/memory-goals.md",
+          "text": "记忆与长期能力"
+        },
+        {
+          "path": "reference/media.md",
+          "text": "消息与媒体"
+        },
+        {
+          "path": "reference/streaming-observability.md",
+          "text": "流式与观测"
+        },
+        {
+          "path": "reference/cli.md",
+          "text": "CLI"
+        }
+      ]
+    },
+    {
+      "text": "参与贡献",
+      "items": [
+        {
+          "path": "contributing/index.md",
+          "text": "开发入口"
+        },
+        {
+          "path": "contributing/source-map.md",
+          "text": "源码地图"
+        },
+        {
+          "path": "contributing/extending.md",
+          "text": "扩展与内核边界"
+        },
+        {
+          "path": "contributing/testing.md",
+          "text": "测试与实验"
+        },
+        {
+          "path": "contributing/docs.md",
+          "text": "维护文档"
+        }
+      ]
+    }
+  ]
+}

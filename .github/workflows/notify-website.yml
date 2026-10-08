@@ -1,0 +1,24 @@
+name: Notify Iris website
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.IRIS_WEB_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'Tsubaki-01',
+              repo: 'iris-web',
+              event_type: 'iris-release',
+              client_payload: { release_tag: context.payload.release.tag_name }
+            });

@@ -71,4 +71,4 @@ Iris 是面向 Python 开发者的本地优先 Agent Kit。你用 YAML 声明模
 
 从[开发入口](contributing/index.md)开始，按[源码地图](contributing/source-map.md)定位 owner。修改前查[扩展与内核边界](contributing/extending.md)，修改后使用[测试与实验指南](contributing/testing.md)选择验证范围，并同步[受影响的文档](contributing/docs.md)。
 
-本站内容以当前仓库实现为依据。Iris 提供运行内核和集成接口，不包含现成 Web 应用、模型部署或语音通话产品；网站展示可以复用这些 Markdown 源文件。
+文档内容对应其所在提交的 Iris 实现；在网站阅读时，以页面标注的发布版本为准。Iris 提供运行内核和集成接口，不包含现成 Web 应用、模型部署或语音通话产品；网站展示可以复用这些 Markdown 源文件。

@@ -8,11 +8,13 @@
 
 本文按源码安装，不假定公共包仓库中的同名包就是本项目。在终端执行：
 
+<!-- iris-web:install:start -->
 ```powershell
-git clone https://github.com/Tsubaki-01/Iris.git
+git clone --branch v0.1.0 https://github.com/Tsubaki-01/Iris.git
 cd Iris
 uv sync
 ```
+<!-- iris-web:install:end -->
 
 之后所有命令都在这个仓库根目录执行。`uv sync` 创建项目环境并安装锁定的依赖；使用 `uv run` 执行该环境里的 Iris。
 
@@ -34,19 +36,23 @@ export IRIS_PROVIDER_API_KEYS__DEEPSEEK="替换为你的 API key"
 
 在仓库根目录新建 `agent.yaml`：
 
+<!-- iris-web:minimal-agent:start -->
 ```yaml
 name: first-agent
 model: deepseek/deepseek-flash
 system: 你是一个中文助手。清楚说明依据，不编造项目文件内容。
 ```
+<!-- iris-web:minimal-agent:end -->
 
 三个字段分别声明 Agent 名称、模型路由和系统要求。`model` 的短写等价于分别指定 `provider` 与 `name`；默认协议是 `responses`。需要 Chat Completions 的服务应显式设置 `model.api_style: chat_completions`，见[配置自己的 Agent](../cookbook/configure-agent.md)。
 
 启动：
 
+<!-- iris-web:run:start -->
 ```powershell
 uv run iris chat agent.yaml
 ```
+<!-- iris-web:run:end -->
 
 输入：
 
