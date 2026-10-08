@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, cast
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -44,10 +43,9 @@ from .models import (
 _DETAIL_FIELDS = {
     "before_documents",
     "candidate_documents",
-    "materials",
     "proposed_issue",
 }
-_DERIVED_FIELDS = {"evidence_refs", "request"}
+_DERIVED_FIELDS = {"evidence_refs", "request", "materials"}
 
 
 class _Registration(BaseModel):
@@ -86,6 +84,65 @@ class _RevisionRouting(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     origin: Annotated[ExperienceOrigin | HostOrigin, Field(discriminator="kind")]
     targets: tuple[RevisionTarget, ...]
+
+
+class _StoredMessage(BaseModel):
+    """一次读取边界解析的完整消息序号和不可变正文。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    message_ordinal: int = Field(ge=0)
+    records: tuple[EvolutionRecord, ...]
+
+
+def _read_messages(
+    database: sqlite3.Connection, key: str, start: int, end: int
+) -> Iterator[_StoredMessage]:
+    for row in database.execute(
+        "SELECT message_ordinal,records_json FROM messages WHERE source_key=? "
+        "AND message_ordinal>=? AND message_ordinal<? ORDER BY message_ordinal",
+        (key, start, end),
+    ):
+        yield _StoredMessage.model_validate(
+            {"message_ordinal": row["message_ordinal"], "records": json.loads(row["records_json"])}
+        )
+
+
+def _publication_materials(
+    database: sqlite3.Connection, publication_id: str
+) -> tuple[EvolutionMaterial, ...]:
+    materials = []
+    sources: dict[str, EvolutionSource] = {}
+    for row in database.execute(
+        "SELECT source_key,start_count,end_count FROM publication_materials "
+        "WHERE publication_id=? ORDER BY position",
+        (publication_id,),
+    ):
+        key = row["source_key"]
+        if key not in sources:
+            sources[key] = EvolutionMaterialStore._read_source(database, key).source
+        bounds = EvolutionRange.model_validate(
+            {
+                "source": sources[key],
+                "start_message_count": row["start_count"],
+                "end_message_count": row["end_count"],
+            }
+        )
+        records = tuple(
+            record
+            for message in _read_messages(
+                database, key, bounds.start_message_count, bounds.end_message_count
+            )
+            for record in message.records
+        )
+        materials.append(
+            EvolutionMaterial.model_construct(
+                source=bounds.source,
+                start_message_count=bounds.start_message_count,
+                end_message_count=bounds.end_message_count,
+                records=records,
+            )
+        )
+    return tuple(materials)
 
 
 def _registration(row: sqlite3.Row) -> _Registration:
@@ -145,13 +202,14 @@ def _publication(database: sqlite3.Connection, row: sqlite3.Row) -> PublicationR
             raise IrisEvolutionError("发布档案引用的修订请求不存在", revision_id=record.revision_id)
         request = RevisionItem.model_validate_json(request_row[0])
         return record.model_copy(update={"request": request, "evidence_refs": request.evidence})
+    materials = _publication_materials(database, record.publication_id)
     evidence = tuple(
         RevisionEvidence.model_construct(ref=entry.ref, quote=entry.text)
-        for material in record.materials
+        for material in materials
         for entry in material.records
         if entry.text.strip()
     )
-    return record.model_copy(update={"evidence_refs": evidence})
+    return record.model_copy(update={"materials": materials, "evidence_refs": evidence})
 
 
 class EvolutionMaterialStore:
@@ -192,6 +250,19 @@ class EvolutionMaterialStore:
                 (
                     record.publication_id,
                     encode(record.model_dump(mode="json", include=_DETAIL_FIELDS)),
+                ),
+            )
+            database.executemany(
+                "INSERT INTO publication_materials VALUES (?,?,?,?,?)",
+                (
+                    (
+                        record.publication_id,
+                        position,
+                        _key(material.source),
+                        material.start_message_count,
+                        material.end_message_count,
+                    )
+                    for position, material in enumerate(record.materials)
                 ),
             )
 
@@ -298,32 +369,38 @@ class EvolutionMaterialStore:
             )
 
     def commit_capture(self, block: EvolutionCaptureBlock) -> EvolutionSourceState:
-        """正文和收据同事务发布，允许跨进程重叠捕获。"""
+        """按稳定消息身份保存单份正文，并在同事务推进连续捕获水位。"""
         with connection(self.path, write=True) as database:
             key = _key(block.source)
             current = self._read_source(database, key)
-            database.execute(
-                "INSERT INTO captures VALUES (?,?,?,?,?,?)",
+            grouped: dict[int, list[EvolutionRecord]] = {}
+            for record in block.records:
+                grouped.setdefault(record.message_ordinal, []).append(record)
+            database.executemany(
+                "INSERT OR IGNORE INTO messages VALUES (?,?,?)",
                 (
-                    uuid4().hex,
-                    key,
-                    block.start_message_count,
-                    block.end_message_count,
-                    encode(block.model_copy(update={"records": ()}).model_dump(mode="json")),
-                    encode(block.model_dump(mode="json"))
-                    if block.end_message_count > current.consumed_until
-                    else None,
+                    (
+                        key,
+                        ordinal,
+                        encode(
+                            [record.model_dump(mode="json") for record in grouped.get(ordinal, ())]
+                        ),
+                    )
+                    for ordinal in range(
+                        max(block.start_message_count, current.consumed_until),
+                        block.end_message_count,
+                    )
                 ),
             )
             position = current.captured_until
             for row in database.execute(
-                "SELECT start_count,end_count FROM captures WHERE source_key=? AND end_count>? "
-                "ORDER BY start_count,end_count",
+                "SELECT message_ordinal FROM messages WHERE source_key=? AND message_ordinal>=? "
+                "ORDER BY message_ordinal",
                 (key, position),
             ):
-                if row["start_count"] > position:
+                if row["message_ordinal"] != position:
                     break
-                position = max(position, row["end_count"])
+                position += 1
             terminal = current.observed_terminal
             outcome = current.observed_outcome
             if block.terminal_message_count is not None:
@@ -566,31 +643,14 @@ class EvolutionMaterialStore:
                     cast(int, state.terminal_message_count),
                     state.consumed_until + limit - len(items),
                 )
-                messages: dict[int, tuple[EvolutionRecord, ...]] = {}
-                for capture in database.execute(
-                    "SELECT body_json FROM captures WHERE source_key=? AND end_count>? "
-                    "AND start_count<? ORDER BY id",
-                    (key, state.consumed_until, through),
-                ):
+                for message in _read_messages(database, key, state.consumed_until, through):
                     check_generation_cancelled()
-                    block = EvolutionCaptureBlock.model_validate_json(capture[0])
-                    grouped: dict[int, list[EvolutionRecord]] = {}
-                    for record in block.records:
-                        grouped.setdefault(record.message_ordinal, []).append(record)
-                    for ordinal in range(
-                        max(state.consumed_until, block.start_message_count),
-                        min(through, block.end_message_count),
-                    ):
-                        messages.setdefault(ordinal, tuple(grouped.get(ordinal, ())))
-                    if len(messages) == through - state.consumed_until:
-                        break
-                for ordinal in sorted(messages):
                     items.append(
                         EvolutionMaterial.model_construct(
                             source=state.source,
-                            start_message_count=ordinal,
-                            end_message_count=ordinal + 1,
-                            records=messages[ordinal],
+                            start_message_count=message.message_ordinal,
+                            end_message_count=message.message_ordinal + 1,
+                            records=message.records,
                         )
                     )
                 if through < cast(int, state.terminal_message_count):
@@ -625,10 +685,12 @@ class EvolutionMaterialStore:
         ):
             return
         consumed: dict[str, int] = {}
+        starts: dict[str, int] = {}
         for item in selected:
             key = _key(item.source)
             if key not in consumed:
                 consumed[key] = self._read_source(database, key).consumed_until
+                starts[key] = consumed[key]
             if item.start_message_count != consumed[key]:
                 raise IrisEvolutionError(
                     "项目材料消费范围不连续",
@@ -646,7 +708,7 @@ class EvolutionMaterialStore:
         if step.publication_id is not None:
             database.execute("INSERT INTO consumed_publications VALUES (?)", (step.publication_id,))
         self._record_step(database, step)
-        self._clean_consumed_bodies(database, consumed)
+        self._collect_messages(database, ((key, starts[key], end) for key, end in consumed.items()))
 
     def settle_publication(self, record: PublicationRecord) -> EvolutionResult:
         """把已确认发布的材料或请求结算与档案收尾原子提交，不重放文件写入。"""
@@ -684,11 +746,17 @@ class EvolutionMaterialStore:
         return result
 
     @staticmethod
-    def _clean_consumed_bodies(database: sqlite3.Connection, consumed: dict[str, int]) -> None:
+    def _collect_messages(
+        database: sqlite3.Connection, ranges: Iterable[tuple[str, int, int]]
+    ) -> None:
+        """只回收本次触达范围内已经消费且不再被完整档案引用的消息。"""
         database.executemany(
-            "UPDATE captures SET body_json=NULL WHERE source_key=? AND end_count<=? "
-            "AND body_json IS NOT NULL",
-            consumed.items(),
+            "DELETE FROM messages AS m WHERE source_key=? AND message_ordinal>=? "
+            "AND message_ordinal<? AND message_ordinal < "
+            "(SELECT consumed_until FROM sources WHERE source_key=m.source_key) "
+            "AND NOT EXISTS (SELECT 1 FROM publication_materials p WHERE p.source_key=m.source_key "
+            "AND p.start_count<=m.message_ordinal AND p.end_count>m.message_ordinal)",
+            ranges,
         )
 
     def record_step(self, step: EvolutionResult) -> None:

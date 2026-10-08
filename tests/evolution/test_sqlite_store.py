@@ -117,11 +117,11 @@ def test_current_schema_is_created_and_reopened(tmp_path: Path) -> None:
     record = publication()
     store.save_publication(record)
     with sqlite3.connect(store.path) as database:
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 4
     assert EvolutionMaterialStore(tmp_path).get_publication(record.publication_id) == record
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_old_schema_is_rejected_without_rewriting_it(tmp_path: Path, version: int) -> None:
     """旧持久契约明确拒绝，原表和版本都不被自动迁移。"""
     path = tmp_path / ".iris" / "evolution" / "evolution.db"
@@ -130,7 +130,7 @@ def test_old_schema_is_rejected_without_rewriting_it(tmp_path: Path, version: in
         database.execute("CREATE TABLE old_schema (value TEXT)")
         database.execute("INSERT INTO old_schema VALUES ('preserved')")
         database.execute(f"PRAGMA user_version={version}")
-    with pytest.raises(IrisEvolutionError, match="schema 3"):
+    with pytest.raises(IrisEvolutionError, match="schema 4"):
         EvolutionMaterialStore(tmp_path)
     with sqlite3.connect(path) as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == version

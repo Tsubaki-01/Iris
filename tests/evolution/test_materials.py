@@ -86,10 +86,11 @@ def _issue(source: EvolutionSource, *, item_id: str = "issue") -> RevisionItem:
 
 
 def body_count(store: EvolutionMaterialStore) -> int:
-    """读取仍待消费的材料正文数量。"""
+    """读取仍待消费的唯一消息数量，不计历史档案保留的正文。"""
     with sqlite3.connect(store.path) as database:
         return database.execute(
-            "SELECT count(*) FROM captures WHERE body_json IS NOT NULL"
+            "SELECT count(*) FROM messages m JOIN sources s ON s.source_key=m.source_key "
+            "WHERE m.message_ordinal >= s.consumed_until"
         ).fetchone()[0]
 
 
@@ -266,7 +267,7 @@ store.commit_capture(block)
     store = EvolutionMaterialStore(tmp_path)
     pending = store.read_pending(allowed_sources=frozenset({("lifecycle", "run")}))
     assert [item.start_message_count for item in pending.items] == [2, 3, 4, 5]
-    assert body_count(store) == 2
+    assert body_count(store) == 4
     assert store.register_source(source, 2).captured_until == 6
 
 
@@ -279,11 +280,7 @@ def test_consume_rolls_back_progress_issue_and_cleanup(tmp_path: Path, failure: 
     allowed = frozenset({("lifecycle", "run")})
     selected = store.read_pending(allowed_sources=allowed).items
     issue = _issue(source)
-    event = (
-        "BEFORE INSERT ON progress"
-        if failure == "progress"
-        else "BEFORE UPDATE OF body_json ON captures"
-    )
+    event = "BEFORE INSERT ON progress" if failure == "progress" else "BEFORE DELETE ON messages"
     with sqlite3.connect(store.path) as database:
         database.execute(
             f"CREATE TRIGGER fail_consume {event} "
@@ -295,7 +292,7 @@ def test_consume_rolls_back_progress_issue_and_cleanup(tmp_path: Path, failure: 
     assert restarted.register_source(source, 2).consumed_until == 2
     assert restarted.read_pending(allowed_sources=allowed).items == selected
     assert restarted.get_revision_request(issue.id) is None
-    assert body_count(restarted) == 1
+    assert body_count(restarted) == 2
 
 
 def test_failed_capture_does_not_advance_source(tmp_path: Path) -> None:
@@ -304,7 +301,7 @@ def test_failed_capture_does_not_advance_source(tmp_path: Path) -> None:
     store.register_source(source, 2)
     with sqlite3.connect(store.path) as database:
         database.execute(
-            "CREATE TRIGGER fail_capture AFTER INSERT ON captures "
+            "CREATE TRIGGER fail_capture AFTER INSERT ON messages "
             "BEGIN SELECT RAISE(ABORT, 'capture interrupted'); END"
         )
     with pytest.raises(IrisEvolutionError, match="capture interrupted"):
