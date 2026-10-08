@@ -67,10 +67,8 @@ class GenerationWorker:
     async def wait_idle(self) -> None:
         """等待真实同步作业完成，调用方在此之前保留维护锁。"""
         while self._pending:
-            await asyncio.gather(
-                *(asyncio.shield(future) for future in tuple(self._pending)),
-                return_exceptions=True,
-            )
+            # wait 让完成回调先回收集合，且等待方取消不会取消实际作业。
+            await asyncio.wait(tuple(self._pending))
 
     async def aclose(self) -> None:
         """等待实际作业退出后释放线程，不占用默认线程池执行 shutdown。"""

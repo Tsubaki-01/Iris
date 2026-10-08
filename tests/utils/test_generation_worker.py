@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,6 +13,40 @@ import pytest
 
 from iris.memory import MemoryIOExecutionMode, MemoryService, SQLiteMemoryStore
 from iris.utils.generation_worker import GenerationWorker
+
+
+def test_wait_idle_drains_completed_future_before_its_callback_runs() -> None:
+    """已完成作业的回收回调仍在队列时，排空不能占住事件循环。"""
+    # 单独进程让旧实现的忙循环按超时失败，而不是卡住整个 pytest 事件循环。
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import asyncio
+from iris.utils.generation_worker import GenerationWorker
+
+async def main() -> None:
+    idle = []
+    worker = GenerationWorker(on_idle=lambda: idle.append(True))
+    future = asyncio.get_running_loop().create_future()
+    worker._pending.add(future)
+    future.add_done_callback(worker._finished)
+    future.set_result(42)
+    await worker.wait_idle()
+    assert not worker.busy
+    assert idle == [True]
+    await worker.aclose()
+
+asyncio.run(main())
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.asyncio
@@ -98,4 +134,35 @@ async def test_inline_store_keeps_calling_thread_in_background_scope(tmp_path: P
         with worker.bind():
             assert await service.run_async_io(threading.get_ident) == threading.get_ident()
     finally:
+        await worker.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_idle_wait_keeps_tracking_real_work() -> None:
+    """取消排空等待不会取消或遗失线程中尚未返回的作业。"""
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    worker = GenerationWorker(on_idle=lambda: None)
+
+    def operation() -> int:
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5)
+        return 42
+
+    running = asyncio.create_task(worker.run(operation))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        draining = asyncio.create_task(worker.wait_idle())
+        await asyncio.sleep(0)
+        draining.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+        assert worker.busy and not running.done()
+        release.set()
+        assert await running == 42
+        await worker.wait_idle()
+        assert not worker.busy
+    finally:
+        release.set()
         await worker.aclose()

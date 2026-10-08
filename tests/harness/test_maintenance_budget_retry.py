@@ -170,7 +170,9 @@ async def test_changed_budget_retries_after_lifecycle_only_waiting_recovery(
         await peer.cancel(waiting.run.run_id)
         assert reopened.store.read_learning_readiness("project") == before
         async with asyncio.timeout(3):
-            while reopened.generation_state("project").blocked_observations:
+            while (
+                state := reopened.generation_state("project")
+            ).blocked_observations or state.pending_observations:
                 await asyncio.sleep(0.01)
         assert len(provider.requests) == 1
         assert reopened.generation_state("project").pending_observations == 0
