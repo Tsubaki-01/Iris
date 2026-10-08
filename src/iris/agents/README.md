@@ -70,6 +70,7 @@ evolution:
   output_budget_tokens: 8000
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 `evolution.enabled` 要求 `skills.enabled=true`，默认只维护
@@ -163,7 +164,7 @@ model: openai/gpt-4o-mini
 - `prompts`: `PromptConfig`，项目命名提示的唯一目录入口，默认 `root: .iris/prompts`。
 - `context_policy`: 默认构造的 `ContextPolicyConfig`，控制当前会话回读、动态快照选材、历史正文减载和可选的按需工具披露。
 - `memory`: 复用 `iris.memory.MemoryConfig`，默认 `enabled: false`，不接入长期记忆服务。
-- `maintenance`: 宿主共享维护的 `idle_seconds`，默认 300 秒，允许 0；不属于 Memory 生成预算。
+- `maintenance`: 宿主共享的 `idle_seconds` 默认 300 秒、允许 0；`min_pending_runs` 默认 10、须为正整数。新自动原文批次同时满足两项门槛，不属于 Memory 生成预算。
 - `goal`: 复用 `iris.goal.GoalConfig`，默认关闭，控制跨 Run 目标能力与默认自动轮数。
 - `todo`: 复用 `iris.todo.TodoConfig`，默认关闭，启用会话 Markdown 清单的 SDK 读取与每步动态投影；要求 `context_policy.enabled=true`，不自动注册文件工具。见 [Todo 说明](../todo/README.md)。
 - `speech`: 复用 `iris.speech.SpeechConfig`，默认关闭；启用时声明 adapter、endpoint 和语音 model。宿主通过 `create_speech_client(config.speech)` 装配转录客户端，Runner 不自动录音或连接。豆包与阿里完整 YAML、专属凭据和最终文字提交见 [语音 SDK](../speech/README.md)。
@@ -376,6 +377,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 ```yaml
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 memory:
   enabled: true
   generation:
@@ -383,11 +385,15 @@ memory:
 ```
 
 `maintenance.idle_seconds` 是唯一的空闲计时入口，`memory.generation` 不接受计时字段。
+新自动原文批次还需达到 `maintenance.min_pending_runs` 个合格新 Run；默认 10，设为 1 可更及时
+整理。两个条件必须同时满足，不足数量可长期等待，不会因超时放行；手动整理可跳过自动门槛。
 CLI 自动创建并绑定宿主协调器；SDK 宿主须在首次 prepare/run 前显式绑定
 `MaintenanceCoordinator` 和 `MemoryMaintenanceBinding`，多个 runner 借用同一协调器。
 见 [harness](../harness/README.md) 的装配与关闭示例。
 
 自动维护只消费已结束且捕获完整的 Run，WAITING 仅排除该会话的未处理材料。
+Memory 按数据库/namespace、Evolution 按 workspace 分别计数；一个 Run 多页材料只计一次，
+纯空材料不计数但可无模型收尾。已准入余料及旧 Observation、修订请求等下游工作不重新凑数。
 纯内存 lifecycle 重启丢失来源状态后保留 pending；跨重启自动继续维护需使用 SQLite lifecycle。
 
 ### `ModelConfig`

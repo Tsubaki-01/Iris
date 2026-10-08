@@ -244,6 +244,7 @@ class MaintenanceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     idle_seconds: float = Field(default=300, ge=0, allow_inf_nan=False)
+    min_pending_runs: int = Field(default=10, gt=0)
 
 
 class AgentConfig(BaseModel):

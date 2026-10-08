@@ -89,7 +89,7 @@ def _runner(
     runtime.environment.memory_service = service
     runner = AgentRunner(runtime=runtime, store=store or InMemoryLifecycleStore())
     runner.bind_maintenance(
-        MaintenanceCoordinator(idle_seconds=idle_seconds),
+        MaintenanceCoordinator(idle_seconds=idle_seconds, min_pending_runs=1),
         memory=MemoryMaintenanceBinding(
             service=service, database_path=tmp_path / "memory.db", namespace="project"
         ),

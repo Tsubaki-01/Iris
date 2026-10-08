@@ -77,7 +77,7 @@ def test_chat_owns_maintenance_and_drains_before_loop_exit(
     config_path.write_text(
         "name: chat\nmodel: openai/test\nsystem: help\n"
         "observability:\n  enabled: true\n"
-        "maintenance:\n  idle_seconds: 0\n" + feature_config,
+        "maintenance:\n  idle_seconds: 0\n  min_pending_runs: 1\n" + feature_config,
         encoding="utf-8",
     )
     provider = ChatMaintenanceProvider()
@@ -144,6 +144,43 @@ def test_chat_owns_maintenance_and_drains_before_loop_exit(
     assert len(models) == 2
     if feature == "evolution":
         assert not (tmp_path / ".iris" / "memory").exists()
+
+
+@pytest.mark.parametrize("minimum,expected", [(None, 10), (1, 1)])
+def test_chat_passes_run_threshold_to_real_maintenance_coordinator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimum: int | None, expected: int
+) -> None:
+    """CLI 将默认或显式 YAML 门槛传给实际绑定并关闭的协调器。"""
+    config_path = tmp_path / "agent.yaml"
+    maintenance_config = "" if minimum is None else f"maintenance:\n  min_pending_runs: {minimum}\n"
+    config_path.write_text(
+        "name: chat\nmodel: openai/test\nsystem: help\n"
+        "memory:\n  enabled: true\n  generation:\n    enabled: true\n" + maintenance_config,
+        encoding="utf-8",
+    )
+    captured: list[chat.MaintenanceCoordinator] = []
+    original_loop = chat.run_chat_loop
+
+    def run_loop(*, maintenance: chat.MaintenanceCoordinator, **kwargs: object) -> int:
+        captured.append(maintenance)
+        return original_loop(maintenance=maintenance, **kwargs)
+
+    monkeypatch.setattr(chat, "run_chat_loop", run_loop)
+    monkeypatch.setattr(chat, "is_config_initialized", lambda: True)
+    monkeypatch.setattr(chat, "create_provider_client", lambda *args, **kwargs: StaticProvider())
+    errors: list[str] = []
+    assert (
+        chat.run_chat(
+            chat.ChatOptions(config_path=config_path),
+            input_func=lambda prompt: "/exit",
+            output_func=lambda text: None,
+            error_func=errors.append,
+        )
+        == 0
+    )
+    assert errors == []
+    assert len(captured) == 1
+    assert captured[0].min_pending_runs == expected
 
 
 def test_chat_preparation_failure_reports_error_after_cleanup(

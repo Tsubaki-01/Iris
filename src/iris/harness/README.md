@@ -645,9 +645,12 @@ BCI、原始用户输入和最新 steer 保持既有保护；压缩提交后的�
 宿主显式创建一个 [`MaintenanceCoordinator`](maintenance.py)，多个 root runner 通过
 `bind_maintenance()` 借用它。`from_config*` 不创建私人维护循环；启用功能却没有绑定时，
 首次准备或运行会报告配置错误。协调器的 `idle_seconds` 来自宿主选定的
-`config.maintenance.idle_seconds`，默认 300 秒。
+`config.maintenance.idle_seconds`，默认 300 秒；`min_pending_runs` 来自同一配置，默认 10。
+新自动原文批次必须同时满足空闲与合格新 Run 数，Memory 按实际数据库/namespace、Evolution
+按 workspace 分别累计；多页捕获只算一个 Run。获准余料及重启后的剩余部分继续处理，新 Run
+独立累计下一批。仅等待时间变长不会放开数量要求，可手动整理或将门槛配置为 1。
 `snapshot()` 同步读取不可变的资源状态；`request_memory_cycle(binding)` 合并同资源请求，
-跳过普通 idle 并返回一轮实际阶段结果与 has_more，仍遵守前台、资格、资源锁及 worker 排空。
+跳过自动空闲和数量门槛并返回一轮实际阶段结果与 has_more，仍遵守前台、资格、资源锁及 worker 排空。
 可注入 `live_publisher` 观察 resource scope 的 `maintenance.changed` 和来源采用事实。
 未启用 Memory 的 runner 也可调用 `runner.bind_maintenance(coordinator)`，只贡献前台状态，
 使同宿主其他 runner 的维护及时让位；不会创建 Memory 资源或捕获材料。
@@ -679,7 +682,10 @@ async def run_sessions(
         config.memory, workspace, prompt_source=prompt_source,
         overview_provider=provider, overview_model=config.model.name,
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=config.maintenance.idle_seconds,
+        min_pending_runs=config.maintenance.min_pending_runs,
+    )
     binding = MemoryMaintenanceBinding(
         service=memory,
         database_path=resolve_memory_path(config.memory.path, workspace),
@@ -715,6 +721,16 @@ BCI、system/reasoning 和记忆读回正文不成为新证据；Search/Fetch �
 每次消费提交前重读生命周期资格；缺少 reader 时保留 pending。SQLite lifecycle 支持重启续作，
 纯内存 lifecycle 丢失后不自动猜测旧材料资格。
 
+门槛只计算尚未准入、有有效剩余原文的独立 Run。失败/取消终态有材料可以计入，纯空或全过滤
+来源不计且可无模型收尾；旧 Observation、显式 change、source-less observe、投影/overview、
+Evolution B 与发布恢复不等待新的十个 Run。Memory 的 episode_sources、Evolution 的
+experience_sources 只限制原文；完整 allowed_sources 仍用于下游资格。
+
+数量不足且没有其它合格任务时显示 waiting_for_materials，资源快照的 pending_new_runs 和
+min_pending_runs 可显示例如 7/10。它们是最后异步判定的投影，snapshot 不读库；此时
+next_eligible_at=None。等待期间复用现有单 timer 读取短就绪状态并重查 lifecycle，发现其他
+进程提交或 WAITING 变化；不创建新调度服务、不把不足数量变成反复执行的空维护周期。
+
 一个宿主最多同时运行一项 Memory 和一项项目学习维护，取消状态、worker 与锁互相独立。
 是否已发出取消直接使用对应 asyncio Task 的状态，不额外保存镜像标志。
 Memory 使用实际 DB 路径和 namespace 确定原生 OS 锁；锁内重读、
@@ -734,7 +750,7 @@ prompt_source=prompt_source, provider=provider)` 构造，然后通过
 `runner.bind_maintenance(coordinator, evolution=project_binding)` 让多个 runner 借用同一资源。
 也可同时传入 `memory=binding`。仅主配置决定维护策略，贡献材料的 runner 不争夺配置所有权。
 项目锁按 workspace 标识，与 Memory 锁不嵌套；Memory 关闭不会阻止项目经验维护。
-`await coordinator.request_project_experience(project_binding)` 可请求一次整理并跳过一般空闲等待，
+`await coordinator.request_project_experience(project_binding)` 可请求一次整理并跳过自动时间和数量门槛，
 仍遵守前台、来源资格和资源锁；没有合格材料时返回 empty，不调用模型。
 关闭借用它的 runner 后，可用 `await coordinator.unbind_evolution(project_binding)` 单独撤销。
 完整启用、产物采用和材料边界见 [evolution](../evolution/README.md)。
@@ -744,10 +760,13 @@ prompt_source=prompt_source, provider=provider)` 构造，然后通过
 有限 `RevisionTarget(kind="prompt"或"config", name=...)`，以及可选的
 `EvolutionSession(lifecycle_source_id=runner.store.source_id, session_id=...)`。
 有会话归属的请求同样受该 session 的 WAITING 状态约束；无 Run 请求不伪造任务经历。
+`request_revision()` 也跳过自动时间与数量门槛，仍保留前台和项目锁约束。
+本轮执行 B 或发布恢复时不顺带准入新原文；只有进入 A 时才应用该原文批次的准入条件。
 显式 A 仍返回 A 结果，显式 B 等待自己的请求 ID；B 失败或取消保留 pending，后续活动再处理。
 自动 A 保存问题并释放项目锁后，B 在下一轮重新取得锁、重读当前目标。Config 发布不重建 runner。
 
-前台 admission/activation 全部退出并安静达到 idle 后才维护。新前台立即撤销未提交生成，
+自动维护在前台 admission/activation 全部退出并安静达到 idle 后进行，新原文批次还检查数量。
+新前台立即撤销未提交生成，
 不等待模型或资源锁；Goal/follow-up 的短交接保留同一前台计数。
 THREAD 服务使用专用 worker，INLINE 保持调用线程执行；已派发同步工作真实退出前保留锁和任务位置。
 模型失败等待外部新活动或重启，自身维护写入不构成新活动；no-change 正常推进消费位置。

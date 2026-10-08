@@ -22,13 +22,21 @@ evolution:
   enabled: true
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 ```powershell
 uv run iris chat agent.yaml
 ```
 
-完成一些有具体反馈的工作后，保持宿主空闲。维护会读取合格 Run 的已提交材料，用一次独立模型请求决定是否更新 `.agents/skills/project-experience/SKILL.md`。没有新材料时结果为 `empty`；有材料但没有值得改动的经验时可以是 `no_change`。不是每次聊天都会新增一条经验。
+完成一些有具体反馈的工作后，保持宿主空闲。自动开始新一批经验整理默认要求同时空闲
+300 秒、积累十个已终态且完整捕获有效原文的合格新 Run；同一 Run 多页材料只计一次。
+每轮按预算读取获准材料，用一次独立模型请求决定是否更新 `.agents/skills/project-experience/SKILL.md`。
+没有新材料时结果为 `empty`；有材料但没有值得改动的经验时可以是 `no_change`。
+
+获准余料分轮继续，重启后不重新凑数，新到的 Run 另行累计。修订请求与发布恢复不等待十个
+新 Run；空/全过滤来源可无模型收尾。不足数量可能长期等待，不会因超时自动放行；可以把
+min_pending_runs 设为 1，或使用下文的手动整理入口。十个 Run 不等于固定 token 量或费用。
 
 首次生成的 Skill 由新 runner 在构造时发现；已经发现这个 Skill 的 runner 在下一次 `load_skill` 时读取新正文。已有消息中的旧正文保持原样。查看文件、确认 catalog 出现名称、确认模型实际调用加载工具，是三种不同的观察结果。
 
@@ -106,7 +114,10 @@ async def main() -> None:
         memory_service=memory,
         prompt_source=prompts,
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=config.maintenance.idle_seconds,
+        min_pending_runs=config.maintenance.min_pending_runs,
+    )
     memory_binding = (
         MemoryMaintenanceBinding(
             service=memory,
@@ -146,7 +157,14 @@ uv run python run_evolution.py
 
 这个例子会把明确的修订请求交给模型，可能修改主 `agent.yaml` 的 `system` 字段；运行后检查打印的 `status`、`effect` 和文件实际差异。模型也可以选择 `no_change`，因此不能承诺固定改写内容。YAML 发布会重新序列化文件，原注释和排版不会保留。
 
-`request_project_experience()` 跳过普通空闲计时，仍等待前台退出、合格来源和项目锁；它整理经验，不代替显式修订请求。`request_revision()` 等待本次持久请求自己的结果，不会误把另一次维护完成当成本次完成。
+`request_project_experience()` 跳过自动空闲和 Run 数量门槛，仍等待前台退出、合格来源和项目锁；
+它只整理经验，不代替显式修订请求。`request_revision()` 同样跳过自动门槛，但等待本次持久请求
+自己的结果，不会误把另一次维护完成当成本次完成。有关联 session 时仍遵守其 WAITING 状态。
+本轮执行修订或恢复时，不会顺带将等待中的原文准入；新原文仍按经验整理自己的条件处理。
+
+自动等待期间，`coordinator.snapshot()` 的资源视图可显示 waiting_for_materials 和
+pending_new_runs/min_pending_runs，例如 7/10。数量未满足时 next_eligible_at 为 None；这些字段
+来自最近一次异步检查，读取 snapshot 不会同步查询数据库。
 
 ## 查看发布历史
 

@@ -185,6 +185,7 @@ memory:
     enabled: true
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 `generation.enabled` 默认 false。配置构造的服务复用 Agent 已解析的 provider/model，
@@ -196,7 +197,12 @@ overview provider/model 和 mirror 均已绑定，否则构造 runner 时报告 
 默认 300 秒，允许 0；旧 `memory.generation.idle_seconds` 已删除。完整接线见
 [harness README](../harness/README.md)。未绑定的自动维护 runner 在首次运行时报配置错误。
 
-admission 成功后登记来源，真实压缩与运行边界只捕获原文。自动学习仅选已结束且完整捕获的
+新一批自动原文 flush 同时要求空闲时间和 `maintenance.min_pending_runs` 个合格新 Run，
+默认门槛为 10。按实际数据库/namespace 分别累计，多页 Episode 只计一个 Run；有效原文已消费、
+纯空或全过滤来源不凑数。获准来源持久准入，余料分轮及重启后继续，新到 Run 另批累计。
+不足数量不会因为等待时间长而放行，可手动请求一轮或设 min_pending_runs=1。
+
+Run admission 成功后登记来源，真实压缩与运行边界及时捕获原文，不等待学习数量门槛。自动学习仅选已结束且完整捕获的
 Run；当前 WAITING 的会话连同其旧材料暂不维护，其他会话正常推进。工具写入通过已有
 完整调用身份与捕获记录关联，缺来源字段或未关联的变更保持 pending；
 没有 Run 的显式 SDK 内容保持原语义。
@@ -211,11 +217,21 @@ Run；当前 WAITING 的会话连同其旧材料暂不维护，其他会话正�
 同一 Run 的多个 Episode 合成一个候选；无 Run 的输入由 has_unsourced 表示。快照还含
 item_revision、projection_revision 和 pending Observation/change 的 has_pending_derived 提示，
 该提示不替代实际来源资格检查。服务对应提供 `await aread_learning_readiness(namespace)`。
+`has_retryable_derived(namespace, *, budget, allowed_sources=None)` 额外查询预算已变化的受阻下游：
+不传来源范围时只读短状态，传入范围后沿用实际来源资格筛选。服务的
+`await ahas_retryable_derived(namespace, *, allowed_sources=None)` 使用当前 dream 预算。
+两者只查询，实际重新开放仍由维护周期内的 `retry_blocked` 完成。
 `admit_learning_sources(namespace, allowed_sources=..., threshold=...)` 在写事务中重读候选，
 达到 threshold 个合格、完整、有有效剩余原文的新 Run 时，才将当时全部候选持久准入；
 服务异步入口是 `aadmit_learning_sources`。捕获或消费不会清除准入标记，重开后保留。
 剩余有效正文随字符游标更新；全空或仅含不可作为证据的记录可在不估算模型预算、不调用模型的
 路径中推进，仍遵守原资格和 CAS。数量门槛由宿主调用准入接口决定，这些查询本身不启动维护。
+
+Observation、显式 change、投影/overview 修复与无 Run 的显式 observe 不需要十个新 Run；
+全空来源无需准入就可无模型收尾。手动 `request_memory_cycle()` 跳过自动时间和数量门槛，
+仍检查前台、来源资格和锁；独立 SDK flush/dream/refresh_overview 保留显式调用语义。
+仅数量不足时资源可显示 waiting_for_materials，snapshot 的 pending_new_runs/min_pending_runs
+来自上次异步判定，不在同步读取时查库，next_eligible_at 保持未知。
 
 协调器在安静期后持对应数据库/namespace 的跨进程 OS 锁，调用
 `maintain_cycle(namespace, scope=..., cycle_id=...)`：已有观察或变更优先 dream，否则 flush 后 dream，

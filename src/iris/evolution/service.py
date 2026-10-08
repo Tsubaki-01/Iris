@@ -220,6 +220,20 @@ class EvolutionService:
         """异步读取原文就绪短状态，不触发准入或生成。"""
         return await self.run_async_io(self.store.read_learning_readiness)
 
+    async def ahas_pending_recovery(self) -> bool:
+        """同时保留原 owner 的进程内收据与数据库未收尾事实。"""
+        return await self.run_async_io(self._publications.has_pending)
+
+    async def ahas_pending_revisions(self, *, scope: EvolutionMaintenanceScope) -> bool:
+        """按当前目标和宿主资格查询 B 候选，不读取请求证据。"""
+        return await self.run_async_io(
+            lambda: self.store.has_pending_revisions(
+                allowed_sources=scope.allowed_sources,
+                allowed_sessions=scope.allowed_sessions,
+                allowed_targets=self._allowed_targets,
+            )
+        )
+
     async def aadmit_learning_sources(
         self, *, allowed_sources: frozenset[tuple[str, str]], threshold: int
     ) -> EvolutionLearningReadiness:

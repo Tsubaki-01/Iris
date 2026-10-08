@@ -23,6 +23,7 @@ from iris.evolution.config import EvolutionConfig
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import (
     EvolutionCaptureBlock,
+    EvolutionLearningReadiness,
     EvolutionMaintenanceScope,
     EvolutionResult,
     EvolutionSession,
@@ -67,6 +68,24 @@ class ControlledEvolution:
         """无真实来源；本组只验证协调器独立调度与取消。"""
         return ()
 
+    async def aread_learning_readiness(self) -> EvolutionLearningReadiness:
+        """此替身没有待学习 Run，本轮可执行的是独立维护工作。"""
+        return EvolutionLearningReadiness(())
+
+    async def aadmit_learning_sources(
+        self, *, allowed_sources: frozenset[tuple[str, str]], threshold: int
+    ) -> EvolutionLearningReadiness:
+        """显式请求没有原文需要准入。"""
+        return EvolutionLearningReadiness(())
+
+    async def ahas_pending_recovery(self) -> bool:
+        """首次自动调度有一项既有工作，完成后不凭空再产生。"""
+        return self.calls == 0
+
+    async def ahas_pending_revisions(self, *, scope: EvolutionMaintenanceScope) -> bool:
+        """独立调度替身不创建 B 请求。"""
+        return False
+
     async def alist_pending_sessions(self) -> tuple[EvolutionSession, ...]:
         """调度测试没有宿主会话请求。"""
         return ()
@@ -110,7 +129,9 @@ async def test_evolution_worker_resets_ended_trace_but_keeps_business_context(
 
     evolution = ObservedEvolution()
     evolution.release.set()
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     coordinator._attach(
         None,
         InMemoryLifecycleStore(),
@@ -201,7 +222,9 @@ async def test_memory_and_evolution_run_concurrently_and_cancel_independently(
             return await super().maintain_cycle(scope=scope)
 
     evolution = ObservedEvolution()
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     binding = ProjectEvolutionBinding(
         workspace_root=tmp_path, service=cast(EvolutionService, evolution)
     )
@@ -260,7 +283,7 @@ async def test_foreground_cancels_both_lanes_without_waiting(tmp_path: Path) -> 
     memory = memory_service(tmp_path / "memory.db", Provider())
     memory.observe(MemoryObserveInput(text="pending memory"))
     evolution = ControlledEvolution()
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     coordinator._attach(
         MemoryMaintenanceBinding(
             service=memory, database_path=tmp_path / "memory.db", namespace="project"
@@ -550,14 +573,17 @@ async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close
     """已派发短IO不被关闭中断；任务位置和项目锁持有到真实收尾。"""
     entered, release = threading.Event(), threading.Event()
     service = project_service(tmp_path)
-    original = service.store.list_pending_sources
+    original = service.store.read_learning_readiness
+    drained_at: list[int] = []
 
-    def blocked_sources() -> tuple[EvolutionSource, ...]:
+    def blocked_sources() -> EvolutionLearningReadiness:
         entered.set()
         assert release.wait(5)
-        return original()
+        result = original()
+        drained_at.append(time_ns())
+        return result
 
-    monkeypatch.setattr(service.store, "list_pending_sources", blocked_sources)
+    monkeypatch.setattr(service.store, "read_learning_readiness", blocked_sources)
     observation, exporter = observability
     coordinator = MaintenanceCoordinator(idle_seconds=300, observability=observation)
     released_at: list[int] = []
@@ -593,11 +619,11 @@ async def test_project_worker_drain_keeps_lock_and_explicit_waiter_ends_on_close
             await requested
         with lock:
             assert not coordinator._evolution_worker.busy
-        cycle = next(
-            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        assert len(released_at) == len(drained_at) == 1
+        assert released_at[0] >= drained_at[0]
+        assert not any(
+            span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans()
         )
-        assert len(released_at) == 1 and cycle.end_time >= released_at[0]
-        assert cycle.attributes["iris.driver.outcome"] == "cancelled"
     finally:
         release.set()
         if closing is not None:

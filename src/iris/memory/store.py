@@ -225,6 +225,15 @@ class MemoryStore(Protocol):
     def record_generation_result(self, result: GenerationResult) -> None:
         """保存独立阶段状态及已发生用量。"""
 
+    def has_retryable_derived(
+        self,
+        namespace: str,
+        *,
+        budget: int,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> bool:
+        """查询预算变化后可重试的下游输入；无范围时只读短状态。"""
+
     def generation_state(
         self,
         namespace: str,

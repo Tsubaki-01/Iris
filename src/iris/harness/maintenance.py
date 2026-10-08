@@ -19,6 +19,7 @@ from uuid import uuid4
 from filelock import FileLock, Timeout
 
 from ..evolution.models import (
+    EvolutionLearningSource,
     EvolutionMaintenanceScope,
     EvolutionResult,
     EvolutionSession,
@@ -29,7 +30,12 @@ from ..evolution.service import EvolutionService
 from ..exceptions import IrisConfigError, IrisEvolutionError, IrisRunStateError
 from ..lifecycle import LifecycleStore, RunPhase
 from ..memory import MemoryService
-from ..memory.generation_models import MemoryCycleResult, MemoryMaintenanceScope, MemorySource
+from ..memory.generation_models import (
+    MemoryCycleResult,
+    MemoryLearningSource,
+    MemoryMaintenanceScope,
+    MemorySource,
+)
 from ..observability.facts import bind_fact_scope
 from ..observability.service import Observability
 from ..utils.generation_worker import GenerationWorker, generation_worker
@@ -80,6 +86,10 @@ class _MemoryResource:
     cycle_id: str | None = None
     lock_waiting: bool = False
     last_result_ref: str | None = None
+    waiting_for_materials: bool = False
+    probe_only: bool = False
+    pending_new_runs: int = 0
+    checked_item_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +116,9 @@ class _EvolutionResource:
     cycle_id: str | None = None
     lock_waiting: bool = False
     last_result_ref: str | None = None
+    waiting_for_materials: bool = False
+    probe_only: bool = False
+    pending_new_runs: int = 0
     revision_requests: dict[str, _RevisionWaiter] = field(default_factory=dict)
 
 
@@ -116,6 +129,7 @@ class MaintenanceCoordinator:
         self,
         *,
         idle_seconds: float = 300,
+        min_pending_runs: int = 10,
         observability: Observability | None = None,
         live_publisher: LivePublisher | None = None,
     ) -> None:
@@ -123,6 +137,7 @@ class MaintenanceCoordinator:
         if not 0 <= idle_seconds < math.inf:
             raise IrisConfigError("maintenance.idle_seconds 必须为有限非负数")
         self.idle_seconds = idle_seconds
+        self.min_pending_runs = min_pending_runs
         self.observability = observability if observability is not None else Observability()
         self.live_publisher = live_publisher
         self._snapshot = MaintenanceSnapshot(f"coordinator_{uuid4().hex}", 0, 0)
@@ -165,16 +180,23 @@ class MaintenanceCoordinator:
         state: MaintenanceState
         if self._closed:
             state = "closing"
-        elif active:
-            state = "running" if resource.cycle_id is not None else "waiting_for_lock"
+        elif active and resource.cycle_id is not None:
+            state = "running"
         elif self._foreground and (resource.dirty or pending is not None):
             state = "waiting_for_foreground"
         elif resource.lock_waiting:
             state = "waiting_for_lock"
+        elif resource.waiting_for_materials:
+            state = "waiting_for_materials"
         else:
             state = "waiting_for_idle" if resource.dirty else "idle"
         eligible = None
-        if resource.dirty and not self._foreground and self._clock_origin is not None:
+        if (
+            resource.dirty
+            and not resource.probe_only
+            and not self._foreground
+            and self._clock_origin is not None
+        ):
             eligible = self._clock_origin + timedelta(
                 seconds=max(resource.ready_at, 0 if pending is not None else self._quiet_until)
             )
@@ -185,6 +207,8 @@ class MaintenanceCoordinator:
             resource.cycle_id,
             eligible,
             resource.last_result_ref,
+            resource.pending_new_runs,
+            self.min_pending_runs,
         )
 
     def _refresh_snapshot(self) -> None:
@@ -386,6 +410,10 @@ class MaintenanceCoordinator:
     def _wake(self, resource: _MemoryResource | _EvolutionResource) -> None:
         """合并原文、服务变化和新 reader 到一个待检查位置。"""
         resource.dirty = True
+        if resource.probe_only:
+            resource.ready_at = 0
+        resource.waiting_for_materials = False
+        resource.probe_only = False
         resource.revision += 1
         self._schedule()
 
@@ -582,6 +610,151 @@ class MaintenanceCoordinator:
             finally:
                 observation.attributes(span, {"iris.driver.outcome": outcome})
 
+    def _learning_scope(
+        self, sources: tuple[MemoryLearningSource | EvolutionLearningSource, ...]
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]], int]:
+        """每次探测重查 lifecycle，返回合格来源、已准入/全空范围与新 Run 数。"""
+        eligible: set[tuple[str, str]] = set()
+        admitted: set[tuple[str, str]] = set()
+        pending = 0
+        for item in sources:
+            source = item.source
+            if not item.complete or not self._source_eligible(
+                source.lifecycle_source_id, source.run_id, source.session_id
+            ):
+                continue
+            key = (source.lifecycle_source_id, source.run_id)
+            eligible.add(key)
+            if item.admitted or not item.has_content:
+                admitted.add(key)
+            else:
+                pending += 1
+        return frozenset(eligible), frozenset(admitted), pending
+
+    def _wait_for_learning(
+        self, resource: _MemoryResource | _EvolutionResource, *, has_backlog: bool
+    ) -> None:
+        """复用原 timer 探测积压；探测期限不是下一次执行承诺。"""
+        resource.dirty = has_backlog
+        resource.probe_only = has_backlog
+        resource.waiting_for_materials = (
+            has_backlog and 0 < resource.pending_new_runs < self.min_pending_runs
+        )
+        resource.ready_at = self._loop.time() + max(self.idle_seconds, 1)
+
+    async def _prepare_memory_scope(
+        self, resource: _MemoryResource
+    ) -> MemoryMaintenanceScope | None:
+        """短原文探测不走 SOURCE_CTE；只有其他候选或版本变化才准备下游资格。"""
+        service = resource.binding.service
+        namespace = resource.binding.namespace
+        manual = resource.request is not None
+        readiness = await service.aread_learning_readiness(namespace)
+        allowed, episodes, count = self._learning_scope(readiness.sources)
+        if manual or count >= self.min_pending_runs:
+            readiness = await service.aadmit_learning_sources(
+                namespace,
+                allowed_sources=allowed,
+                threshold=1 if manual else self.min_pending_runs,
+            )
+            allowed, episodes, count = self._learning_scope(readiness.sources)
+        resource.pending_new_runs = count
+        retryable = await service.ahas_retryable_derived(namespace)
+        check_derived = (
+            manual
+            or readiness.has_pending_derived
+            or retryable
+            or resource.checked_item_revision != readiness.item_revision
+            or (
+                service.mirror is not None
+                and readiness.projection_revision != readiness.item_revision
+            )
+        )
+        sources: tuple[MemorySource, ...] = ()
+        if check_derived:
+            sources = await service.alist_pending_sources(namespace)
+            allowed = allowed | frozenset(
+                (source.lifecycle_source_id, source.run_id)
+                for source in sources
+                if self._source_eligible(
+                    source.lifecycle_source_id, source.run_id, source.session_id
+                )
+            )
+        scope = MemoryMaintenanceScope(
+            allowed_sources=allowed,
+            episode_sources=episodes,
+            check=partial(self._eligible, resource),
+        )
+        runnable = manual or bool(episodes) or readiness.has_unsourced
+        if retryable:
+            runnable = runnable or await service.ahas_retryable_derived(
+                namespace, allowed_sources=scope.allowed_sources
+            )
+        if check_derived:
+            state = await service.ageneration_state(namespace, scope=scope)
+            resource.checked_item_revision = state.item_revision
+            runnable = runnable or bool(
+                state.pending_observations
+                or state.pending_changes
+                or (
+                    service.mirror is not None
+                    and (
+                        state.projection_revision != state.item_revision
+                        or (state.item_revision and state.overview_revision != state.item_revision)
+                    )
+                )
+            )
+        if runnable:
+            resource.waiting_for_materials = False
+            resource.probe_only = False
+            return scope
+        self._wait_for_learning(
+            resource,
+            has_backlog=bool(readiness.sources)
+            or readiness.has_pending_derived
+            or retryable
+            or bool(sources),
+        )
+        return None
+
+    async def _after_memory_cycle(
+        self, resource: _MemoryResource, result: MemoryCycleResult, revision: int
+    ) -> None:
+        """只用短状态发现周期期间新增的原文，不把未准入积压变成空周期。"""
+        failed = any(item.status in {"failed", "cancelled", "conflict"} for item in result.results)
+        if failed:
+            resource.checked_item_revision = None
+            resource.waiting_for_materials = False
+            resource.probe_only = False
+            resource.dirty = resource.revision != revision
+            resource.ready_at = self._loop.time() + self.idle_seconds
+            return
+        service = resource.binding.service
+        readiness = await service.aread_learning_readiness(resource.binding.namespace)
+        _, episodes, count = self._learning_scope(readiness.sources)
+        resource.pending_new_runs = count
+        resource.checked_item_revision = None if result.has_more else readiness.item_revision
+        runnable = bool(
+            result.has_more
+            or episodes
+            or readiness.has_unsourced
+            or readiness.has_pending_derived
+            or count >= self.min_pending_runs
+            or resource.revision != revision
+            or (
+                service.mirror is not None
+                and readiness.projection_revision != readiness.item_revision
+            )
+        )
+        if runnable:
+            resource.dirty = True
+            resource.waiting_for_materials = False
+            resource.probe_only = False
+            resource.ready_at = self._loop.time() + self.idle_seconds
+        else:
+            retryable = await service.ahas_retryable_derived(resource.binding.namespace)
+            self._wait_for_learning(resource, has_backlog=bool(readiness.sources) or retryable)
+
     async def _run_cycle(self, resource: _MemoryResource) -> MemoryCycleResult | None:
         """有界周期持有 OS 锁，取消后直到真实 worker 排空才释放。"""
         lock = FileLock(resource.lock_path, timeout=0)
@@ -593,42 +766,36 @@ class MaintenanceCoordinator:
             resource.ready_at = self._loop.time() + max(self.idle_seconds, 1)
             return None
         resource.lock_waiting = False
-        resource.cycle_id = f"maintenance_cycle_{uuid4().hex}"
-        self._refresh_snapshot()
-        with self._observe_cycle(resource):
-            revision = resource.revision
-            try:
-                with self._worker.bind():
-                    service = resource.binding.service
-                    sources = await service.alist_pending_sources(resource.binding.namespace)
-                    allowed_sources = frozenset(
-                        (source.lifecycle_source_id, source.run_id)
-                        for source in sources
-                        if self._source_eligible(
-                            source.lifecycle_source_id, source.run_id, source.session_id
+        observed = False
+        revision = resource.revision
+        try:
+            with self.observability.detached(), self._worker.bind():
+                scope = await self._prepare_memory_scope(resource)
+                if scope is None:
+                    return None
+                resource.cycle_id = f"maintenance_cycle_{uuid4().hex}"
+                self._refresh_snapshot()
+                observed = True
+                with self._observe_cycle(resource):
+                    try:
+                        result = await resource.binding.service.maintain_cycle(
+                            resource.binding.namespace,
+                            scope=scope,
+                            cycle_id=resource.cycle_id,
                         )
-                    )
-                    scope = MemoryMaintenanceScope(
-                        allowed_sources=allowed_sources,
-                        episode_sources=allowed_sources,
-                        check=partial(self._eligible, resource),
-                    )
-                    result = await service.maintain_cycle(
-                        resource.binding.namespace, scope=scope, cycle_id=resource.cycle_id
-                    )
-                    failed = any(
-                        item.status in {"failed", "cancelled", "conflict"}
-                        for item in result.results
-                    )
-                    resource.dirty = (
-                        result.has_more and not failed
-                    ) or resource.revision != revision
-                    resource.ready_at = self._loop.time() + self.idle_seconds
-                    return result
-            except (Exception, asyncio.CancelledError):
-                resource.dirty = resource.revision != revision
-                raise
-            finally:
+                        await self._after_memory_cycle(resource, result, revision)
+                        return result
+                    finally:
+                        await self._worker.wait_idle()
+                        lock.release()
+        except (Exception, asyncio.CancelledError):
+            resource.checked_item_revision = None
+            resource.waiting_for_materials = False
+            resource.probe_only = False
+            resource.dirty = resource.revision != revision
+            raise
+        finally:
+            if not observed:
                 await self._worker.wait_idle()
                 lock.release()
 
@@ -650,6 +817,11 @@ class MaintenanceCoordinator:
                 resource.request.set_result(result)
                 resource.request = None
                 resource.request_id = None
+        if resource.request is not None:
+            resource.dirty = True
+            resource.waiting_for_materials = False
+            resource.probe_only = False
+            resource.ready_at = 0
         self._schedule()
 
     @staticmethod
@@ -658,6 +830,105 @@ class MaintenanceCoordinator:
             resource.request.set_exception(error)
             resource.request = None
             resource.request_id = None
+
+    async def _prepare_project_scope(
+        self, project: _EvolutionResource
+    ) -> EvolutionMaintenanceScope | None:
+        """恢复与 B 先决定本轮工作；只有进入 A 时才进行新原文准入。"""
+        service = project.binding.service
+        for item_id in tuple(project.revision_requests):
+            settled = await service.run_async_io(partial(service.store.revision_result, item_id))
+            if settled is not None:
+                project.revision_requests.pop(item_id).future.set_result(settled)
+        readiness = await service.aread_learning_readiness()
+        raw_allowed, experiences, count = self._learning_scope(readiness.sources)
+        project.pending_new_runs = count
+        sources = await service.alist_pending_sources()
+        sessions = await service.alist_pending_sessions()
+        allowed = raw_allowed | frozenset(
+            (source.lifecycle_source_id, source.run_id)
+            for source in sources
+            if self._source_eligible(source.lifecycle_source_id, source.run_id, source.session_id)
+        )
+        requested_id = next(
+            (
+                identity
+                for identity, waiter in project.revision_requests.items()
+                if self._session_eligible(waiter.session)
+            ),
+            None,
+        )
+        manual = project.request is not None or requested_id is not None
+        if not manual and self._loop.time() < self._quiet_until:
+            # 不合格 waiter 只豁免资格探测，不能替自动 A/B 豁免空闲条件。
+            project.dirty = True
+            project.ready_at = self._quiet_until
+            return None
+        scope = EvolutionMaintenanceScope(
+            allowed_sources=allowed,
+            experience_sources=experiences,
+            check=partial(self._eligible, project),
+            allowed_sessions=frozenset(
+                (session.lifecycle_source_id, session.session_id)
+                for session in sessions
+                if self._session_eligible(session)
+            ),
+            check_session=partial(self._eligible_session, project),
+            experience_only=project.request is not None,
+            requested_revision_id=requested_id,
+        )
+        recovery = await service.ahas_pending_recovery()
+        revision = not scope.experience_only and await service.ahas_pending_revisions(scope=scope)
+        if not recovery and not revision and (manual or count >= self.min_pending_runs):
+            readiness = await service.aadmit_learning_sources(
+                allowed_sources=raw_allowed, threshold=1 if manual else self.min_pending_runs
+            )
+            _, experiences, count = self._learning_scope(readiness.sources)
+            project.pending_new_runs = count
+            scope = replace(scope, experience_sources=experiences)
+        if recovery or revision or experiences or project.request is not None:
+            project.waiting_for_materials = False
+            project.probe_only = False
+            return scope
+        self._wait_for_learning(
+            project,
+            has_backlog=bool(readiness.sources or sources or sessions or project.revision_requests),
+        )
+        return None
+
+    async def _after_project_cycle(
+        self, project: _EvolutionResource, result: EvolutionResult, revision: int
+    ) -> None:
+        """周期末保留原文与待资格恢复的请求，失败不被周期探测重复执行。"""
+        if result.status in {"failed", "cancelled", "conflict"}:
+            project.waiting_for_materials = False
+            project.probe_only = False
+            project.dirty = project.revision != revision
+            project.ready_at = self._loop.time() + self.idle_seconds
+            return
+        readiness = await project.binding.service.aread_learning_readiness()
+        _, experiences, count = self._learning_scope(readiness.sources)
+        project.pending_new_runs = count
+        if (
+            result.has_more
+            or experiences
+            or count >= self.min_pending_runs
+            or project.revision != revision
+        ):
+            project.dirty = True
+            project.waiting_for_materials = False
+            project.probe_only = False
+            project.ready_at = (
+                0
+                if project.request is not None or project.revision_requests
+                else self._loop.time() + self.idle_seconds
+            )
+        else:
+            sources = await project.binding.service.alist_pending_sources()
+            sessions = await project.binding.service.alist_pending_sessions()
+            self._wait_for_learning(
+                project, has_backlog=bool(readiness.sources or sources or sessions)
+            )
 
     async def _run_project_cycle(self, project: _EvolutionResource) -> EvolutionResult | None:
         """一个有界 A 或 B 持项目锁；真实短 IO 排空前不释放该类位置。"""
@@ -670,60 +941,31 @@ class MaintenanceCoordinator:
             project.ready_at = self._loop.time() + max(self.idle_seconds, 1)
             return None
         project.lock_waiting = False
-        project.cycle_id = f"maintenance_cycle_{uuid4().hex}"
-        self._refresh_snapshot()
-        with self._observe_cycle(project):
-            revision = project.revision
-            try:
-                with self._evolution_worker.bind():
-                    service = project.binding.service
-                    for item_id in tuple(project.revision_requests):
-                        settled = await service.run_async_io(
-                            partial(service.store.revision_result, item_id)
-                        )
-                        if settled is not None:
-                            project.revision_requests.pop(item_id).future.set_result(settled)
-                    sources = await service.alist_pending_sources()
-                    sessions = await service.alist_pending_sessions()
-                    allowed_sources = frozenset(
-                        (source.lifecycle_source_id, source.run_id)
-                        for source in sources
-                        if self._source_eligible(
-                            source.lifecycle_source_id, source.run_id, source.session_id
-                        )
-                    )
-                    scope = EvolutionMaintenanceScope(
-                        allowed_sources=allowed_sources,
-                        experience_sources=allowed_sources,
-                        check=partial(self._eligible, project),
-                        allowed_sessions=frozenset(
-                            (session.lifecycle_source_id, session.session_id)
-                            for session in sessions
-                            if self._session_eligible(session)
-                        ),
-                        check_session=partial(self._eligible_session, project),
-                        experience_only=project.request is not None,
-                        requested_revision_id=next(
-                            (
-                                item_id
-                                for item_id, waiter in project.revision_requests.items()
-                                if self._session_eligible(waiter.session)
-                            ),
-                            None,
-                        ),
-                    )
-                    result = await service.maintain_cycle(scope=scope)
-                    project.dirty = result.has_more or project.revision != revision
-                    project.ready_at = (
-                        0
-                        if project.request is not None or project.revision_requests
-                        else self._loop.time() + self.idle_seconds
-                    )
-                    return result
-            except BaseException:
-                project.dirty = project.revision != revision
-                raise
-            finally:
+        observed = False
+        revision = project.revision
+        try:
+            with self.observability.detached(), self._evolution_worker.bind():
+                scope = await self._prepare_project_scope(project)
+                if scope is None:
+                    return None
+                project.cycle_id = f"maintenance_cycle_{uuid4().hex}"
+                self._refresh_snapshot()
+                observed = True
+                with self._observe_cycle(project):
+                    try:
+                        result = await project.binding.service.maintain_cycle(scope=scope)
+                        await self._after_project_cycle(project, result, revision)
+                        return result
+                    finally:
+                        await self._evolution_worker.wait_idle()
+                        lock.release()
+        except BaseException:
+            project.waiting_for_materials = False
+            project.probe_only = False
+            project.dirty = project.revision != revision
+            raise
+        finally:
+            if not observed:
                 await self._evolution_worker.wait_idle()
                 lock.release()
 
@@ -752,12 +994,13 @@ class MaintenanceCoordinator:
                 self._fail_request(project, blocked)
                 self._fail_revisions(project, blocked)
                 project.dirty = False
-            elif project.request is not None or any(
-                self._session_eligible(waiter.session)
-                for waiter in project.revision_requests.values()
-            ):
-                project.dirty = True
-                project.ready_at = 0
+        if project.request is not None or any(
+            self._session_eligible(waiter.session) for waiter in project.revision_requests.values()
+        ):
+            project.dirty = True
+            project.waiting_for_materials = False
+            project.probe_only = False
+            project.ready_at = 0
         self._schedule()
 
     @staticmethod

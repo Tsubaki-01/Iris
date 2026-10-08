@@ -117,7 +117,9 @@ async def test_revision_during_memory_cycle_is_adopted_by_the_next_cycle(
         provider=revision_provider,
         observability=observation,
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     coordinator._attach(
         MemoryMaintenanceBinding(
             service=memory, database_path=tmp_path / "memory.db", namespace="project"

@@ -11,6 +11,7 @@ from iris.evolution.config import EvolutionConfig
 from iris.evolution.history import PublicationDocument, PublicationRecord
 from iris.evolution.materials import EvolutionMaterialStore
 from iris.evolution.models import (
+    EvolutionLearningReadiness,
     EvolutionResult,
     EvolutionSession,
     RevisionItem,
@@ -20,14 +21,14 @@ from iris.evolution.models import (
 from iris.evolution.revision import PromptTarget
 from iris.evolution.service import EvolutionService
 from iris.exceptions import IrisEvolutionError, IrisRunStateError
-from iris.harness import MaintenanceCoordinator, ProjectEvolutionBinding
+from iris.harness import AgentRunner, MaintenanceCoordinator, ProjectEvolutionBinding
 from iris.lifecycle import AgentRunRequest
 from iris.message import LLMRequest, LLMResponse, ToolUseBlock
 from iris.prompts import PromptSource
 from iris.store import InMemoryLifecycleStore
-from iris.tools import ToolCapability
+from iris.tools import ToolCapability, ToolRegistry
 
-from .fakes import StaticProvider, text_response, tool_response
+from .fakes import StaticProvider, build_runtime, text_response, tool_response
 from .test_evolution_maintenance import project_runner
 
 
@@ -235,12 +236,147 @@ async def test_ineligible_host_session_does_not_block_unrelated_request(
         assert not waiting_task.done()
         await asyncio.sleep(0.05)
         assert len(provider.requests) == 1
-        assert coordinator._evolution_task is None and coordinator._timer is None
+        assert coordinator._evolution_task is None and coordinator._timer is not None
+        assert coordinator._timer.when() > asyncio.get_running_loop().time()
     finally:
         await runner.aclose()
         await coordinator.aclose()
     with pytest.raises(IrisRunStateError, match="关闭"):
         await waiting_task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("automatic_stage", ["experience", "revision"])
+async def test_ineligible_manual_revision_does_not_skip_automatic_idle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, automatic_stage: str
+) -> None:
+    """WAITING 的手动 B 只可触发资格检查，不能替其他自动 A/B 豁免 idle。"""
+    provider = StaticProvider(
+        text_response(
+            '{"body":null,"reason":"保持"}'
+            if automatic_stage == "experience"
+            else '{"action":"no_change","reason":"保持"}'
+        )
+    )
+    service = revision_service(tmp_path, provider)
+    runner = project_runner(
+        tmp_path,
+        StaticProvider(
+            *[text_response() for _ in range(10)],
+            tool_response(ToolUseBlock(id="write", name="write")),
+        ),
+    )
+    runner.runtime.environment.tool_bridge.tool_executor.registry.register_function(
+        lambda: "written", name="write", description="写", capabilities={ToolCapability.WRITE}
+    )
+    coordinator = MaintenanceCoordinator(idle_seconds=3600)
+    binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
+    runner.bind_maintenance(coordinator, evolution=binding)
+    pending: asyncio.Task | None = None
+    try:
+        for index in range(10):
+            await runner.start(AgentRunRequest(input=f"经历 {index}", session_id=f"run-{index}"))
+        waiting = await runner.start(AgentRunRequest(input="等待许可", session_id="waiting"))
+        assert waiting.pending_interaction is not None
+        if automatic_stage == "revision":
+            await service.enqueue_revision(request("独立自动 B"))
+        probed = asyncio.Event()
+        read = service.aread_learning_readiness
+
+        async def observed_read() -> EvolutionLearningReadiness:
+            readiness = await read()
+            probed.set()
+            return readiness
+
+        monkeypatch.setattr(service, "aread_learning_readiness", observed_read)
+        pending = asyncio.create_task(
+            coordinator.request_revision(
+                binding,
+                request(
+                    "WAITING 手动 B",
+                    EvolutionSession(
+                        lifecycle_source_id=runner.store.source_id, session_id="waiting"
+                    ),
+                ),
+            )
+        )
+        await asyncio.wait_for(probed.wait(), 2)
+        async with asyncio.timeout(2):
+            while coordinator._evolution_task is not None:
+                await asyncio.sleep(0)
+        assert provider.requests == []
+        assert all(
+            not source.admitted for source in service.store.read_learning_readiness().sources
+        )
+        assert not pending.done()
+        coordinator._quiet_until = asyncio.get_running_loop().time()
+        project = next(iter(coordinator._projects.values()))
+        project.ready_at = 0
+        coordinator._schedule()
+        async with asyncio.timeout(2):
+            while not provider.requests:
+                await asyncio.sleep(0.01)
+        assert not pending.done()
+    finally:
+        await runner.aclose()
+        await coordinator.aclose()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_persistent_blocked_revision_keeps_probe_after_other_revision_finishes(
+    tmp_path: Path,
+) -> None:
+    """无原文和本地 waiter 时，剩余 B 仍能在 lifecycle 单独恢复后被发现。"""
+    provider = StaticProvider(
+        text_response('{"action":"no_change","reason":"独立请求完成"}'),
+        text_response('{"action":"no_change","reason":"等待请求完成"}'),
+    )
+    service = revision_service(tmp_path, provider)
+    registry = ToolRegistry()
+    registry.register_function(
+        lambda: "written", name="write", description="写", capabilities={ToolCapability.WRITE}
+    )
+    runner = AgentRunner(
+        runtime=build_runtime(
+            tmp_path,
+            provider=StaticProvider(tool_response(ToolUseBlock(id="write", name="write"))),
+            registry=registry,
+        ),
+        store=InMemoryLifecycleStore(),
+    )
+    waiting = await runner.start(AgentRunRequest(input="等待许可", session_id="waiting"))
+    assert waiting.pending_interaction is not None
+    blocked = await service.enqueue_revision(
+        request(
+            "暂不合格的持久请求",
+            EvolutionSession(lifecycle_source_id=runner.store.source_id, session_id="waiting"),
+        )
+    )
+    ready = await service.enqueue_revision(request("合格的独立请求"))
+    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    binding = ProjectEvolutionBinding(workspace_root=tmp_path, service=service)
+    coordinator._attach(None, runner.store, evolution=binding)
+    try:
+        await coordinator.prepare()
+        async with asyncio.timeout(2):
+            while service.store.revision_result(ready.id) is None or coordinator._evolution_task:
+                await asyncio.sleep(0.01)
+        assert service.store.read_learning_readiness().sources == ()
+        assert service.store.revision_result(blocked.id) is None
+        assert len(provider.requests) == 1
+        assert coordinator._timer is not None
+        assert coordinator.snapshot().resources[0].next_eligible_at is None
+        # runner 未绑定 coordinator；终态变化只可由保留的短探测发现。
+        await runner.cancel(waiting.run.run_id)
+        async with asyncio.timeout(2):
+            while service.store.revision_result(blocked.id) is None:
+                await asyncio.sleep(0.01)
+        assert len(provider.requests) == 2
+    finally:
+        await coordinator.aclose()
+        await runner.aclose()
 
 
 @pytest.mark.asyncio

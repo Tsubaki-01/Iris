@@ -57,6 +57,10 @@ class PublicationJournal:
                 )
             )
 
+    def has_pending(self) -> bool:
+        """原收据存在时仍需收尾，短查询不读取受保护的完整档案。"""
+        return bool(self._receipts) or self.store.has_unsettled_publications()
+
     def resume(self) -> EvolutionResult | None:
         """先结算真实收据；重启后的未确认候选只展示观察结果，不推断过去成功。"""
         if self._receipts:

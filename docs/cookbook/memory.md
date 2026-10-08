@@ -24,6 +24,7 @@ memory:
     enabled: true
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 tools:
   builtin:
     - memory.remember
@@ -44,7 +45,13 @@ uv run iris chat agent.yaml
 
 `memory_search` 和 `memory_fetch` 在 `memory.enabled: true` 时自动注册，不要把 `memory.search`、`memory.fetch` 写入 `tools.builtin`。三个写工具需要上面的显式声明。自动整理也可以关闭，此时仍能用读写工具及 SDK 管理记忆。
 
-CLI 会装配维护协调器。自动维护只在宿主空闲、来源 Run 已终态且相应会话没有等待中的人工交互时消费材料。退出 CLI 后不会留一个脱离宿主的定时服务。默认空闲时间是五分钟，不应期待刚结束回答就已经完成整理。
+CLI 会装配维护协调器。自动开始一批原文学习，默认同时要求宿主持续空闲五分钟，以及当前
+数据库/namespace 积累十个合格新 Run：已终态、完整捕获、有有效原文且会话没有等待中的人工交互。
+一个 Run 捕获多页只计一次；捕获落盘仍及时进行。退出 CLI 后不会留一个脱离宿主的定时服务。
+
+获准的一批按预算分轮处理，重启后余料也不用重新凑十个，新 Run 则另行累计。旧 Observation、
+显式记忆变更和投影/概览修复不用等待十个新 Run。不足数量时可以一直等待，时间再久也不会
+自动放行；希望更及时自动整理时，把 min_pending_runs 设为 1，或由 SDK 宿主显式请求整理。
 
 在同一会话里马上追问约定，回答也可能只是来自聊天历史。要体验跨会话记忆，应先确认概览已经发布，再用新的 `--session-id` 启动会话并询问概览覆盖的约定。数据库条目、概览文件和模型实际读取是不同的观察位置，下节分别说明。
 
@@ -115,6 +122,10 @@ SDK 写入会得到稳定 `item.id`，后续修改复用这个 ID。重复执行
 ## 在 Python 宿主中维护
 
 如果 SDK 配置开启 `memory.generation.enabled`，需要显式构建共享 `MemoryService`，并在运行前用 `runner.bind_maintenance()` 绑定 `MaintenanceCoordinator`。仅调用 `AgentRunner.from_config_path()` 不会替宿主建立后台维护调度。完整装配和关闭顺序见[经验与维护配方](evolution.md#python-宿主的完整装配)。
+
+宿主调用 `await coordinator.request_memory_cycle(binding)` 可提前执行一轮，跳过自动的时间和
+数量门槛，仍等待前台退出并遵守来源、WAITING 和锁约束。`snapshot()` 中 waiting_for_materials
+配合 pending_new_runs/min_pending_runs 可显示例如 7/10；它是最近一次判定的投影，不会同步读库。
 
 只想手动运行生成阶段时，可为服务提供 provider、model 和 `PromptSource`，依次调用 `await service.flush("project")`、`await service.dream("project")`、`await service.refresh_overview("project")`。这些是独立模型请求；查看各自结果和 usage，不把它们算作主 Run 的生成质量或成本。
 

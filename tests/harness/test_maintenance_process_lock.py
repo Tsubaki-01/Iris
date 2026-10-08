@@ -13,7 +13,11 @@ import pytest
 
 from iris.harness import MaintenanceCoordinator, MemoryMaintenanceBinding
 from iris.memory import MemoryObserveInput, MemoryService, SQLiteMemoryStore
-from iris.memory.generation_models import MemoryCycleResult, MemoryMaintenanceScope
+from iris.memory.generation_models import (
+    MemoryCycleResult,
+    MemoryLearningReadiness,
+    MemoryMaintenanceScope,
+)
 from iris.memory.mirror import FileMemoryMirror
 from iris.message import LLMRequest, LLMResponse
 from iris.prompts import PromptSource
@@ -49,6 +53,16 @@ def _maintain_process(
                 return text_response('{"observations": []}')
 
         class ObservedService(MemoryService):
+            async def aread_learning_readiness(self, ns: str) -> MemoryLearningReadiness:
+                readiness = await super().aread_learning_readiness(ns)
+                if (
+                    not readiness.sources
+                    and not readiness.has_unsourced
+                    and not readiness.has_pending_derived
+                ):
+                    completed.set()
+                return readiness
+
             async def maintain_cycle(
                 self, ns: str, *, scope: MemoryMaintenanceScope, cycle_id: str
             ) -> MemoryCycleResult:

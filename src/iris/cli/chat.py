@@ -247,7 +247,9 @@ def run_chat(
         )
         if memory_binding is not None or evolution is not None:
             maintenance = MaintenanceCoordinator(
-                idle_seconds=config.maintenance.idle_seconds, observability=observability
+                idle_seconds=config.maintenance.idle_seconds,
+                min_pending_runs=config.maintenance.min_pending_runs,
+                observability=observability,
             )
             runner.bind_maintenance(
                 maintenance,

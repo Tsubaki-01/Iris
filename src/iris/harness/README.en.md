@@ -747,7 +747,11 @@ uses the new revision and the same pending model step.
 it defaults to false. The host creates one [`MaintenanceCoordinator`](maintenance.py) and binds
 its root runners through `runner.bind_maintenance(coordinator, memory=binding)`. `from_config*`
 never creates a private maintenance loop. An enabled but unbound runner fails at its first
-prepare/run boundary. The host selects `config.maintenance.idle_seconds` (300 seconds by default).
+prepare/run boundary. The host selects `config.maintenance.idle_seconds` (300 seconds by default) and
+`min_pending_runs` (10 by default). New automatic source batches require both gates. Memory counts
+separately per database/namespace, Evolution per workspace; multiple capture pages count as one Run.
+Admitted remainders continue across cycles and restart, while later Runs form the next batch. Longer
+waiting never waives the count; request a manual cycle or configure the threshold as 1.
 Runners without Memory can still call `runner.bind_maintenance(coordinator)` to contribute
 foreground activity, pausing maintenance from other runners without creating a Memory resource.
 
@@ -779,7 +783,10 @@ async def run_sessions(
         config.memory, workspace, prompt_source=prompt_source,
         overview_provider=provider, overview_model=config.model.name,
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=config.maintenance.idle_seconds,
+        min_pending_runs=config.maintenance.min_pending_runs,
+    )
     binding = MemoryMaintenanceBinding(
         service=memory,
         database_path=resolve_memory_path(config.memory.path, workspace),
@@ -818,6 +825,20 @@ before each consumption commit. Missing lifecycle readers leave material pending
 lifecycle supports restart continuation, whereas lost in-memory state is never reconstructed
 as a second eligibility database.
 
+Only new, unadmitted Runs with effective remaining source text count. Failed or cancelled terminal
+Runs can count; empty or fully filtered sources do not count and can settle without a model. Existing
+observations, explicit changes, source-less observe input, projection/overview repair, Evolution B,
+and publication recovery do not need ten new Runs. Memory episode_sources and Evolution
+experience_sources limit original input only; full allowed_sources remain available to downstream work.
+
+When quantity alone blocks progress, the resource reports waiting_for_materials and the last checked
+pending_new_runs/min_pending_runs, such as 7/10. `snapshot()` does not read the database, and
+next_eligible_at is None in this state. The existing single timer rechecks short readiness metadata
+and lifecycle eligibility to discover commits or WAITING changes from other processes. There is no
+additional scheduler service or repeated empty maintenance cycle while quantity remains insufficient.
+`request_memory_cycle(binding)` bypasses both automatic gates while retaining foreground, eligibility,
+resource-lock, and worker-drain rules.
+
 A host runs at most one Memory job and one project evolution job concurrently, each with its own
 worker, cancellation state and resource lock. Cancellation requests use each asyncio Task's state
 directly rather than a separate mirrored flag. Canonical database path plus namespace determines the
@@ -843,7 +864,7 @@ prompt_source=prompt_source, provider=provider)` and share it through
 `memory=binding`. The selected main configuration owns maintenance policy; contributing runners do
 not replace it. Evolution uses a workspace lock that never nests with a Memory lock and can run with
 Memory disabled. `await coordinator.request_project_experience(project_binding)` requests one pass
-without the usual idle delay, while retaining foreground, eligibility and locking rules. No eligible
+without the automatic idle or Run-count gates, while retaining foreground, eligibility and locking rules. No eligible
 material returns empty without a model call. After its borrowing runners close,
 `await coordinator.unbind_evolution(project_binding)` removes only that resource.
 See [evolution](../evolution/README.md) for configuration and artifact adoption.
@@ -853,12 +874,15 @@ Hosts can call `await coordinator.request_revision(project_binding, RevisionRequ
 description, finite `RevisionTarget(kind="prompt" or "config", name=...)` values, and an optional
 `EvolutionSession(lifecycle_source_id=runner.store.source_id, session_id=...)`. Session-bound requests
 respect that session's WAITING state; requests without a Run do not fabricate task evidence.
+`request_revision()` also bypasses both automatic gates, retaining foreground and project-lock rules.
+A cycle executing B or publication recovery does not also admit new source input; admission is applied
+only when the cycle enters A.
 Explicit A returns an A result; explicit B waits for its own request ID. Failed or cancelled B stays
 pending for later external activity. Automatic A saves its issue and releases the project lock before
 B reacquires it in another cycle and rereads current targets. Publishing config never rebuilds runners.
 
-Maintenance starts only after foreground admission/activation calls fully exit and the idle
-interval passes. New foreground work cancels uncommitted generation without waiting for a
+Automatic maintenance starts after foreground admission/activation calls fully exit and the idle
+interval passes; new source batches also check the Run count. New foreground work cancels uncommitted generation without waiting for a
 model or resource lock. Goal/follow-up handoffs reserve the same foreground counter. THREAD
 services use a dedicated worker; INLINE retains the calling thread. Actual synchronous work
 must finish before its slot and lock are released. Model failures wait for external activity

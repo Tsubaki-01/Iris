@@ -42,7 +42,10 @@ class SourceGenerationProvider(StaticProvider):
 async def wait_for_maintenance(coordinator: MaintenanceCoordinator) -> None:
     """等到本轮真实调度与捕获通知收口，不以固定 sleep 猜模型是否执行。"""
     async with asyncio.timeout(5):
-        while coordinator._timer is not None or coordinator._task is not None:
+        while coordinator._task is not None or any(
+            resource.dirty and not resource.probe_only
+            for resource in coordinator._resources.values()
+        ):
             await asyncio.sleep(0)
 
 
@@ -86,7 +89,7 @@ async def test_memory_tool_changes_wait_for_source_run_to_finish(
         }
     )
     runner = AgentRunner.from_config(config, provider=provider, memory_service=service)
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     runner.bind_maintenance(
         coordinator,
         memory=MemoryMaintenanceBinding(
@@ -176,7 +179,7 @@ async def test_repeated_tool_call_ids_do_not_mix_independent_sources(
             text_response("B 完成"),
         ),
     )
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     binding = MemoryMaintenanceBinding(
         service=service,
         database_path=tmp_path / "memory.db",

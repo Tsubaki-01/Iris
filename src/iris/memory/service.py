@@ -194,6 +194,21 @@ class MemoryService:
         """异步读取短原文就绪事实，不执行生命周期资格判断或学习。"""
         return await self.run_async_io(lambda: self.store.read_learning_readiness(namespace))
 
+    async def ahas_retryable_derived(
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> bool:
+        """查询当前预算可重试的下游候选，不提前改变 blocked 状态。"""
+        return await self.run_async_io(
+            lambda: self.store.has_retryable_derived(
+                namespace,
+                budget=self.generation_config.dream_input_budget_tokens,
+                allowed_sources=allowed_sources,
+            )
+        )
+
     async def aadmit_learning_sources(
         self,
         namespace: str,

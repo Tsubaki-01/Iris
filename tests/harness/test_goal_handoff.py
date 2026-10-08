@@ -104,7 +104,7 @@ def _runner(
     )
     runner = AgentRunner.from_config(config, provider=main, store=store, memory_service=memory)
     runner.bind_maintenance(
-        MaintenanceCoordinator(idle_seconds=idle_seconds),
+        MaintenanceCoordinator(idle_seconds=idle_seconds, min_pending_runs=1),
         memory=MemoryMaintenanceBinding(
             service=memory, database_path=tmp_path / "memory.db", namespace="project"
         ),

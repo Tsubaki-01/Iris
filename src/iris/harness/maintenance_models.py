@@ -5,7 +5,13 @@ from datetime import datetime
 from typing import Literal
 
 type MaintenanceState = Literal[
-    "idle", "waiting_for_idle", "waiting_for_foreground", "waiting_for_lock", "running", "closing"
+    "idle",
+    "waiting_for_idle",
+    "waiting_for_materials",
+    "waiting_for_foreground",
+    "waiting_for_lock",
+    "running",
+    "closing",
 ]
 
 
@@ -19,6 +25,8 @@ class ResourceMaintenanceView:
     cycle_id: str | None = None
     next_eligible_at: datetime | None = None
     last_result_ref: str | None = None
+    pending_new_runs: int = 0
+    min_pending_runs: int = 10
 
 
 @dataclass(frozen=True, slots=True)
