@@ -51,20 +51,24 @@ def initialize(path: Path) -> None:
         tables = database.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         version = database.execute("PRAGMA user_version").fetchone()[0]
         if tables:
-            if version != 5:
-                raise IrisEvolutionError("Evolution 数据库要求 schema 5", version=version)
+            if version != 6:
+                raise IrisEvolutionError("Evolution 数据库要求 schema 6", version=version)
             return
         statements = (
             "CREATE TABLE sources (source_key TEXT PRIMARY KEY, registration_json TEXT NOT NULL, "
             "consumed_until INTEGER NOT NULL, lifecycle_source_id TEXT NOT NULL, "
-            "captured_until INTEGER NOT NULL, observed_terminal INTEGER, observed_outcome TEXT)",
+            "captured_until INTEGER NOT NULL, observed_terminal INTEGER, observed_outcome TEXT, "
+            "admitted INTEGER NOT NULL DEFAULT 0)",
             "CREATE INDEX sources_capture ON sources(lifecycle_source_id) WHERE "
             "observed_terminal IS NULL OR captured_until < observed_terminal",
             "CREATE INDEX sources_pending ON sources(source_key) WHERE "
             "captured_until=observed_terminal AND consumed_until < observed_terminal",
             "CREATE TABLE messages (source_key TEXT NOT NULL REFERENCES sources(source_key), "
             "message_ordinal INTEGER NOT NULL, records_json TEXT NOT NULL, "
+            "has_content INTEGER NOT NULL, "
             "PRIMARY KEY(source_key,message_ordinal))",
+            "CREATE INDEX messages_content ON messages(source_key,message_ordinal) "
+            "WHERE has_content=1",
             "CREATE TABLE requests (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, "
             "summary_json TEXT NOT NULL, payload TEXT NOT NULL, result_json TEXT, "
             "routing_json TEXT NOT NULL)",
@@ -88,7 +92,7 @@ def initialize(path: Path) -> None:
             "settled=1 AND publication_state!='unconfirmed' AND detail_status='available'",
             "CREATE TABLE consumed_publications (publication_id TEXT PRIMARY KEY)",
             "CREATE TABLE progress (id INTEGER PRIMARY KEY CHECK(id=1), latest_step TEXT NOT NULL)",
-            "PRAGMA user_version=5",
+            "PRAGMA user_version=6",
         )
         for statement in statements:
             database.execute(statement)

@@ -36,6 +36,7 @@ from .generation_models import (
     GenerationState,
     MemoryCycleResult,
     MemoryGenerationConfig,
+    MemoryLearningReadiness,
     MemoryMaintenanceScope,
     MemorySource,
     ObservationState,
@@ -189,12 +190,32 @@ class MemoryService:
         """在一次 IO 中读取自动维护来源投影。"""
         return await self.run_async_io(lambda: self.list_pending_sources(namespace))
 
+    async def aread_learning_readiness(self, namespace: str) -> MemoryLearningReadiness:
+        """异步读取短原文就绪事实，不执行生命周期资格判断或学习。"""
+        return await self.run_async_io(lambda: self.store.read_learning_readiness(namespace))
+
+    async def aadmit_learning_sources(
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        threshold: int,
+    ) -> MemoryLearningReadiness:
+        """由宿主持资源锁后调用领域原子准入，不复制计数或校验。"""
+        return await self.run_async_io(
+            lambda: self.store.admit_learning_sources(
+                namespace, allowed_sources=allowed_sources, threshold=threshold
+            )
+        )
+
     def generation_state(
         self, namespace: str, *, scope: MemoryMaintenanceScope | None = None
     ) -> GenerationState:
         """读取生成积压、受阻输入及最近阶段结果。"""
         state = self.store.generation_state(
-            namespace, allowed_sources=None if scope is None else scope.allowed_sources
+            namespace,
+            allowed_sources=None if scope is None else scope.allowed_sources,
+            episode_sources=None if scope is None else scope.episode_sources,
         )
         if self.mirror is None:
             return state

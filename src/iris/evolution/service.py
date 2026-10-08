@@ -35,6 +35,7 @@ from .history import (
 )
 from .materials import EvolutionMaterialStore
 from .models import (
+    EvolutionLearningReadiness,
     EvolutionMaintenanceScope,
     EvolutionMaterial,
     EvolutionRange,
@@ -214,6 +215,21 @@ class EvolutionService:
     async def alist_pending_sessions(self) -> tuple[EvolutionSession, ...]:
         """提供宿主请求的会话归属，由 harness 判定 WAITING 与 reader 资格。"""
         return await self.run_async_io(self.store.list_pending_sessions)
+
+    async def aread_learning_readiness(self) -> EvolutionLearningReadiness:
+        """异步读取原文就绪短状态，不触发准入或生成。"""
+        return await self.run_async_io(self.store.read_learning_readiness)
+
+    async def aadmit_learning_sources(
+        self, *, allowed_sources: frozenset[tuple[str, str]], threshold: int
+    ) -> EvolutionLearningReadiness:
+        """异步提交宿主当前合格范围的原文准入。"""
+        return await self.run_async_io(
+            lambda: self.store.admit_learning_sources(
+                allowed_sources=allowed_sources, threshold=threshold
+            ),
+            complete_on_cancel=True,
+        )
 
     async def enqueue_revision(self, request: RevisionRequest) -> RevisionItem:
         """在宿主入口校验开放目标，完整保存显式请求而不伪造经历。"""
@@ -424,12 +440,44 @@ class EvolutionService:
             stage="experience", origin="experience", description="从本批真实材料整理项目经验。"
         )
         try:
+            readiness = await self.aread_learning_readiness()
+            empty_sources = frozenset(
+                (item.source.lifecycle_source_id, item.source.run_id)
+                for item in readiness.sources
+                if item.complete
+                and not item.has_content
+                and (item.source.lifecycle_source_id, item.source.run_id)
+                in scope.experience_sources
+            )
             pending = await self.run_async_io(
-                lambda: self.store.read_pending(allowed_sources=scope.allowed_sources)
+                lambda: self.store.read_pending(
+                    allowed_sources=empty_sources or scope.experience_sources
+                )
             )
             if not pending.items:
                 self.observability.maintenance_result("evolution", "experience", "empty")
                 return EvolutionResult(status="empty")
+            if not any(record.text.strip() for item in pending.items for record in item.records):
+                publication = publication.model_copy(update={"materials": pending.items})
+                sources = tuple(dict.fromkeys(item.source for item in pending.items))
+                _check_cancelled()
+                if not await scope.check(sources):
+                    raise asyncio.CancelledError
+                result = EvolutionResult(
+                    publication_id=publication.publication_id,
+                    status="no_change",
+                    reason="本批仅含过滤后的空区间",
+                    effect="项目 Skill 保持原样。",
+                )
+                result = await self.run_async_io(
+                    lambda: self._publications.complete(publication, result),
+                    complete_on_cancel=True,
+                )
+                recorded = True
+                self.observability.maintenance_result("evolution", result.stage, result.status)
+                _check_cancelled()
+                has_more = await self.run_async_io(lambda: self._remaining(scope))
+                return result.model_copy(update={"has_more": has_more})
             baseline, selected, request = await self.run_async_io(
                 lambda: self._prepare(pending.items)
             )
@@ -445,7 +493,7 @@ class EvolutionService:
             _check_cancelled()
             if not await scope.check(sources):
                 raise asyncio.CancelledError
-            if any(item.records for item in selected):
+            if any(record.text.strip() for item in selected for record in item.records):
                 with self.observability.bind({"iris.model.purpose": "evolution_experience"}):
                     response = await self.provider.complete(request)
                 usage = {
@@ -582,7 +630,7 @@ class EvolutionService:
             allowed_sources=scope.allowed_sources,
             allowed_sessions=scope.allowed_sessions,
             allowed_targets=self._allowed_targets,
-        ) or self.store.has_pending_materials(allowed_sources=scope.allowed_sources)
+        ) or self.store.has_pending_materials(allowed_sources=scope.experience_sources)
 
     async def _maintain_revision(
         self, item: RevisionItem, scope: EvolutionMaintenanceScope

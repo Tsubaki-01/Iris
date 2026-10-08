@@ -164,7 +164,9 @@ async def test_host_request_needs_no_historical_failure_and_no_change_settles(
     async def no_sources(sources: tuple[object, ...]) -> bool:
         raise AssertionError("宿主无 Run 请求不走伪造来源资格")
 
-    scope = EvolutionMaintenanceScope(frozenset(), no_sources, frozenset(), eligible_session)
+    scope = EvolutionMaintenanceScope(
+        frozenset(), no_sources, frozenset(), eligible_session, experience_sources=frozenset()
+    )
     provider.output = {"action": "no_change", "reason": "当前规则已满足要求"}
     result = await service.maintain_cycle(scope=scope)
     assert result.status == "no_change" and result.revision_id == item.id
@@ -217,7 +219,7 @@ async def test_reopened_pending_respects_narrowed_current_targets(
         else {"action": "prompt", "target": original, "body": "旧请求候选", "reason": "旧请求"}
     )
 
-    empty_scope = replace(scope, allowed_sources=frozenset())
+    empty_scope = replace(scope, allowed_sources=frozenset(), experience_sources=frozenset())
     result = await reopened.maintain_cycle(scope=empty_scope)
 
     assert result.status == "empty" and not result.has_more
@@ -352,7 +354,9 @@ async def test_another_process_settlement_is_observed_without_second_model(tmp_p
     other.settle_revision(
         item.id, EvolutionResult(stage="revision", status="no_change", revision_id=item.id)
     )
-    result = await service.maintain_cycle(scope=replace(scope, allowed_sources=frozenset()))
+    result = await service.maintain_cycle(
+        scope=replace(scope, allowed_sources=frozenset(), experience_sources=frozenset())
+    )
     assert result.status == "empty" and provider.requests == []
 
 

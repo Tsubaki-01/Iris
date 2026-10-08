@@ -6,12 +6,14 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
 from ..exceptions import IrisMemoryError
+from ._learning import has_remaining_content
 from ._query import make_snippet, prepare_fts_query, tokenize_text
-from ._sources import SOURCE_CTE, read_sources, source_filter
+from ._sources import SOURCE_CTE, episode_source_filter, read_sources, source_filter
 from .generation_models import (
     DreamChange,
     DreamPlan,
@@ -22,6 +24,8 @@ from .generation_models import (
     GenerationResult,
     GenerationState,
     MemoryCaptureSource,
+    MemoryLearningReadiness,
+    MemoryLearningSource,
     MemorySource,
     ObservationState,
 )
@@ -58,7 +62,7 @@ PublicationT = TypeVar("PublicationT")
 
 
 class SQLiteMemoryStore:
-    """保留 FTS 读取面、使用 schema v6 的本地记忆存储。"""
+    """保留 FTS 读取面、使用 schema v7 的本地记忆存储。"""
 
     def __init__(self, path: str | Path) -> None:
         """只接受新空库或当前 schema，不迁移已有数据库。"""
@@ -83,16 +87,16 @@ class SQLiteMemoryStore:
                 row = connection.execute(
                     "SELECT value FROM memory_schema WHERE key='schema_version'"
                 ).fetchone()
-                if row is None or row["value"] != "6":
+                if row is None or row["value"] != "7":
                     raise IrisMemoryError(
-                        "SQLite memory 版本不受支持，要求 schema version 6",
+                        "SQLite memory 版本不受支持，要求 schema version 7",
                         path=str(self.path),
                         version=None if row is None else row["value"],
                     )
                 return
             statements = (
                 "CREATE TABLE memory_schema (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-                "INSERT INTO memory_schema VALUES ('schema_version','6')",
+                "INSERT INTO memory_schema VALUES ('schema_version','7')",
                 (
                     "CREATE TABLE memory_publications (id TEXT PRIMARY KEY,namespace TEXT NOT NULL,"
                     "created_at TEXT NOT NULL,payload TEXT NOT NULL)"
@@ -133,8 +137,11 @@ class SQLiteMemoryStore:
                     "KEY,namespace TEXT NOT NULL,payload TEXT NOT "
                     "NULL,created_at TEXT NOT NULL,record_index INTEGER NOT "
                     "NULL DEFAULT 0,text_offset INTEGER NOT NULL DEFAULT "
-                    "0,flushed INTEGER NOT NULL DEFAULT 0)"
+                    "0,flushed INTEGER NOT NULL DEFAULT 0,lifecycle_source_id TEXT,"
+                    "run_id TEXT,session_id TEXT,has_content INTEGER NOT NULL)"
                 ),
+                "CREATE INDEX idx_memory_episodes_learning ON memory_episodes"
+                "(namespace,lifecycle_source_id,run_id,session_id,has_content) WHERE flushed=0",
                 (
                     "CREATE TABLE memory_observations (id TEXT PRIMARY "
                     "KEY,namespace TEXT NOT NULL,payload TEXT NOT "
@@ -164,11 +171,16 @@ class SQLiteMemoryStore:
                     "NULL DEFAULT '[]')"
                 ),
                 (
+                    "CREATE INDEX idx_memory_changes_pending ON memory_dream_changes(namespace) "
+                    "WHERE status='pending'"
+                ),
+                (
                     "CREATE TABLE memory_capture_sources (lifecycle_source_id "
                     "TEXT NOT NULL,run_id TEXT NOT NULL,namespace TEXT NOT "
                     "NULL,captured_until INTEGER NOT "
                     "NULL,terminal_message_count INTEGER,payload TEXT NOT "
-                    "NULL,PRIMARY KEY(lifecycle_source_id,run_id,namespace))"
+                    "NULL,admitted INTEGER NOT NULL DEFAULT 0,"
+                    "PRIMARY KEY(lifecycle_source_id,run_id,namespace))"
                 ),
                 (
                     "CREATE TABLE memory_generation_results (id TEXT PRIMARY "
@@ -435,13 +447,11 @@ class SQLiteMemoryStore:
     ) -> list[EpisodeProgress]:
         """读取尚未完整 flush 的经历与精确处理游标。"""
         with self._connection() as connection:
-            restriction, params = source_filter("episode", "e", "id", allowed_sources)
+            restriction, params = episode_source_filter("e", allowed_sources)
             rows = connection.execute(
-                SOURCE_CTE + "SELECT e.*,s.payload AS source_payload FROM memory_episodes e "
+                "SELECT e.*,s.payload AS source_payload FROM memory_episodes e "
                 "LEFT JOIN memory_capture_sources s ON s.namespace=e.namespace "
-                "AND s.run_id=json_extract(e.payload,'$.source_id') "
-                "AND s.lifecycle_source_id="
-                "json_extract(e.payload,'$.metadata.lifecycle_source_id') "
+                "AND s.run_id=e.run_id AND s.lifecycle_source_id=e.lifecycle_source_id "
                 "WHERE e.namespace=? AND e.flushed=0"
                 + restriction
                 + " ORDER BY e.created_at,e.id LIMIT ?",
@@ -484,6 +494,94 @@ class SQLiteMemoryStore:
             )
             return tuple(MemorySource(*row) for row in rows)
 
+    def read_learning_readiness(self, namespace: str) -> MemoryLearningReadiness:
+        """从待处理 Episode 的短列读取原文候选，不加载任何材料正文。"""
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            return self._learning_readiness(connection, namespace)
+
+    def _learning_readiness(
+        self, connection: sqlite3.Connection, namespace: str
+    ) -> MemoryLearningReadiness:
+        """在调用方快照内把一个 Run 的多页原文归成一个候选。"""
+        rows = connection.execute(
+            "SELECT e.lifecycle_source_id,e.run_id,min(e.session_id) AS session_id,"
+            "max(e.has_content) AS has_content,coalesce(s.admitted,0) AS admitted,"
+            "(s.terminal_message_count IS NOT NULL AND "
+            "s.captured_until>=s.terminal_message_count) AS complete "
+            "FROM memory_episodes e LEFT JOIN memory_capture_sources s "
+            "ON s.namespace=e.namespace AND s.lifecycle_source_id=e.lifecycle_source_id "
+            "AND s.run_id=e.run_id WHERE e.namespace=? AND e.flushed=0 "
+            "AND e.lifecycle_source_id IS NOT NULL "
+            "GROUP BY e.lifecycle_source_id,e.run_id "
+            "ORDER BY e.lifecycle_source_id,e.run_id",
+            (namespace,),
+        )
+        sources = tuple(
+            MemoryLearningSource(
+                MemorySource(row["lifecycle_source_id"], row["run_id"], row["session_id"]),
+                bool(row["complete"]),
+                bool(row["admitted"]),
+                bool(row["has_content"]),
+            )
+            for row in rows
+        )
+        unsourced = connection.execute(
+            "SELECT 1 FROM memory_episodes WHERE namespace=? AND flushed=0 "
+            "AND lifecycle_source_id IS NULL LIMIT 1",
+            (namespace,),
+        ).fetchone()
+        state = self._read_namespace_state(connection, namespace)
+        derived = connection.execute(
+            "SELECT 1 FROM memory_observations WHERE namespace=? AND status='pending' "
+            "UNION ALL SELECT 1 FROM memory_dream_changes WHERE namespace=? "
+            "AND status='pending' LIMIT 1",
+            (namespace, namespace),
+        ).fetchone()
+        return MemoryLearningReadiness(
+            sources,
+            unsourced is not None,
+            state.item_revision,
+            state.projection_revision,
+            derived is not None,
+        )
+
+    def admit_learning_sources(
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]],
+        threshold: int,
+    ) -> MemoryLearningReadiness:
+        """在写事务中重读候选，达到门槛才一次准入全部合格新 Run。"""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            readiness = self._learning_readiness(connection, namespace)
+            candidates = frozenset(
+                (item.source.lifecycle_source_id, item.source.run_id)
+                for item in readiness.sources
+                if item.complete
+                and item.has_content
+                and not item.admitted
+                and (item.source.lifecycle_source_id, item.source.run_id) in allowed_sources
+            )
+            if len(candidates) < threshold:
+                return readiness
+            connection.executemany(
+                "UPDATE memory_capture_sources SET admitted=1 WHERE namespace=? "
+                "AND lifecycle_source_id=? AND run_id=?",
+                [(namespace, source_id, run_id) for source_id, run_id in candidates],
+            )
+            return replace(
+                readiness,
+                sources=tuple(
+                    replace(item, admitted=True)
+                    if (item.source.lifecycle_source_id, item.source.run_id) in candidates
+                    else item
+                    for item in readiness.sources
+                ),
+            )
+
     def register_source(self, source: MemoryCaptureSource) -> MemoryCaptureSource:
         """首次登记 run；重复登记保留已持久化的捕获水位。"""
         with self._connection() as connection:
@@ -503,7 +601,10 @@ class SQLiteMemoryStore:
                 }
             )
             connection.execute(
-                "INSERT INTO memory_capture_sources VALUES (?,?,?,?,?,?)",
+                "INSERT INTO memory_capture_sources "
+                "(lifecycle_source_id,run_id,namespace,captured_until,"
+                "terminal_message_count,payload) "
+                "VALUES (?,?,?,?,?,?)",
                 (
                     source.lifecycle_source_id,
                     source.run_id,
@@ -635,8 +736,15 @@ class SQLiteMemoryStore:
                 )
             for episode, index, offset in positions.values():
                 connection.execute(
-                    "UPDATE memory_episodes SET record_index=?,text_offset=?,flushed=? WHERE id=?",
-                    (index, offset, int(index == len(episode.records)), episode.id),
+                    "UPDATE memory_episodes SET record_index=?,text_offset=?,flushed=?,"
+                    "has_content=? WHERE id=?",
+                    (
+                        index,
+                        offset,
+                        int(index == len(episode.records)),
+                        has_remaining_content(episode, index, offset),
+                        episode.id,
+                    ),
                 )
             self._insert_result(connection, commit.result)
             return True
@@ -1077,16 +1185,19 @@ class SQLiteMemoryStore:
             self._insert_result(connection, result)
 
     def generation_state(
-        self, namespace: str, *, allowed_sources: frozenset[tuple[str, str]] | None = None
+        self,
+        namespace: str,
+        *,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+        episode_sources: frozenset[tuple[str, str]] | None = None,
     ) -> GenerationState:
         """读取当前积压及各阶段最近一次实际结果。"""
         with self._connection() as connection:
             connection.execute("BEGIN")
             state = self._read_namespace_state(connection, namespace)
-            restriction, params = source_filter("episode", "memory_episodes", "id", allowed_sources)
+            restriction, params = episode_source_filter("memory_episodes", episode_sources)
             episodes = connection.execute(
-                SOURCE_CTE
-                + "SELECT count(*) FROM memory_episodes WHERE namespace=? AND flushed=0"
+                "SELECT count(*) FROM memory_episodes WHERE namespace=? AND flushed=0"
                 + restriction,
                 [namespace, *params],
             ).fetchone()[0]
@@ -1181,8 +1292,19 @@ class SQLiteMemoryStore:
     def _insert_episode(self, connection: sqlite3.Connection, episode: MemoryEpisode) -> None:
         """保存不可变材料内容，初始游标指向首条记录。"""
         connection.execute(
-            "INSERT INTO memory_episodes (id,namespace,payload,created_at) VALUES (?,?,?,?)",
-            (episode.id, episode.namespace, _dump_model(episode), episode.created_at),
+            "INSERT INTO memory_episodes "
+            "(id,namespace,payload,created_at,lifecycle_source_id,run_id,session_id,has_content) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                episode.id,
+                episode.namespace,
+                _dump_model(episode),
+                episode.created_at,
+                episode.metadata.get("lifecycle_source_id"),
+                episode.source_id,
+                episode.metadata.get("session_id"),
+                has_remaining_content(episode),
+            ),
         )
 
     def _ensure_new_item_id(self, connection: sqlite3.Connection, item: MemoryItem) -> None:

@@ -24,7 +24,7 @@ memory:
 ## 运行要求与快速开始
 
 本包随 Iris 安装，使用标准库 SQLite 和 FTS5。默认本地搜索使用 FTS5；初始化或查询错误
-报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 6，旧版库
+报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 7，旧版库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
@@ -200,9 +200,22 @@ admission 成功后登记来源，真实压缩与运行边界只捕获原文。�
 Run；当前 WAITING 的会话连同其旧材料暂不维护，其他会话正常推进。工具写入通过已有
 完整调用身份与捕获记录关联，缺来源字段或未关联的变更保持 pending；
 没有 Run 的显式 SDK 内容保持原语义。
-`list_pending_sources()` 提供材料来源；宿主给 `MemoryMaintenanceScope` 的允许集合及异步
-资格检查。Memory 在查询层先过滤后限量，并在模型前及每次消费/阻塞提交前重查实际来源。
-范围只限制待消费输入，已发布知识仍可用于比较、投影和概览。
+`list_pending_sources()` 提供材料来源；宿主给 `MemoryMaintenanceScope` 传入必填的
+`allowed_sources`、`check` 和 `episode_sources`。其中 episode_sources 只限制 flush 原文及其
+剩余计数；allowed_sources 继续控制 Observation、显式 change 和 retry_blocked 的资格，
+没有 Run 来源的显式 observe 不受原文来源集合限制。Memory 在查询层先过滤后限量，并在
+模型前及每次消费/阻塞提交前重查实际来源。已发布知识仍可用于比较、投影和概览。
+
+领域 store 提供 `read_learning_readiness(namespace)`：仅用来源身份、封源、admitted 和剩余
+有效正文短列返回 `MemoryLearningReadiness`，不读取 Episode/Observation/Event payload。
+同一 Run 的多个 Episode 合成一个候选；无 Run 的输入由 has_unsourced 表示。快照还含
+item_revision、projection_revision 和 pending Observation/change 的 has_pending_derived 提示，
+该提示不替代实际来源资格检查。服务对应提供 `await aread_learning_readiness(namespace)`。
+`admit_learning_sources(namespace, allowed_sources=..., threshold=...)` 在写事务中重读候选，
+达到 threshold 个合格、完整、有有效剩余原文的新 Run 时，才将当时全部候选持久准入；
+服务异步入口是 `aadmit_learning_sources`。捕获或消费不会清除准入标记，重开后保留。
+剩余有效正文随字符游标更新；全空或仅含不可作为证据的记录可在不估算模型预算、不调用模型的
+路径中推进，仍遵守原资格和 CAS。数量门槛由宿主调用准入接口决定，这些查询本身不启动维护。
 
 协调器在安静期后持对应数据库/namespace 的跨进程 OS 锁，调用
 `maintain_cycle(namespace, scope=..., cycle_id=...)`：已有观察或变更优先 dream，否则 flush 后 dream，

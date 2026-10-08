@@ -601,14 +601,16 @@ class MaintenanceCoordinator:
                 with self._worker.bind():
                     service = resource.binding.service
                     sources = await service.alist_pending_sources(resource.binding.namespace)
+                    allowed_sources = frozenset(
+                        (source.lifecycle_source_id, source.run_id)
+                        for source in sources
+                        if self._source_eligible(
+                            source.lifecycle_source_id, source.run_id, source.session_id
+                        )
+                    )
                     scope = MemoryMaintenanceScope(
-                        allowed_sources=frozenset(
-                            (source.lifecycle_source_id, source.run_id)
-                            for source in sources
-                            if self._source_eligible(
-                                source.lifecycle_source_id, source.run_id, source.session_id
-                            )
-                        ),
+                        allowed_sources=allowed_sources,
+                        episode_sources=allowed_sources,
                         check=partial(self._eligible, resource),
                     )
                     result = await service.maintain_cycle(
@@ -683,14 +685,16 @@ class MaintenanceCoordinator:
                             project.revision_requests.pop(item_id).future.set_result(settled)
                     sources = await service.alist_pending_sources()
                     sessions = await service.alist_pending_sessions()
+                    allowed_sources = frozenset(
+                        (source.lifecycle_source_id, source.run_id)
+                        for source in sources
+                        if self._source_eligible(
+                            source.lifecycle_source_id, source.run_id, source.session_id
+                        )
+                    )
                     scope = EvolutionMaintenanceScope(
-                        allowed_sources=frozenset(
-                            (source.lifecycle_source_id, source.run_id)
-                            for source in sources
-                            if self._source_eligible(
-                                source.lifecycle_source_id, source.run_id, source.session_id
-                            )
-                        ),
+                        allowed_sources=allowed_sources,
+                        experience_sources=allowed_sources,
                         check=partial(self._eligible, project),
                         allowed_sessions=frozenset(
                             (session.lifecycle_source_id, session.session_id)

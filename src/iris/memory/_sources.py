@@ -59,6 +59,25 @@ WITH episode_sources AS (
 """
 
 
+def episode_source_filter(
+    alias: str, allowed_sources: frozenset[tuple[str, str]] | None
+) -> tuple[str, list[str]]:
+    """按 Episode 短关联筛选完整来源；无 Run 的显式输入保持可读。"""
+    if allowed_sources is None:
+        return "", []
+    return (
+        f" AND ({alias}.lifecycle_source_id IS NULL OR EXISTS ("
+        "SELECT 1 FROM memory_capture_sources src WHERE "
+        f"src.namespace={alias}.namespace AND src.lifecycle_source_id={alias}.lifecycle_source_id"
+        f" AND src.run_id={alias}.run_id AND src.terminal_message_count IS NOT NULL"
+        " AND src.captured_until>=src.terminal_message_count AND EXISTS ("
+        "SELECT 1 FROM json_each(?) allowed WHERE "
+        "json_extract(allowed.value,'$[0]')=src.lifecycle_source_id AND "
+        "json_extract(allowed.value,'$[1]')=src.run_id)))",
+        [json.dumps(sorted(allowed_sources))],
+    )
+
+
 def source_filter(
     kind: str, alias: str, id_column: str, allowed_sources: frozenset[tuple[str, str]] | None
 ) -> tuple[str, list[str]]:

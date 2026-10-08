@@ -124,7 +124,7 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 ## 材料与一次 A 操作
 
 材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
-`EvolutionMaterialStore` 管理 schema 5，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
+`EvolutionMaterialStore` 管理 schema 6，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
 不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。`messages` 按 `(source_key, message_ordinal)`
 保存每条消息经过捕获过滤后的 records，保留原始 record.ref；重复或重叠捕获按这个身份幂等
 插入，不覆盖已保存正文。过滤后 records 为空的消息也保留其捕获位置。捕获位置、消费位置
@@ -139,6 +139,24 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 `read_pending(allowed_sources=..., limit=128)` 先筛选合格来源，再按来源和消息顺序读取所需
 消息，返回完整 records；过滤后 records 为空的消息仍占一个区间。`has_pending_materials()` 与
 `has_pending_revisions()` 只检查短状态，供剩余工作判定使用，不加载材料正文或请求证据。
+
+原文准入由 `read_learning_readiness()` 和 `admit_learning_sources(allowed_sources=..., threshold=...)`
+提供。前者返回 `EvolutionLearningReadiness`：每个仍有原文积压的来源包含 source、complete、
+admitted、has_content；只读消息有效正文短标志，不加载 records 或请求证据。有效正文指当前
+未消费范围中仍有 `text.strip()` 非空的记录，不能以“这个 Run 曾经有过正文”代替剩余事实。
+后者在写事务中重新读取状态，只统计合格、完整封源、有有效剩余原文且尚未准入的不同 Run；
+达到正整数 threshold 后，将当时全部合格新来源置 admitted，返回判定后的短快照。
+未达到阈值不会部分准入。捕获、消费、失败和同版重开均不清除准入，后来新增的 Run 另行判断。
+服务提供 `aread_learning_readiness()` 与 `aadmit_learning_sources(...)` 异步委托。
+
+`EvolutionMaintenanceScope` 的必填 `experience_sources` 单独限定 A 的原文来源，
+`allowed_sources/allowed_sessions` 继续用于 B 和原有来源资格，不因原文准入范围收窄而阻塞
+已存在的修订请求或发布恢复。宿主仍负责把当前资格与准入事实组合成实际范围，领域准入
+不会绕过前台、WAITING 或 reader 检查。本接口本身不启用新的自动频率，也不创建定时器。
+
+当前范围内剩余全空的完整来源优先无模型收尾，不要求 admitted；它们不读取 Skill、策略
+或模型预算，也不写目标文件，只保存 no_change 档案并原子消费对应区间。混合范围中的有效
+原文仍留待各自获准的 A 操作；单条消息的空前缀跟随原来源的完整消息顺序处理。
 
 每轮重读当前经验并固定 `project_skill_update.j2` 的项目快照与策略 Skill。按完整请求
 token 估算选择预算内的消息前缀，最多调用模型一次；未读范围不消费，第一条完整消息也

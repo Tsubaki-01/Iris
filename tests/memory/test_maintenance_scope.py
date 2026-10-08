@@ -36,6 +36,7 @@ def capture(
     terminal: bool = True,
     call_id: str = "",
     lifecycle_source_id: str = "host",
+    evidence_allowed: bool = True,
 ) -> MemoryEpisode:
     """写入一个保留真实来源关系的捕获片段。"""
     source = MemoryCaptureSource(
@@ -49,7 +50,11 @@ def capture(
     store.register_source(source)
     episode = MemoryEpisode(
         source_id=run_id,
-        records=(MemoryRecord(text="使用 uv", metadata={"call_id": call_id}),),
+        records=(
+            MemoryRecord(
+                text="使用 uv", metadata={"call_id": call_id, "evidence_allowed": evidence_allowed}
+            ),
+        ),
         metadata={
             "lifecycle_source_id": lifecycle_source_id,
             "run_id": run_id,
@@ -83,7 +88,12 @@ def test_scope_filters_before_limit_and_counts_only_eligible(tmp_path: Path) -> 
     progresses = store.list_pending_episodes("project", limit=1, allowed_sources=allowed)
     assert [p.episode.id for p in progresses] == [eligible.id]
     assert progresses[0].source_outcome == "failed"
-    assert store.generation_state("project", allowed_sources=allowed).pending_episodes == 1
+    assert (
+        store.generation_state(
+            "project", allowed_sources=allowed, episode_sources=allowed
+        ).pending_episodes
+        == 1
+    )
     assert {s.run_id for s in store.list_pending_sources("project")} == {
         "waiting",
         "unsealed",
@@ -226,15 +236,7 @@ async def test_flush_rechecks_actual_batch_before_consuming(
     tmp_path: Path, has_evidence: bool
 ) -> None:
     store = SQLiteMemoryStore(tmp_path / "memory.db")
-    episode = capture(store, "ready")
-    if not has_evidence:
-        # 原始记录在读取边界声明不可作新证据，仍需消费资格。
-        with store._connection() as connection:
-            connection.execute(
-                "UPDATE memory_episodes SET payload=json_set(payload,"
-                "'$.records[0].metadata.evidence_allowed',json('false')) WHERE id=?",
-                (episode.id,),
-            )
+    capture(store, "ready", evidence_allowed=has_evidence)
     provider = ScopeProvider()
     memory = MemoryService(
         store,
@@ -248,7 +250,9 @@ async def test_flush_rechecks_actual_batch_before_consuming(
         checks.append(sources)
         return len(checks) == 1
 
-    scope = MemoryMaintenanceScope(frozenset({("host", "ready")}), check)
+    scope = MemoryMaintenanceScope(
+        frozenset({("host", "ready")}), check, episode_sources=frozenset({("host", "ready")})
+    )
     with pytest.raises(asyncio.CancelledError):
         await memory.flush("project", scope=scope)
     assert len(checks) == 2 and checks[0] == checks[1]
@@ -288,7 +292,9 @@ async def test_dream_reselection_and_blocking_keep_scope(tmp_path: Path) -> None
         checked.append({source.run_id for source in sources})
         return True
 
-    scope = MemoryMaintenanceScope(frozenset({("host", "large"), ("host", "small")}), check)
+    scope = MemoryMaintenanceScope(
+        frozenset({("host", "large"), ("host", "small")}), check, episode_sources=frozenset()
+    )
     result = await memory.dream("project", scope=scope)
     assert result.status == "completed" and result.counts["blocked"] == 1
     assert not result.has_more
@@ -327,7 +333,9 @@ async def test_dream_checks_sources_after_model_and_before_block(tmp_path: Path)
         assert [source.run_id for source in sources] == ["ready"]
         return eligible
 
-    scope = MemoryMaintenanceScope(frozenset({("host", "ready")}), check)
+    scope = MemoryMaintenanceScope(
+        frozenset({("host", "ready")}), check, episode_sources=frozenset()
+    )
     with pytest.raises(asyncio.CancelledError):
         await memory.dream("project", scope=scope)
     assert memory.generation_state("project").pending_changes == 1

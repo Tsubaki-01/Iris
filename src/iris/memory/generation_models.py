@@ -95,11 +95,33 @@ class MemorySource:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryLearningSource:
+    """一个尚有原文积压的 Run，仅包含准入判定需要的短事实。"""
+
+    source: MemorySource
+    complete: bool
+    admitted: bool
+    has_content: bool
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryLearningReadiness:
+    """资源当前原文候选，不包括 Observation 或显式 change 的来源。"""
+
+    sources: tuple[MemoryLearningSource, ...]
+    has_unsourced: bool
+    item_revision: int
+    projection_revision: int | None
+    has_pending_derived: bool
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryMaintenanceScope:
     """宿主提供本轮范围，并在生成与消费前重查实际输入资格。"""
 
     allowed_sources: frozenset[tuple[str, str]]
     check: Callable[[tuple[MemorySource, ...]], Awaitable[bool]]
+    episode_sources: frozenset[tuple[str, str]]
 
 
 @dataclass(frozen=True, slots=True)
