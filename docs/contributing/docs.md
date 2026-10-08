@@ -40,8 +40,8 @@
 
 导航以[docs 首页](../index.md)的阅读路线为基础，在 `docs/navigation.json` 维护分组和顺序。每个条目的 `path` 相对 docs 目录；新增、重命名或移除页面时，在同一个变更中更新导航与引用。
 
-首页复用快速开始中由 `iris-web:install`、`iris-web:minimal-agent` 和 `iris-web:run` HTML 注释标出的代码块；这些注释不影响 Markdown 阅读。修改示例时保留成对标记，不在网站中再改一份命令。正式发版前，把安装代码块固定到本次真实发行标签，再创建该标签与 Release。
+首页复用快速开始中由 `iris-web:install`、`iris-web:minimal-agent` 和 `iris-web:run` HTML 注释标出的代码块；这些注释不影响 Markdown 阅读。修改示例时保留成对标记，不在网站中再改一份命令。安装命令统一使用 `git clone https://github.com/Tsubaki-01/Iris.git`，从仓库默认分支获取源码。
 
-正式 Release 发布后通知 iris-web，网站检出 GitHub latest 正式版本，构建正文、导航、图片和搜索索引。“查看本版源码”对应构建使用的提交；“编辑此页”指向维护分支，修改随后续版本发布。普通文档合并和预发布不会更新线上正式文档。
+正式 Release 发布后通知 iris-web，网站检出 GitHub latest 正式版本，构建正文、导航、图片和搜索索引。“查看本版源码”对应构建使用的提交；“编辑此页”指向维护分支，修改随后续版本发布。普通文档合并和预发布不会更新线上正式文档。同版本文档勘误可从对应 Release 标签创建修订提交，由 iris-web 的 `.github/docs-revisions.json` 指定该提交并重建，保持版本号。
 
 主题、页面样式、链接转换与构建脚本在 iris-web 维护。生成的网页与文档副本不回写本仓库；重新部署当前正式版本可在 iris-web 手动运行部署工作流。
