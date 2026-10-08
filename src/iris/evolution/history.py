@@ -75,6 +75,31 @@ class PublicationSummary(BaseModel):
     reason: str
     published_at: datetime | None
     settled: bool
+    detail_status: Literal["available", "expired"] = "available"
+    proposed_revision_id: str | None = None
+
+
+class ProposedIssueSummary(BaseModel):
+    """已提出但尚未形成正式请求的问题摘要，不包含完整材料。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    description: str
+    targets: tuple[RevisionTarget, ...]
+
+
+class PublicationHistoryEntry(BaseModel):
+    """发布历史及详情留存状态；过期后仍保留结果与必要证据。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    summary: PublicationSummary
+    detail: PublicationRecord | None
+    evidence: tuple[RevisionEvidence, ...] = ()
+    proposed_issue_summary: ProposedIssueSummary | None = None
+
+    @property
+    def detail_status(self) -> Literal["available", "expired"]:
+        """从唯一摘要事实投影详情状态。"""
+        return self.summary.detail_status
 
 
 class RevisionRequestSummary(BaseModel):

@@ -93,7 +93,7 @@ def test_publication_projects_evidence_and_request_without_storing_copies(
         return connection
 
     monkeypatch.setattr(sqlite3, "connect", tracked_connect)
-    assert restarted.get_publication(record.publication_id) == record
+    assert restarted.get_publication(record.publication_id).detail == record
     assert len(connections) == 1
     connections.clear()
     assert restarted.list_unsettled_publications() == (record,)
@@ -173,8 +173,10 @@ async def test_deduplicated_experience_recovers_proposed_issue_after_confirmatio
     with pytest.raises(IrisEvolutionError, match="settlement interrupted"):
         await service.maintain_cycle(scope=scope)
     publication_id = service.list_publications().items[0].publication_id
-    record = service.get_publication(publication_id)
-    assert record is not None and record.proposed_issue is not None
+    entry = service.get_publication(publication_id)
+    assert entry is not None and entry.detail is not None
+    record = entry.detail
+    assert record.proposed_issue is not None
     assert record.publication_state == "confirmed" and not record.settled
     issue = record.proposed_issue
     assert service.get_revision_request(issue.id) is None

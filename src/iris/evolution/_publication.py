@@ -37,27 +37,25 @@ class PublicationJournal:
         return self._finish(confirmed)
 
     def _finish(self, record: PublicationRecord) -> EvolutionResult:
-        self.store.save_publication(record)
-        result = self.store.settle_publication(record)
+        settled = self.store.save_publication(record)
+        result = settled if settled is not None else self.store.settle_publication(record)
         self._receipts.pop(record.publication_id, None)
         return result
 
     def failure(self, record: PublicationRecord, result: EvolutionResult) -> None:
         """生成/发布前失败没有生效正文；已发生发布的收据不被失败状态覆盖。"""
         if record.publication_id not in self._receipts:
-            self.store.save_publication(
+            self.store.settle_publication(
                 record.model_copy(
                     update={
                         "outcome": result,
                         "publication_state": "not_published",
-                        "settled": True,
                         "reason": result.reason,
                         "usage": result.usage,
                         "effect": result.effect,
                     }
                 )
             )
-            self.store.record_step(result)
 
     def resume(self) -> EvolutionResult | None:
         """先结算真实收据；重启后的未确认候选只展示观察结果，不推断过去成功。"""
@@ -90,7 +88,7 @@ class PublicationJournal:
             targets=record.targets,
             usage=record.usage,
         )
-        self.store.save_publication(
+        settled = self.store.save_publication(
             record.model_copy(
                 update={
                     "observed_documents": tuple(observed),
@@ -99,5 +97,7 @@ class PublicationJournal:
                 }
             )
         )
+        if settled is not None:
+            return settled
         self.store.record_step(result)
         return result

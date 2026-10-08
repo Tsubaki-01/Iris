@@ -124,7 +124,7 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 ## 材料与一次 A 操作
 
 材料、请求、消费进度和发布档案统一位于 root workspace 的 `.iris/evolution/evolution.db`。
-`EvolutionMaterialStore` 管理 schema 4，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
+`EvolutionMaterialStore` 管理 schema 5，只接受新空库或当前版本；旧版 SQLite 在初始化时拒绝，
 不读取、迁移或删除旧 JSON，不依赖 Memory 数据库。`messages` 按 `(source_key, message_ordinal)`
 保存每条消息经过捕获过滤后的 records，保留原始 record.ref；重复或重叠捕获按这个身份幂等
 插入，不覆盖已保存正文。过滤后 records 为空的消息也保留其捕获位置。捕获位置、消费位置
@@ -160,11 +160,13 @@ A 可以在 Skill no-change 时产生问题；普通事实缺失或单次失败�
 发布前比较最初读取的 Skill 文件与当前文件；外部修改导致 conflict，保留用户文件与 pending。
 成功/no-change 才确认实际处理范围，失败或取消不消费。原发布 owner 先把基线与候选存入
 SQLite，再写目标文件并保存 confirmed 与 published_at；after_documents 由已确认候选投影，
-不重复保存正文。确认后材料消费或请求结算、无引用正文回收及档案收尾在一个 SQLite 事务中提交。
+不重复保存正文。持久确认和最终结算是两次数据库提交；确认后材料消费或请求结算、档案收尾、
+本次详情裁剪与无引用正文回收在一个 SQLite 事务中完成。确认成功而结算失败不会丢失确认。
 目标文件写入与数据库确认仍不属于同一个事务。若文件已发布而结算失败，
 本进程保留实际收据，下一轮在同一项目锁内完成结算，不重新调用模型或重写目标。
 已持久确认的发布重启后也只补结算；A 的消费与发布 ID 在同一数据库事务中确认，
 重试不重复推进原文位置或重复创建问题。
+若其他 owner 已经完成结算，旧收据重试直接返回原持久结果，不覆盖 settled，也不恢复已过期详情。
 
 重启后缺少确认的记录保留 `publication_state=unconfirmed`，返回
 `publication_unconfirmed` 并保存 observed_documents；即使当前文件等于候选，也不填
@@ -201,14 +203,27 @@ prompt 在同一内存来源替换候选，再以领域代表变量渲染一次�
 `get_revision_request(revision_id)` 获取。四个入口均提供同步及 `a` 前缀的 async 读取。
 分页使用 `EvolutionHistoryCursor(created_at, id)`，按原创建时刻和 ID 升序，limit 为 1–100；
 确认更新不移动历史位置。请求摘要 status 仅表示最终结算结果，未结算时为 None。
-已完成请求的描述/evidence、选中材料与 before/candidate 正文保留在数据库中；静态档案正文
-与状态分表，仅首次入库，后续确认和结算只更新状态表。A 档案在 `publication_materials` 保存
+
+每个 workspace 保留 A/B 合计最近十次已收尾、非 unconfirmed 尝试的完整详情，按
+`(created_at,id)` 排序。updated/no_change/failed/cancelled/conflict 都计数；没有材料的 empty
+调用不创建档案。未确认或未结算记录额外完整保留，不占十个名额。更旧的合格详情变为 expired，
+删除 before/candidate/observed 全文与材料关联，保留摘要、必要证据和结算收据。
+待处理请求自己的描述和必要 quote 保留，但不会让它的所有旧失败候选永久保留。
+
+`get_publication()` 现在返回 `PublicationHistoryEntry | None`：None 表示 ID 不存在；已有记录包含
+summary、detail_status、detail、evidence 和 proposed_issue_summary。available 时 detail 是完整
+`PublicationRecord`，expired 时为 None；detail_status 与 summary.detail_status 是同一事实。
+summary.proposed_revision_id 仅在 A 实际创建请求后指向该请求。尚未创建请求的提案以
+proposed_issue_summary 保留 description/targets，必要 quote 在 evidence，不能把失败提案当作已入队请求。
+
+静态档案正文与状态分表，确认时不重写材料或候选全文。A 档案在 `publication_materials` 保存
 本批实际选中材料的有序来源/消息区间引用，不再复制 records 全文。读取时在同一快照中从
 `messages` 重组 `materials`，并从非空 record 正文按原顺序投影 `evidence_refs`。多个尝试可
-引用同一份原文；当前完整历史关联继续保留，即使材料已消费、原 lifecycle reader 已消失，
-详情也能从 Evolution 自有存储读取。旧 captures 的 body/receipt 副本不再保存。B 档案通过
+引用同一份原文；尚在完整窗口或受恢复保护的详情，即使材料已消费、原 lifecycle reader 已消失，
+也能从 Evolution 自有存储读取。裁剪只回收本次解除关联后已经消费且无人引用的消息。
+来源水位不被裁剪，摘要与请求仍可累积；十次窗口不代表数据库文件大小固定。B 档案通过
 `revision_id` 引用插入后不再修改的请求实体，在同一读快照中组装 `request/evidence_refs`，
-不在每次尝试中复制它们；请求结算不改变原请求正文。公开详情仍返回完整 `PublicationRecord`。
+不在每次尝试中复制它们；请求结算不改变原请求正文。
 `after_documents` 是只读 Python 属性，不进入 `model_dump()`；confirmed 时等于候选，否则为空。
 A 的固定 Skill 路径由文档 path 描述，B 另含有限 targets。`EvolutionResult.publication_id` 指向这份档案。
 

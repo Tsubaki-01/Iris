@@ -44,8 +44,9 @@ async def test_failed_attempts_share_one_original_message(tmp_path: Path) -> Non
             assert "materials" not in json.loads(detail)
     restarted = EvolutionMaterialStore(tmp_path)
     for summary in summaries:
-        record = restarted.get_publication(summary.publication_id)
-        assert record is not None and record.materials == selected
+        entry = restarted.get_publication(summary.publication_id)
+        assert entry is not None and entry.detail is not None
+        assert entry.detail.materials == selected
     assert restarted.read_pending(allowed_sources=scope.allowed_sources).items == selected
 
 
@@ -89,8 +90,10 @@ async def test_consumed_message_remains_available_through_publication_reference(
             "WHERE publication_id=? ORDER BY position",
             (result.publication_id,),
         ).fetchall() == [(0, 0, 1)]
-    record = reopen(service).get_publication(result.publication_id)
-    assert record is not None and record.materials == selected
+    entry = reopen(service).get_publication(result.publication_id)
+    assert entry is not None and entry.detail is not None
+    record = entry.detail
+    assert record.materials == selected
     assert record.evidence_refs[0].quote == selected[0].records[0].text
     assert len(provider.requests) == 1
 
