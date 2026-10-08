@@ -10,7 +10,7 @@
 
 <!-- iris-web:install:start -->
 ```powershell
-git clone --branch v0.1.0 https://github.com/Tsubaki-01/Iris.git
+git clone https://github.com/Tsubaki-01/Iris.git
 cd Iris
 uv sync
 ```
