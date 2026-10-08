@@ -70,7 +70,7 @@ Iris 有两层配置：进程配置提供服务凭据、provider 注册和统一
 | `command` | Native 环境 | 不会自动注册命令工具；[工具参考](tools.md) |
 | `memory` | enabled `false` | [记忆配置与 SDK](memory-goals.md) |
 | `prompts` | root `.iris/prompts` | [命名模板](context.md#项目命名模板) |
-| `maintenance` | idle_seconds `300` | 宿主共享维护的空闲等待，秒，允许 `0`；领域生成预算另设 |
+| `maintenance` | idle_seconds `300`、min_pending_runs `10` | 新自动原文批次同时要求空闲时间和合格新 Run 数；空闲秒数允许 `0`，Run 门槛须为正整数，领域生成预算另设 |
 | `evolution` | enabled `false` | 要求同时启用 Skill；[长期能力参考](memory-goals.md) |
 | `goal` | enabled `false` | 要求 context policy 开启；[长期能力参考](memory-goals.md) |
 | `todo` | enabled `false` | 要求 context policy 开启；[长期能力参考](memory-goals.md) |

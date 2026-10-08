@@ -31,6 +31,7 @@
 | 字段 | 类型与默认值 | 规则 |
 | --- | --- | --- |
 | `maintenance.idle_seconds` | `float = 300` | 宿主共享空闲时间，有限且非负；只有启用维护能力时才有维护工作 |
+| `maintenance.min_pending_runs` | `int = 10` | 新自动原文批次所需合格新 Run 数，必须大于 0；与空闲时间同时满足，可设为 `1` |
 | `evolution.enabled` | `bool = false` | 开启项目经验维护；要求 `skills.enabled: true` |
 | `evolution.policy_skill` | `str \| null = null` | 非空时相对 workspace 读取策略 Skill；空值使用包内策略 |
 | `evolution.skill_max_chars` | `int = 8000` | 经验 Skill 正文字符上限，必须大于 0 |
@@ -242,12 +243,17 @@ Sessions/session_items.md
 
 自定义 `MemoryStore` 应实现[完整存储协议](../../src/iris/memory/store.py)。关键事务不只是 Item CRUD：条目与事件一起提交，capture 按水位 CAS，flush 同时提交观察与消费区间，dream 同时比较条目版本、应用计划并消费输入，分类正文发布在短事务中绑定完整快照版本。`MemoryNamespaceState(namespace, item_revision=0, projection_revision=None)` 与 `MemoryNamespaceSnapshot(state, items)` 是供投影使用的只读结果；只实现查询和写入方法不足以支持自动生成。
 
+自动维护还使用 `read_learning_readiness(namespace)` 查询原文短状态，以及
+`has_retryable_derived(namespace, *, budget, allowed_sources=None)` 查询预算变化后可重试的
+受阻下游。后者无来源范围时只读短状态，指定范围后筛选来源资格；查询不改变 blocked，
+实际重新开放仍在原维护周期中完成，预算未变不会因此重复启动模型。
+
 ## 维护协调器与 Evolution SDK
 
 以下入口从 `iris.harness` 导入：
 
 ```text
-MaintenanceCoordinator(*, idle_seconds=300, observability=None, live_publisher=None)
+MaintenanceCoordinator(*, idle_seconds=300, min_pending_runs=10, observability=None, live_publisher=None)
 MemoryMaintenanceBinding(*, service, database_path: Path, namespace: str)
 ProjectEvolutionBinding(*, workspace_root: Path, service)
 
@@ -270,24 +276,54 @@ runner.bind_maintenance(coordinator, *, memory=None, evolution=None) -> None
 | --- | --- |
 | `await prepare()` | 绑定当前事件循环，启动必要监听与调度；runner 准备时会调用 |
 | `snapshot()` | `MaintenanceSnapshot`；同步返回最近的不可变控制投影，不取锁、不读盘 |
-| `await request_memory_cycle(binding)` | `MemoryCycleResult`；同资源请求合并，完成一个有界周期；跳过普通 idle，仍遵守前台、来源资格、锁和 worker 排空 |
-| `await request_project_experience(binding)` | `EvolutionResult`；同项目请求合并，跳过普通 idle，仍检查前台/资格/锁 |
-| `await request_revision(binding, request)` | `EvolutionResult`；保存请求并等这一项自己的结算 |
+| `await request_memory_cycle(binding)` | `MemoryCycleResult`；同资源请求合并，完成一个有界周期；跳过自动空闲与 Run 数门槛，仍遵守前台、来源资格、锁和 worker 排空 |
+| `await request_project_experience(binding)` | `EvolutionResult`；同项目请求合并，仅请求经验整理；跳过自动空闲与 Run 数门槛，仍检查前台/资格/锁 |
+| `await request_revision(binding, request)` | `EvolutionResult`；保存请求并等这一项自己的结算；跳过自动两项门槛，不绕过前台/会话资格/锁 |
 | `await unbind_memory(binding)` | 先关闭借用 runner；排空本资源维护，不关闭 service |
 | `await unbind_evolution(binding)` | 同上；持久 pending 请求继续保留 |
 | `await aclose()` | 停止派发、取消生成并排空 IO；不关闭宿主注入的服务、reader 和观测资源 |
 
 同一协调器对同一 DB/namespace 或同一项目要求共享同一服务实例。Memory 与 Evolution 各有最多一个作业位置；所有前台工作共用空闲计数。来源 Run 要求 TERMINAL，来源 session 当前不能 WAITING。显式请求可不关联 session；有关联时也检查该 session 的真实等待状态。取消调用方等待不会取消已经保存的共享请求。
 
+新一批自动 Memory 原文 flush 或 Evolution A 同时要求：前台退出后持续空闲达到 idle_seconds，
+且本资源至少有 min_pending_runs 个尚未准入、完整捕获并有有效剩余原文的合格 Run。Memory
+按实际数据库路径/namespace，Evolution 按 workspace 分别计数；Run 身份是 lifecycle_source_id/run_id，
+不是 Episode 数、消息数或模型请求数。多页捕获和 resume/recover 不重复计数；失败/取消终态
+有有效材料时可以计入，空/全过滤来源、WAITING、缺 reader 和已消费历史不计。
+
+轮到新原文处理且达到门槛后，当时全部合格新来源持久准入，十个只是默认启动阈值，不是批次硬上限。每轮仍
+遵守原预算；已准入余料在下一轮或重启后继续，不重新凑数，新到的 Run 独立累计下一批。
+数量豁免的工作仍遵守自动空闲、前台、实际来源资格和资源锁：
+
+| 工作 | 数量门槛 |
+| --- | --- |
+| 已准入的原文余料 | 不重新凑数 |
+| 当前合格、剩余全空或全过滤的来源 | 不计数，可无模型收尾 |
+| Memory 旧 Observation、显式 change、投影/overview 修复 | 不检查新 Run 数 |
+| 无 Run 来源的显式 observe | 保持显式输入语义，不伪造 Run |
+| Evolution B 与发布恢复 | 不检查新 Run 数，保持先恢复、再 B、再 A 的顺序 |
+
+手动 Memory 整理可将当前合格原文持久准入；Evolution 只有本轮进入 A 时才进行原文准入，
+执行 B 或发布恢复不会顺带放开等待中的新原文。手动请求不扩大原有处理范围；直接 SDK
+flush/dream/refresh_overview 保留显式调用契约。严格使用时间与数量的 AND，不会因为等得足够久
+就自动放开数量限制；不足十个可能长期等待，可手动整理或配置 min_pending_runs=1。
+十个 Run 不表示固定 token 量，也不保证模型调用或费用减少为十分之一。
+
 `MaintenanceSnapshot` 提供 coordinator_id、revision、foreground_count 和 resources。每个
 `ResourceMaintenanceView` 包含稳定的 resource_ref、state、pending_request_id、cycle_id、
-next_eligible_at 和 last_result_ref。状态为 idle、waiting_for_idle、waiting_for_foreground、
-waiting_for_lock、running 或 closing，只投影现有调度事实。
+next_eligible_at、last_result_ref、pending_new_runs 和 min_pending_runs。状态为 idle、waiting_for_idle、
+waiting_for_materials、waiting_for_foreground、waiting_for_lock、running 或 closing。pending_new_runs
+是上次异步判定的合格未准入 Run 数，snapshot 本身不读数据库。仅数量不足且没有其它可处理
+工作时进入 waiting_for_materials，此时 next_eligible_at=None，不把下次复查时间当作执行承诺。
+等待期间复用协调器原有 timer 查询短就绪状态并重查 lifecycle 资格，发现跨进程新增材料或
+WAITING 状态变化；不另外创建后台服务或可配置的复查周期。数量不足不会反复调用模型或产生
+空档案，失败工作仍按原规则等待新的活动或显式请求。
 `maintenance.changed` 只发送对应资源的视图到 resource scope；维护来源采用事实和 trace
 共用 cycle_id，不归到任意前台 Run。
 
 `MemoryCycleResult(cycle_id, results, has_more)` 保留原 `GenerationResult.status`。
-空资源的 results 为空，不伪造生成成功。has_more 描述剩余积压；失败后的剩余输入仍可为 true，
+空资源的 results 为空，不伪造生成成功。has_more 描述本轮范围内可继续处理的积压，不把未达数量的
+新原文作为持续执行信号；协调器另查新批次是否就绪。失败后的已获准余料仍可为 true，
 协调器不会因此进入失败重试循环。宿主需要继续时可再次请求一轮。
 
 从 `iris.evolution` 导入：

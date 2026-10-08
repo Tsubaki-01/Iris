@@ -20,6 +20,7 @@ evolution:
   output_budget_tokens: 8000
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 `evolution.enabled` requires `skills.enabled=true` and by default only maintains
@@ -309,12 +310,18 @@ with full parameter JSON Schema within its budget. The selected names are saved 
 
 `AgentConfig.maintenance` uses `MaintenanceConfig`, exported from `iris.agents` and `iris.agents.config`.
 Its `idle_seconds` is the host-wide quiet interval: 300 seconds by default, with zero allowed.
+New automatic source-learning batches also require `min_pending_runs` eligible new Runs, a positive
+integer defaulting to 10. Both conditions must hold; waiting longer does not waive the count. Set the
+threshold to 1 for more frequent automatic learning, or request a manual cycle.
 `memory.generation` no longer accepts an idle interval. The CLI creates and binds the host coordinator;
 SDK hosts explicitly bind `MaintenanceCoordinator` and `MemoryMaintenanceBinding` before prepare/run.
 Multiple runners borrow that one coordinator; see [harness](../harness/README.en.md).
 
 Automatic learning consumes terminal, fully captured Runs and excludes only the WAITING session's
-pending materials. If an in-memory lifecycle loses its source state on restart, those materials remain
+pending materials. Memory counts separately per database/namespace, Evolution per workspace. Multiple
+pages from one Run count once; empty material does not count and can settle without a model. Admitted
+remainders and downstream observations or revision requests do not need a new batch of Runs.
+If an in-memory lifecycle loses its source state on restart, those materials remain
 pending; use SQLite lifecycle for automatic continuation across restarts.
 
 `AgentConfig.memory` reuses `iris.memory.MemoryConfig` and defaults to `enabled: false`.

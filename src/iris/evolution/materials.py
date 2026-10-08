@@ -398,6 +398,14 @@ class EvolutionMaterialStore:
                 )
             )
 
+    def has_unsettled_publications(self) -> bool:
+        """只读取待恢复档案是否存在，不加载材料与文件正文。"""
+        with connection(self.path) as database:
+            return (
+                database.execute("SELECT 1 FROM publications WHERE settled=0 LIMIT 1").fetchone()
+                is not None
+            )
+
     def list_revision_requests(
         self, *, after: EvolutionHistoryCursor | None = None, limit: int = 50
     ) -> RevisionRequestPage:

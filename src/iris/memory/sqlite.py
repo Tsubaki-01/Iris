@@ -1149,6 +1149,30 @@ class SQLiteMemoryStore:
                 )
             return True
 
+    def has_retryable_derived(
+        self,
+        namespace: str,
+        *,
+        budget: int,
+        allowed_sources: frozenset[tuple[str, str]] | None = None,
+    ) -> bool:
+        """先用短列找预算变化候选，有范围时再沿既有来源关系判断资格。"""
+        with self._connection() as connection:
+            for table, kind, column in (
+                ("memory_observations", "observation", "id"),
+                ("memory_dream_changes", "change", "event_id"),
+            ):
+                restriction, params = source_filter(kind, table, column, allowed_sources)
+                row = connection.execute(
+                    (SOURCE_CTE if allowed_sources is not None else "")
+                    + f"SELECT 1 FROM {table} WHERE namespace=? AND status='blocked' "
+                    "AND blocked_budget != ?" + restriction + " LIMIT 1",
+                    [namespace, budget, *params],
+                ).fetchone()
+                if row is not None:
+                    return True
+            return False
+
     def retry_blocked(
         self,
         namespace: str,

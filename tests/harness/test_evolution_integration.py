@@ -207,7 +207,7 @@ async def test_terminal_experience_automatically_produces_and_settles_revision(
         return result
 
     monkeypatch.setattr(binding.service.store, "settle_publication", observe_settle)
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     runner = AgentRunner.from_config(
         config,
         config_path=path,

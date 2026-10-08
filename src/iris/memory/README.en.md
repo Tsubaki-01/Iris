@@ -209,6 +209,7 @@ memory:
     enabled: true
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 `generation.enabled` defaults to false. Configured services reuse the Agent's resolved provider and
@@ -222,7 +223,13 @@ reader and `MemoryMaintenanceBinding`; factories do not create private maintenan
 `memory.generation.idle_seconds` field is removed. See [harness](../harness/README.en.md) for host wiring.
 An automatic-maintenance runner without a binding fails at its first preparation/run boundary.
 
-Capture records committed source text without learning. Automatic learning selects only terminal,
+A new automatic Episode batch requires both the quiet interval and `maintenance.min_pending_runs`
+eligible new Runs, defaulting to 10. Each database/namespace counts independently; multiple Episodes
+from a Run count once, and consumed or entirely filtered input does not count. Admission is durable:
+budget-limited remainders continue in later cycles or after restart, while new Runs form the next batch.
+Time alone never waives the count; use a manual cycle or min_pending_runs=1 for earlier processing.
+
+Capture promptly records committed source text without waiting for the learning count. Automatic learning selects only terminal,
 fully captured runs. A WAITING session excludes its own earlier material, while other sessions can
 continue. Tool changes resolve complete call identities through captured records; incomplete or unmatched changes
 remain pending. Explicit SDK content without a Run keeps its existing semantics.
@@ -240,6 +247,11 @@ or Event payloads. Multiple Episodes from one Run form one candidate; has_unsour
 input without a Run. The snapshot also includes item_revision, projection_revision, and a
 has_pending_derived hint for pending observations or changes; the hint does not replace source checks.
 The service exposes `await aread_learning_readiness(namespace)`.
+`has_retryable_derived(namespace, *, budget, allowed_sources=None)` also finds blocked downstream
+inputs whose budget has changed. Without a source scope it reads short state only; with one it
+applies the existing source qualification query. The service's
+`await ahas_retryable_derived(namespace, *, allowed_sources=None)` uses the current dream budget.
+Both are read-only; `retry_blocked` inside the maintenance cycle still reopens the inputs.
 `admit_learning_sources(namespace, allowed_sources=..., threshold=...)` rereads candidates in a write
 transaction. When at least threshold eligible, fully captured new Runs still have evidence text, it
 persistently admits all current candidates. The async service entry point is `aadmit_learning_sources`.
@@ -247,6 +259,14 @@ Capture and consumption preserve admission across reopening. Remaining content f
 cursor. Empty or evidence-disabled prefixes advance without model budget estimation or model calls,
 while retaining source checks and CAS. The host selects the admission threshold; these read APIs do
 not start maintenance.
+
+Existing observations, explicit changes, projection/overview repair, and explicit observe input without
+a Run do not require ten new Runs. Empty sources can settle without admission or model calls. Manual
+`request_memory_cycle()` bypasses the automatic time and count gates while retaining foreground,
+eligibility, and locking rules. Standalone SDK flush/dream/refresh_overview remain explicit operations.
+When only material quantity blocks progress, the resource reports waiting_for_materials. Snapshot
+pending_new_runs/min_pending_runs come from the last async check, without synchronous database reads;
+next_eligible_at remains unknown.
 
 After the quiet interval, the coordinator acquires the database/namespace OS lock and calls
 `maintain_cycle(namespace, scope=..., cycle_id=...)`: dream existing observations or changes first; otherwise flush,

@@ -19,6 +19,7 @@ evolution:
   config_targets: [compaction.summary_ratio]
 maintenance:
   idle_seconds: 300
+  min_pending_runs: 10
 ```
 
 `evolution.enabled` 默认关闭，启用要求 `skills.enabled=true`。`policy_skill` 可指定策略文件，
@@ -65,9 +66,17 @@ A 的异常或取消仍向外传播；B 仍返回原有失败/取消结果。提
 已提交结果的原 status，不虚构 `committed` 状态，也不把模型成功后的发布失败回写为模型失败。
 
 `MaintenanceCoordinator` 负责项目锁、空闲时机、来源资格与取消。服务的
-`await maintain_cycle(scope=...)` 只在该锁内执行一轮；`scope.allowed_sources` 限定本次来源，
+`await maintain_cycle(scope=...)` 只在该锁内执行一轮；`scope.experience_sources` 限定本次 A 原文，
+`scope.allowed_sources/allowed_sessions` 保留给 B 与原来源资格，
 `scope.check(actual_sources)` 在模型前与发布前重查。宿主主动整理也走同一入口，
-可以跳过 idle，但不能跳过前台、WAITING 或项目锁。绑定与关闭见 [harness](../harness/README.md)。
+可以跳过自动空闲与 Run 数门槛，但不能跳过前台、WAITING 或项目锁。绑定与关闭见 [harness](../harness/README.md)。
+
+新一批自动 A 默认同时要求空闲 300 秒与 min_pending_runs=10 个合格新 Run；按 workspace
+独立累计，一个 Run 多页材料只计一次。来源须终态、完整捕获且有有效剩余原文，获准后持久
+准入，余料分轮及重启后继续；后来 Run 独立累计。B、发布恢复与空材料无模型收尾不重新凑数。
+只有本轮进入 A 时才准入新原文；执行 B 或恢复不会顺带放开等待中的新来源。
+数量不足可长期等待，没有超时放行；手动请求或配置 min_pending_runs=1 可提前处理。
+十个 Run 不等于十次模型调用或固定 token 量，也不同于十次发布详情的留存窗口。
 
 下面使用前述已开启 evolution 的 YAML 与宿主已有 `CompletionProvider`。一个 runner 的宿主
 保留列表第一项即可；两个 runner 共用同一项目绑定与来源，贡献各自 session 的经历：
@@ -93,7 +102,10 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
         provider=provider, config_path=config_path,
     )
     assert binding is not None  # 示例 YAML 已开启 evolution。
-    coordinator = MaintenanceCoordinator(idle_seconds=config.maintenance.idle_seconds)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=config.maintenance.idle_seconds,
+        min_pending_runs=config.maintenance.min_pending_runs,
+    )
     runners = [
         AgentRunner.from_config(config, config_path=config_path, provider=provider, prompt_source=source)
         for _ in range(2)

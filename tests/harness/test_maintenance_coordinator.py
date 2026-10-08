@@ -79,7 +79,7 @@ async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
         observability=observation,
     )
     service.observe(MemoryObserveInput(text="待整理材料"))
-    read_sources = service.list_pending_sources
+    read_sources = service.store.read_learning_readiness
 
     def read_in_worker(namespace: str) -> object:
         with observation.scope("memory-io"):
@@ -87,8 +87,10 @@ async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
             seen_markers.append(marker.get())
             return read_sources(namespace)
 
-    monkeypatch.setattr(service, "list_pending_sources", read_in_worker)
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    monkeypatch.setattr(service.store, "read_learning_readiness", read_in_worker)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     coordinator._attach(
         MemoryMaintenanceBinding(
             service=service, database_path=tmp_path / "memory.db", namespace="project"
@@ -120,7 +122,11 @@ async def test_memory_worker_resets_ended_trace_but_keeps_business_context(
     assert cycle.attributes["iris.maintenance.database"] == str(tmp_path / "memory.db")
     assert cycle.attributes["iris.maintenance.namespace"] == "project"
     assert "gen_ai.conversation.id" not in cycle.attributes
-    assert all(span.parent.span_id == cycle.context.span_id for span in spans if span is not cycle)
+    assert all(
+        span.parent.span_id == cycle.context.span_id
+        for span in spans
+        if span is not cycle and span.name != "memory-io"
+    )
 
 
 def configured_runner(
@@ -214,7 +220,7 @@ async def test_waiting_excludes_old_session_sources_after_runner_close(tmp_path:
 
     provider = Generation()
     service = memory_service(tmp_path / "memory.db", provider)
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     first = configured_runner(tmp_path, service)
     second = configured_runner(tmp_path, service)
     first.runtime.environment.provider.responses.extend(
@@ -269,15 +275,20 @@ async def test_real_worker_drain_retains_slot_and_os_lock(
     monkeypatch.setattr(maintenance_module, "FileLock", ObservedLock)
     service = memory_service(tmp_path / "memory.db", io_mode=MemoryIOExecutionMode.THREAD)
     service.observe(MemoryObserveInput(text="待整理"))
-    read_sources = service.list_pending_sources
+    read_sources = service.store.read_learning_readiness
+    drained_at: list[int] = []
 
     def blocked_read(namespace: str) -> object:
         entered.set()
         assert release.wait(5)
-        return read_sources(namespace)
+        result = read_sources(namespace)
+        drained_at.append(time_ns())
+        return result
 
-    monkeypatch.setattr(service, "list_pending_sources", blocked_read)
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    monkeypatch.setattr(service.store, "read_learning_readiness", blocked_read)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     runner = configured_runner(tmp_path, service)
     binding = MemoryMaintenanceBinding(
         service=service, database_path=tmp_path / "memory.db", namespace="project"
@@ -310,11 +321,11 @@ async def test_real_worker_drain_retains_slot_and_os_lock(
         await asyncio.wait_for(asyncio.shield(closing), 2)
         with peer_lock:
             assert not coordinator._worker.busy
-        cycle = next(
-            span for span in exporter.get_finished_spans() if span.name == "iris.maintenance.cycle"
+        assert len(released_at) == len(drained_at) == 1
+        assert released_at[0] >= drained_at[0]
+        assert not any(
+            span.name == "iris.maintenance.cycle" for span in exporter.get_finished_spans()
         )
-        assert len(released_at) == 1 and cycle.end_time >= released_at[0]
-        assert cycle.attributes["iris.driver.outcome"] == "cancelled"
     finally:
         release.set()
         if closing is not None:
@@ -342,7 +353,7 @@ async def test_cancellation_suppressing_provider_cannot_commit_and_retains_lock(
 
     service = memory_service(tmp_path / "memory.db", LateProvider())
     service.observe(MemoryObserveInput(text="不能被迟到输出消费"))
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     first = configured_runner(tmp_path, service)
     first.bind_maintenance(
         coordinator,
@@ -424,7 +435,7 @@ async def test_external_waiting_change_reselects_other_sources(tmp_path: Path) -
     lifecycle_path = tmp_path / "lifecycle.db"
     runner = configured_runner(tmp_path, service, store=SQLiteStore(lifecycle_path))
     runner.runtime.environment.provider.responses.append(text_response())
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     runner.bind_maintenance(
         coordinator,
         memory=MemoryMaintenanceBinding(
@@ -476,14 +487,15 @@ async def test_missing_lifecycle_reader_retains_pending_after_restart(tmp_path: 
     await first.start(AgentRunRequest(input="只存在于原内存 lifecycle 的材料"))
     await first.aclose()
     await original.aclose()
-    restarted = MaintenanceCoordinator(idle_seconds=0)
+    restarted = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     second = configured_runner(tmp_path, service)
     second.bind_maintenance(restarted, memory=binding)
     await second.aprepare()
     await asyncio.sleep(0.05)
     assert service.generation_provider.requests == []
     assert service.generation_state("project").pending_episodes == 1
-    assert restarted._task is None and restarted._timer is None
+    assert restarted._task is None and restarted._timer is not None
+    assert restarted._timer.when() > asyncio.get_running_loop().time()
     await second.aclose()
     await restarted.aclose()
 
@@ -503,7 +515,9 @@ async def test_lock_busy_retries_without_activity_and_yields_to_other_resource(
         configured_runner(tmp_path, second_service),
     )
     observation, exporter = observability
-    coordinator = MaintenanceCoordinator(idle_seconds=0, observability=observation)
+    coordinator = MaintenanceCoordinator(
+        idle_seconds=0, min_pending_runs=1, observability=observation
+    )
     for runner, name, service in (
         (first, "first", first_service),
         (second, "second", second_service),
@@ -574,7 +588,7 @@ async def test_overview_failure_does_not_retry_after_own_dream_notification(tmp_
     service = memory_service(tmp_path / "memory.db", provider)
     service.remember(MemoryWriteInput(text="已确认事实", reason="用户指定"))
     runner = configured_runner(tmp_path, service)
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     runner.bind_maintenance(
         coordinator,
         memory=MemoryMaintenanceBinding(
@@ -612,7 +626,7 @@ async def test_foreground_cancels_shared_generation_without_waiting(
 
     service = memory_service(tmp_path / "memory.db", Background())
     service.observe(MemoryObserveInput(text="已有材料"))
-    coordinator = MaintenanceCoordinator(idle_seconds=0)
+    coordinator = MaintenanceCoordinator(idle_seconds=0, min_pending_runs=1)
     first = configured_runner(tmp_path, service)
     second = (
         configured_runner(tmp_path, service)

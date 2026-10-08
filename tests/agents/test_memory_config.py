@@ -17,15 +17,19 @@ def test_agent_memory_is_disabled_by_default() -> None:
 
 
 def test_maintenance_idle_belongs_to_host_config(tmp_path: Path) -> None:
-    """宿主安静时间独立于 Memory 生成参数，加载没有副作用。"""
+    """宿主时间与数量门槛独立于 Memory 生成参数，加载没有副作用。"""
     defaults = AgentConfig.model_validate({"name": "a", "model": "openai/test", "system": "a"})
     assert defaults.maintenance.idle_seconds == 300
+    assert defaults.maintenance.min_pending_runs == 10
     path = tmp_path / "agent.yaml"
     path.write_text(
-        "name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n  idle_seconds: 0\n",
+        "name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n"
+        "  idle_seconds: 0\n  min_pending_runs: 1\n",
         encoding="utf-8",
     )
-    assert load_agent_config(path).maintenance.idle_seconds == 0
+    config = load_agent_config(path)
+    assert config.maintenance.idle_seconds == 0
+    assert config.maintenance.min_pending_runs == 1
     assert not (tmp_path / ".iris").exists()
 
 
@@ -35,6 +39,20 @@ def test_maintenance_idle_rejects_invalid_duration(tmp_path: Path, idle: str) ->
     path = tmp_path / "agent.yaml"
     path.write_text(
         f"name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n  idle_seconds: {idle}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(IrisConfigError, match="Agent 配置校验失败"):
+        load_agent_config(path)
+
+
+@pytest.mark.parametrize("minimum", [0, -1])
+def test_maintenance_min_pending_runs_rejects_nonpositive_values(
+    tmp_path: Path, minimum: int
+) -> None:
+    """Run 数量门槛在 YAML 配置边界拒绝非正数。"""
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        f"name: a\nmodel: openai/test\nsystem: a\nmaintenance:\n  min_pending_runs: {minimum}\n",
         encoding="utf-8",
     )
     with pytest.raises(IrisConfigError, match="Agent 配置校验失败"):
