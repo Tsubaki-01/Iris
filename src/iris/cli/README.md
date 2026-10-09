@@ -39,7 +39,9 @@ iris chat agent.yaml --session-id work --max-steps 8
 
 启用 `memory.generation.enabled` 后，CLI 将已构造的 Memory 服务绑定到一个共享
 `MaintenanceCoordinator`，在接收输入前绑定 runner。`maintenance.idle_seconds` 控制安静时间，
-默认 300 秒；Memory 的生成预算继续位于 `memory.generation`。
+默认 300 秒；新一批自动原文处理还要求 `maintenance.min_pending_runs` 个合格新 Run，默认 10。
+设为 1 可在每次出现合格材料后更及时处理，但仍等待空闲时间。Memory 的生成预算继续位于
+`memory.generation`；已准入批次的续作、投影修复与发布收尾不重复等待新 Run 数量。
 
 自动维护仅消费已结束且完整捕获的 Run。等待用户回答时，该会话的材料保留 pending；
 新前台输入取消未提交的生成。退出时先停止 SessionManager，再排空维护的实际 IO，
@@ -128,3 +130,5 @@ SQLite schema 按新契约使用，不提供旧 schema migration；child/fork �
 
 `tests/cli/test_chat_todo.py` 通过真实 `run_chat_loop` 验证清单三态、人工编辑刷新、
 查询错误与参数提示，以及普通/Goal 执行和 question/permission WAITING 时的只读行为。
+
+使用与设计：[首次运行](../../../docs/getting-started/quickstart.md) · [CLI 参考](../../../docs/reference/cli.md)。

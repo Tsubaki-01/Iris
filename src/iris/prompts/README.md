@@ -32,6 +32,8 @@ print(text)  # Select the best tool from state.tools for state.queries[0].
 - `render(prompt_id, variables)`：按固定 ID 渲染，ID 不含 `.j2`；变量每次调用重新传入。
 - `root`：本次来源的绝对目录。
 - `renderer`：冻结的 `TemplateRenderer`，可供已有 `render_file(path, context)` 调用使用。
+- `source_documents()`：返回已经冻结的来源文本及状态，不重新读取目录。该集合表示快照可用
+  的来源，不代表其中每个模板都进入了某次模型请求。
 - `with_template(prompt_id, source)`：在相同内存源中仅替换一个模板，返回独立候选快照；
   不改变原快照或磁盘，供有限候选使用领域代表变量试渲染。
 
@@ -82,3 +84,5 @@ Skill 提供；经验合并步骤只在 A 模板中，prompt/config 的具体修
 项目正文可手工修改；[evolution](../evolution/README.md) 可按显式开放列表修订有限目标，
 此包仍只提供来源与统一渲染，不拥有修订模型、调度或消费进度。初始化与并发发布测试位于
 `tests/prompts/`，完整 Jinja 快照语义测试位于 `tests/utils/test_templating.py`。
+
+使用与设计：[配置 Agent](../../../docs/cookbook/configure-agent.md) · [Context 与模板参考](../../../docs/reference/context.md)。

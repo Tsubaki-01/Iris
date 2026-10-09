@@ -453,8 +453,8 @@ recoverable parent/child state.
   `limit` must be a positive integer.
 
 `resume()` passes the current interaction ID, run revision, interaction version, and typed response
-to the Store without echoing the stored call fingerprint as a resolve argument. Actual tool
-execution still retains fingerprint binding.
+to the Store. Responses match the interaction identity and version; actual tool execution separately
+checks fingerprint binding.
 
 Use `resume()`, not `recover()`, for a valid waiting run. Cancel/recover on terminal runs are
 idempotent reads.
@@ -473,8 +473,9 @@ their receipts. Call `get_session()` explicitly when messages are needed.
 
 A host may inject the same `LivePublisher` (typically a `LiveStreamBroker`) into `AgentRunner`
 through `live_publisher=`. The runner synchronously publishes each activation's
-`RuntimeStreamEvent` values and every newly committed `RunEvent`; without a publisher, it creates
-no runtime sink. The publisher is a best-effort observation plane. An ordinary exception produces
+`RuntimeStreamEvent`, `ContextPreparation`, `ConfigurationApplied`, and `SourceAdopted` values,
+plus every newly committed `RunEvent`; without a publisher, it creates no runtime sink.
+The publisher is a best-effort observation plane. An ordinary exception produces
 a payload-free warning and cannot roll back a durable mutation, cancel a run, or change its
 `RunResult`.
 
@@ -485,6 +486,17 @@ with one. `ModelConfig` has no `stream` field; direct provider calls still use `
 `RuntimeFactory` owns neither the broker nor fan-out. A host can refill durable facts from the
 exact runner/store through `get_session()`, `get_run()`, `get_result()`, `list_tool_calls()`, and
 `list_events()`. These reads never publish live facts.
+
+`ConfigurationApplied.configuration` carries the full configuration adopted by the activation.
+`SourceAdopted` records sources at their actual consumption boundary; `ContextPreparation` records
+model-request preparation. These facts do not depend on the OTel switch. Hosts may retain the typed
+facts, while the broker projects compact fields and references; see
+[streaming](../streaming/README.en.md#observation-scopes-and-diagnostic-events).
+
+`runner.get_run_lineage(run_id)` builds `RunLineage` from durable parent links, returning `None` for
+a root Run and raising `IrisRunNotFoundError` for a missing Run. Child live facts retain their original
+run/session identities plus lineage and can project into the root's `session_tree`. This read does not
+resume work or maintain a second child directory.
 
 ## Per-session input management
 
@@ -920,3 +932,5 @@ uv run pytest tests/harness
 uv run ruff check src/iris/harness tests/harness
 uv run mypy src/iris/harness
 ```
+
+Guides and reference (Chinese): [Python SDK introduction](../../../docs/getting-started/python-sdk.md) · [Runtime and session reference](../../../docs/reference/runtime.md).

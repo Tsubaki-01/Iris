@@ -302,7 +302,7 @@ original/model 的路径、MIME、尺寸及所属 message/result 位置；原始
 切点规划复用相同空后缀的估算，不改变完整消息组和近期原文保留规则。
 
 摘要指令使用项目 `compaction.j2`，种子要求七栏 Markdown、正文跟随对话主要语言。
-手工编辑项目模板可替换指令与输出格式，旧 `compaction.prompt` / `prompt_path` 入口已删除。
+手工编辑项目模板可替换指令与输出格式；模板目录由 `prompts.root` 配置。
 旧摘要与本批历史仍由框架提供，user 消息包装使用同目录的 `compaction_input.j2`。
 每次完整压缩开始从 `RuntimeEnvironment.prompt_source` 取得新快照；两个入口及其动态
 include/import/extends 依赖在内存中固定，全部批次、预算计量及重试共用，下一次压缩才采用修改。
@@ -358,6 +358,21 @@ DENY 时，批准仍返回权限拒绝结果。用户主动拒绝保持 `USER_RE
 工具结果统一经 `ToolResult.to_msg()` 投影为 history 消息。
 普通工具与 child 续接复用 executor 的最终结果处理，统一保留完整输出引用并裁剪模型正文。
 
+## 上下文准备诊断
+
+每次获准的 `before_model` 准备使用一个 `ContextPreparation`，关联配置快照、session/run/
+activation、步骤与独立 `preparation_id`。退出准备区间时，经已有 stream sink 发布一次只读结果：
+正常为 `ready`，错误为 `failed`，取消或期限终止为 `cancelled`。
+
+`ContextStage` 记录装配、去重、可选材料与工具选择、旧结果预览、摘要和最终请求的实际计量；
+`ContextDecision` 解释保留、替换、移除或摘要的来源及原因。阶段区分 `applied`、`skipped`、
+`candidate` 和 `rejected`，压缩规划中的候选不表示已经提交。最终快照保存选中的工具、动态
+contribution keys、保护引用与输入 token 估算，不为诊断额外调用 estimator 或模型。
+
+这些事实不进入 checkpoint，不裁决执行或恢复。`RuntimeEventSink.emit()` 的当前参数是
+`RuntimeStreamEvent | ContextPreparation`；自定义 sink 需要处理两种类型。诊断发布失败只记日志，
+不改变业务结果。测试见 `tests/runtime/test_context_diagnostics.py`。
+
 ## 可选 live streaming
 
 `iris.providers.CompletionProvider` 必须同时实现 `complete()` 和同步
@@ -389,8 +404,8 @@ provider iterator；清理失败只记录 warning。Provider completed 也不代
 preflight；`tool.started` 只在 permission refresh、activation fence 与 durable claim 成功后、
 middleware/body 前发布；`tool.completed` 只在 ordered `commit_tool_result()` 成功后携带完整
 `ToolResult` 发布。并发工具 body 可以乱序结束，但 completed event 仍按 model ordinal。
-Runtime 不 await sink、不创建 queue，也不捕获自定义 sink 的异常；publisher 隔离由后续
-harness-owned sink 负责。
+普通 `RuntimeStreamEvent` 发布不 await sink、不创建 queue，也不捕获自定义 sink 的异常；
+publisher 隔离由 harness-owned sink 负责。上下文诊断使用前述独立的 best-effort 发布边界。
 
 ## Runtime steering
 
@@ -415,8 +430,7 @@ callback 自身的异常只记录日志，不会覆盖 durable 结果。传入 `
 ## 有界工具并发
 
 在 `RETURN_TO_MODEL` 策略下，runtime 会把连续的“只读且声明为并发安全”调用组成内部窗口，
-每个窗口最多 8 条。8 是私有实现上限，不是 YAML、`RuntimeExecutionOptions` 或环境变量配置；
-本次能力没有改变 public config、schema、model 或导出。
+每个窗口最多 8 条。8 是私有实现上限，不是 YAML、`RuntimeExecutionOptions` 或环境变量配置。
 
 窗口只覆盖连续候选。STOP、HITL、preflight result、WRITE/EXECUTE/NETWORK/MCP/AGENT，以及任一
 不安全或分类失败的调用都是串行屏障，后序调用不能跨过屏障启动。整个 batch 复用首次生成的
@@ -452,9 +466,8 @@ loop 合并。窗口 settle 后的 checkpoint snapshot 包含合并记录，后�
 同步 callable 默认 inline；显式 `CallableExecutionMode.THREAD` 才把
 阻塞 body 放入 worker。线程无法安全强停，取消或 timeout 只停止 async waiter；claim 未结算时
 runtime 以 `OUTCOME_UNKNOWN` 收口，晚到结果不能推进 history、cursor、checkpoint 或 events。
-thread placement 不承诺 CPU 加速。NETWORK/MCP 并发或 write 并发未来必须另行设计 effect、
-retry、timeout、冲突与 crash reconciliation 协议，不能直接放宽当前 classifier；本轮也没有
-引入 delta/merge/lock/hash 模型。
+thread placement 不承诺 CPU 加速。NETWORK/MCP 和写入调用串行执行，不属于此并发窗口；
+窗口只调度满足上述分类条件的只读调用，并沿用逐调用的 durable claim 与有序提交契约。
 
 ## 命令期限与停止事实
 
@@ -583,9 +596,10 @@ registry 的 `load_skill`。关闭 Skill 或发现结果为空时会精确绕过
 
 包级导出包括 `AgentRuntime`、`RuntimeFactory`、`RuntimeEnvironment`、
 `RuntimeEventSink`、
-`RuntimeStreamEvent`、assembler/tool bridge、`RuntimeSteeringPort`、`SteeringInput`，以及
-activation/commit-port contracts。不存在 complete-run options/status/result、
-`run_turn()`、`run_loop()`、`resume()` 或旧 checkpoint helper。
+`RuntimeStreamEvent`、`ContextPreparation`、`ContextStage`、`ContextDecision`、assembler/tool bridge、
+`RuntimeSteeringPort`、`SteeringInput`，以及
+activation/commit-port contracts。完整 Run 的启动、恢复、取消与结果查询由
+[`iris.harness.AgentRunner`](../harness/README.md) 提供。
 共同协议 `CompletionProvider`、`StreamingProvider` 及 `streaming_provider_for()` 从
 `iris.providers` 导入；runtime 不重复导出 provider 协议。
 
@@ -606,3 +620,5 @@ uv run pytest tests/runtime
 uv run ruff check src/iris/runtime tests/runtime
 uv run mypy src/iris/runtime
 ```
+
+使用与设计：[整体架构](../../../docs/design/architecture.md) · [上下文工程](../../../docs/design/context-engineering.md) · [运行参考](../../../docs/reference/runtime.md)。

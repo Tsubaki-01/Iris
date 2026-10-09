@@ -3,7 +3,7 @@
 # `iris.lifecycle`
 
 公开 Sub Agent 契约以 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)`
-关联独立运行；parent 工具保持 PREPARED。Store 增加 `AdmitChildRun`、`RebindSubagentProxy`、
+关联独立运行；parent 工具保持 PREPARED。Store 提供 `AdmitChildRun`、`RebindSubagentProxy`、
 `FinalizeSubagentResult` 与 exact link point read。Rebind 返回完整 WAITING `RunCommit`；
 WAITING finalize 在同一 commit 返回绑定 fresh RESUME activation 的 ACTIVE run/checkpoint，
 调用方无需追加普通 resume mutation。Child usage 保持 run-local。
@@ -88,7 +88,7 @@ header、compaction、`raw_tail`、`protected_indices`、`protected_prefix_messa
 `tool_discovery`。设摘要覆盖数为 C、原文总数为 N，tail 对应 `[C,N)`；保护下标和 prefix 中的
 `(index, Msg)` 始终使用绝对下标，保留当前 run 的 BCI、input 和最新普通 steer。
 `include_tool_discovery=False` 不加载发现 JSON；缺失 run 抛出 `IrisRunNotFoundError`。
-这是当前模型上下文读取，不是历史终态预览；完整 `load_session()` 和 Fork 的返回契约保持不变。
+这是当前模型上下文读取；读取完整会话使用 `load_session()`，读取终态截点使用 `load_session_at_run()`。
 
 `SessionToolDiscovery` 保存最近发现/成功使用位置、最后搜索的有序结果和尚未消费的搜索首项保护；
 `SessionReadState` 组合该模型与最后普通用户位置。两者只能由 store 按消息 delta 更新并与原文一起
@@ -121,7 +121,7 @@ BCI、用户输入并初始化上下文窗口，推进 checkpoint sequence 到 `
 重交成功；已有相同回答、取消和 child admission 的业务状态幂等按各 mutation 契约保留。
 Run 状态 mutation 按各自契约携带 expected revision/fence；stale writer 必须 conflict，而不是覆盖新事实。
 `ResolveInteraction` 携带 run ID、当前 interaction ID、expected run revision、expected interaction
-version、typed response 和时间，不再接收 `expected_fingerprint`。待回答写入检查 revision/version；
+version、typed response 和时间。待回答写入检查 revision/version；
 WAITING 已保存相同回答时返回当前事实与空 events，不同回答冲突。工具执行的参数/workspace 指纹仍保留。
 Store 只校验当前 mutation 影响的 phase、counter、identity 与 fence，再应用 typed delta；不会为了
 更新单个字段而把整个已验证 aggregate `model_dump()` 后重新 `model_validate()`。SQLite row 与
@@ -144,7 +144,7 @@ checkpoint recovery 仍是完整验证边界，JSON-safe 约束仍由 durable mo
 消息与窗口一起变化也只推进一次。
 后续 run、HITL 和恢复复用该窗口；只有成功的 `CommitCompaction.context_window` 会替换它。
 取消、失败或 CAS 冲突均保留旧窗口。Checkpoint v4 通过 session revision 绑定窗口，不复制其正文。
-`RuntimeExecutionOptions` 不再接受 memory 查询、结果快照或字符预算，读取与选择由 runtime 装配负责。
+Memory 概览读取与窗口选择由 runtime 负责，不通过 `RuntimeExecutionOptions` 传入查询或结果快照。
 `request_options` 在此输入边界一次解析逻辑 `tool_choice`、`response_format` 和
 `provider_options`，拒绝协议包装与请求级 `api_style`；runtime 直接应用已经验证的覆盖值。
 
@@ -176,9 +176,27 @@ session 不存在时返回 `0`。需要完整历史时仍使用 `load_session()`
 gateway 可以据此确认 run 属于所请求的 session，无需加载完整 run。上述读取都不
 替代 mutation CAS，也不改变同步 store boundary。
 
+## 会话与运行导航
+
+`LifecycleStore` 的导航读取返回 `history.py` 中的冻结分页模型，不加载完整消息历史：
+
+| 方法 | 返回值 | 顺序与范围 |
+| --- | --- | --- |
+| `list_sessions(*, after=None, limit=50)` | `SessionPage` | 按最新 Run 时间与 session ID 降序，只列根会话；未运行的持久 fork 排在末尾 |
+| `list_runs(session_id, *, after=None, limit=50)` | `RunPage` | 按创建时间与 Run ID 升序，包含全部 phase |
+| `list_child_runs(parent_run_id, *, after=None, limit=50)` | `ChildRunPage` | 按相同 Run 顺序列直接 child，保留 parent tool call 和实际 `agent_selector` |
+
+`SessionCursor` 与 `RunCursor` 分别表示会话页、运行页的位置；`next_cursor=None` 表示本次查询
+已到末尾。Store 统一校验正数 `limit`，跨页不承诺固定快照。递归后代需按各自 parent Run 查询。
+
+`load_parent_link(child_run_id)` 返回直接父关系 `SubagentRunLink`；不存在该关系时返回 `None`。
+`history.RunLineage` 包含 root session/run、直接 parent run/tool call、child run/session 与 selector，
+由 harness 沿持久 link 构造。它是只读关系投影，不新增一份运行状态；SDK 查询入口见
+[harness](../harness/README.md)。
+
 ## 会话历史契约
 
-`history.py` 定义四个 frozen slots dataclass，均从 `iris.lifecycle` 导出：
+`history.py` 中用于历史分支的四个 frozen slots dataclass 均从 `iris.lifecycle` 导出：
 
 - `ForkPointCursor(created_at, run_id)`：分支点分页位置；
 - `ForkPoint`：run/session/agent identity、input 的文字展示、stop reason、创建与结束时间及 `message_count`；纯图片显示图片名称标签；
@@ -223,3 +241,5 @@ uv run pytest tests/store tests/harness
 uv run ruff check src/iris/lifecycle
 uv run mypy src/iris/lifecycle
 ```
+
+使用与设计：[运行控制与持久化](../../../docs/design/lifecycle.md) · [运行契约](../../../docs/reference/runtime.md)。

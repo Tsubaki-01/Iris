@@ -70,9 +70,9 @@ flowchart LR
 内置 Iris provider id 为 `openai`、`anthropic` 和 `deepseek`。自定义 provider 只有在已初始化
 `Config.providers` 且包含 `base_url` 时才进入注册表；只配置 API key 不会注册 provider。
 
-全局 `Config` 只提供 `api_key`、`provider_api_keys` 和 `providers`。Endpoint 使用
+模型连接相关的全局 `Config` 字段为 `api_key`、`provider_api_keys` 和 `providers`。Endpoint 使用
 `providers[name].base_url` 或 Agent `model.base_url`；timeout 使用 `model.timeout` 或
-显式 client 参数，日志通过 Python `logging` 配置。全局不再声明无效的 `base_url/timeout/debug`。
+显式 client 参数，日志通过 Python `logging` 配置。
 `ProviderConfig` 只声明 `litellm_provider`、`base_url` 和 `headers`。协议配置的唯一 YAML 入口为
 Agent `model.api_style`，默认 `responses`，可选 `chat_completions`；Iris Python SDK 使用
 `create_provider_client(..., api_style="chat_completions")` 或 `ProviderClient(api_style=...)`。
@@ -83,8 +83,8 @@ Responses 当前接入 OpenAI 原生路线，以及 DeepSeek 的 OpenAI-compatib
 `deepseek` 默认使用传输 `deepseek`。两者默认地址均为 `https://api.deepseek.com`，凭据始终按
 逻辑 `deepseek` 查找。只覆盖 headers 不丢失这些默认值；显式 `litellm_provider` 和 endpoint
 覆盖优先。两种协议都把公共 `base_url` 传为 LiteLLM `api_base`。
-Responses 尚未接入的非 `openai`
-传输在请求前报错，不进入 Chat bridge。直接构造 `ProviderClient` 时须提供已解析的传输与地址；
+Responses 只支持 `openai` 传输；其他传输在请求前报错，不进入 Chat bridge。
+直接构造 `ProviderClient` 时须提供已解析的传输与地址；
 通常使用 factory 取得完整默认配置。
 
 API key 优先级：
@@ -124,7 +124,7 @@ model:
 ### `ProviderClient`
 
 构造字段为 `provider`、`api_style`、`litellm_provider`、`api_key`、`base_url`、`timeout` 和 `headers`；
-Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
+Pydantic `extra="forbid"` 拒绝声明之外的参数。
 
 `complete(request)`：
 
@@ -137,7 +137,7 @@ Pydantic `extra="forbid"` 会拒绝旧的 `adapter`、`http_client` 等参数。
 - 返回 provider-neutral `LLMResponse`。
 
 Provider response raw boundary 只接受 `Mapping` 或当前 LiteLLM/Pydantic v2 的
-`model_dump()` 对象形态；不再调用 Pydantic v1 `.dict()` 兼容接口。
+`model_dump()` 对象形态。
 
 `response_format` 使用 `text`、`json_object` 或 `{name, schema, strict?}`；Chat 编码为
 `response_format`，Responses 编码为 `text.format`。Responses 还将 `max_tokens` 映射为
@@ -243,3 +243,5 @@ Iris 统一通过 LiteLLM 调用两种协议；OpenAI SDK 是 LiteLLM 的传递�
 uv run pytest tests/providers tests/test_provider_client.py tests/harness/test_protocol_adapters.py
 uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```
+
+使用与设计：[模型与配置参考](../../../docs/reference/configuration.md) · [协议与媒体](../../../docs/design/messages-media.md)。

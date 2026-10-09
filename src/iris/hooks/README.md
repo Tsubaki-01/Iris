@@ -221,3 +221,5 @@ finished 脚本 unknown/cleanup 只处理附加动作：有停止收据则等待
 [`models.py`](models.py) 只在类型检查时引用 lifecycle 和 ToolResult；[`__init__.py`](__init__.py) 不加载派发器，避免形成 lifecycle/tools/hooks 的循环导入。`event_to_dict` 从可信字段生成脚本输入投影，不重新验证已解析领域模型。
 
 核心测试位于 `tests/hooks/test_models.py` 和 `tests/hooks/test_dispatcher.py`，覆盖事件序列化、注册约束、精确匹配、输入隔离、部分反馈、处理器期限及取消与 unknown/cleanup 的交接。工具结果反馈的持久化和 artifact 投影由 [`tools`](../tools/README.md) 的结果模型负责。
+
+使用与设计：[扩展用法](../../../docs/cookbook/extensions.md) · [扩展点职责](../../../docs/design/extensions.md)。

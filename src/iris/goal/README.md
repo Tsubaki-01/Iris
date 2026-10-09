@@ -157,3 +157,5 @@ helper 留在对应内部模块，不作为顶层稳定 SDK。模型在 [models.
 [context.py](context.py) 负责目标投影、变量准备与渲染调用。直接使用领域适配器时，
 `GoalContextSource(service, host_source=None, *, prompt_snapshot=...)` 与
 `render_continuation(goal, *, prompt_snapshot=...)` 都显式接收同一构造期快照。
+
+使用与设计：[Goal 与 Todo 用法](../../../docs/cookbook/goals-todos.md) · [推进规则](../../../docs/design/goals.md)。

@@ -20,8 +20,19 @@ prompt 和只读文件工具，适合作为个人本地 agent 配置的起点。
 - `file.grep`
 
 它不会启用写入工具，也不会启用 SQLite session。
+模型默认使用 `responses` 协议；`permissions.workspace: .` 相对本 `agent.yaml` 所在目录解析。
+`session.backend: none` 仍有进程内会话状态，退出后不保留历史。
 
 ## 使用方式
+
+在已安装 Iris 的 Python 环境中，进入本目录，配置 `IRIS_PROVIDER_API_KEYS__OPENAI` 后启动：
+
+```bash
+iris chat agent.yaml
+```
+
+如果凭据保存在本目录的 `.env` 中，显式使用 `iris chat agent.yaml --env-file .env`。
+以下 SDK 片段只加载配置并构建工具注册表，不调用模型：
 
 ```python
 from iris.agents import build_tool_registry, load_agent_config
@@ -30,7 +41,8 @@ config = load_agent_config("agent.yaml")
 registry = build_tool_registry(config.tools)
 ```
 
-生成的配置可以作为后续 agent loop 的输入，但模板本身不实现 agent loop。
+完整执行由 CLI 或 `iris.harness.AgentRunner.from_config_path("agent.yaml")` 负责；模板本身不实现
+agent loop。SDK 宿主用完 runner 后需 `await runner.aclose()`。
 
 ## 调整建议
 

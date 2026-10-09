@@ -343,14 +343,16 @@ Jinja 环境使用 `StrictUndefined`，默认关闭自动转义，适用于纯�
 模板渲染使用数据副本；模板 renderer 对传入上下文的修改不会改变原 section
 或 slot。
 
-`TemplateRenderer` 按解析后的入口目录复用 Jinja Environment，保留 FileSystemLoader，
+独立构造的 `TemplateRenderer()` 按解析后的入口目录复用 Jinja Environment，保留 FileSystemLoader，
 每次渲染都通过 `get_template()` 获取入口。Jinja 使用默认的进程内编译缓存和 `auto_reload=True`，
 按文件 mtime 检测入口与实际使用依赖的变化；文件未变时复用编译结果，每次仍用当前数据生成文本。
-同一 runner 的多个 run 复用此缓存，它不保存最终 prompt，也不写入 Store 或 SQLite。
+同一 renderer 实例复用编译缓存，不保存最终 prompt，也不写入 Store 或 SQLite。
 
 `include` / `import` / `extends` 支持 Jinja 原生动态文件名；依赖在分支实际执行时才加载。
-新增可选文件与优先候选文件可在下次渲染生效。修改实际使用的模板导致语法错误、缺失或未定义
-变量时抛出 `IrisContextError`，不退回旧内容；这不是一次 run 内所有模板来源的固定快照。
+使用独立文件 renderer 时，新增可选文件与优先候选文件可在下次渲染生效。修改实际使用的
+模板导致语法错误、缺失或未定义变量时抛出 `IrisContextError`，不退回旧内容。
+Runner/runtime 装配注入的 renderer 则读取构造期内存快照；同一实例跨 Run 复用冻结来源，
+包括动态依赖与可选文件的缺失状态，磁盘编辑由新建 runner/runtime 采用。
 
 `build()` 对没有启用 slot 的可选段直接返回 `None`，不会读取该段的模板。
 `StrictUndefined` 与 `max_chars` 只在实际渲染时生效。
@@ -473,3 +475,5 @@ class ContextXmlRenderer:
 uv run pytest tests/context
 uv run ruff check src/iris/context tests/context
 ```
+
+使用与设计：[上下文用法](../../../docs/cookbook/context.md) · [上下文工程](../../../docs/design/context-engineering.md) · [Context 参考](../../../docs/reference/context.md)。

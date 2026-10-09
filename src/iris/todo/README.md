@@ -119,3 +119,5 @@ SDK 和模型展示当前绝对路径，以该位置为准。
 
 `/todo` 不接受参数，不向模型发送用户输入；在执行中或等待 question/permission 时也可以
 查看，之后的实际回答仍对应原交互。命令只按需读取，不监听文件或自动显示进度面板。
+
+使用与设计：[Goal 与 Todo 用法](../../../docs/cookbook/goals-todos.md) · [职责与流程](../../../docs/design/goals.md)。

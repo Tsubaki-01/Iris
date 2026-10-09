@@ -30,15 +30,12 @@ Field parsing first produces a complete typed request. `HumanInteraction` model-
 then compares the `tool_call_id`, request subject, and lifecycle delta without rechecking whether
 required fields exist.
 
-The standalone interaction store, consumed/resume phases, checkpoint payload, and stateful service
-have been removed.
-
 ## Stateless service
 
 `HumanInteractionService` constructs pending values and typed child proxies, validates responses
 against exact run/interaction facts, expiry, and any stored response, and projects a response to `ToolResult` or
 `ApprovedToolCall`. `project_response(interaction)` reads the RESOLVED/CLOSED interaction's response
-without accepting a second copy. It performs no persistence. Harness uses lifecycle commands, including
+as its sole answer source. It performs no persistence. Harness uses lifecycle commands, including
 `ResumeWaitingRun`, for atomic state transitions.
 
 ## Fingerprint
@@ -58,3 +55,5 @@ uv run pytest tests/harness/test_runner_resume.py tests/runtime/test_execute.py 
 uv run ruff check src/iris/hitl tests/harness/test_runner_resume.py tests/runtime/test_execute.py tests/tools/test_executor_preflight.py tests/tools/test_human_ask_tool.py
 uv run mypy src/iris/hitl
 ```
+
+Guides and reference (Chinese): [Human interaction and recovery](../../../docs/cookbook/hitl-recovery.md) · [Interaction design](../../../docs/design/human-interaction.md).

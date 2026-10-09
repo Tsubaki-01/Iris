@@ -181,16 +181,18 @@ The builder strips leading and trailing whitespace from template output before u
 It converts template loading and rendering errors to `IrisContextError`; non-serializable slot values
 also raise `IrisContextError`.
 
-`TemplateRenderer` reuses a Jinja Environment per resolved entry directory, retains
+An independently constructed `TemplateRenderer()` reuses a Jinja Environment per resolved entry directory, retains
 FileSystemLoader, and calls `get_template()` for each render. Jinja's default in-memory compiled
 cache and `auto_reload=True` detect changes to the entry and used dependencies by file mtime.
-Unchanged templates reuse compiled code while each render uses current data. Runs on the same
-runner share this cache; final prompts are not cached or stored in the Store or SQLite.
+Unchanged templates reuse compiled code while each render uses current data. Calls on the same
+renderer share this cache; final prompts are not cached or stored in the Store or SQLite.
 
 `include` / `import` / `extends` accept native Jinja dynamic filenames, and dependencies load only
-when their branch executes. Newly added optional files and preferred candidates can take effect on
-the next render. Invalid, missing, or undefined content in a used template raises `IrisContextError`
-without falling back to old content. Template sources are not frozen for the duration of a run.
+when their branch executes. With the standalone file renderer, newly added optional files and preferred
+candidates can take effect on the next render. Invalid, missing, or undefined content in a used template
+raises `IrisContextError` without falling back to old content. Runner/runtime assembly instead injects
+a frozen renderer: the same instance reuses construction-time sources across Runs, including dynamic
+dependencies and absent optional files. A newly constructed runner/runtime adopts disk edits.
 
 `build()` returns `None` for optional sections without enabled slots and does not read their
 templates. `StrictUndefined` and `max_chars` apply only during actual rendering.
@@ -234,3 +236,5 @@ memory store, estimate tokens, allocate cross-section budgets, or maintain compa
 uv run pytest tests/context
 uv run ruff check src/iris/context tests/context
 ```
+
+Guides and reference (Chinese): [Context usage](../../../docs/cookbook/context.md) · [Context engineering](../../../docs/design/context-engineering.md) · [Context and templates](../../../docs/reference/context.md).

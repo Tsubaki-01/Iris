@@ -160,3 +160,5 @@ generate tool parameter JSON Schema, execute tools, persist history, or manage c
 uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py
 uv run ruff check src/iris/message tests/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```
+
+Guides and reference (Chinese): [Images and speech](../../../docs/cookbook/media.md) · [Messages and media reference](../../../docs/reference/media.md).

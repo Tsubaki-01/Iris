@@ -313,7 +313,7 @@ Its `idle_seconds` is the host-wide quiet interval: 300 seconds by default, with
 New automatic source-learning batches also require `min_pending_runs` eligible new Runs, a positive
 integer defaulting to 10. Both conditions must hold; waiting longer does not waive the count. Set the
 threshold to 1 for more frequent automatic learning, or request a manual cycle.
-`memory.generation` no longer accepts an idle interval. The CLI creates and binds the host coordinator;
+`maintenance.idle_seconds` owns idle timing; `memory.generation` owns generation settings. The CLI creates and binds the host coordinator;
 SDK hosts explicitly bind `MaintenanceCoordinator` and `MemoryMaintenanceBinding` before prepare/run.
 Multiple runners borrow that one coordinator; see [harness](../harness/README.en.md).
 
@@ -339,10 +339,10 @@ tools:
     - memory.forget
 ```
 
-Enabling memory automatically registers Search/Fetch; declare only the write tools as needed.
-The old `memory.backend` setting and manual `memory.search/fetch` Agent declarations are rejected.
-The model chooses Search/Fetch using the adopted overview; queries retain all terms.
-The old recall_mode, max_query_terms, and mirror settings are no longer accepted. The host generates
+Enabling memory connects SQLite storage and automatically registers Search/Fetch; declare write tools
+as needed. Agent YAML rejects manual `memory.search/fetch` declarations and accepts only the fields
+defined by `MemoryConfig`. The model chooses Search/Fetch using the adopted overview; queries retain
+all terms. The host generates
 core facts and knowledge scope explicitly; new sessions and successful compaction adopt an overview
 within 2% of the available input budget across all namespaces. Unmentioned topics are treated as
 absent; without an overview, chat continues without long-term memory use. See
@@ -402,8 +402,8 @@ not relative to `agent.yaml` or a child's narrower workspace. Loading configurat
 directory. Constructing a runnable Agent adds missing default templates and preserves existing
 files. Edit the project's `compaction.j2` to change headings and wording; `compaction_input.j2`
 uses `previous_summary_or_none` and `serialized_history` for the user message. Summaries remain
-natural-language text wrapped in `<summary>` in the main request. The old `compaction.prompt`
-and SDK `CompactionConfig.prompt_path` have been removed and are rejected.
+natural-language text wrapped in `<summary>` in the main request. Maintain summary instructions
+through these two project templates.
 
 Each compaction freezes both templates and their dependencies in memory for all batches and retries;
 the next compaction adopts edits. Goal, Todo, Memory context guidance, Skill catalog, Decision
@@ -511,3 +511,5 @@ at assembly. Native cwd is not an OS access boundary. See [command](../command/R
 uv run pytest tests/agents tests/runtime/test_factory.py
 uv run ruff check src/iris/agents tests/agents
 ```
+
+Guides and reference (Chinese): [Agent configuration](../../../docs/cookbook/configure-agent.md) · [Configuration reference](../../../docs/reference/configuration.md).

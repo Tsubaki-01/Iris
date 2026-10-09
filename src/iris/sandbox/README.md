@@ -78,3 +78,5 @@ Docker Desktop 使用 `1000:1000`。`HOME=/tmp`、`PYTHONUSERBASE=/tmp/.local`�
 
 底层资源失败抛出 `IrisSandboxError`；command 在准备、执行、停止或关闭边界转换为相应命令
 错误并保留已有结果事实。沙箱错误不携带命令结果，不反向依赖 command 模型。
+
+使用与设计：[命令与执行环境](../../../docs/cookbook/commands.md) · [配置参考](../../../docs/reference/configuration.md)。

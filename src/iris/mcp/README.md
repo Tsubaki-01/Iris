@@ -93,7 +93,7 @@ shared assembly 将 context policy 的开关作为同一个 `defer_tools` 参数
 默认只允许本地 trust_annotations 与 readOnlyHint 同时为 true 的 MCP 工具；其他工具仍需确认。
 SDK 调用不明按该只读策略回灌错误，或抛公共 `IrisToolOutcomeUnknownError` 进入
 OUTCOME_UNKNOWN；Iris 主动中断未结算 claim 时
-包括只读在内都沿现有 unknown 路径处理。MCP 工具首版不进入并行窗口。
+包括只读在内都沿现有 unknown 路径处理。MCP 工具串行执行，不进入 runtime 的并行窗口。
 取消通过现有 executor 传入 SDK，请求清理结束后才结算；这不证明远端副作用已经终止。
 CLI 退出先等待 `manager.close(cancel_run=True)`，再关闭 runner，最后收尾输出和后台 loop。
 
@@ -132,6 +132,8 @@ SDK 返回后，图片导入、完整投影、`model_dump`、JSON 编码和落�
 - `tests/mcp/test_connection.py`、`test_sdk_contract.py`：Iris 调度与真实 SDK 契约。
 - `tests/mcp/test_interoperability.py`：五行完整互操作与公开取消后新 run 复用。
 
-在仓库根目录设置 `UV_CACHE_DIR` 后使用 `uv run pytest`、`uv run ruff check` 和
+在仓库根目录使用 `uv run pytest`、`uv run ruff check` 和
 `uv run mypy`，测试范围为 `tests/mcp`。客户端 inputs、命令替换、插件变量、remote executor、
-动态 header helper 与 OAuth UI 不在首版范围；启用配置包含这些字段或表达式时明确报错。
+动态 header helper 与 OAuth UI 不受支持；启用配置包含这些字段或表达式时明确报错。
+
+使用与设计：[MCP 配方](../../../docs/cookbook/mcp.md) · [工具参考](../../../docs/reference/tools.md)。

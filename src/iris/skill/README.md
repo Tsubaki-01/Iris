@@ -55,8 +55,8 @@ skills:
 - root 不存在、单个候选格式错误或不可读等普通扫描问题会产生 warning diagnostic；不会让
   其他有效 Skill 失效。非空 `require` 可把缺失项提升为配置错误。
 
-若多个 discovery root 将来提供同名 Skill，声明顺序靠前者 first-wins，并产生冲突诊断。
-当前自动集成只配置一个 `PROJECT` root。
+直接调用 `discover_skills()` 时，`SkillDiscoveryOptions.roots` 可声明多个 workspace 内的目录；
+同名 Skill 由声明顺序靠前的目录提供，并产生冲突诊断。Agent YAML 自动装配使用一个 `PROJECT` root。
 
 ## `SKILL.md` 格式
 
@@ -141,17 +141,17 @@ Factory 会记录 warning；若 template 忽略该 slot，catalog 对模型不�
 | File read | 读取当前完整文本，`load_skill` 返回含 frontmatter 的前 1000 行 |
 | Tool result | `load_skill` 默认 `max_result_chars=50000`；超长非错误结果由 executor 落为 artifact 并返回 preview |
 
-目前没有 user-level 共享目录。临时方案是把 `permissions.workspace` 指向多个项目的共同父目录，
-再把 `skills.root` 指向其中的共享路径；这同时扩大了所有文件工具的 workspace 权限边界，使用前
-必须接受这一安全代价。
+Skill 目录必须位于 workspace 内，不提供 user-level 共享目录。多个项目使用共同父目录作为
+`permissions.workspace` 时，可以让 `skills.root` 指向其中的共享目录；所有文件工具的可访问
+范围也随 workspace 一同扩大。
 
 同一 run 或同一 runner 的后续 run 都可读到编辑后的文件；catalog 描述仍是构造时快照，
 可以与当前文件的新 frontmatter 不同。新增、重命名或刷新 catalog 需要重新构造 runtime，
 或重启长期运行的 `iris chat`。关闭 Skill 时不读取目录或正文，不扫描 workspace 中的其他文件。
 当前不承诺 provider cache 保持命中。
 
-未来若加入多 scope，裸名称可能演进为 `scope:name`；`require` 和调用方不应假定裸名称永远能
-跨 scope 唯一。只有实际规模超过几十个 Skill 时，才考虑第三层检索或 deferred catalog。
+`SkillScope` 只有 `PROJECT`；`require` 和 `load_skill` 使用目录的 kebab-case 名称。
+Catalog 展示已发现的全部 Skill，不提供 Skill 检索或 deferred catalog。
 
 ## 公共 API
 
@@ -186,8 +186,9 @@ frontmatter helper、内部正则和 `LoadSkillInput` 都是实现细节。
 | config/factory 集成 | `../agents/config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-uv run pytest tests/skill tests/agents/test_skill_config.py tests/runtime/test_factory_skills.py -p no:cacheprovider
+uv run pytest tests/skill tests/agents/test_skill_config.py tests/runtime/test_factory_skills.py
 uv run ruff check src/iris/skill tests/skill
 uv run mypy src/iris/skill
 ```
+
+使用与设计：[Skill 与子 Agent](../../../docs/cookbook/skills-subagents.md) · [方法复用与委派](../../../docs/design/delegation.md)。

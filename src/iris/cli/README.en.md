@@ -45,7 +45,11 @@ restarting `iris chat`; a new session does not hot-switch an existing runner's c
 
 With `memory.generation.enabled`, the CLI binds the constructed Memory service to one shared
 `MaintenanceCoordinator` and binds the runner before accepting input. `maintenance.idle_seconds`
-sets the quiet interval (300 seconds by default); generation budgets remain under `memory.generation`.
+sets the quiet interval (300 seconds by default). A new automatic source batch also requires
+`maintenance.min_pending_runs` eligible new Runs, defaulting to 10. Set it to 1 for earlier processing
+after eligible material appears; the idle interval still applies. Generation budgets remain under
+`memory.generation`. Continuation of admitted batches, projection repair, and publication settlement
+do not wait for another batch of new Runs.
 
 Automatic learning consumes only terminal, fully captured Runs. A session waiting for a human response
 keeps its materials pending. New foreground work cancels uncommitted generation. On exit, the host
@@ -146,3 +150,5 @@ hints. These tests do not evaluate a real model's task quality.
 `tests/cli/test_chat_todo.py` exercises the real `run_chat_loop` for all three task states, manual
 edits, query failures, argument usage, and read-only behavior during ordinary/Goal execution and
 question/permission WAITING states.
+
+Guides and reference (Chinese): [Quick start](../../../docs/getting-started/quickstart.md) · [CLI reference](../../../docs/reference/cli.md).

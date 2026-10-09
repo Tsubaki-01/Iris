@@ -4,7 +4,7 @@
 
 Public Sub Agent contracts link independent runs through
 `SubagentRunLink(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)` while the parent tool stays
-PREPARED. The store adds `AdmitChildRun`, `RebindSubagentProxy`, `FinalizeSubagentResult`, and an
+PREPARED. The store provides `AdmitChildRun`, `RebindSubagentProxy`, `FinalizeSubagentResult`, and an
 exact link point read. Rebind returns complete WAITING `RunCommit` facts. WAITING finalize returns
 the ACTIVE run/checkpoint bound to a fresh RESUME activation in the same commit, without an extra
 ordinary resume mutation. Child usage remains run-local.
@@ -98,7 +98,8 @@ zero counts and no window. `load_run_context(run_id, *, include_tool_discovery)`
 the tail covers `[C,N)`. Protected indices and prefix `(index, Msg)` pairs keep absolute positions for
 the current run's BCI, input, and latest ordinary steer. `include_tool_discovery=False` avoids reading
 discovery JSON; a missing run raises `IrisRunNotFoundError`. This reads current model context rather
-than a historical terminal preview. Complete `load_session()` and Fork return contracts are unchanged.
+than a historical terminal preview. Use `load_session()` for complete history or `load_session_at_run()`
+for a terminal cutoff.
 
 `SessionToolDiscovery` stores the latest discovery/use positions, ordered results from the last search,
 and unconsumed first-result protections. `SessionReadState` combines it with the last ordinary-user
@@ -141,7 +142,7 @@ idempotence for matching answers, cancellation, and child admission follows each
 Run-state mutations carry the expected revision/fence facts required by their contracts; stale
 writers conflict instead of overwriting.
 `ResolveInteraction` carries the run ID, current interaction ID, expected run revision, expected
-interaction version, typed response, and time; it no longer accepts `expected_fingerprint`.
+interaction version, typed response, and time.
 Pending writes check revision/version. A matching stored answer while WAITING returns current facts
 with empty events; a different answer conflicts. Tool argument/workspace fingerprints remain intact.
 Stores validate only the phase, counters, identity, and fence affected by the mutation, then apply a
@@ -172,8 +173,8 @@ failure, and CAS conflicts preserve the previous value. Checkpoint v4 binds the 
 session revision without duplicating its text. `request_options` parses logical `tool_choice`,
 `response_format`, and `provider_options` once at this boundary, rejecting protocol wrappers and
 request-level `api_style`; runtime applies the validated overrides directly.
-`RuntimeExecutionOptions` no longer accepts memory
-queries, result snapshots, or character budgets; runtime composition owns reading and selection.
+Runtime owns memory overview reads and window selection; `RuntimeExecutionOptions` does not carry
+memory queries or result snapshots.
 
 ### Summary state and usage
 
@@ -210,9 +211,28 @@ filter returns the whole run.
 loading a complete run. These reads do not replace mutation CAS or change the synchronous store
 boundary.
 
+## Session and run navigation
+
+Navigation reads return frozen page models from `history.py` without loading complete message history:
+
+| Method | Return value | Order and scope |
+| --- | --- | --- |
+| `list_sessions(*, after=None, limit=50)` | `SessionPage` | Root sessions by latest Run time and session ID descending; persisted forks without Runs come last |
+| `list_runs(session_id, *, after=None, limit=50)` | `RunPage` | All phases by creation time and Run ID ascending |
+| `list_child_runs(parent_run_id, *, after=None, limit=50)` | `ChildRunPage` | Direct children in the same Run order, retaining parent tool call and actual `agent_selector` |
+
+`SessionCursor` and `RunCursor` identify session-page and run-page positions. `next_cursor=None` means
+the current query reached its end. The store owns positive `limit` validation; separate pages do not
+share a fixed snapshot. Query each parent Run to discover deeper descendants.
+
+`load_parent_link(child_run_id)` returns the direct `SubagentRunLink`, or `None` when no such relation
+exists. `history.RunLineage` describes the root session/run, direct parent run/tool call, child
+run/session, and selector. Harness builds this read-only projection from durable links without creating
+another source of run state. See [harness](../harness/README.en.md) for the SDK read.
+
 ## Session history contract
 
-`history.py` defines four frozen slots dataclasses, all exported from `iris.lifecycle`:
+The four history-fork dataclasses in `history.py` use frozen slots and are exported from `iris.lifecycle`:
 
 - `ForkPointCursor(created_at, run_id)`: a pagination position for fork points;
 - `ForkPoint`: run/session/agent identities, a text display of input (image-name labels for
@@ -261,3 +281,5 @@ uv run pytest tests/store tests/harness
 uv run ruff check src/iris/lifecycle
 uv run mypy src/iris/lifecycle
 ```
+
+Guides and reference (Chinese): [Lifecycle and persistence](../../../docs/design/lifecycle.md) · [Runtime and session reference](../../../docs/reference/runtime.md).

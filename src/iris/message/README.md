@@ -175,3 +175,5 @@ def consume(event: ModelStreamEvent) -> str | None:
 uv run pytest tests/message/test_streaming_models.py tests/runtime/test_assembler.py tests/test_provider_client.py
 uv run ruff check src/iris/message tests/message tests/runtime/test_assembler.py tests/test_provider_client.py
 ```
+
+使用与设计：[图片与语音](../../../docs/cookbook/media.md) · [消息与媒体参考](../../../docs/reference/media.md)。

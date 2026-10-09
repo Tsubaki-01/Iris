@@ -13,8 +13,8 @@ This package owns concrete storage only. Domain models and command/read protocol
 
 ## Quick start
 
-Sub Agent adds exactly three mutations. `admit_child_run()` atomically creates an ordinary child
-and its three-field `subagent_run_links` row; reentry returns the original child for the exact
+Sub Agent uses three mutations. `admit_child_run()` atomically creates an ordinary child
+and its `subagent_run_links` row, including the selected `agent_selector`; reentry returns the original child for the exact
 parent key. `rebind_subagent_proxy()` keeps the parent tool PREPARED and preserves history, usage,
 and cursor, returning complete WAITING facts. `finalize_subagent_result()` requires a terminal
 child and commits one parent result/message/usage update. Its WAITING mode also closes the proxy,
@@ -145,16 +145,18 @@ read/recovery interfaces to inspect outcomes.
 `resolve_interaction` first matches the current waiting interaction identity and response kind.
 PENDING writes check run revision and interaction version; a matching RESOLVED answer returns current facts.
 
-`agent_runs.usage_json` is the sole stored run usage; the three duplicate scalar counter columns are
-removed. Existing `RunUsage` parsing validates nonnegative counters and committed/reserved relations
-when rows are first loaded. The current database is schema v12. Runs and checkpoints no longer store
-an environment fingerprint; older schemas are not migrated or read.
+`agent_runs.usage_json` is the sole stored run usage. `RunUsage` parsing validates nonnegative counters
+and committed/reserved relations when rows are first loaded. The database uses schema v12 and rejects
+incompatible schemas during initialization without migration. Recovery relies on run revisions and
+activation fences, not an environment fingerprint.
 
-Schema v11 contains:
+Schema v12 contains:
 
 - `lifecycle_schema`, `sessions`, `session_messages`, `agent_runs`, and `session_run_lanes`;
 - `run_activations`, `run_checkpoints`, and `run_tool_calls`;
+- `subagent_run_links(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)`;
 - `run_interactions` and `run_events`;
+- `goals`, `goal_runs`, and the partial unique index `one_current_goal_per_session`;
 - the partial unique index `one_open_interaction_per_run`.
 - the terminal partial index `terminal_runs_by_session(session_id, created_at, run_id)`.
 
@@ -300,9 +302,21 @@ Tool bodies may finish out of order, while session messages, checkpoints, cursor
 `TOOL_CALL_COMMITTED` events advance only with the committed ordinal prefix. Every event sequence is
 strictly monotonic with exact correlation identity. The ordinal order of multiple
 `TOOL_CALL_CLAIMED` telemetry events is not contractual. The fixed internal window bound of 8
-belongs to runtime and is not persisted; lifecycle schema v12, config, commands, models, and public
-exports remain unchanged. Future NETWORK/MCP/write concurrency requires a new durable effect and
-recovery protocol and cannot be inferred from current multiple-claim support.
+belongs to runtime and is not persisted. The store supports independent claims, while runtime
+classification determines which calls can run concurrently. NETWORK/MCP and write calls execute serially.
+
+## Session and child-run navigation
+
+Both backends implement `list_sessions()`, `list_runs()`, and `list_child_runs()` as bounded navigation
+reads, without the terminal-root-only filter used for forks. SQLite applies filtering, ordering, and
+`limit + 1` in the query; `_navigation.py` shares public page projection. See the
+[lifecycle navigation contract](../lifecycle/README.en.md#session-and-run-navigation) for ordering,
+cursors, and return models.
+
+`load_subagent_link(parent_run_id, parent_tool_call_id)` reads a link by parent tool;
+`load_parent_link(child_run_id)` finds the direct parent by unique child. Both return `None` when no
+link matches. The latter uses SQLite's existing child unique index or the in-memory store's lock.
+Neither query creates a child or resumes execution.
 
 ## Session history queries and forks
 
@@ -375,3 +389,5 @@ uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_life
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```
+
+Guides and reference (Chinese): [Lifecycle and persistence](../../../docs/design/lifecycle.md) · [Runtime and session reference](../../../docs/reference/runtime.md).

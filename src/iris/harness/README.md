@@ -404,7 +404,7 @@ Child 已关闭 HITL interaction 但尚未提交工具结果时，普通 ACTIVE 
 
 waiting run 应使用 `resume()`，不是 `recover()`。terminal run 的 cancel/recover 是幂等读取。
 `resume()` 将当前 interaction ID、run revision、interaction version 与 typed response 交给 Store；
-不再回传 interaction 内已有的调用指纹作为 resolve 参数，实际工具执行的指纹绑定仍保留。
+回答通过 interaction 身份与版本匹配，实际工具执行另行检查调用指纹绑定。
 
 `get_run_control()` 只读取 run identity、phase、activation fence、revision 与取消控制字段。
 SessionManager 在锁内用它判断 steer 是否仍可进入当前 activation，不装载完整 run snapshot。
@@ -417,8 +417,9 @@ mutation 不为回执加载完整 history。需要消息时仍显式调用 `get_
 ## Live publisher 组合
 
 Host 可把同一个 `LivePublisher`（通常是 `LiveStreamBroker`）通过 `live_publisher=` 注入
-`AgentRunner`。Runner 会把每个 activation 的 `RuntimeStreamEvent` 和每条新 committed
-`RunEvent` 同步交给 publisher；未注入时不构造 runtime sink。Publisher 是 best-effort
+`AgentRunner`。Runner 会把每个 activation 的 `RuntimeStreamEvent`、`ContextPreparation`、
+`ConfigurationApplied`、`SourceAdopted` 和每条新 committed `RunEvent` 同步交给 publisher；
+未注入时不构造 runtime sink。Publisher 是 best-effort
 观察面：普通异常只记录不含 payload 的 warning，不会回滚 durable mutation、取消 run 或改变
 `RunResult`。
 
@@ -429,6 +430,15 @@ Host 可把同一个 `LivePublisher`（通常是 `LiveStreamBroker`）通过 `li
 `RuntimeFactory` 不拥有 broker 或 fan-out。Host 可通过 `get_session()`、`get_run()`、
 `get_result()`、`list_tool_calls()` 和 `list_events()` 从 exact runner/store 补读 durable facts，
 这些读取不会触发 live 发布。
+
+`ConfigurationApplied.configuration` 携带本次 activation 采用的完整配置描述；
+`SourceAdopted` 记录真实消费点的来源，`ContextPreparation` 记录模型请求准备过程，均不依赖
+OTel 开关。原始 typed facts 可由宿主按需保存；broker 只投影短字段与引用，详见
+[streaming](../streaming/README.md#观察范围与诊断事件)。
+
+`runner.get_run_lineage(run_id)` 从 store 的持久父关系构造 `RunLineage`，根 Run 返回 `None`，
+缺失 Run 抛出 `IrisRunNotFoundError`。Child live facts 携带原始 run/session identity 和关系，
+可投影到 root 的 `session_tree`；该查询不恢复运行，也不维护另一份 child 目录。
 
 ## 单 session 输入管理
 
@@ -798,3 +808,5 @@ uv run pytest tests/harness
 uv run ruff check src/iris/harness tests/harness
 uv run mypy src/iris/harness
 ```
+
+使用与设计：[Python SDK 入门](../../../docs/getting-started/python-sdk.md) · [运行与会话参考](../../../docs/reference/runtime.md)。

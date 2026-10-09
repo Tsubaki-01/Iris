@@ -155,7 +155,9 @@ The SDK network wait remains cancellable.
   and environment precedence.
 - `tests/mcp/test_connection.py`, `test_sdk_contract.py`: Iris scheduling and real SDK contracts.
 
-Set `UV_CACHE_DIR` at the repository root, then use `uv run pytest`, `uv run ruff check`, and
+From the repository root, use `uv run pytest`, `uv run ruff check`, and
 `uv run mypy`, targeting `tests/mcp`. Client inputs, command substitutions, plugin variables,
-remote executors, dynamic header helpers, and OAuth UI are outside the first release. Enabled
+remote executors, dynamic header helpers, and OAuth UI are unsupported. Enabled
 declarations containing these fields or expressions fail explicitly.
+
+Guides and reference (Chinese): [MCP recipe](../../../docs/cookbook/mcp.md) · [Tools reference](../../../docs/reference/tools.md).

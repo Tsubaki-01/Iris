@@ -23,6 +23,14 @@ written = scaffold_template("file-agent", "./my-agent")
 
 生成的 `agent.yaml` 可以交给 `iris.agents.load_agent_config()` 读取。
 
+在仓库环境中配置 `IRIS_PROVIDER_API_KEYS__OPENAI` 后，可直接运行：
+
+```bash
+uv run iris chat my-agent/agent.yaml
+```
+
+默认 workspace 是生成配置所在的 `my-agent/`；工具只读取该工作区内的文件。
+
 ## API
 
 ### `scaffold_template(template_name, target_dir, *, overwrite=False)`
@@ -45,6 +53,7 @@ written = scaffold_template("file-agent", "./my-agent")
 `file-agent` 是最小本地文件助手模板，声明：
 
 - OpenAI `gpt-4o-mini` 模型路由。
+- 未显式声明 `api_style`，采用当前默认 `responses`。
 - 一个面向本地文件助手的 system prompt。
 - 只读文件工具：`file.read`、`file.list`、`file.grep`。
 - `writes: confirm`。
@@ -72,3 +81,5 @@ sdist/wheel，并至少包含：
 ```bash
 uv run ruff check src/iris/templates
 ```
+
+使用与设计：[配置与 scaffold](../../../docs/cookbook/configure-agent.md) · [首次运行](../../../docs/getting-started/quickstart.md)。

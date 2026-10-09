@@ -100,5 +100,7 @@ archive 上传。helper 参数只传文件路径，Docker exec 本身仍为 `std
 真实引擎测试默认关闭，显式运行：
 
 ```console
-uv run --extra sandbox pytest tests/command/test_docker_integration.py --run-docker -p no:cacheprovider --basetemp=tmp/pytest-docker-local
+uv run --extra sandbox pytest tests/command/test_docker_integration.py --run-docker
 ```
+
+使用与设计：[命令与执行环境](../../../docs/cookbook/commands.md) · [工具参考](../../../docs/reference/tools.md)。

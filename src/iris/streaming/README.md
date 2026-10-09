@@ -71,6 +71,27 @@ gap；不要假设新 scope 从 1 开始。`close()` 清理 replay/counter 并�
 `SubscriptionTerminal`，客户端应重连并执行 durable sync。slow-consumer 转换只从 active
 subscription 的 offer 路径进入，并只产生一组 gap/terminal。
 
+## 观察范围与诊断事件
+
+`LiveScope` 包含 `run`、`session`、`session_tree` 和 `resource`。前两者保留 exact identity；
+`session_tree` 在根会话下汇集其自身与 child 的 session 投影，child envelope 保留 `RunLineage`
+及原 run/session IDs。`subagent.linked` 是持久 child admission 后的 critical 通知，
+`session.control.changed` 是 manager 已替换控制快照的 critical 通知。
+
+Gateway 的 `session` / `session_tree` scope ID 必须等于其绑定会话；`resource` 订阅由宿主
+另行绑定资源并直接使用 broker，session gateway 会拒绝它。资源绑定不会增加远程维护命令。
+
+| kind | live payload | 投递方式 |
+| --- | --- | --- |
+| `configuration.applied` | 配置快照 ID 与 Agent ID | run/session/tree，critical |
+| `source.adopted` | 采用 ID、来源种类、owner、采用时机、步骤/维护周期与 document IDs | 前台 run/session/tree 或后台 resource，非 critical |
+| `context.preparation` | 准备 ID、phase、步骤、配置快照 ID、阶段数与最终输入 token 估算 | run/session/tree，按 Run/activation/步骤合并 |
+| `maintenance.changed` | coordinator ID、revision、前台计数与单个资源状态 | resource，按资源合并 |
+
+这些通知没有 durable sequence，不携带完整 YAML、模板或诊断阶段正文。需要正文时，宿主保存
+原始 typed facts，或通过 `runner.describe_configuration()` 与 `coordinator.snapshot()` 查询
+当前视图；broker replay 不保证保留完整采用历史。普通诊断可合并或丢弃，不能作为执行完成凭据。
+
 ## Gateway 与命令
 
 命令环境清理失败通过 root 的 `CommandCleanupFailed` 投影为 critical
@@ -153,7 +174,7 @@ tool result data/stats/metadata 与 pending interaction 的 workspace path；这
 放行。当前 durable wire shape 无法在不携带 path 的情况下表达 artifact，因此 gateway 返回
 `artifact=None`，由 host 另行实现授权下载接口。
 
-Phase 03 projection 已在更早边界删除 raw provider chunk/header/key/traceback，以及 artifact path、
+`projection.py` 已在更早边界删除 raw provider chunk/header/key/traceback，以及 artifact path、
 bytes 和任意 metadata。Gateway filtering 只消费该 trusted allowlist，不重新解析 payload。
 
 `tool.completed.payload.content` 仍为文字列表：文字块保留正文，图片块仅显示
@@ -221,9 +242,10 @@ Durable authority 始终是 runner/store，live replay
 broker-only 场景以 `max_tracked_durable_runs=1` 验证连续运行接纳。
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD/tmp/uv-cache"
 uv sync --dev
-uv run pytest tests/streaming -p no:cacheprovider --basetemp="$PWD/tmp/pytest-streaming"
+uv run pytest tests/streaming
 uv run ruff check src/iris/streaming tests/streaming
 uv run mypy src/iris/streaming
 ```
+
+使用与设计：[流式宿主接入](../../../docs/cookbook/streaming.md) · [流式参考](../../../docs/reference/streaming-observability.md)。

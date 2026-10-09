@@ -59,8 +59,9 @@ skills:
 - A missing root or an invalid/unreadable candidate produces a warning diagnostic while other
   valid Skills remain available. `require` can promote a missing entry to a configuration error.
 
-If future discovery uses multiple roots, the earlier declared root wins a duplicate name and a
-collision diagnostic is emitted. Automatic integration currently supplies one `PROJECT` root.
+Direct `discover_skills()` calls can declare multiple workspace-contained directories through
+`SkillDiscoveryOptions.roots`. The earlier declared root wins duplicate names, with a collision
+diagnostic. Agent YAML assembly supplies one `PROJECT` root.
 
 ## `SKILL.md` format
 
@@ -153,9 +154,9 @@ is invisible to the model even though `load_skill` remains registered.
 | File read | Read current complete text; `load_skill` returns its first 1000 lines including frontmatter |
 | Tool result | `load_skill` defaults to `max_result_chars=50000`; the executor stores a larger non-error result as an artifact and returns a preview |
 
-There is no user-level shared directory. A temporary workaround is to set `permissions.workspace`
-to a common parent of several projects and point `skills.root` to a shared path below it. This also
-broadens the workspace boundary for every file tool and must be treated as a security tradeoff.
+Skill directories must stay within the workspace; there is no user-level shared directory. Projects
+using a common parent as `permissions.workspace` can point `skills.root` to a shared directory under
+it. Every file tool then has the same broader workspace boundary.
 
 Repeated loads in the same run or subsequent runs on the same runner can see edited files.
 Catalog descriptions remain the construction-time snapshot and may differ from current frontmatter.
@@ -163,9 +164,8 @@ Rebuild the runtime or restart long-running `iris chat` to discover added or ren
 the catalog. Disabled Skills do not read directories or bodies, and unrelated files are not scanned.
 No provider-cache hit behavior is guaranteed.
 
-If multiple scopes are added, bare names may evolve into `scope:name`; callers and `require` should
-not assume a bare name stays unique across scopes forever. A third search/deferred level should be
-considered only after real scale exceeds tens of Skills.
+`SkillScope` contains only `PROJECT`; `require` and `load_skill` use the directory's kebab-case name.
+The catalog presents all discovered Skills, without Skill search or a deferred catalog.
 
 ## Public API
 
@@ -201,8 +201,9 @@ dataclass used only by discovery results.
 | Config/factory integration | `../agents/config/base.py`, `../runtime/factory.py` | `tests/agents/test_skill_config.py`, `tests/runtime/test_factory_skills.py` |
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-uv run pytest tests/skill tests/agents/test_skill_config.py tests/runtime/test_factory_skills.py -p no:cacheprovider
+uv run pytest tests/skill tests/agents/test_skill_config.py tests/runtime/test_factory_skills.py
 uv run ruff check src/iris/skill tests/skill
 uv run mypy src/iris/skill
 ```
+
+Guides and reference (Chinese): [Skills and subagents](../../../docs/cookbook/skills-subagents.md) · [Reuse and delegation](../../../docs/design/delegation.md).

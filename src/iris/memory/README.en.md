@@ -110,8 +110,7 @@ flowchart LR
 ```
 
 Each workspace has its own database/service. Items use an opaque `namespace` string, defaulting to
-`project`; agents reading that namespace share project memory. Agent, session, and visibility no
-longer form a five-field partition. Different workspaces use different databases.
+`project`; agents reading that namespace share project memory. Different workspaces use different databases.
 
 `service.search(MemorySearchQuery(query="..."), ["project", "notes"])` searches allowed namespaces in one
 query and applies the limit after global ranking. `get_item(item_id, namespaces)` and
@@ -219,8 +218,8 @@ without these dependencies raises `IrisConfigError`.
 
 The host owns one shared `MaintenanceCoordinator` and explicitly binds each root runner's lifecycle
 reader and `MemoryMaintenanceBinding`; factories do not create private maintenance schedulers.
-`maintenance.idle_seconds` defaults to 300 and accepts zero. The old
-`memory.generation.idle_seconds` field is removed. See [harness](../harness/README.en.md) for host wiring.
+`maintenance.idle_seconds` defaults to 300 and accepts zero; generation budgets and policies belong
+to `memory.generation`. See [harness](../harness/README.en.md) for host wiring.
 An automatic-maintenance runner without a binding fails at its first preparation/run boundary.
 
 A new automatic Episode batch requires both the quiet interval and `maintenance.min_pending_runs`
@@ -442,9 +441,9 @@ controls the system window selection described above.
 The complete export set is [__all__](__init__.py). Private SQL, lexer, and payload helpers are not
 SDK extension protocols.
 
-The [memory evaluation report (Chinese)](../../../docs/memory-system-evaluation.md) compares the
-retrieval, file-reading, and Search/Fetch approaches. Iris adopts G's required-phrase capability while
-keeping SQLite FTS, without adding a vector database or other heavyweight retrieval components.
+See [memory organization and adoption (Chinese)](../../../docs/design/memory.md) for Search/Fetch,
+overview windows, and generation responsibilities. Ordinary retrieval uses SQLite FTS with explicit
+required-phrase filtering; optional Decision recall is described below. No vector database is required.
 
 ### Plain-text search
 
@@ -553,8 +552,8 @@ using Decision recall is `READ+NETWORK`, while Fetch stays `READ`. Do not declar
 configuration parsing. `include_tools=False` still omits schemas from that request, with overview
 instructions based on the tools actually available.
 
-Low-level `register_memory_tools()` still defaults to no tools and accepts explicit
-`memory.search/fetch` selection in SDK code. Only manual Agent read declarations have been removed.
+Low-level `register_memory_tools()` defaults to no tools and accepts explicit
+`memory.search/fetch` selection in SDK code. Agent YAML uses `memory.enabled` to register read tools.
 Search directly uses `MemorySearchQuery` as its input and returns `items` and `has_more`. Only when
 more candidates exist does it add the hint “还有候选；这不要求继续查询。” Stop when snippets provide
 enough evidence; search again only for missing necessary information, not merely to rephrase a
@@ -634,11 +633,11 @@ a complete active read for mirror projections and direct semantic recall.
 | Flush / dreaming and atomic input consumption | `generation.py`, `generation_models.py`, `sqlite.py` | `tests/memory/test_generation.py`, `tests/memory/test_generation_store.py` |
 | Overview-window adoption, compaction, and recovery | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
-Run targeted tests from the repository root, using a fresh basetemp for each invocation:
+Run targeted tests from the repository root:
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-$memoryTestTemp = "$PWD\tmp\pytest-memory-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff'))"
-uv run pytest tests/memory -p no:cacheprovider --basetemp="$memoryTestTemp"
+uv run pytest tests/memory
 uv run ruff check src/iris/memory tests/memory
 ```
+
+Guides and reference (Chinese): [Memory usage](../../../docs/cookbook/memory.md) · [Memory organization and adoption](../../../docs/design/memory.md) · [Memory reference](../../../docs/reference/memory-goals.md).

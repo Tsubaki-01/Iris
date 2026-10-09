@@ -77,6 +77,30 @@ dropped. If a critical event cannot be queued, the subscription produces `Replay
 `SubscriptionTerminal`; the client should reconnect and perform durable sync. Only the active
 subscription offer path triggers this slow-consumer transition, producing one gap/terminal pair.
 
+## Observation scopes and diagnostic events
+
+`LiveScope` includes `run`, `session`, `session_tree`, and `resource`. Run/session retain exact identity.
+`session_tree` collects root and child session projections under the root session; child envelopes keep
+their `RunLineage` and original run/session IDs. `subagent.linked` is a critical notification after
+durable child admission; `session.control.changed` is a critical notification of a replaced manager
+control snapshot.
+
+Gateway `session` / `session_tree` IDs must match the bound session. A host binds resources separately
+and subscribes through the broker for `resource` scope; a session gateway rejects that scope. Resource
+binding does not add remote maintenance commands.
+
+| Kind | Live payload | Delivery |
+| --- | --- | --- |
+| `configuration.applied` | Configuration snapshot ID and Agent ID | run/session/tree, critical |
+| `source.adopted` | Adoption ID, source kind, owner, adoption boundary, step/cycle and document IDs | Foreground run/session/tree or background resource, noncritical |
+| `context.preparation` | Preparation ID, phase, step, configuration snapshot ID, stage count and final input-token estimate | run/session/tree, coalesced by Run/activation/step |
+| `maintenance.changed` | Coordinator ID, revision, foreground count and one resource view | resource, coalesced by resource |
+
+These notifications have no durable sequence and carry no complete YAML, template, or diagnostic-stage
+text. Hosts can retain original typed facts or query current views through `runner.describe_configuration()`
+and `coordinator.snapshot()`. Broker replay does not preserve a complete adoption history. Ordinary
+diagnostics may coalesce or drop and cannot prove execution completion.
+
 ## Gateway and commands
 
 The root publishes `CommandCleanupFailed` as critical `command.cleanup.failed` for both the
@@ -241,9 +265,10 @@ lifetimes. System tests use real runner/manager/provider adapters with scripted 
 no external calls. Broker-only cases use `max_tracked_durable_runs=1` to verify successive admission.
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD/tmp/uv-cache"
 uv sync --dev
-uv run pytest tests/streaming -p no:cacheprovider --basetemp="$PWD/tmp/pytest-streaming"
+uv run pytest tests/streaming
 uv run ruff check src/iris/streaming tests/streaming
 uv run mypy src/iris/streaming
 ```
+
+Guides and reference (Chinese): [Streaming hosts](../../../docs/cookbook/streaming.md) · [Streaming reference](../../../docs/reference/streaming-observability.md).

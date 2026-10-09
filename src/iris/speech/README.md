@@ -193,3 +193,5 @@ adapter 消费已经检查的音频块，负责厂商请求/响应转换、全�
 公共音频格式错误使用 `IrisSpeechError`；内置 adapter 的服务/协议错误也归入该类型，
 沿用 provider 来源与 `SPEECH_ERROR`。宿主音频源异常和 `CancelledError` 保持原语义。
 这些发生在普通文字提交之前，不自动成为 Agent 的 Run 错误。
+
+使用与设计：[图片与语音](../../../docs/cookbook/media.md) · [消息与媒体参考](../../../docs/reference/media.md)。

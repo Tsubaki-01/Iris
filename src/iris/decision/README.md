@@ -121,6 +121,7 @@ child 按自己的配置独立构造，不继承 root 注入。增强的内置�
 测试使用 MockTransport 在本地验证请求和响应契约。
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-uv run pytest -p no:cacheprovider --basetemp="$PWD\tmp\pytest-tmp" tests/decision
+uv run pytest tests/decision
 ```
+
+使用与设计：[工具发现](../../../docs/design/tool-execution.md) · [Decision 参考](../../../docs/reference/tools.md)。

@@ -12,7 +12,6 @@ SDK/CLI、子 Agent、Memory 和 Evolution 已接入普通与流式模型记录�
 API 是直接依赖，导出 SDK 按需安装。在本仓库执行：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
 uv sync --extra observability
 ```
 
@@ -76,6 +75,20 @@ subagent 的等待正常结束本次区间；继续执行的 control 覆盖 chil
 例如结果已提交 completed 后 observer 等待被取消，Run 仍为 completed。遥测不会修改
 权威结果、触发业务重试或成为恢复依据。
 
+## 配置来源与上下文诊断
+
+[`facts.py`](facts.py) 定义 `SourceAdopted` 及其执行关联作用域，记录真实消费点采用的来源文本、
+版本和身份。该路径独立于 OTel 开关，通过 runner 或维护协调器的 live publisher 发布；
+关闭 trace 不等于关闭已配置的 live 事实。后台 worker 将事实送回绑定的 event loop，发布失败
+只记日志，不影响原操作。
+
+`ConfigurationApplied` 由 harness 提供，`ContextPreparation`、`ContextStage` 和
+`ContextDecision` 由 runtime 提供。它们分别描述实际配置与请求准备，不成为恢复依据。
+OTel 使用 `iris.configuration.snapshot_id`、`iris.context.preparation_id` 和流式调用的
+`iris.model_stream.id` 关联对应事实；原始 typed facts 与 broker 的短字段投影不同，详见
+[harness](../harness/README.md#live-publisher-组合) 和
+[streaming](../streaming/README.md#观察范围与诊断事件)。
+
 ## 边界与记录语义
 
 Memory 和 Evolution 各自持有独立维护根，只在取得资源锁后开始，并在真实 worker 排空、
@@ -99,7 +112,8 @@ empty、blocked、no_change、conflict 保持非错误；failed 标记维护失�
 
 `config.py` 只定义策略；`service.py` 统一标准 span/context、记录 gate 和 SDK 关闭；
 `content.py` 负责 typed 内容投影；`provider.py` 拥有单次 complete/stream 的记录区间。
-上层 owner 决定业务范围和结果，本包不定义第二套事件总线、Span 类型或状态模型。
+`facts.py` 仅提供采用事实和局部关联；上层 owner 决定业务范围、结果与发布出口，本包不建立
+独立调度器、持久状态库或自定义 Span 类型。
 
 内容格式采用 [GenAI schema 固定快照](https://github.com/open-telemetry/semantic-conventions-genai/tree/e07f4ebacb08f56db8c4c882d117720333fbca04)。
 
@@ -109,7 +123,6 @@ MLflow 独立运行，不加入 Iris 依赖。本地验收使用 3.14.0；在仓
 PowerShell 终端启动：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
 $env:NO_PROXY = '127.0.0.1,localhost'
 $env:MLFLOW_MODEL_CATALOG_URI = ''
 New-Item -ItemType Directory -Path 'tmp\observability-mlflow' -Force | Out-Null
@@ -119,7 +132,6 @@ uv tool run --from 'mlflow==3.14.0' mlflow server --backend-store-uri 'sqlite://
 在 [本地 UI](http://127.0.0.1:5000) 创建 experiment 并取得 ID。第二个终端执行：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
 $env:NO_PROXY = '127.0.0.1,localhost'
 $observabilityExperimentId = Read-Host '输入 MLflow experiment ID'
 uv run --extra observability python examples/observability/basic.py --experiment-id "$observabilityExperimentId"
@@ -145,3 +157,5 @@ uv run --extra observability python examples/observability/streaming_child.py --
 参考：[OTLP 接收](https://mlflow.org/docs/latest/genai/tracing/opentelemetry/ingest/)、
 [属性映射](https://mlflow.org/docs/latest/genai/tracing/opentelemetry/attribute-mapping/)、
 [模型目录开关](https://mlflow.org/docs/latest/api_reference/python_api/mlflow.environment_variables.html#mlflow.environment_variables.MLFLOW_MODEL_CATALOG_URI)。
+
+使用与设计：[观测接入](../../../docs/cookbook/observability.md) · [流式与观测参考](../../../docs/reference/streaming-observability.md)。

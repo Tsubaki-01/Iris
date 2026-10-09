@@ -26,7 +26,8 @@ maintenance:
 相对 root workspace 解析；省略时每轮明确读取包内
 [`self-evolution/SKILL.md`](self-evolution/SKILL.md)。Skill 统一规定承载位置、依据标准和适用范围；
 `project_skill_update` prompt 负责经验合并与问题提炼，`evolution_review` prompt 负责当前目标检查
-及各类字段的修订步骤。两份 prompt 不再重复整份策略；输出 schema、进度和调度由代码拥有。
+及各类字段的修订步骤。两份 prompt 分别描述经验整理与有限修订，共同策略由该 Skill 提供；
+输出 schema、进度和调度由代码拥有。
 策略 Skill 不被自动改写，输入/输出预算独立于业务 Run，必须为正数。
 策略正文区分长期项目约定、临时要求和具体机制问题：偶发故障或笼统差评不直接触发参数调整，
 明确的持续行为要求可以成为修订依据。修订保留未要求改变的角色、无关规则和适用条件；依据不足、
@@ -131,7 +132,7 @@ async def run_project(config_path: Path, provider: CompletionProvider) -> None:
 显式 B 请求不要求历史失败。可选的 `RevisionRequest.session` 使用
 `EvolutionSession` 的 `lifecycle_source_id`、`session_id` 字段指定归属；宿主检查该 reader
 和 session 当前是否 WAITING，不虚构 run_id。普通聊天纠正不会直接成为宿主命令，仍在终态
-后由 A 理解。不新增 CLI 修订命令，`iris chat` 使用同一维护链。
+后由 A 理解。`iris chat` 使用同一维护链，没有独立的 CLI 修订命令。
 
 ## 材料与一次 A 操作
 
@@ -247,7 +248,7 @@ summary.proposed_revision_id 仅在 A 实际创建请求后指向该请求。尚
 proposed_issue_summary 保留 description/targets，必要 quote 在 evidence，不能把失败提案当作已入队请求。
 
 静态档案正文与状态分表，确认时不重写材料或候选全文。A 档案在 `publication_materials` 保存
-本批实际选中材料的有序来源/消息区间引用，不再复制 records 全文。读取时在同一快照中从
+本批实际选中材料的有序来源/消息区间引用，不保存 records 全文副本。读取时在同一快照中从
 `messages` 重组 `materials`，并从非空 record 正文按原顺序投影 `evidence_refs`。多个尝试可
 引用同一份原文；尚在完整窗口或受恢复保护的详情，即使材料已消费、原 lifecycle reader 已消失，
 也能从 Evolution 自有存储读取。裁剪只回收本次解除关联后已经消费且无人引用的消息。
@@ -288,7 +289,8 @@ prompt 在对应的下一次完整操作采用：正在生成的 Memory cycle �
 `tests/harness/test_evolution_integration.py` 覆盖。这些使用受控 provider，不是模型学习收益评测。
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-uv run pytest tests/evolution -p no:cacheprovider --basetemp="$PWD\tmp\pytest-evolution"
+uv run pytest tests/evolution
 uv run ruff check src/iris/evolution tests/evolution
 ```
+
+使用与设计：[项目经验用法](../../../docs/cookbook/evolution.md) · [经验与有限修订](../../../docs/design/evolution.md)。

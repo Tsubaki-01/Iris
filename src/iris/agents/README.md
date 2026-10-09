@@ -88,7 +88,7 @@ evolution:
   config_targets: [compaction.keep_recent_ratio, system]
 ```
 
-两个列表默认空。支持范围固定，未实现的流程不能靠新增 YAML 字段获得。
+两个列表默认空；可开放的模板与配置项由 `EvolutionConfig` 定义。
 配置候选与文件加载共用 `parse_agent_config(raw_config, config_path=...)`，写盘前按原文件
 基准校验，不将已解析模型回写成全部默认值。`system` 只修改已采用简单模式的文本。
 Config 改动只由新 runner 采用，旧 runner 创建新 session 仍使用原配置。
@@ -142,7 +142,7 @@ tools:
 它不会读取或校验该 context 文件。context 文件存在性、内容结构和模板路径由
 `iris.runtime.RuntimeFactory` 调用 `iris.context.load_context_build_input()` 时校验。
 
-`model` 推荐使用结构化对象。为了兼容简单配置，也可以写成 route string：
+`model` 支持结构化对象；只需指定 provider 和模型名时，也可以使用 route string 简写：
 
 ```yaml
 model: openai/gpt-4o-mini
@@ -155,7 +155,7 @@ model: openai/gpt-4o-mini
 顶层 agent 配置模型，字段包括：
 
 - `name`: agent 名称，不能为空。
-- `model`: `ModelConfig`，也兼容 `provider/model` route string。
+- `model`: `ModelConfig`，也接受 `provider/model` route string 简写。
 - `system`: 简单模式的 system prompt，和 `context` 互斥。
 - `context`: `AgentContextConfig`，声明独立 context 配置路径，和 `system` 互斥。
 - `skills`: 可选的 `AgentSkillsConfig`；默认 `None`，不启用 Skill。
@@ -244,7 +244,7 @@ context_policy:
 
 完整 `AgentRunner` 根据这个开关注册 `context_read` 与 `context_search`，读取当前会话的已提交
 消息和当时保存的工具结果；不依赖长期 memory，也不需要显式配置 `file.read`。设为 `false`
-时不注册这两个工具，也不进行新增的历史正文裁剪或动态注入；现有工具 artifact 和 LLM
+时不注册这两个工具，也不进行历史正文裁剪或动态注入；工具 artifact 和 LLM
 compaction 继续工作。同时传入 `context_source` 会在装配时报 `IrisConfigError`，不会忽略宿主输入。
 
 `preserve_recent_tool_groups` 是确定性裁剪时完整保留的最近已闭合工具批次数，默认 2，允许
@@ -285,7 +285,7 @@ compaction:
   timeout_seconds: 300
 ```
 
-`input_budget_tokens` 是已扣除输出预留的可用输入预算，不再自动减去 `model.max_tokens`。
+`input_budget_tokens` 是已扣除输出预留的可用输入预算，runtime 直接使用该值，不额外减去 `model.max_tokens`。
 触发和压缩后验收额度固定为预算的 80%（向下取整）；近期原文目标与摘要输出上限分别为
 预算乘以对应比例（向上取整）。近期原文只是软目标，不要求两个比例之和小于 80%。
 输入预算与超时必须为正数，两个比例必须位于 0 与 1 之间。
@@ -301,8 +301,8 @@ prompts:
 也不会按缩窄后的 workspace 重新解释。配置加载只校验声明，不创建目录；首次构造可运行
 Agent 时补齐缺少的默认模板，保留已有文件。手工修改项目目录中的 `compaction.j2` 可改变
 摘要栏目和措辞，`compaction_input.j2` 使用 `previous_summary_or_none` 与 `serialized_history`
-组织 user 消息。摘要仍是自然语言，由框架包裹 `<summary>` 注入主请求。旧
-`compaction.prompt` 和 SDK `CompactionConfig.prompt_path` 已删除，传入会报配置错误。
+组织 user 消息。摘要是自然语言，由框架包裹 `<summary>` 注入主请求；摘要提示通过这两个
+项目模板维护。
 
 每次压缩开始固定两份模板及依赖的内存源，全部分块与重试共用，下一次压缩才采用文件修改。
 Goal、Todo、Memory 概览指引、Skill catalog、Decision 指令和 system/context 模板则在 runner
@@ -356,9 +356,9 @@ tools:
     - memory.forget
 ```
 
-`memory.enabled` 同时接入服务、概览和自动注册的 Search/Fetch；写工具仍按需声明。旧
-`memory.backend` 和手工 `memory.search/fetch` 声明不再接受。模型根据当前概览自主选择
-Search/Fetch，查询使用全部词项；旧 recall_mode/max_query_terms/mirror 配置不再接受。
+`memory.enabled` 同时接入 SQLite 服务、概览和自动注册的 Search/Fetch；写工具按需声明。
+模型根据当前概览自主选择 Search/Fetch，查询使用全部词项。Agent YAML 不接受手工
+`memory.search/fetch` 工具声明；可配置字段以 `MemoryConfig` 为准，未知字段会被拒绝。
 概览通过宿主显式生成，内容为核心事实和知识范围，新会话或成功压缩时采用，
 全部 namespace 合计使用可用输入预算的 2%。概览未提及的主题默认没有，无概览时正常聊天但
 暂不使用长期记忆。完整规则见 [memory 说明](../memory/README.md)。
@@ -369,7 +369,7 @@ YAML 加载不打开数据库。Runtime 确定 effective workspace 和 provider 
 优先于配置构造；关闭时不挂载注入对象。CLI 使用同一装配链；child 根据自己的配置和收窄后的 effective workspace
 构建服务和自己的概览窗口，不继承父 Agent 的 service。数据库初始化错误直接沿装配入口报告。
 
-开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，暂不支持热切换。静态
+开关在构建 Agent 时确定，改配置后重建 Agent 并使用新会话，不支持热切换。静态
 `context.yaml` memory 与已有历史不受关闭影响；`include_tools=False` 仍控制当次请求是否包含工具定义。
 
 ### `MaintenanceConfig`
@@ -608,3 +608,5 @@ runner = AgentRunner.from_config_path("agent.yaml")
 uv run pytest tests/agents tests/runtime/test_factory.py
 uv run ruff check src/iris/agents tests/agents
 ```
+
+使用与设计：[配置 Agent](../../../docs/cookbook/configure-agent.md) · [配置参考](../../../docs/reference/configuration.md)。

@@ -388,8 +388,7 @@ write/edit 共用进程级真实路径锁，覆盖取消检查、exists/freshnes
 HITL、preflight result 与 unsafe 调用保持屏障语义。每个调用仍有自己的 durable claim，body
 完成顺序不决定 result 顺序，claim telemetry 顺序也不是 ordinal 契约。未声明的同步 callable
 继续 inline，可能阻塞 event loop；显式 `THREAD` 只隔离阻塞等待，不承诺 CPU 加速。该调度不改变
-provider schema；未来 NETWORK/MCP 或 write 并发必须先定义新的 effect
-与恢复协议，不能仅修改 capability classifier。
+provider schema。NETWORK/MCP 和写入调用串行执行，不属于 runtime 的只读并发窗口。
 
 ## 文件工具
 
@@ -511,7 +510,7 @@ column 超出起始行报 `COLUMN_OUT_OF_RANGE`；预算不足以容纳片段和
 
 `list_files` 与 `grep_search` 的 `max_results=0` 会在路径解析、walk、stat 或 open 前直接返回空结果。
 当 `max_results > 0` 时，缺失搜索根统一返回 `FILE_NOT_FOUND`。流式遍历以低开销早停为契约，
-因此 `list_files` 不再提供旧实现的全局排序保证；需要稳定排序的调用方应对返回的有限结果自行排序。
+`list_files` 不保证全局排序；需要稳定排序的调用方应对返回的有限结果自行排序。
 
 默认 workspace grep 在下降前排除 `.iris`；显式将 path 指向 `.iris` 内文件或目录时正常搜索。
 
@@ -597,8 +596,8 @@ payload 代替 middleware 最终输出。未截短结果不额外保存文本。
 
 `ToolDefinition.preview_mode` 默认 `head`，两种命令工具使用 `head_tail`；`ToolArtifact.preview`
 与最终模型正文复用同一个头尾算法。最终预算包含错误前缀、完整回读提示和省略标记。
-预览长度由 `ToolDefinition.preview_chars` 决定；`ToolExecutor` 不再接受
-`artifact_preview_chars`。工具异常与 middleware 错误也走相同的最终保存出口，落盘失败只返回
+预览长度由每个工具的 `ToolDefinition.preview_chars` 决定。工具异常与 middleware 错误也走
+相同的最终保存出口，落盘失败只返回
 错误而不重复尝试保存。预检拒绝和熔断等 effect 前短路只裁剪说明。
 
 `persist_json()` 保存完整解析后的 MCP JSON；`artifact_store_for()` 按当前调用 context 的 session
@@ -710,7 +709,7 @@ tool-call snapshot/fingerprint 均由 executor 的同一路径构造。
 `registry.search_deferred()` 使用 `DeferredToolIndex.search()` 的 BM25-like 本地排序：
 它会对 `name`、`tags`、`group`、`description` 分字段加权，使用 IDF、词频饱和和文档长度归一化计算相关性。
 中文文本会额外生成 CJK bigram 和低权重单字 token，并按查询词覆盖率加分，避免只命中单个高权重字段的工具压过同时覆盖多个中文查询词的工具。
-旧的字符子串硬匹配保留为 `DeferredToolIndex.naive_search()`，主要用于调试和对照测试。
+`DeferredToolIndex.naive_search()` 提供字符子串匹配，主要用于调试和对照测试。
 
 ```python
 from iris.tools import ToolRegistry, ToolSearchTool, tool
@@ -730,9 +729,9 @@ registry.register(ToolSearchTool(registry.view()))
 `ToolSearchTool` 接收静态 `ToolRegistryView`，工具名固定为 `tool_search`。输入模型为
 `ToolSearchInput(queries, include_groups=None)`，例如
 `{"queries": ["读取项目说明", "修改配置"], "include_groups": ["file"]}`。`queries` 是非空数组，
-每项去除首尾空白后必须非空；不再接收旧 `query/limit` 字段，未知字段也会被拒绝。
-本地后端逐意图调用 `registry.search_deferred(..., limit=1)`，底层 registry 的 query/limit API
-及默认 limit=10 保持不变。两个后端均先按 base view 的 deny/group/allow 与本次组过滤筛选
+每项去除首尾空白后必须非空；只接受 `queries` 和 `include_groups`，未知字段会被拒绝。
+本地后端逐意图调用 `registry.search_deferred(..., limit=1)`；底层 registry 接收 query/limit，
+默认 limit=10。两个后端均先按 base view 的 deny/group/allow 与本次组过滤筛选
 deferred 工具；`include_groups=[]` 表示没有允许组，搜索名称不能扩大宿主的组范围。
 
 可通过 `ToolSearchTool(view, decision_client=evaluator, prompt_snapshot=...)` 借用 Decision
@@ -814,3 +813,5 @@ register_file_tools, schema_from_callable, schema_from_pydantic_model, tool
 uv run pytest tests/tools
 uv run ruff check src/iris/tools tests/tools
 ```
+
+使用与设计：[编写工具](../../../docs/cookbook/tools.md) · [工具生命周期](../../../docs/design/tool-execution.md) · [工具参考](../../../docs/reference/tools.md)。

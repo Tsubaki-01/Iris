@@ -63,10 +63,9 @@ Built-in Iris provider IDs are `openai`, `anthropic`, and `deepseek`. A custom p
 registry only when initialized `Config.providers` contains its `base_url`; an API key alone does not
 register it.
 
-Global `Config` contains only `api_key`, `provider_api_keys`, and `providers`. Set the endpoint via
+Model connection fields in global `Config` are `api_key`, `provider_api_keys`, and `providers`. Set the endpoint via
 `providers[name].base_url` or Agent `model.base_url`; set timeout via `model.timeout` or an explicit
-client argument, and configure logs through Python `logging`. Global `base_url/timeout/debug`
-fields are no longer declared.
+client argument, and configure logs through Python `logging`.
 `ProviderConfig` declares only `litellm_provider`, `base_url`, and `headers`. Agent `model.api_style`
 is the sole YAML protocol setting: `responses` by default, or `chat_completions`. The Iris Python SDK equivalent
 is `create_provider_client(..., api_style="chat_completions")`. This setting does not enter
@@ -111,8 +110,8 @@ model:
 is `vendor/native-model`. This gateway is illustrative, not a verified service.
 
 `ProviderClient` fields are `provider`, `api_style`, `litellm_provider`, `api_key`, `base_url`,
-`timeout`, and `headers`; Pydantic `extra="forbid"` rejects removed `adapter` and `http_client`
-arguments. Logical requests contain `ToolSpec(name, description, input_schema, strict)` and forced
+`timeout`, and `headers`; Pydantic `extra="forbid"` rejects undeclared arguments.
+Logical requests contain `ToolSpec(name, description, input_schema, strict)` and forced
 choice `{name: ...}`. Providers encode the Responses flat schema or Chat function wrapper.
 Response format is `text`, `json_object`, or `{name, schema, strict?}`; the selected adapter produces
 Responses `text.format` or Chat `response_format`.
@@ -141,7 +140,7 @@ distinction. `complete=True` closes the usage stream; it does not promise a comp
 the existing runtime totals.
 
 The provider-response raw boundary accepts `Mapping` values or the current LiteLLM/Pydantic v2
-`model_dump()` object shape. It does not call the legacy Pydantic v1 `.dict()` API.
+`model_dump()` object shape.
 
 `estimate_input_tokens(request)` projects the selected adapter's effective request into the local
 tokenizer shape, including calls/results, schemas, tool_choice, and protocol-specific output format. Encrypted reasoning
@@ -227,3 +226,5 @@ SDK path or global model registration changes.
 uv run pytest tests/providers tests/test_provider_client.py tests/harness/test_protocol_adapters.py
 uv run ruff check src/iris/providers tests/providers tests/test_provider_client.py
 ```
+
+Guides and reference (Chinese): [Configuration reference](../../../docs/reference/configuration.md) · [Protocols and media](../../../docs/design/messages-media.md).

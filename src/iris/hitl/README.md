@@ -27,8 +27,6 @@ proxy 使用 parent `resume()`；已 RESOLVED 的 crash gap 用 parent `recover(
 字段 parsing 先产生完整 typed request；`HumanInteraction` 的 model-level 校验随后只比较
 `tool_call_id`、request subject 和 lifecycle delta，不重复防御必填字段缺失。
 
-旧 standalone store、consumed/resume phase、checkpoint payload 和 stateful service 已删除。
-
 ## 无状态服务
 
 `HumanInteractionService` 提供以下无状态操作：
@@ -37,7 +35,7 @@ proxy 使用 parent `resume()`；已 RESOLVED 的 crash gap 用 parent `recover(
 - `create_subagent_proxy()`：从 typed child prompt 与 parent snapshot 构造 proxy；
 - `validate_response()`：校验 run/interaction identity、kind、expiry 与已保存回答的一致性；
 - `project_response(interaction)`：读取 RESOLVED/CLOSED interaction 的存储回答，投影为
-  `ToolResult` 或 `ApprovedToolCall`，不再接受第二份 response。
+  `ToolResult` 或 `ApprovedToolCall`，以已保存的回答为唯一输入来源。
 
 服务不做 persistence。Harness 通过 lifecycle `SuspendRun`、`ResolveInteraction`、
 `ResumeWaitingRun` 和 `FinishRun` commands 完成原子状态转换。
@@ -59,3 +57,5 @@ uv run pytest tests/harness/test_runner_resume.py tests/runtime/test_execute.py 
 uv run ruff check src/iris/hitl tests/harness/test_runner_resume.py tests/runtime/test_execute.py tests/tools/test_executor_preflight.py tests/tools/test_human_ask_tool.py
 uv run mypy src/iris/hitl
 ```
+
+使用与设计：[人工交互与恢复](../../../docs/cookbook/hitl-recovery.md) · [交互设计](../../../docs/design/human-interaction.md)。

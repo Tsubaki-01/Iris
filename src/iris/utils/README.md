@@ -9,6 +9,7 @@
 [`GenerationWorker`](generation_worker.py) 为一项后台维护提供串行同步执行、协作式取消和
 真实作业排空。Memory 与项目学习各持有自己的实例；协调器在 `wait_idle()` 完成后才释放
 对应资源锁。它不决定维护时机、处理内容或 Run 资格，普通前台 IO 不借用这些后台实例。
+`wait_idle()` 等待真实作业和完成回调收尾；取消等待者不会取消正在执行的同步作业。
 
 [`BackgroundIO`](background_io.py) 统一跟踪服务派发的异步 IO 等待任务，处理取消后的短提交回执
 及 `wait_pending()` 排空。Memory 与项目学习各持有一份作业集合；存在当前维护 worker 时借用它，
@@ -75,7 +76,16 @@ text = renderer.render_file(Path("prompts/greeting.j2"), {"name": "Iris"})
 
 命名项目模板由 [`iris.prompts`](../prompts/README.md) 负责初始化和选择快照时机；runtime
 装配也使用冻结 renderer 固定自定义 system/context 模板。独立 `TemplateRenderer()` 继续
-按文件更新检测，不因新增快照能力改变语义。
+按文件更新检测读取模板。
+
+冻结 renderer 的 `source_documents()` 返回缓存的 `SourceDocument` tuple，直接复用内存源，
+不回读磁盘或编译模板；非冻结 renderer 返回空 tuple。无法解码的文件标记为 `not_utf8`，
+不因枚举来源就触发渲染。该集合描述可用来源，不证明所有模板都被实际请求使用。
+
+[`sources.py`](sources.py) 的 `SourceDocument` 保存来源种类、原路径、正文、状态和文档 ID。
+`capture_source_reads` 为一次同步装配收集实际 loader 读取的文本；`read_source_text()` 与
+`capture_document()` 复用读取结果，`captured_documents()` 返回当前集合。独立 loader 不保留
+全局历史；配置采用、live 发布和持久存储仍由相应领域负责。
 
 读取、解码、解析或执行模板失败时抛出 `IrisTemplateError`，包含模板路径和底层错误。
 业务调用边界负责转换领域异常：context 与 compaction 使用 `IrisContextError`，memory 使用
@@ -131,3 +141,5 @@ print(saved.model.path, saved.model.mime_type)  # 模型应读取的文件及实
 
 图片处理和文件契约由 `tests/utils/test_images.py` 验证。`PreparedImage`、`SavedImage` 及其
 子对象是进程内不可变 DTO，不负责 JSON 持久化或 session 生命周期。
+
+使用与设计：[Context 与模板参考](../../../docs/reference/context.md) · [消息与媒体参考](../../../docs/reference/media.md) · [源码地图](../../../docs/contributing/source-map.md)。

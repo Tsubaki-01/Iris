@@ -376,13 +376,13 @@ across batches. Cut-point planning reuses identical empty-suffix estimates witho
 boundaries or the recent-history target.
 Summary instructions use the project's `compaction.j2`; its seed requests seven Markdown headings
 in the conversation's primary language. Edit project templates to change instructions and output
-format. The old `compaction.prompt` / `prompt_path` entry points have been removed.
+format; `prompts.root` selects the template directory.
 Iris still supplies the previous summary and current history batch through `compaction_input.j2`.
 Each complete compaction takes a fresh snapshot from `RuntimeEnvironment.prompt_source`, freezing
 both entry points and their dynamic include/import/extends dependencies in memory. All batches,
 budget estimates, and retries share this source; the next compaction adopts edits. Instructions
 still have leading and trailing whitespace stripped. There is no heading parser or format-repair
-loop. See [prompts](../prompts/README.en.md) for source configuration.
+loop. See [prompts](../prompts/README.md) for source configuration.
 
 Snapshots use the shared `iris.utils.TemplateRenderer` in-memory source support. Autoescape
 is disabled by default, preserving JSON, quotes, and `<>&` in summary inputs. Runtime converts template
@@ -439,6 +439,25 @@ Tool execution uses `ToolBridge.preflight()` to produce a plan, then guarded
 Ordinary tools and child continuations share the executor's final output handling, retaining the
 complete artifact reference while limiting model-visible text.
 
+## Context preparation diagnostics
+
+Each admitted `before_model` preparation owns a `ContextPreparation`, correlated with its configuration
+snapshot, session/run/activation, step, and `preparation_id`. On leaving preparation, the existing stream
+sink receives one read-only result: `ready` on success, `failed` on failure, or `cancelled` on cancellation
+or deadline termination.
+
+`ContextStage` records actual measurements for assembly, deduplication, optional context/tool selection,
+old-result previews, summaries, and the final request. `ContextDecision` explains retained, replaced,
+removed, or summarized sources and their reasons. Stage outcomes distinguish `applied`, `skipped`,
+`candidate`, and `rejected`; a planning candidate is not a committed change. The final snapshot includes
+selected tools, contribution keys, protected references, and estimated input tokens. Recording adds no
+estimator calls or model requests.
+
+These facts do not enter checkpoints or control execution and recovery. `RuntimeEventSink.emit()` now
+accepts `RuntimeStreamEvent | ContextPreparation`; custom sinks must handle both types. Diagnostic
+publication failures only produce a log and do not change business results. Coverage lives in
+`tests/runtime/test_context_diagnostics.py`.
+
 ## Optional live streaming
 
 Summaries always call `complete()` directly and expose neither summary text nor summary model
@@ -469,8 +488,9 @@ complete `ToolUseBlock` before preflight; it emits `tool.started` after permissi
 activation fencing, and a successful durable claim but before middleware/body; it emits
 `tool.completed` with the complete `ToolResult` only after ordered `commit_tool_result()` succeeds.
 Parallel tool bodies may finish out of order, while completed events retain model ordinal order.
-Runtime does not await the sink, create a queue, or catch custom sink errors; a later
-harness-owned sink isolates publisher failures.
+Ordinary `RuntimeStreamEvent` publication does not await the sink, create a queue, or catch custom sink
+errors; the harness-owned sink isolates publisher failures. Context diagnostics use the separate
+best-effort publication boundary described above.
 
 ## Runtime steering
 
@@ -500,8 +520,7 @@ delta, resumability, and outcome semantics.
 
 Under `RETURN_TO_MODEL`, runtime groups consecutive calls that are both read-only and declared
 concurrency-safe into an internal window of at most 8 calls. Eight is a private implementation
-bound, not a YAML, `RuntimeExecutionOptions`, or environment setting. This capability does not
-change public config, schemas, models, or exports.
+bound, not a YAML, `RuntimeExecutionOptions`, or environment setting.
 
 Only consecutive candidates share a window. STOP, HITL, preflight results,
 WRITE/EXECUTE/NETWORK/MCP/AGENT calls, unsafe calls, and classification failures are serial
@@ -545,9 +564,9 @@ Synchronous callables remain inline by default; only explicit `CallableExecution
 placement moves a blocking body to a worker. Threads cannot be safely forced to stop. Cancellation
 or timeout stops only the async waiter; when a claim remains unresolved, runtime settles as
 `OUTCOME_UNKNOWN`, and the late result cannot advance history, cursor, checkpoint, or events.
-Thread placement does not promise CPU speedup. Future NETWORK/MCP or write concurrency requires a new effect, retry, timeout,
-conflict, and crash-reconciliation protocol rather than a relaxed classifier. This work adds no
-delta/merge/lock/hash model.
+Thread placement does not promise CPU speedup. NETWORK/MCP and write calls execute serially outside
+this window. The window schedules only eligible read-only calls, using per-call durable claims and
+ordered result commits.
 
 ## Command deadlines and stop facts
 
@@ -705,10 +724,9 @@ A `skills.root` escape, missing `skills.require` entry, or name/alias collision 
 ## Public API
 
 Package exports cover `AgentRuntime`, factory/environment,
-`RuntimeEventSink`, `RuntimeStreamEvent`, assembler/tool
-bridge, `RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Complete-run
-options/status/results, `run_turn()`, `run_loop()`,
-`resume()`, and old checkpoint helpers do not exist.
+`RuntimeEventSink`, `RuntimeStreamEvent`, `ContextPreparation`, `ContextStage`, `ContextDecision`, assembler/tool
+bridge, `RuntimeSteeringPort`, `SteeringInput`, and activation/commit-port contracts. Use
+[`iris.harness.AgentRunner`](../harness/README.en.md) to start, recover, cancel, and read complete Runs.
 Import `CompletionProvider`, `StreamingProvider`, and `streaming_provider_for()` from
 `iris.providers`; runtime does not re-export provider protocols.
 
@@ -729,3 +747,5 @@ uv run pytest tests/runtime
 uv run ruff check src/iris/runtime tests/runtime
 uv run mypy src/iris/runtime
 ```
+
+Guides and reference (Chinese): [Architecture](../../../docs/design/architecture.md) · [Context engineering](../../../docs/design/context-engineering.md) · [Runtime and session reference](../../../docs/reference/runtime.md).

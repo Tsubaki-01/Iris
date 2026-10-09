@@ -48,8 +48,9 @@ Goal 使用同一 backend 的 `goals`、`goal_runs`，一个 session 至多一�
 不增加独立报告表。终态先提交而目标尚未结算时，读视图只显示 settlement_pending，显式
 reconcile 补结算。重复结算不再修改目标；last-round 的有效完成先于额度耗尽判定。
 
-Sub Agent 新增且只新增三条 mutation：`admit_child_run()` 同事务创建普通 child run 与
-`subagent_run_links` 三字段 link；重入 exact parent key 返回原 child。`rebind_subagent_proxy()`
+Sub Agent 使用三条 mutation：`admit_child_run()` 同事务创建普通 child run 与
+`subagent_run_links` 关系，保存父 Run、父工具调用、child Run 和实际 `agent_selector`；
+重入 exact parent key 返回原 child。`rebind_subagent_proxy()`
 保持 parent 工具 PREPARED、history/usage/cursor 不变，返回完整 WAITING snapshot。
 `finalize_subagent_result()` 要求 child 已 terminal，提交一次 parent tool result/message/usage；
 WAITING 模式同时关闭 proxy、建立 fresh RESUME activation，并返回其 checkpoint。
@@ -67,7 +68,7 @@ WAITING 模式同时关闭 proxy、建立 fresh RESUME activation，并返回其
 `SQLiteStore` 每次操作打开独立连接并启用 foreign keys。公共 read 使用 targeted query，只
 读取目标 run、session、lane owner、interaction、checkpoint、tool calls 或 events；跨多条查询的
 read 在同一个 deferred transaction 中取得一致 snapshot，且不执行写入。
-SQLite row decode 已创建独立对象，public read 直接返回解析结果，不再做统一 deepcopy；
+SQLite row decode 创建独立对象，public read 直接返回解析结果，无需额外 deepcopy；
 内存实现继续通过 deepcopy 隔离 store-owned facts。
 完整 `load_session()` 与分页采集一样，在同一事务取得 metadata 和原始消息行，释放事务及
 实例锁后才解析消息；fork 等 mutation 内的会话读取仍在原事务中完成。此改动缩短持锁时间，
@@ -118,16 +119,17 @@ revision/CAS 和 activation fence 执行；旧写入通常抛出冲突或状态�
 `resolve_interaction` 先匹配当前等待的 interaction identity 和 response kind，再对 PENDING
 写入检查 run revision 与 interaction version；RESOLVED 的同回答直接返回当前事实。
 
-`agent_runs.usage_json` 是 run usage 的唯一存储，不再并存三个重复的标量计数列。首次读取 row
-时由既有 `RunUsage` 解析校验非负计数及 committed/reserved 关系。当前数据库为 schema v12，
-run 与 checkpoint 不再保存环境总指纹；不迁移或读取旧 schema。
+`agent_runs.usage_json` 是 run usage 的唯一存储。首次读取 row 时由 `RunUsage` 解析校验非负
+计数及 committed/reserved 关系。数据库使用 schema v12；不兼容的 schema 在初始化时拒绝，
+不执行迁移。恢复使用 run revision 与 activation fence，不依赖环境总指纹。
 
 schema v12 包含：
 
 - `lifecycle_schema`、`sessions`、`session_messages`、`agent_runs`、`session_run_lanes`；
 - `run_activations`、`run_checkpoints`、`run_tool_calls`；
-- `subagent_run_links(parent_run_id, parent_tool_call_id, child_run_id)`；
+- `subagent_run_links(parent_run_id, parent_tool_call_id, child_run_id, agent_selector)`；
 - `run_interactions`、`run_events`；
+- `goals`、`goal_runs` 与 partial unique index `one_current_goal_per_session`；
 - partial unique index `one_open_interaction_per_run`。
 - terminal partial index `terminal_runs_by_session(session_id, created_at, run_id)`。
 
@@ -249,9 +251,19 @@ session history 追加一个模型可见的合成 error result：前者使用 `T
 tool body 可以乱序完成，但 session message、checkpoint、cursor 与
 `TOOL_CALL_COMMITTED` event 只随 committed ordinal prefix 推进。所有 event sequence 都严格单调，
 correlation identity 精确；多个 `TOOL_CALL_CLAIMED` telemetry event 的 ordinal 顺序不是契约。
-固定内部窗口 8 属于 runtime，不写入 store，也没有改变 lifecycle schema v12、config、command、
-model 或公开导出。future NETWORK/MCP/write concurrency 需要新的 durable effect/recovery 协议，
-不能从当前多 claim 支持推导出来。
+固定内部窗口 8 由 runtime 调度，不写入 store。Store 支持多个独立 claim，
+调用能否并行仍由 runtime 分类决定；NETWORK/MCP 和写入调用串行执行。
+
+## 会话与子运行导航
+
+两个 backend 均实现 `list_sessions()`、`list_runs()` 与 `list_child_runs()`，返回有界导航页，
+不使用仅 terminal 根 Run 才合格的 fork 筛选规则。SQLite 在查询中完成过滤、排序和
+`limit + 1` 读取，公共页投影由 `_navigation.py` 复用。顺序、游标及返回模型见
+[lifecycle 导航契约](../lifecycle/README.md#会话与运行导航)。
+
+`load_subagent_link(parent_run_id, parent_tool_call_id)` 按父工具读取 link；
+`load_parent_link(child_run_id)` 按唯一 child 反查直接父关系，无匹配均返回 `None`。
+SQLite 后者使用已有 child 唯一索引，InMemory 在同一锁内查询。查询不创建 child，也不恢复执行。
 
 ## 会话历史查询与分支
 
@@ -312,3 +324,5 @@ uv run pytest tests/store/test_lifecycle_store_contract.py tests/store/test_life
 uv run ruff check src/iris/store tests/store
 uv run mypy src/iris/store
 ```
+
+使用与设计：[运行控制与持久化](../../../docs/design/lifecycle.md) · [运行与存储参考](../../../docs/reference/runtime.md)。

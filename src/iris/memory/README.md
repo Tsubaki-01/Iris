@@ -24,7 +24,7 @@ memory:
 ## 运行要求与快速开始
 
 本包随 Iris 安装，使用标准库 SQLite 和 FTS5。默认本地搜索使用 FTS5；初始化或查询错误
-报告 `IrisMemoryError`，无命中返回空，不再降级为 LIKE。新库使用 schema version 7，旧版库
+报告 `IrisMemoryError`，无命中返回空，不降级为 LIKE。数据库使用 schema version 7，不兼容的库
 在初始化时明确拒绝，不自动迁移、覆盖版本或删除数据。
 
 ```python
@@ -105,8 +105,7 @@ flowchart LR
 ### Namespace 与项目共享
 
 每个 workspace 使用独立数据库/service，条目以普通字符串 `namespace` 分组，默认
-`project`。同项目 Agent 读取同一空间即可共享资料；不再要求 Agent ID、session、visibility
-等五个字段同时匹配。不同项目使用不同数据库。
+`project`。同项目 Agent 通过读取同一 namespace 共享资料，不同项目使用不同数据库。
 
 `service.search(MemorySearchQuery(query="..."), ["project", "notes"])` 对多个空间做一次联合查询，
 全局排序后取 limit。`get_item(item_id, namespaces)` 和 `list_items(namespaces)` 也接受联合
@@ -194,7 +193,7 @@ overview provider/model 和 mirror 均已绑定，否则构造 runner 时报告 
 
 宿主创建一个共享 `MaintenanceCoordinator`，显式把各 root runner 的 lifecycle reader 与
 `MemoryMaintenanceBinding` 绑定；工厂不创建私人维护器。统一 `maintenance.idle_seconds`
-默认 300 秒，允许 0；旧 `memory.generation.idle_seconds` 已删除。完整接线见
+默认 300 秒，允许 0；生成预算与策略由 `memory.generation` 配置。完整接线见
 [harness README](../harness/README.md)。未绑定的自动维护 runner 在首次运行时报配置错误。
 
 新一批自动原文 flush 同时要求空闲时间和 `maintenance.min_pending_runs` 个合格新 Run，
@@ -355,9 +354,9 @@ refresh 报生成依赖未配置。
 
 概览生成预算独立于主请求窗口预算；`system_budget_ratio=0.02` 用于上述 system 窗口选择。
 
-历次检索、文件读取和 Search/Fetch 方案的效果与成本见
-[Memory 选型实验对比](../../../docs/memory-system-evaluation.md)。当前采用 G 的必要词组能力，
-继续复用 SQLite FTS，不引入向量库等重组件。
+Search/Fetch、概览窗口与生成流程的职责见
+[长期记忆的组织与采用](../../../docs/design/memory.md)。普通检索使用 SQLite FTS 与显式必要
+词组过滤；可选 Decision 召回见下文，不引入向量数据库。
 
 ## 公开接口分组
 
@@ -462,11 +461,11 @@ SDK 注入连接由宿主负责。仅增强 Search 标记 `READ+NETWORK`，沿�
 Agent 开启 memory 后自动按 Search、Fetch 的顺序注册工具。默认均为 `READ`；启用 Decision
 召回的 Search 为 `READ+NETWORK`，Fetch 仍为 `READ`。无需在
 `tools.builtin` 声明它们；手写 `memory.search` 或 `memory.fetch` 会在 registry 装配时报
-`IrisConfigError`，提示改用 `memory.enabled`。旧 `memory.backend` 字段在配置解析时拒绝。
+`IrisConfigError`，提示使用 `memory.enabled` 控制读工具注册。
 `include_tools=False` 仍会让当前请求不发送工具 schema，概览指引也按实际可用工具生成。
 
-低层 `register_memory_tools()` 仍默认空，SDK 可显式选择 `memory.search/fetch`；退出的是
-Agent 手工读声明。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和
+低层 `register_memory_tools()` 默认空，SDK 可显式选择 `memory.search/fetch`；Agent YAML 的
+读工具由开关统一注册。Search 直接使用 `MemorySearchQuery` 作为工具输入，返回 `items` 和
 `has_more`；仅有更多候选时附提示“还有候选；这不要求继续查询。”。片段足以回答时停止查询，
 仅在必要信息仍缺失时补查；没有新线索时不只换措辞反复搜索。
 
@@ -541,11 +540,11 @@ Tasks、Sessions 分类文件。它不创建 `Memory.md`；旧根目录文件保
 | Flush / dreaming 与原子输入消费 | `generation.py`, `generation_models.py`, `sqlite.py` | `tests/memory/test_generation.py`, `tests/memory/test_generation_store.py` |
 | 概览窗口采用、压缩与恢复 | `../runtime/runtime.py`, `../runtime/memory_context.py` | `tests/harness/test_auto_memory.py`, `tests/harness/test_runner_memory.py`, `tests/runtime/test_memory_context.py` |
 
-在仓库根目录按本次变更选择精准测试；每次使用新的 basetemp：
+在仓库根目录按本次变更选择精准测试：
 
 ```powershell
-$env:UV_CACHE_DIR = "$PWD\tmp\uv-cache"
-$memoryTestTemp = "$PWD\tmp\pytest-memory-$((Get-Date).ToString('yyyyMMdd-HHmmss-fff'))"
-uv run pytest tests/memory -p no:cacheprovider --basetemp="$memoryTestTemp"
+uv run pytest tests/memory
 uv run ruff check src/iris/memory tests/memory
 ```
+
+使用与设计：[长期记忆用法](../../../docs/cookbook/memory.md) · [组织与采用](../../../docs/design/memory.md) · [记忆参考](../../../docs/reference/memory-goals.md)。

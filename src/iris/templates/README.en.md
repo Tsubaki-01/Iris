@@ -17,13 +17,22 @@ written = scaffold_template("file-agent", "./my-agent")
 The template creates `agent.yaml`, `README.md`, and `README.en.md`. The generated YAML can be loaded
 with `iris.agents.load_agent_config()`.
 
+After configuring `IRIS_PROVIDER_API_KEYS__OPENAI`, run from the repository environment:
+
+```bash
+uv run iris chat my-agent/agent.yaml
+```
+
+The default workspace is the generated configuration directory, `my-agent/`; file tools read within it.
+
 `scaffold_template(template_name, target_dir, *, overwrite=False)` returns the written target paths.
 An unknown template raises `IrisTemplateNotFoundError`; an existing target file raises
 `IrisTemplateError` unless `overwrite=True`. Conflict detection happens before copying.
 
 `file-agent` selects OpenAI `gpt-4o-mini`, a basic system prompt, the read-only `file.read`,
 `file.list`, and `file.grep` tools, `writes: confirm`, and `session.backend: none`. The template
-contains configuration and documentation only; it does not implement an agent loop.
+contains configuration and documentation only; it does not implement an agent loop. It omits
+`api_style`, so the current `responses` default applies.
 
 ## Packaging and maintenance
 
@@ -38,3 +47,5 @@ when adding or changing a template.
 ```bash
 uv run ruff check src/iris/templates
 ```
+
+Guides and reference (Chinese): [Agent configuration](../../../docs/cookbook/configure-agent.md) · [Quick start](../../../docs/getting-started/quickstart.md).

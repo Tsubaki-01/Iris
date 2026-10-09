@@ -318,9 +318,7 @@ results, and unsafe calls remain barriers. Every call keeps its own durable clai
 does not determine result order, and claim telemetry order is not an ordinal contract. Undeclared
 synchronous callables remain inline and may block the event loop; explicit `THREAD` placement
 isolates blocking waits but does not promise CPU speedup. Placement does not enter provider schemas.
-Future
-NETWORK/MCP or write concurrency must define a new effect and recovery protocol rather than merely
-changing the capability classifier.
+NETWORK/MCP and write calls execute serially outside runtime's read-only concurrency window.
 
 ## Built-in file tools
 
@@ -461,8 +459,8 @@ Preflight errors are clipped without writing files.
 `ToolDefinition.preview_mode` defaults to `head`; both command tools use `head_tail`.
 `ToolArtifact.preview` and final model text share the preview algorithm. The character budget
 includes the error prefix, complete retrieval notice, and omission marker.
-`ToolDefinition.preview_chars` controls preview length; `ToolExecutor` no longer accepts
-`artifact_preview_chars`. An artifact write failure returns an error without retrying the write.
+Each tool's `ToolDefinition.preview_chars` controls preview length. An artifact write failure returns
+an error without retrying the write.
 `ToolArtifactStore.persist_file(tool_use_id, source, preview=...)` stores a copy of an already
 resolved source file for explicit publication.
 The [MCP adapter](../mcp/README.en.md) uses the ordinary executor and cancellation bridge.
@@ -609,7 +607,8 @@ bigrams, low-weight single characters, query coverage, and stable sorting. Const
 with a static `ToolRegistryView`, for example `ToolSearchTool(registry.view())`. Its model-facing name
 is `tool_search`, with `ToolSearchInput(queries, include_groups=None)`, for example
 `{"queries": ["read project notes", "edit config"], "include_groups": ["file"]}`. `queries` is a nonempty
-array of strings that remain nonblank after trimming. Legacy `query/limit` and unknown fields are rejected.
+array of strings that remain nonblank after trimming. Only `queries` and `include_groups` are accepted;
+unknown fields are rejected.
 The local backend calls `registry.search_deferred(..., limit=1)` separately for each intent; the
 lower-level registry query/limit API still defaults to 10. Both backends first apply base
 deny/group/allow and call-specific group filters to deferred tools. `include_groups=[]` allows no groups;
@@ -649,7 +648,7 @@ tool definitions.
 
 ## Public surface and boundaries
 
-The exact top-level API is `src/iris/tools/__init__.py::__all__`, including
+The exact top-level API is the `__all__` list in [__init__.py](__init__.py), including
 `CallableExecutionMode`, `ToolTimeoutOwner`, `ToolCall`, `ToolNext`, `ExecCommandInput`,
 `ExecCommandTool`, and covering models, base/adapters,
 registry/view, executor/preflight, permission/artifact/middleware/breaker types, file/human tools,
@@ -675,3 +674,5 @@ MCP protocol integration lives in `iris.mcp` and uses this package's ordinary to
 uv run pytest tests/tools
 uv run ruff check src/iris/tools tests/tools
 ```
+
+Guides and reference (Chinese): [Writing tools](../../../docs/cookbook/tools.md) · [Tool lifecycle](../../../docs/design/tool-execution.md) · [Tools reference](../../../docs/reference/tools.md).
