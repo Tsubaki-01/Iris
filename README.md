@@ -82,3 +82,13 @@ Runner 拥有完整任务的创建、继续和结算；runtime 推进一次激�
 从[贡献指南](docs/contributing/index.md)准备环境，用[源码地图](docs/contributing/source-map.md)找到职责和入口，针对改动运行相关测试。设计解释、公开契约和可运行配方共同构成项目的查阅手册。
 
 项目采用 [MIT License](LICENSE)。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Tsubaki-01%2FIris&type=date&logscale=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&legend=bottom-right" />
+ </picture>
+</a>
