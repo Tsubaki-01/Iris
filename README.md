@@ -89,6 +89,6 @@ Runner 拥有完整任务的创建、继续和结算；runtime 推进一次激�
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&theme=dark&legend=bottom-right" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" width="65%" src="https://api.star-history.com/chart?repos=Tsubaki-01/Iris&type=date&legend=bottom-right" />
  </picture>
 </a>
