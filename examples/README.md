@@ -33,12 +33,15 @@ permission / question 提示出现后，下一行输入会作为 typed HITL resp
 
 ## Web
 
-[Web 示例](web/README.md) 提供 Tavily 搜索、批量正文与 query 摘录、长结果续读，以及
-真实 DeepSeek 驱动的搜索和来源引用。独立工具调用仅需 Tavily key，Agent 示例还需 DeepSeek key。
+[Web 示例](web/README.md) 提供 Tavily 与 DeepSeek 搜索、网页读取和长结果续读，以及
+真实模型驱动的来源引用。工具直调只需所选服务的 key；[DeepSeek Agent](web/deepseek.yaml)
+的模型和 Web 工具共用 DeepSeek key，原 Tavily Agent 示例使用两种服务的 key。
 
 ```powershell
 uv run python -m examples.web.tools --env-file .env.local search "Python asyncio TaskGroup" --max-results 3
 uv run python -m examples.web.agent --env-file .env.local
+uv run python -m examples.web.tools --env-file .env.local --provider deepseek search "Python site:docs.python.org" --max-results 3
+uv run python -m examples.web.agent --env-file .env.local --config examples/web/deepseek.yaml
 ```
 
 ## 图片输入

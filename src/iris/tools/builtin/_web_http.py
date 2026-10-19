@@ -1,4 +1,4 @@
-"""Tavily 请求生命周期与外部响应解析。"""
+"""Web 服务共用的请求生命周期与外部响应解析。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,19 @@ from pydantic import BaseModel, ValidationError
 
 from ...exceptions import IrisToolExecutionError
 
+WebProvider = Literal["tavily", "deepseek"]
 
-async def post_tavily[ResponseT: BaseModel](
+_BASE_URLS = {
+    "tavily": "https://api.tavily.com",
+    "deepseek": "https://api.deepseek.com/v1/tools",
+}
+_LABELS = {"tavily": "Tavily", "deepseek": "DeepSeek"}
+
+
+async def post_web[ResponseT: BaseModel](
     *,
-    endpoint: Literal["search", "extract"],
+    provider: WebProvider,
+    endpoint: Literal["search", "extract", "fetch"],
     api_key: str,
     payload: dict[str, Any],
     response_model: type[ResponseT],
@@ -20,8 +29,9 @@ async def post_tavily[ResponseT: BaseModel](
     """发送一次请求并将服务响应解析为可信模型。
 
     Args:
-        endpoint: Tavily 接口名称。
-        api_key: 显式传入的 Tavily 凭据。
+        provider: 构造工具时选定的 Web 服务。
+        endpoint: 对应服务的接口名称。
+        api_key: 显式传入的服务凭据。
         payload: 已由工具输入边界校验并映射的请求内容。
         response_model: 当前接口消费的响应字段模型。
 
@@ -31,22 +41,23 @@ async def post_tavily[ResponseT: BaseModel](
     Raises:
         IrisToolExecutionError: 请求、HTTP 状态或响应解析失败。
     """
+    label = _LABELS[provider]
     try:
         async with httpx2.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"https://api.tavily.com/{endpoint}",
+                f"{_BASE_URLS[provider]}/{endpoint}",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
             )
             response.raise_for_status()
     except httpx2.HTTPStatusError as exc:
         raise IrisToolExecutionError(
-            f"Tavily {endpoint} HTTP {exc.response.status_code}: {exc.response.text}"
+            f"{label} {endpoint} HTTP {exc.response.status_code}: {exc.response.text}"
         ) from exc
     except httpx2.RequestError as exc:
-        raise IrisToolExecutionError(f"Tavily {endpoint} 请求失败: {exc}") from exc
+        raise IrisToolExecutionError(f"{label} {endpoint} 请求失败: {exc}") from exc
 
     try:
         return response_model.model_validate_json(response.content)
     except ValidationError as exc:
-        raise IrisToolExecutionError(f"Tavily {endpoint} 响应无法解析: {exc}") from exc
+        raise IrisToolExecutionError(f"{label} {endpoint} 响应无法解析: {exc}") from exc

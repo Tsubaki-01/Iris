@@ -29,6 +29,7 @@ from ...prompts.config import PromptConfig
 from ...providers import ModelRoute, parse_model_route
 from ...speech.config import SpeechConfig
 from ...todo.config import TodoConfig
+from ...tools.builtin.web import WebProvider
 from ...utils.sources import SourceDocument
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
@@ -123,11 +124,13 @@ class ToolsConfig(BaseModel):
 
     Attributes:
         builtin (list[str]): 内置工具公开 YAML 名称。
+        web_provider (WebProvider): Web 搜索与抓取服务，默认 tavily。
         python (PythonToolsConfig): Python 扩展引用配置。
         subagent (Path | None): 相对 parent YAML 的 Sub Agent catalog 路径。
     """
 
     builtin: list[str] = Field(default_factory=list)
+    web_provider: WebProvider = "tavily"
     python: PythonToolsConfig = Field(default_factory=PythonToolsConfig)
     subagent: Path | None = None
 

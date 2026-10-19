@@ -43,7 +43,7 @@ async def run_agent(*, config_path: Path, prompt: str, session_id: str) -> RunRe
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """执行真实模型与 Tavily 调用，输出 RunResult JSON。"""
+    """执行真实模型与所选 Web 服务调用，输出 RunResult JSON。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     parser.add_argument("--env-file", type=Path)

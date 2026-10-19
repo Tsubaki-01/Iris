@@ -521,10 +521,11 @@ async def test_tiny_budget_reports_artifact_error_without_partial_handle(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 async def test_web_fetch_artifact_can_be_read_with_configured_file_tool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
-    """批量网页长正文沿配置、HTTP、artifact 和 read_file 链路完整可读。"""
+    """两种 Web 服务的长正文沿配置、HTTP、artifact 和 read_file 链路完整可读。"""
     import iris.config as iris_config
     from iris.agents import ToolsConfig, build_tool_registry
 
@@ -536,7 +537,11 @@ async def test_web_fetch_artifact_can_be_read_with_configured_file_tool(
         client: httpx.AsyncClient, request: httpx.Request, **kwargs: Any
     ) -> httpx.Response:
         """只替换网络发送，保留真实客户端和工具响应解析。"""
-        assert request.headers["Authorization"] == "Bearer tvly-artifact-test"
+        assert request.headers["Authorization"] == "Bearer web-artifact-test"
+        if provider == "deepseek":
+            assert str(request.url) == "https://api.deepseek.com/v1/tools/fetch"
+            assert json.loads(request.content) == {"url": url}
+            return httpx.Response(200, json={"title": "资料", "content": body}, request=request)
         assert str(request.url) == "https://api.tavily.com/extract"
         assert json.loads(request.content)["urls"] == [url, failed_url]
         return httpx.Response(
@@ -550,18 +555,26 @@ async def test_web_fetch_artifact_can_be_read_with_configured_file_tool(
 
     monkeypatch.setattr(httpx.AsyncClient, "send", respond)
     monkeypatch.setattr(iris_config, "_config", None)
-    iris_config.init_config(provider_api_keys={"tavily": "tvly-artifact-test"})
-    registry = build_tool_registry(ToolsConfig(builtin=["web.fetch", "file.read"]))
+    iris_config.init_config(provider_api_keys={provider: "web-artifact-test"})
+    registry = build_tool_registry(
+        ToolsConfig(builtin=["web.fetch", "file.read"], web_provider=provider)
+    )
     executor = ToolExecutor(registry)
     context = ToolExecutionContext(workspace_root=tmp_path)
 
     result = await executor.execute_one(
-        ToolUseBlock(id="fetch", name="web_fetch", input={"urls": [url, failed_url]}), context
+        ToolUseBlock(
+            id="fetch",
+            name="web_fetch",
+            input={"url": url} if provider == "deepseek" else {"urls": [url, failed_url]},
+        ),
+        context,
     )
 
     assert not result.is_error
     assert result.artifact is not None
-    assert failed_url in result.model_content
+    if provider == "tavily":
+        assert failed_url in result.model_content
     assert str(result.artifact.path) in result.model_content
     assert "context_read" not in result.model_content
     assert body in result.artifact.path.read_text(encoding="utf-8")

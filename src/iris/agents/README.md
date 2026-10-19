@@ -439,11 +439,12 @@ Memory 按数据库/namespace、Evolution 按 workspace 分别计数；一个 Ru
 `file.publish` 暴露 `publish_artifact(file_path)`，沿用 registry 的文件服务与 READ 权限，
 将指定文件复制为本地结果产物。它不依赖命令服务或 Docker，也不隐式包含在默认文件工具集合中。
 
-`web.search` 和 `web.fetch` 分别暴露 `web_search`、`web_fetch`，使用 Tavily Search/Extract。
-两者固定 basic，可独立启用，不增加专用 Web 配置块：
+`web.search` 和 `web.fetch` 分别暴露 `web_search`、`web_fetch`，可独立启用。
+`tools.web_provider` 选择 `tavily`（默认）或 `deepseek`，例如：
 
 ```yaml
 tools:
+  web_provider: deepseek
   builtin:
     - web.search
     - web.fetch
@@ -451,9 +452,13 @@ tools:
 ```
 
 注册 Web 工具前，host 需要通过现有 `init_config()` 初始化全局配置。凭据来自
-`Config.provider_api_keys["tavily"]`，对应环境变量 `IRIS_PROVIDER_API_KEYS__TAVILY`；
-也可在初始化时传入 `provider_api_keys`。需要 dotenv 时显式传 `env_file`。缺少 Tavily key
-会抛出 `IrisConfigError`，不会改用聊天模型的通用 key。
+`Config.provider_api_keys[tools.web_provider]`，对应环境变量
+`IRIS_PROVIDER_API_KEYS__TAVILY` 或 `IRIS_PROVIDER_API_KEYS__DEEPSEEK`；
+也可在初始化时传入 `provider_api_keys`。需要 dotenv 时显式传 `env_file`。缺少所选服务的 key
+会抛出 `IrisConfigError`。DeepSeek Web 与聊天模型可以共用 `deepseek` 凭据，服务选择独立于模型。
+
+Tavily 使用 Search/Extract basic，保留批量 URL 和 query 摘录；DeepSeek 使用独立的 Search/Fetch
+API，搜索条件写进 query，抓取接收单个 url。构造出的工具 schema 只公开所选服务支持的参数。
 
 两个具体 Web builtin 在默认策略下自动执行，自定义策略仍然生效。默认 context policy 提供
 `context_read`，可按历史引用继续读取长网页结果；`file.read` 是需要显式启用的文件工具。

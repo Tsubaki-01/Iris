@@ -54,7 +54,24 @@ MCP 结果会保留完整原生结果 artifact。普通文本进入模型正文�
 
 ## 直接搜索网页
 
-内置 `web.search` 与 `web.fetch` 使用 Tavily。配置 `IRIS_PROVIDER_API_KEYS__TAVILY` 后，在仓库根目录可以先运行不依赖主模型的工具示例：
+内置 `web.search` 与 `web.fetch` 默认使用 Tavily，也可以通过 `tools.web_provider: deepseek` 使用 DeepSeek。独立工具调用只需要所选服务的 key。
+
+### 使用 DeepSeek
+
+配置环境变量 `IRIS_PROVIDER_API_KEYS__DEEPSEEK`，在仓库根目录运行：
+
+```shell
+uv run python -m examples.web.tools --provider deepseek search "Python asyncio TaskGroup site:docs.python.org" --max-results 3
+uv run python -m examples.web.tools --provider deepseek fetch "https://docs.python.org/3/library/asyncio-task.html"
+```
+
+Search 返回标题、URL 和适合模型阅读的摘要。将搜索结果中的完整 URL 交给 Fetch，可以读取标题和 Markdown 正文；上面的 URL 是具体调用例子。DeepSeek 的搜索词连同操作符最多 128 个字符，结果上限为 50；站点、日期等条件写进 `query`，例如 `site:docs.python.org after:2025`。Fetch 每次接收单个 `url`，不支持 query 摘录。
+
+如果凭据保存在 dotenv 文件，命令增加 `--env-file .env.local`，放在 `search` 或 `fetch` 前面。
+
+### 使用 Tavily
+
+配置 `IRIS_PROVIDER_API_KEYS__TAVILY` 后，在仓库根目录运行：
 
 ```shell
 uv run python -m examples.web.tools search "Python asyncio TaskGroup" --include-domains docs.python.org --max-results 3
@@ -68,7 +85,9 @@ uv run python -m examples.web.tools fetch "https://docs.python.org/3/library/asy
 
 这里的 URL 是一个具体调用例子；搜索结果可能随时间变化。`query` 对一批 URL 生效，用于获取相关摘录；省略它时返回服务提取的完整正文。它不是浏览器页面渲染，也不执行交互操作。
 
-`web_fetch` 可一次提交 1–20 个 URL。部分页面失败时，成功正文和各 URL 的失败原因一起返回；全部提取失败时为工具错误。搜索或正文过长时，结果提供 artifact 正文路径，继续运行 `examples.web.tools read <返回路径>`，按返回的 `next_offset`、`next_column` 分页。
+Tavily 的 `web_fetch` 可一次提交 1–20 个 URL。部分页面失败时，成功正文和各 URL 的失败原因一起返回；全部提取失败时为工具错误。
+
+两种服务的搜索或正文过长时，结果都提供 artifact 正文路径，继续运行 `examples.web.tools read <返回路径>`，按返回的 `next_offset`、`next_column` 分页。
 
 ## 交给 Agent 完成搜索到回答
 
@@ -77,6 +96,14 @@ uv run python -m examples.web.tools fetch "https://docs.python.org/3/library/asy
 ```shell
 uv run iris chat examples/web/agent.yaml
 ```
+
+使用 [DeepSeek 示例](../../examples/web/deepseek.yaml) 时，只需要 `IRIS_PROVIDER_API_KEYS__DEEPSEEK`；模型和 Web 工具共用该凭据：
+
+```shell
+uv run iris chat examples/web/deepseek.yaml
+```
+
+自己的 Agent 在 `tools` 下设置 `web_provider: deepseek`，并在 `builtin` 中声明需要的 `web.search`、`web.fetch`。切换后模型会收到所选服务的参数 schema。完整字段及 SDK 入口见 [Web 参数参考](../reference/tools.md#内置工具目录)。
 
 成功标志是可看到真实搜索和正文读取调用，并得到有来源链接的回答；答案措辞由模型决定。工具示例的 HTTP 连接成功、Agent 的工具调用成功和答案质量是三个不同的验证目标。
 

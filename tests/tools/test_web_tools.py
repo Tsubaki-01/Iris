@@ -1,4 +1,4 @@
-"""Tavily Web 工具的请求、正文和失败契约。"""
+"""Web 工具的请求、正文和失败契约。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from iris.tools import (
     ToolExecutor,
     ToolRegistry,
 )
-from iris.tools.builtin import _tavily
 from iris.tools.builtin.web import WebFetchTool, WebSearchTool
 
 
@@ -38,7 +37,7 @@ def _mock_http(
         clients.append(client)
         return client
 
-    monkeypatch.setattr(_tavily.httpx2, "AsyncClient", create_client)
+    monkeypatch.setattr(httpx2, "AsyncClient", create_client)
     return clients
 
 
@@ -276,8 +275,9 @@ async def test_fetch_all_failed_is_an_error_with_each_url_and_reason(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [401, 429, 432, 500])
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 async def test_http_failures_preserve_service_reason_and_do_not_retry(
-    monkeypatch: pytest.MonkeyPatch, status: int
+    monkeypatch: pytest.MonkeyPatch, status: int, provider: str
 ) -> None:
     """HTTP 错误保留状态及服务消息；一次工具调用只发一次请求。"""
     requests: list[httpx2.Request] = []
@@ -287,7 +287,7 @@ async def test_http_failures_preserve_service_reason_and_do_not_retry(
         return httpx2.Response(status, json={"detail": "service failure reason"})
 
     clients = _mock_http(monkeypatch, respond)
-    tool = WebSearchTool(api_key="test-key")
+    tool = WebSearchTool(api_key="test-key", provider=provider)
     with pytest.raises(IrisToolExecutionError) as raised:
         await tool.arun(
             tool.validate_input({"query": "x"}), ToolExecutionContext(workspace_root=".")
@@ -300,12 +300,13 @@ async def test_http_failures_preserve_service_reason_and_do_not_retry(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content", [b"not JSON", b'{"error":"failed"}', b'{"results":[{}]}'])
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 async def test_search_rejects_unparseable_responses(
-    monkeypatch: pytest.MonkeyPatch, content: bytes
+    monkeypatch: pytest.MonkeyPatch, content: bytes, provider: str
 ) -> None:
     """外部响应缺少消费字段时不能伪装成搜索无结果。"""
     _mock_http(monkeypatch, lambda request: httpx2.Response(200, content=content))
-    tool = WebSearchTool(api_key="test-key")
+    tool = WebSearchTool(api_key="test-key", provider=provider)
     with pytest.raises(IrisToolExecutionError, match="响应"):
         await tool.arun(
             tool.validate_input({"query": "x"}), ToolExecutionContext(workspace_root=".")
@@ -331,8 +332,9 @@ async def test_fetch_rejects_missing_raw_content(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 async def test_network_failure_is_distinct_from_response_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
     """网络超时转换为工具请求失败并关闭客户端。"""
 
@@ -340,7 +342,7 @@ async def test_network_failure_is_distinct_from_response_failure(
         raise httpx2.ReadTimeout("read timed out", request=request)
 
     clients = _mock_http(monkeypatch, timeout)
-    tool = WebSearchTool(api_key="test-key")
+    tool = WebSearchTool(api_key="test-key", provider=provider)
     with pytest.raises(IrisToolExecutionError, match="请求失败"):
         await tool.arun(
             tool.validate_input({"query": "x"}), ToolExecutionContext(workspace_root=".")
@@ -349,8 +351,9 @@ async def test_network_failure_is_distinct_from_response_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 async def test_cancellation_propagates_and_closes_http_client(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, provider: str
 ) -> None:
     """取消正在等待网络的工具时不吞掉取消信号。"""
     started = asyncio.Event()
@@ -361,10 +364,15 @@ async def test_cancellation_propagates_and_closes_http_client(
         raise AssertionError("请求应被取消")
 
     clients = _mock_http(monkeypatch, wait_for_cancellation)
-    tool = WebFetchTool(api_key="test-key")
+    tool = WebFetchTool(api_key="test-key", provider=provider)
+    arguments = (
+        {"urls": ["https://example.com/a"]}
+        if provider == "tavily"
+        else {"url": "https://example.com/a"}
+    )
     task = asyncio.create_task(
         tool.arun(
-            tool.validate_input({"urls": ["https://example.com/a"]}),
+            tool.validate_input(arguments),
             ToolExecutionContext(workspace_root="."),
         )
     )
@@ -373,3 +381,161 @@ async def test_cancellation_propagates_and_closes_http_client(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_results", [None, 50])
+async def test_deepseek_search_uses_native_query_and_model_summary(
+    monkeypatch: pytest.MonkeyPatch, max_results: int | None
+) -> None:
+    """DeepSeek 原样接收搜索语法，使用长摘要而非 UI 短摘要或空正文。"""
+    requests: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": title,
+                        "url": f"https://docs.python.org/{index}",
+                        "summary": f"模型摘要{index}",
+                        "snippet": "UI 短摘要",
+                        "content": "",
+                    }
+                    for index, title in enumerate(["TaskGroup", "ExceptionGroup"])
+                ]
+            },
+        )
+
+    clients = _mock_http(monkeypatch, respond)
+    tool = WebSearchTool(api_key="deepseek-key", provider="deepseek")
+    query = "TaskGroup site:docs.python.org -site:old.python.org after:2025"
+    arguments: dict[str, Any] = {"query": query}
+    if max_results is not None:
+        arguments["max_results"] = max_results
+    result = await tool.arun(
+        tool.validate_input(arguments),
+        ToolExecutionContext(workspace_root=".", call_id="search-call"),
+    )
+
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://api.deepseek.com/v1/tools/search"
+    assert requests[0].headers["authorization"] == "Bearer deepseek-key"
+    assert json.loads(requests[0].content) == {
+        "query": query,
+        "count": max_results or 10,
+        "need_content": False,
+    }
+    assert result.model_content == (
+        f"# Web Search\n\nQuery: {query}\nResults: 2\n\n"
+        "## 1. TaskGroup\nURL: https://docs.python.org/0\n\n模型摘要0\n\n"
+        "## 2. ExceptionGroup\nURL: https://docs.python.org/1\n\n模型摘要1"
+    )
+    assert result.tool_use_id == "search-call"
+    assert clients[0].is_closed
+    assert set(tool.input_schema["properties"]) == {"query", "max_results"}
+    assert tool.input_schema["properties"]["query"]["maxLength"] == 128
+
+
+@pytest.mark.asyncio
+async def test_deepseek_search_empty_results_are_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DeepSeek 的空列表表示正常无结果。"""
+    _mock_http(monkeypatch, lambda request: httpx2.Response(200, json={"results": []}))
+    tool = WebSearchTool(api_key="deepseek-key", provider="deepseek")
+    result = await tool.arun(
+        tool.validate_input({"query": "no results"}), ToolExecutionContext(workspace_root=".")
+    )
+    assert not result.is_error
+    assert "Results: 0" in result.model_content
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"query": " "},
+        {"query": "字" * 129},
+        {"query": "x", "max_results": 0},
+        {"query": "x", "max_results": 51},
+        {"query": "x", "include_domains": ["python.org"]},
+        {"query": "x", "time_range": "month"},
+    ],
+)
+def test_deepseek_search_validates_its_own_schema(arguments: dict[str, Any]) -> None:
+    """只公开 DeepSeek 可执行的参数，限制按 Unicode 字符数计算。"""
+    tool = WebSearchTool(api_key="deepseek-key", provider="deepseek")
+    with pytest.raises(IrisToolValidationError):
+        tool.validate_input(arguments)
+    assert tool.validate_input({"query": "字" * 128}).query == "字" * 128
+
+
+@pytest.mark.asyncio
+async def test_deepseek_fetch_preserves_title_url_and_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek Fetch 单次请求单个 URL，完整正文沿 executor 输出。"""
+    requests: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json={"title": "Python", "content": "# Python\n\n正文"})
+
+    clients = _mock_http(monkeypatch, respond)
+    tool = WebFetchTool(api_key="deepseek-key", provider="deepseek")
+    registry = ToolRegistry()
+    registry.register(tool)
+    result = await ToolExecutor(registry).execute_one(
+        ToolUseBlock(id="fetch", name="web_fetch", input={"url": "https://docs.python.org/3/"}),
+        ToolExecutionContext(workspace_root="."),
+    )
+    assert not result.is_error
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://api.deepseek.com/v1/tools/fetch"
+    assert requests[0].headers["authorization"] == "Bearer deepseek-key"
+    assert json.loads(requests[0].content) == {"url": "https://docs.python.org/3/"}
+    assert "URL: https://docs.python.org/3/" in result.model_content
+    assert "Title: Python" in result.model_content
+    assert "# Python\n\n正文" in result.model_content
+    assert clients[0].is_closed
+    assert set(tool.input_schema["properties"]) == {"url"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"url": "file:///tmp/page"},
+        {"url": "https://example.com/" + "x" * 8192},
+        {"url": "https://user:password@example.com/"},
+        {"url": "https://example.com/", "query": "摘录"},
+        {"urls": ["https://example.com/"]},
+    ],
+)
+def test_deepseek_fetch_validates_its_own_schema(arguments: dict[str, Any]) -> None:
+    """Fetch 仅接受符合上游请求格式的单个 HTTP(S) URL。"""
+    with pytest.raises(IrisToolValidationError):
+        WebFetchTool(api_key="deepseek-key", provider="deepseek").validate_input(arguments)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(404, json={"error": {"message": "page unavailable"}}),
+        httpx2.Response(200, json={"title": "缺少正文"}),
+    ],
+)
+async def test_deepseek_fetch_failure_becomes_tool_error(
+    monkeypatch: pytest.MonkeyPatch, response: httpx2.Response
+) -> None:
+    """网页不可用与缺失正文沿 executor 转为模型可见的工具错误。"""
+    _mock_http(monkeypatch, lambda request: response)
+    registry = ToolRegistry()
+    registry.register(WebFetchTool(api_key="deepseek-key", provider="deepseek"))
+    result = await ToolExecutor(registry).execute_one(
+        ToolUseBlock(id="fetch", name="web_fetch", input={"url": "https://example.com/"}),
+        ToolExecutionContext(workspace_root="."),
+    )
+    assert result.is_error
+    assert result.error is not None and result.error.code == "EXECUTION_ERROR"
+    assert "DeepSeek" in result.model_content

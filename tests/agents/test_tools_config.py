@@ -152,30 +152,50 @@ def test_subagent_path_is_parent_relative_and_ordinary_registry_ignores_it(tmp_p
 
 
 @pytest.mark.parametrize("names", [["web.search"], ["web.fetch"], ["web.search", "web.fetch"]])
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
 def test_web_builtins_use_configured_key_and_register_only_selected_tools(
-    monkeypatch: pytest.MonkeyPatch, names: list[str]
+    monkeypatch: pytest.MonkeyPatch, names: list[str], provider: str
 ) -> None:
     """Web 凭据沿用集中配置，启用名单不隐式增加其他工具。"""
     monkeypatch.setattr(iris_config, "_config", None)
-    monkeypatch.setenv("IRIS_PROVIDER_API_KEYS__TAVILY", "tvly-config-test")
+    monkeypatch.setenv(f"IRIS_PROVIDER_API_KEYS__{provider.upper()}", "web-config-test")
     iris_config.init_config()
 
-    registry = build_tool_registry(ToolsConfig(builtin=names))
+    registry = build_tool_registry(ToolsConfig(builtin=names, web_provider=provider))
 
     assert {tool.name for tool in registry.view().active_tools} == {
         name.replace(".", "_") for name in names
     }
+    for tool in registry.view().active_tools:
+        assert tool.provider == provider
+        assert tool._api_key == "web-config-test"
 
 
 @pytest.mark.parametrize("name", ["web.search", "web.fetch"])
-def test_web_builtins_require_their_own_key(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    """没有 Tavily 凭据时，不得使用聊天模型通用 key 代替。"""
+@pytest.mark.parametrize("provider", ["tavily", "deepseek"])
+def test_web_builtins_require_their_own_key(
+    monkeypatch: pytest.MonkeyPatch, name: str, provider: str
+) -> None:
+    """没有所选服务凭据时，不得使用通用 key 或另一服务的 key 代替。"""
     monkeypatch.setattr(iris_config, "_config", None)
-    monkeypatch.delenv("IRIS_PROVIDER_API_KEYS__TAVILY", raising=False)
-    iris_config.init_config(api_key="llm-only", provider_api_keys={})
+    monkeypatch.delenv(f"IRIS_PROVIDER_API_KEYS__{provider.upper()}", raising=False)
+    other_provider = "deepseek" if provider == "tavily" else "tavily"
+    iris_config.init_config(api_key="llm-only", provider_api_keys={other_provider: "other-key"})
 
-    with pytest.raises(IrisConfigError, match="IRIS_PROVIDER_API_KEYS__TAVILY"):
-        build_tool_registry(ToolsConfig(builtin=[name]))
+    with pytest.raises(IrisConfigError, match=f"IRIS_PROVIDER_API_KEYS__{provider.upper()}"):
+        build_tool_registry(ToolsConfig(builtin=[name], web_provider=provider))
+
+
+def test_web_provider_is_loaded_and_validated_at_yaml_boundary(tmp_path: Path) -> None:
+    """YAML 选择服务，省略时保留 Tavily，拼错的服务名在配置边界失败。"""
+    assert ToolsConfig().web_provider == "tavily"
+    path = tmp_path / "agent.yaml"
+    source = "name: web\nmodel: deepseek/test\nsystem: web assistant\ntools:\n  web_provider: {}\n"
+    path.write_text(source.format("deepseek"), encoding="utf-8")
+    assert load_agent_config(path).tools.web_provider == "deepseek"
+    path.write_text(source.format("unknown"), encoding="utf-8")
+    with pytest.raises(IrisConfigError, match="web_provider"):
+        load_agent_config(path)
 
 
 def test_file_builtin_does_not_require_initialized_global_config(

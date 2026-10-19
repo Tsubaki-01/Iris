@@ -29,7 +29,7 @@ from ...tools.builtin.file import (
     WriteFileTool,
 )
 from ...tools.builtin.python import RunPythonTool
-from ...tools.builtin.web import WebFetchTool, WebSearchTool
+from ...tools.builtin.web import WebFetchTool, WebProvider, WebSearchTool
 from ._imports import import_ref
 from .base import ToolsConfig
 
@@ -89,6 +89,7 @@ def build_tool_registry(
     _register_builtin_tools(
         registry,
         list(config.builtin),
+        web_provider=config.web_provider,
         memory_service=memory_service,
         memory_config=memory_config or MemoryConfig(),
         memory_decision_client=memory_decision_client,
@@ -113,6 +114,7 @@ def _register_builtin_tools(
     registry: ToolRegistry,
     names: list[str],
     *,
+    web_provider: WebProvider,
     memory_service: MemoryService | None,
     memory_config: MemoryConfig,
     memory_decision_client: DecisionEvaluator | None,
@@ -155,10 +157,14 @@ def _register_builtin_tools(
                 raise IrisConfigError("未知内置工具", tool=name)
             registry.register(factory(file_service))
         elif name in _BUILTIN_WEB_TOOL_CLASSES:
-            api_key = get_config().provider_api_keys.get("tavily")
+            api_key = get_config().provider_api_keys.get(web_provider)
             if api_key is None:
-                raise IrisConfigError("Web 工具需要配置 IRIS_PROVIDER_API_KEYS__TAVILY", tool=name)
-            registry.register(_BUILTIN_WEB_TOOL_CLASSES[name](api_key=api_key))
+                raise IrisConfigError(
+                    f"Web 工具需要配置 IRIS_PROVIDER_API_KEYS__{web_provider.upper()}", tool=name
+                )
+            registry.register(
+                _BUILTIN_WEB_TOOL_CLASSES[name](api_key=api_key, provider=web_provider)
+            )
         elif name in MEMORY_TOOL_CLASSES:
             if memory_service is None:
                 raise IrisConfigError("memory 写工具需要开启 memory.enabled", tool=name)

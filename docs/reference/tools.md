@@ -124,12 +124,24 @@ executor.prepare_many(tool_uses, context)
 | `exec.command` | `exec_command` | 非空 `command`、`cwd="."`、`timeout_seconds=None` |
 | `exec.python` | `run_python` | 非空完整 `code`、`cwd="."`、`timeout_seconds=None` |
 | `human.ask` | `ask_question` | 非空 `question`、`options=[]`；选项不可为空或重复，通过 HITL 返回回答 |
-| `web.search` | `web_search` | 见下表，需要 Tavily 凭据 |
-| `web.fetch` | `web_fetch` | 见下表，需要 Tavily 凭据 |
+| `web.search` | `web_search` | 见下表，需要所选 Web provider 的凭据 |
+| `web.fetch` | `web_fetch` | 见下表，需要所选 Web provider 的凭据 |
 
 文本 `offset` 和 `column` 从 0 开始；`limit` 0–1000，省略使用 1000。正文受单次字符预算限制，按结果 `next_offset` 与 `next_column` 继续，避免超长单行无法读完。PNG/JPEG/WebP 内容走图片导入，忽略分页与行号参数。读取更新文件观测；编辑或覆盖已有文件需要满足读后未变化的约束。`file.publish` 不更新编辑前读取状态。
 
-Web 参数：
+`tools.web_provider` 选择这两个工具的服务，取值为 `tavily`（默认）或 `deepseek`，在构造时固定。`tools.builtin` 仍控制各工具是否启用；选择 provider 本身不会增加工具。
+
+```yaml
+tools:
+  web_provider: deepseek
+  builtin: [web.search, web.fetch]
+```
+
+凭据来自 `Config.provider_api_keys`：Tavily 使用 `IRIS_PROVIDER_API_KEYS__TAVILY`，DeepSeek 使用 `IRIS_PROVIDER_API_KEYS__DEEPSEEK`。后者可以与 DeepSeek 聊天模型共用 key，Web 服务选择独立于 `model.provider`。缺少所选服务的 key 时，注册工具抛出 `IrisConfigError`。Web 请求使用服务商官方地址，不采用聊天模型的 `base_url`。
+
+Python SDK 的 `WebSearchTool(*, api_key, provider="tavily")` 和 `WebFetchTool(*, api_key, provider="tavily")` 从 `iris.tools` 导入。每个工具的 `input_model` 和 `input_schema` 对应所选服务；`WebSearchInput` / `WebFetchInput` 是 Tavily 参数，`DeepSeekWebSearchInput` / `DeepSeekWebFetchInput` 是 DeepSeek 参数。
+
+Tavily 参数：
 
 | 工具 | 字段 | 默认与约束 |
 | --- | --- | --- |
@@ -141,7 +153,21 @@ Web 参数：
 | `web_fetch` | `urls` | 必填，1–20 个 HTTP(S) URL |
 | | `query` | None 表示完整提取正文，非空字符串表示相关摘录 |
 
-两个 Web 工具都固定使用 Tavily basic；搜索不让服务端生成最终答案。`web_fetch` 部分失败时保留成功与失败信息，全失败返回工具错误。凭据由 `IRIS_PROVIDER_API_KEYS__TAVILY` 提供，操作例子见[外部检索指南](../cookbook/mcp.md)。
+Tavily 的搜索与提取固定使用 basic，搜索不请求生成答案或整页正文。`web_fetch` 部分失败时保留成功与失败信息，全失败返回工具错误。
+
+DeepSeek 参数：
+
+| 工具 | 字段 | 默认与约束 |
+| --- | --- | --- |
+| `web_search` | `query` | 必填，去掉首尾空白后为 1–128 个 Unicode 字符，含搜索操作符 |
+| | `max_results` | 10，严格整数 1–50，映射到 API 的 `count` |
+| `web_fetch` | `url` | 必填，单个 HTTP(S) URL，最多 8192 字符，不能包含用户名或密码 |
+
+DeepSeek Search 调用 `POST https://api.deepseek.com/v1/tools/search`，固定 `need_content=false`，按服务顺序返回标题、URL 和供模型阅读的 `summary`。空结果仍是成功。站点与日期条件写入 `query`，例如 `TaskGroup site:docs.python.org after:2025`；多个包含站点使用 `site:python.org OR site:peps.python.org`。Iris 原样传递查询，不添加或截断操作符。支持语法见 [DeepSeek 官方指南](https://api-docs.deepseek.com/zh-cn/guides/search/)。
+
+DeepSeek Fetch 调用 `POST https://api.deepseek.com/v1/tools/fetch`，返回来源 URL、标题与完整 Markdown 正文。它仅接收单个 `url`，不提供 Tavily 的 `urls` 或 `query` 摘录参数。两种服务的工具 schema 分别公开对应参数，传入不支持的字段会产生参数错误。
+
+HTTP 错误、网络超时和响应解析失败沿现有 `EXECUTION_ERROR` 返回。客户端使用 30 秒阶段超时，每次调用结束后关闭连接；不自动重试或切换 provider。长结果沿用 executor 的 artifact 与上下文回读。操作例子见[外部检索指南](../cookbook/mcp.md)。
 
 以下工具由能力配置自动装配，不是手写 builtin 键：`load_skill`、`subagent`、`tool_search`、`context_read`、`context_search`、`get_goal`、`report_goal`、`memory_search`、`memory_fetch`。Memory 写工具按其[状态与长期能力参考](memory-goals.md)显式配置。Todo 由普通文件工具维护，没有专用写 Todo 工具。Evolution 的经验与修订入口见[Evolution 指南](../cookbook/evolution.md)。
 

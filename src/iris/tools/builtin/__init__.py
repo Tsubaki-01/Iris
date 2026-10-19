@@ -15,11 +15,21 @@ from .file import (
 )
 from .human import AskQuestionInput, AskQuestionTool
 from .python import RunPythonInput, RunPythonTool
-from .web import WebFetchInput, WebFetchTool, WebSearchInput, WebSearchTool
+from .web import (
+    DeepSeekWebFetchInput,
+    DeepSeekWebSearchInput,
+    WebFetchInput,
+    WebFetchTool,
+    WebProvider,
+    WebSearchInput,
+    WebSearchTool,
+)
 
 __all__ = [
     "AskQuestionInput",
     "AskQuestionTool",
+    "DeepSeekWebFetchInput",
+    "DeepSeekWebSearchInput",
     "EditFileInput",
     "ExecCommandInput",
     "ExecCommandTool",
@@ -34,6 +44,7 @@ __all__ = [
     "RunPythonTool",
     "WebFetchInput",
     "WebFetchTool",
+    "WebProvider",
     "WebSearchInput",
     "WebSearchTool",
     "WorkspaceFileService",

@@ -57,7 +57,7 @@ Iris 有两层配置：进程配置提供服务凭据、provider 注册和统一
 | `model` | 必填 | `provider/model` 字符串或下节的模型对象 |
 | `system` | `null` | 简单系统要求，与 `context` 互斥 |
 | `context` | `null` | `{path: context.yaml}`；[Context 格式](context.md) |
-| `tools` | 内置列表和 Python 引用为空，subagent 为 `null` | [工具参考](tools.md) |
+| `tools` | 内置列表和 Python 引用为空，subagent 为 `null`，web_provider 为 `tavily` | [工具参考](tools.md)；Web 服务可选 `deepseek` |
 | `permissions` | workspace `.`，writes/execute 均 `confirm` | 本页下节 |
 | `session` | backend `none`，path `null` | 本页下节 |
 | `compaction` | 自动上下文压缩的默认预算 | [Context 参考](context.md#压缩预算) |
@@ -126,7 +126,7 @@ reset() -> None
 | 字段 | 默认 | 常见环境变量 |
 | --- | --- | --- |
 | `api_key` | `null` | `IRIS_API_KEY`，全局兜底凭据 |
-| `provider_api_keys` | `{}` | `IRIS_PROVIDER_API_KEYS__DEEPSEEK` 等，按逻辑 provider 查找；Tavily 也使用此字典 |
+| `provider_api_keys` | `{}` | `IRIS_PROVIDER_API_KEYS__DEEPSEEK` 等，按逻辑 provider 查找；Web 工具按 `tools.web_provider` 读取 `tavily` 或 `deepseek` 凭据 |
 | `providers` | `{}` | `IRIS_PROVIDERS__名称__BASE_URL` 等，自定义非 secret 配置 |
 | `observability` | 默认导出配置 | `IRIS_OBSERVABILITY__TRACES_ENDPOINT` 等；[详细字段](streaming-observability.md) |
 

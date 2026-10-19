@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -13,7 +14,6 @@ import pytest
 
 from examples.web import tools as web_example
 from iris.config import init_config, reset
-from iris.tools.builtin import _tavily
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -44,7 +44,7 @@ def test_fetch_command_reports_partial_and_total_failure(
     def client(**kwargs: Any) -> httpx2.AsyncClient:
         return original_client(transport=httpx2.MockTransport(respond), **kwargs)
 
-    monkeypatch.setattr(_tavily.httpx2, "AsyncClient", client)
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
     reset()
     init_config(provider_api_keys={"tavily": "test-key"})
     try:
@@ -113,3 +113,51 @@ def test_module_command_prints_unicode_when_pipe_defaults_to_gbk(tmp_path: Path)
     )
     assert completed.returncode == 0, completed.stderr
     assert "Python 文档 ¶ 😀" in completed.stdout
+
+
+@pytest.mark.parametrize("command", ["search", "fetch"])
+def test_deepseek_command_uses_selected_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    command: str,
+) -> None:
+    """示例 CLI 透传 DeepSeek 的查询或单页 URL，不夹带 Tavily 参数。"""
+    requests: list[httpx2.Request] = []
+    original_client = httpx2.AsyncClient
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            200,
+            json={"results": []} if command == "search" else {"title": "Python", "content": "正文"},
+        )
+
+    def client(**kwargs: Any) -> httpx2.AsyncClient:
+        return original_client(transport=httpx2.MockTransport(respond), **kwargs)
+
+    monkeypatch.setattr(httpx2, "AsyncClient", client)
+    reset()
+    init_config(provider_api_keys={"deepseek": "test-key"})
+    try:
+        code = web_example.main(
+            [
+                "--provider",
+                "deepseek",
+                "--workspace",
+                str(tmp_path),
+                command,
+                "Python site:python.org" if command == "search" else "https://www.python.org/",
+            ]
+        )
+    finally:
+        reset()
+    assert code == 0
+    assert len(requests) == 1
+    assert str(requests[0].url) == f"https://api.deepseek.com/v1/tools/{command}"
+    assert json.loads(requests[0].content) == (
+        {"query": "Python site:python.org", "count": 10, "need_content": False}
+        if command == "search"
+        else {"url": "https://www.python.org/"}
+    )
+    assert ("Results: 0" if command == "search" else "正文") in capsys.readouterr().out
