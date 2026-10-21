@@ -1,0 +1,26 @@
+name: iris-terminal
+model:
+  provider: openai
+  name: configured-by-harbor
+  api_style: chat_completions
+  temperature: 0
+system: >-
+  完成用户给出的终端任务。先检查当前文件和运行环境，通过文件工具与 shell
+  实际执行任务，并根据命令结果修正。使用 exec_command 调用任务环境的 Python
+  和测试程序。完成后简洁说明结果。
+tools:
+  builtin: [file.read, file.list, file.write, file.edit, exec.command]
+permissions:
+  workspace: .
+  writes: allow
+  execute: allow
+command:
+  mode: native
+memory:
+  enabled: false
+evolution:
+  enabled: false
+goal:
+  enabled: false
+todo:
+  enabled: false
