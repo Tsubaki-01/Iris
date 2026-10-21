@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,14 @@ async def no_generate(state: TaskState, **kwargs: Any) -> TaskState:
     pytest.fail("接入层不能调用 Inspect generate")
 
 
+def saved_traces(config_path: Path) -> list[dict[str, Any]]:
+    """读取本测试实际写出的独立归档。"""
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (config_path.parent / "traces").glob("*/trace.json")
+    ]
+
+
 @pytest.mark.asyncio
 async def test_text_input_result_and_usage(
     config_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -154,7 +163,9 @@ async def test_text_input_result_and_usage(
     state = task_state()
     state.messages[0].content = "前置 solver 修改后的输入"
 
-    result = await iris_solver(str(config_path))(state, no_generate)
+    result = await iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")(
+        state, no_generate
+    )
 
     assert result is state
     assert state.output.completion == "完成"
@@ -168,6 +179,10 @@ async def test_text_input_result_and_usage(
     assert record["runs"][0]["usage"]["compaction"]["total_tokens"] == 0
     assert "success" not in record
     assert state.output.usage is None
+    trace = state.store.get("iris_trace")
+    assert trace["archive_id"] == state.uuid
+    assert trace["export"]["status"] == "complete"
+    assert (config_path.parent / "traces" / state.uuid / "trace.json").is_file()
     assert not provider.requests[0].stream
     assert provider.requests[0].messages[-1].text == "前置 solver 修改后的输入"
     with pytest.raises(IrisRunStateError, match="关闭"):
@@ -181,7 +196,7 @@ async def test_concurrent_samples_have_distinct_sessions(
     runners = install_providers(
         monkeypatch, FakeProvider(response("一")), FakeProvider(response("二"))
     )
-    solve = iris_solver(str(config_path))
+    solve = iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")
     states = await asyncio.gather(
         solve(task_state("甲"), no_generate), solve(task_state("乙"), no_generate)
     )
@@ -201,12 +216,17 @@ async def test_waiting_is_recorded_then_cancelled_without_answer(
     provider = FakeProvider(question_response())
     runners = install_providers(monkeypatch, provider)
 
-    state = await iris_solver(str(config_path))(task_state(), no_generate)
+    state = await iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")(
+        task_state(), no_generate
+    )
 
     record = state.store.get("iris")["runs"][0]
     assert record["phase"] == "waiting"
     assert record["pending_interaction"] is not None
     assert record["stop_reason"] is None
+    assert (
+        state.store.get("iris_trace")["runs"][record["run_id"]]["run"]["stop_reason"] == "cancelled"
+    )
     assert len(provider.requests) == 1
     assert runners[0].get_result(record["run_id"]).run.stop_reason is RunStopReason.CANCELLED
 
@@ -224,7 +244,9 @@ async def test_callback_can_resume_and_start_another_turn(
         assert resumed.assistant_message.text == "第一轮"
         return await sample.start("继续")
 
-    state = await iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+    state = await iris_solver(
+        str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+    )(task_state(), no_generate)
 
     records = state.store.get("iris")["runs"]
     assert state.output.completion == "第二轮"
@@ -240,7 +262,9 @@ async def test_provider_failure_preserves_run_error(
     config_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install_providers(monkeypatch, FakeProvider(IrisProviderError("受控 provider 失败")))
-    state = await iris_solver(str(config_path))(task_state(), no_generate)
+    state = await iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")(
+        task_state(), no_generate
+    )
 
     record = state.store.get("iris")["runs"][0]
     assert record["stop_reason"] == "failed"
@@ -261,7 +285,9 @@ async def test_callback_exception_cleans_waiting_run(
         raise LookupError("受控任务回调异常")
 
     with pytest.raises(LookupError, match="任务回调"):
-        await iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+        await iris_solver(
+            str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+        )(task_state(), no_generate)
 
     assert runners[0].get_result(run_ids[0]).run.stop_reason is RunStopReason.CANCELLED
     with pytest.raises(IrisRunStateError, match="关闭"):
@@ -281,7 +307,9 @@ async def test_external_cancellation_settles_before_close(
         return await sample.start("等待取消")
 
     running = asyncio.create_task(
-        iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+        iris_solver(
+            str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+        )(task_state(), no_generate)
     )
     await asyncio.wait_for(provider.started.wait(), timeout=3)
     running.cancel()
@@ -315,7 +343,9 @@ async def test_run_options_are_forwarded(
         assert result.run.limits.max_model_steps == 1
         return result
 
-    state = await iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+    state = await iris_solver(
+        str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+    )(task_state(), no_generate)
     assert state.store.get("iris")["runs"][0]["stop_reason"] == "budget_exhausted"
 
 
@@ -333,12 +363,17 @@ async def test_cancel_before_run_admission(
         await asyncio.Event().wait()
 
     monkeypatch.setattr(AgentRunner, "aprepare", blocked_prepare)
-    running = asyncio.create_task(iris_solver(str(config_path))(task_state(), no_generate))
+    running = asyncio.create_task(
+        iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")(
+            task_state(), no_generate
+        )
+    )
     await asyncio.wait_for(preparing.wait(), timeout=3)
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
     assert provider.requests == []
+    assert saved_traces(config_path)[0]["root_run_ids"] == []
     with pytest.raises(IrisRunStateError, match="关闭"):
         await prepare(runners[0])
 
@@ -365,7 +400,9 @@ async def test_anyio_scope_cancellation_drains_sdk(
         return await sample.start("等待取消")
 
     async def run() -> None:
-        await iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+        await iris_solver(
+            str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+        )(task_state(), no_generate)
 
     with anyio.fail_after(3):
         async with anyio.create_task_group() as group:
@@ -415,7 +452,9 @@ async def test_cancel_while_resuming_child_proxy(
         return await sample.resume(waiting, QuestionInteractionResponse(answer="继续"))
 
     running = asyncio.create_task(
-        iris_solver(str(config_path), execute=execute)(task_state(), no_generate)
+        iris_solver(
+            str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+        )(task_state(), no_generate)
     )
     await asyncio.wait_for(child.started.wait(), timeout=3)
     running.cancel()
@@ -426,6 +465,11 @@ async def test_cancel_while_resuming_child_proxy(
         await running
     assert done, "取消不应等待 child provider 自行完成"
     assert runners[0].get_result(run_ids[0]).run.stop_reason is RunStopReason.CANCELLED
+    trace = saved_traces(config_path)[0]
+    assert len(trace["runs"]) == 2
+    assert len(trace["sessions"]) == 2
+    assert any(record["parent"] is not None for record in trace["runs"].values())
+    assert trace["export"]["status"] == "complete"
 
 
 @pytest.mark.asyncio
@@ -437,7 +481,9 @@ async def test_default_rejects_conversation_instead_of_dropping_messages(
     state.messages.append(ChatMessageUser(content="第二条输入"))
 
     with pytest.raises(IrisConfigError, match="execute"):
-        await iris_solver(str(config_path))(state, no_generate)
+        await iris_solver(str(config_path), trajectory_dir=config_path.parent / "traces")(
+            state, no_generate
+        )
 
 
 @pytest.mark.asyncio
@@ -453,7 +499,11 @@ async def test_inspect_dispatch_and_log_with_fake_provider(
     logs = await eval_async(
         Task(
             dataset=[Sample(input="接口测试 fixture", id="fixture")],
-            solver=iris_solver(str(config_path), execute=execute if custom else None),
+            solver=iris_solver(
+                str(config_path),
+                trajectory_dir=config_path.parent / "traces",
+                execute=execute if custom else None,
+            ),
         ),
         model="mockllm/model",
         score=False,
@@ -463,3 +513,89 @@ async def test_inspect_dispatch_and_log_with_fake_provider(
     assert logs[0].status == "success"
     assert logs[0].samples[0].output.completion == "接口结果"
     assert logs[0].samples[0].store["iris"]["runs"][0]["usage"]["total_tokens"] == 5
+    trace = logs[0].samples[0].store["iris_trace"]
+    assert trace["export"]["status"] == "complete"
+    assert len(trace["runs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_export_failure_preserves_output(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_providers(monkeypatch, FakeProvider(response("完成")))
+    blocked = config_path.parent / "blocked"
+    blocked.write_text("不是目录", encoding="utf-8")
+    state = await iris_solver(str(config_path), trajectory_dir=blocked)(task_state(), no_generate)
+    assert state.output.completion == "完成"
+    assert state.completed
+    assert state.store.get("iris_trace")["export"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_callback_error_survives_cleanup_failure(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install_providers(monkeypatch, FakeProvider(response("完成")))
+    close = AgentRunner.aclose
+
+    async def broken_close(self: AgentRunner) -> None:
+        await close(self)
+        raise IrisRunStateError("受控收尾失败")
+
+    async def execute(sample: IrisSample, state: TaskState) -> RunResult:
+        await sample.start("运行")
+        raise LookupError("原回调错误")
+
+    monkeypatch.setattr(AgentRunner, "aclose", broken_close)
+    state = task_state()
+    with pytest.raises(LookupError, match="原回调错误"):
+        await iris_solver(
+            str(config_path), trajectory_dir=config_path.parent / "traces", execute=execute
+        )(state, no_generate)
+    trace = state.store.get("iris_trace")
+    assert trace["export"]["status"] == "partial"
+    assert any(error["stage"] == "cleanup" for error in trace["export"]["errors"])
+
+
+@pytest.mark.asyncio
+async def test_inspect_archive_keeps_image_after_workspace_removed(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from PIL import Image
+
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("[human.ask]", "[file.read]"),
+        encoding="utf-8",
+    )
+    Image.new("RGB", (2, 2), "blue").save(config_path.parent / "pixel.png")
+    install_providers(
+        monkeypatch,
+        FakeProvider(
+            LLMResponse(
+                provider="fake",
+                content=[
+                    ToolUseBlock(id="read", name="read_file", input={"file_path": "pixel.png"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            response("看到图片"),
+        ),
+    )
+    logs = await eval_async(
+        Task(
+            dataset=[Sample(input="读图片", id="image")],
+            solver=iris_solver(str(config_path), trajectory_dir=tmp_path / "archives"),
+        ),
+        model="mockllm/model",
+        score=False,
+        log_dir=str(tmp_path / "logs"),
+    )
+    trace = logs[0].samples[0].store["iris_trace"]
+    bundle = tmp_path / "archives" / trace["archive_id"]
+    assert trace["export"]["status"] == "complete"
+    assert trace["assets"]
+    disk = json.loads((bundle / "trace.json").read_text(encoding="utf-8"))
+    for asset in disk["assets"]:
+        Path(asset["source_path"]).unlink(missing_ok=True)
+        with Image.open(bundle / asset["path"]) as picture:
+            assert picture.size == (2, 2)

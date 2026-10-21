@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from pathlib import Path
@@ -14,10 +16,12 @@ from inspect_ai.model import ChatMessageUser, ModelOutput
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from iris.exceptions import IrisConfigError
-from iris.harness import AgentRunner
+from iris.harness import AgentRunner, collect_trajectory, write_trajectory
 from iris.hitl import HumanInteractionResponse
 from iris.lifecycle import AgentRunOptions, AgentRunRequest, RunPhase, RunResult
 from iris.store import InMemoryLifecycleStore
+
+logger = logging.getLogger(__name__)
 
 
 class IrisSample:
@@ -136,12 +140,52 @@ def _run_record(result: RunResult) -> dict[str, Any]:
     }
 
 
+def _export_sample(
+    sample: IrisSample,
+    state: TaskState,
+    directory: Path,
+    cleanup_error: BaseException | None,
+) -> None:
+    """记录已收尾或部分可读的轨迹，导出错误不改变业务执行结果。"""
+    try:
+        document = collect_trajectory(sample.runner, sample.session_id)
+        document.update(
+            {
+                "archive_id": state.uuid,
+                "archive_root": str(directory),
+                "sample_id": state.sample_id,
+                "epoch": state.epoch,
+            }
+        )
+        if cleanup_error is not None:
+            document["export"]["status"] = "partial"
+            document["export"]["errors"].append(
+                {
+                    "stage": "cleanup",
+                    "message": str(cleanup_error),
+                }
+            )
+        exported = write_trajectory(document, directory / state.uuid)
+    except Exception as error:
+        # 归档是宿主观察出口；不能用其异常替换原运行或清理异常。
+        logger.exception("Inspect 轨迹导出失败")
+        exported = {
+            "root_session_id": sample.session_id,
+            "archive_id": state.uuid,
+            "export": {"status": "failed", "errors": [{"stage": "collect", "message": str(error)}]},
+        }
+    state.store.set("iris_trace", exported)
+
+
 @solver(name="iris")
-def iris_solver(config_path: str, *, execute: SampleExecutor | None = None) -> Solver:
+def iris_solver(
+    config_path: str, *, trajectory_dir: str | Path, execute: SampleExecutor | None = None
+) -> Solver:
     """创建使用 Iris 自身 provider 的 Inspect Solver。
 
     Args:
         config_path: Agent YAML 路径，相对路径在创建 solver 时解析。
+        trajectory_dir: 本次评测的归档根目录，每个 sample 按 state.uuid 独立保存。
         execute: 可选任务回调，用 IrisSample.start/resume 驱动多轮和 WAITING，
             返回作为最终输出的 RunResult。默认执行当前单条用户文本。
 
@@ -153,6 +197,7 @@ def iris_solver(config_path: str, *, execute: SampleExecutor | None = None) -> S
         模型配置及 token/cost 限额不接管 Iris；运行限额通过 AgentRunOptions 传递。
     """
     path = Path(config_path).resolve()
+    directory = Path(trajectory_dir).resolve()
     execute_sample = execute if execute is not None else _execute_text
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
@@ -177,8 +222,18 @@ def iris_solver(config_path: str, *, execute: SampleExecutor | None = None) -> S
             state.completed = True
             return state
         finally:
+            operation_error = sys.exception()
+            cleanup_error: BaseException | None = None
             with CancelScope(shield=True):
-                await sample._close()
+                try:
+                    await sample._close()
+                except BaseException as error:
+                    cleanup_error = error
+                    if operation_error is None:
+                        raise
+                    logger.exception("Inspect 资源收尾失败，保留原调用异常")
+                finally:
+                    _export_sample(sample, state, directory, cleanup_error)
 
     return solve
 
