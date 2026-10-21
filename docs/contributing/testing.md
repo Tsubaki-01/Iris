@@ -64,4 +64,12 @@ uv run --group eval pytest tests/evals/test_iris_solver.py
 
 SDK 入口测试使用仓库环境，adapter 契约测试使用 `experiments/agentic_rl` 环境。它们分别验证文件/命令执行与取消收尾、Harbor 安装参数与退出协议。测试专用 verifier 用于验证接线，正式题集和评分器另行选择。
 
+真实容器验收需要 Linux Docker 引擎及镜像/依赖下载网络，并显式指定开关：
+
+```shell
+uv run --project experiments/agentic_rl python -m pytest tests/experiments/harbor/test_integration.py --run-harbor-docker
+```
+
+它使用容器内确定性模型服务，经过真实 Harbor → Iris → 文件/命令 → verifier 链路，并在容器销毁后检查归档。默认运行测试时，这组容器场景跳过。
+
 下一步：[贡献流程](index.md) · [文档维护](docs.md)。

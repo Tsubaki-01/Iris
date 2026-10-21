@@ -18,14 +18,19 @@ if TYPE_CHECKING:
     from .runner import AgentRunner
 
 
-def _image_paths(blocks: Iterable[ContentBlock]) -> Iterator[Path]:
-    """只遍历 typed 内容中的图片引用，不扫描正文路径。"""
+def _referenced_paths(blocks: Iterable[ContentBlock]) -> Iterator[Path]:
+    """读取内容块中的图片和标准 artifact 引用，不扫描正文路径。"""
     for block in blocks:
         if isinstance(block, ImageBlock):
             yield block.original.path
             yield block.model.path
         elif isinstance(block, ToolResultBlock):
-            yield from _image_paths(block.content)
+            yield from _referenced_paths(block.content)
+            artifact = block.metadata.get("artifact")
+            if artifact is not None:
+                yield Path(artifact["path"])
+                if artifact.get("text_path") is not None:
+                    yield Path(artifact["text_path"])
 
 
 def collect_trajectory(runner: AgentRunner, session_id: str) -> dict[str, Any]:
@@ -63,7 +68,7 @@ def collect_trajectory(runner: AgentRunner, session_id: str) -> dict[str, Any]:
         snapshot = runner.get_session(identifier)
         sessions[identifier] = snapshot.model_dump(mode="json")
         for message in snapshot.messages:
-            for path in _image_paths(message.content):
+            for path in _referenced_paths(message.content):
                 add_asset(path)
 
     add_session(session_id)
@@ -85,7 +90,7 @@ def collect_trajectory(runner: AgentRunner, session_id: str) -> dict[str, Any]:
         for call in tool_calls:
             if call.result is None:
                 continue
-            for path in _image_paths(call.result.content):
+            for path in _referenced_paths(call.result.content):
                 add_asset(path)
             artifact = call.result.artifact
             if artifact is not None:
