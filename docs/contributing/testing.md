@@ -58,4 +58,10 @@ uv run --group eval pytest tests/evals/test_iris_solver.py
 
 增加评测时先明确想测的行为、固定输入与预算、结果记录和评分方式。报告实际运行条件，区分检索选对工具、工具执行正确与最终任务完成。
 
+## Harbor 终端评测接入
+
+[Harbor 接入说明](../../experiments/agentic_rl/evaluation/harbor/README.md)提供独立宿主环境、Iris wheel 安装和容器 SDK 入口。宿主固定 Harbor 0.24.0，容器仅安装 Iris；两套依赖不混装。
+
+SDK 入口测试使用仓库环境，adapter 契约测试使用 `experiments/agentic_rl` 环境。它们分别验证文件/命令执行与取消收尾、Harbor 安装参数与退出协议。测试专用 verifier 用于验证接线，正式题集和评分器另行选择。
+
 下一步：[贡献流程](index.md) · [文档维护](docs.md)。
