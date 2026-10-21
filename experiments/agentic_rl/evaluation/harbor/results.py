@@ -72,7 +72,11 @@ def save_results(
             record["trace_errors"] = [{"stage": "collect", "message": str(error)}]
     else:
         record["trace_errors"] = [{"stage": "setup", "message": "Runner 尚未创建"}]
-    write_json(logs_dir / "result.json", record)
+    try:
+        write_json(logs_dir / "result.json", record)
+    except OSError:
+        # 第一份原子回执已经保存运行与清理事实，归档回写失败只影响观测。
+        logger.exception("轨迹状态回写失败，保留已发布的运行与清理回执")
     return record
 
 

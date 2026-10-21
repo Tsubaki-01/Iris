@@ -31,6 +31,25 @@ from .fakes import (
 
 
 @pytest.mark.asyncio
+async def test_archive_keeps_effective_context_settings(tmp_path: Path) -> None:
+    """保存本次采用的上下文策略与压缩预算，离线比较无需回读 profile。"""
+    path = tmp_path / "agent.yaml"
+    path.write_text(
+        "name: context-test\nmodel: openai/fake\nsystem: 执行任务。\n"
+        "context_policy:\n  old_result_preview_chars: 128\n"
+        "compaction:\n  input_budget_tokens: 4096\n",
+        encoding="utf-8",
+    )
+    runner = AgentRunner.from_config_path(path, provider=StaticProvider(text_response()))
+    await runner.start(AgentRunRequest(input="执行", session_id="sample"))
+    await runner.aclose()
+    path.unlink()
+    trace = write_trajectory(collect_trajectory(runner, "sample"), tmp_path / "archive")
+    assert trace["configuration"]["context_policy"]["old_result_preview_chars"] == 128
+    assert trace["configuration"]["compaction"]["input_budget_tokens"] == 4096
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sqlite", [False, True])
 async def test_empty_and_paginated_multiturn_after_close(tmp_path: Path, sqlite: bool) -> None:
     store = SQLiteStore(tmp_path / "lifecycle.db") if sqlite else InMemoryLifecycleStore()

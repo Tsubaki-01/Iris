@@ -382,6 +382,8 @@ print(exported["export"]["status"])
 
 当前格式的 `schema_version` 为 1，结构包含 `root_session_id`、`root_run_ids`、按 ID 索引的 `sessions/runs`、`configuration`、`assets` 与 `export`。`runs` 中的 `parent` 保留 `parent_run_id/parent_tool_call_id/agent_selector`；`result` 在运行尚无结果时为 `None`。历史分支复制的消息中，标准 artifact 元数据引用也会被收集，即使分支还没有新 Run。事件 sequence 只在所属 Run 内有序，多次查询不构成全局原子快照。
 
+`configuration` 保存已采用的 snapshot ID、Agent 名称、主模型配置、workspace，以及 `context_policy` 和 `compaction` 的实际参数。导出时直接读取 Runner 的配置快照，不回读可能已修改或移除的 YAML。
+
 | 导出状态 | 含义 |
 | --- | --- |
 | `complete` | 已读取稳定运行记录，写出时全部引用文件复制成功 |

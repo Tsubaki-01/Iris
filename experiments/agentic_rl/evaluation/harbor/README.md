@@ -68,6 +68,8 @@ Linux 环境先安装本仓库构建的 Iris wheel，并将 `evaluation/` 放入
 profile 在容器内加载，workspace 使用任务实际目录；命名模板写到 profile 旁的
 `runtime-prompts/`，避免修改任务代码仓库。终端配置开放明确的文件和命令工具，默认关闭长期记忆、Goal、Todo 和自动经验维护。
 
+terminal profile 显式固定上下文回读策略与压缩参数；`trace.json` 和 `result.json` 的 `configuration` 保存本次实际采用值，便于离线比较不同 profile。
+
 ## 停止与结果
 
 SIGTERM 转为 SDK 停止请求：准备阶段取消原调用，已准入的运行请求取消，WAITING 按无人回答结束。关闭成功后才写入 `cleanup_completed=true`。
@@ -80,5 +82,7 @@ SIGTERM 转为 SDK 停止请求：准备阶段取消原调用，已准入的运�
 | `trace.json`、`assets/` | 父子执行记录与可移动的引用产物 |
 
 退出码 `0` 表示正常或预算结束，`1` 表示普通运行失败/取消/无人处理的 WAITING，`70` 表示资源收尾失败。仅轨迹 partial/failed 不改变原运行退出码。WAITING 的原始结果与收尾后取消的 store 记录分别保留。
+
+adapter 确认收尾回执后才交回 Harbor；读取回执期间被取消也会完成同样的确认。原始结果与清理回执在归档前写入，若归档后的状态回写失败，保留先前回执和原退出码，并在 stderr 中记录写入错误。
 
 本目录不定义正式题集或评分器。测试中的 verifier 仅验证接入链路；公共 benchmark 和付费模型运行由实验另行选择。

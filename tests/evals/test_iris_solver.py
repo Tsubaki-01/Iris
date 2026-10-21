@@ -205,6 +205,11 @@ async def test_concurrent_samples_have_distinct_sessions(
     assert records[0]["session_id"] != records[1]["session_id"]
     assert runners[0].store is not runners[1].store
     assert [state.output.completion for state in states] == ["一", "二"]
+    traces = [state.store.get("iris_trace") for state in states]
+    assert len({trace["archive_id"] for trace in traces}) == 2
+    assert {trace["root_session_id"] for trace in saved_traces(config_path)} == {
+        record["session_id"] for record in records
+    }
     for runner, record, prompt in zip(runners, records, ("甲", "乙"), strict=True):
         assert runner.get_session(record["session_id"]).messages[0].text == prompt
 
@@ -270,6 +275,9 @@ async def test_provider_failure_preserves_run_error(
     assert record["stop_reason"] == "failed"
     assert record["error"]["source"] == "provider"
     assert state.output.completion == ""
+    trace = state.store.get("iris_trace")
+    assert trace["runs"][record["run_id"]]["result"]["error"]["source"] == "provider"
+    assert trace["export"]["status"] == "complete"
 
 
 @pytest.mark.asyncio
@@ -318,6 +326,9 @@ async def test_external_cancellation_settles_before_close(
 
     run = samples[0].results()[0]
     assert run.run.stop_reason is RunStopReason.CANCELLED
+    trace = saved_traces(config_path)[0]
+    assert trace["runs"][run.run.run_id]["run"]["stop_reason"] == "cancelled"
+    assert trace["export"]["status"] == "complete"
     with pytest.raises(IrisRunStateError, match="关闭"):
         await runners[0].aprepare()
 

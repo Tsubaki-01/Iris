@@ -171,6 +171,7 @@ class IrisHarborAgent(BaseInstalledAgent):
                 cwd=self._workspace,
                 env={"PYTHONPATH": str(INSTALL)},
             )
+            record = await self._read_json(environment, "result.json")
         except asyncio.CancelledError:
             cleanup = asyncio.create_task(self._stop(environment))
             while not cleanup.done():
@@ -180,7 +181,6 @@ class IrisHarborAgent(BaseInstalledAgent):
                     continue
             cleanup.result()
             raise
-        record = await self._read_json(environment, "result.json")
         if result.return_code == 70 or record["cleanup_completed"] is not True:
             raise RuntimeError("Iris resource cleanup failed")
         if result.return_code == 1:

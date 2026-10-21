@@ -270,6 +270,35 @@ async def test_missing_export_asset_keeps_success_exit(
     assert record["trace_status"] == "partial"
 
 
+@pytest.mark.asyncio
+async def test_export_receipt_write_failure_keeps_original_exit(
+    profile: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """附件写出后磁盘耗尽，已发布的清理回执仍有效，归档错误只进入日志。"""
+    install(monkeypatch, Provider(answer()))
+    original = results.write_json
+    result_writes = 0
+
+    def full_after_export(path: Path, value: dict[str, Any]) -> None:
+        nonlocal result_writes
+        if path.name == "result.json":
+            result_writes += 1
+            if result_writes == 2:
+                raise OSError("No space left on device")
+        original(path, value)
+
+    monkeypatch.setattr(results, "write_json", full_after_export)
+    assert await execute(profile, tmp_path, asyncio.Event()) == 0
+    record = json.loads((tmp_path / "logs/result.json").read_text(encoding="utf-8"))
+    assert record["cleanup_completed"]
+    assert record["stop_reason"] == "completed"
+    assert record["trace_status"] == "failed"
+    assert "No space left on device" in caplog.text
+
+
 def test_token_usage_counts_compaction_once() -> None:
     assert results.token_usage(
         {

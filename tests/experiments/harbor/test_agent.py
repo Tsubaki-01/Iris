@@ -140,6 +140,30 @@ async def test_partial_export_does_not_change_success(agent: IrisHarborAgent) ->
 
 
 @pytest.mark.asyncio
+async def test_cancel_during_result_read_still_checks_cleanup(
+    agent: IrisHarborAgent, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """进程已退出但收尾回执尚未读完时，超时不能绕过清理失败通道。"""
+    environment = Environment(code=70, cleanup=False)
+    await agent.install(environment)
+    reading = asyncio.Event()
+    original = agent._read_json
+
+    async def delayed_read(environment: Environment, filename: str) -> dict[str, Any]:
+        if filename == "result.json" and not reading.is_set():
+            reading.set()
+            await asyncio.Event().wait()
+        return await original(environment, filename)
+
+    monkeypatch.setattr(agent, "_read_json", delayed_read)
+    task = asyncio.create_task(agent.run("输入", environment, AgentContext()))
+    await asyncio.wait_for(reading.wait(), timeout=3)
+    task.cancel()
+    with pytest.raises(RuntimeError, match="cleanup"):
+        await task
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_control", [True, False])
 async def test_cancellation_confirms_exit_and_cleanup(
     agent: IrisHarborAgent, has_control: bool

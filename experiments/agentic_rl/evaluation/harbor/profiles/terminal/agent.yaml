@@ -16,6 +16,16 @@ permissions:
   execute: allow
 command:
   mode: native
+context_policy:
+  enabled: true
+  preserve_recent_tool_groups: 2
+  old_result_preview_chars: 512
+  deferred_tools: false
+compaction:
+  input_budget_tokens: 96000
+  keep_recent_ratio: 0.15
+  summary_ratio: 0.05
+  timeout_seconds: 300
 memory:
   enabled: false
 evolution:

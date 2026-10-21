@@ -126,6 +126,8 @@ def collect_trajectory(runner: AgentRunner, session_id: str) -> dict[str, Any]:
             "model": configuration.agent_config.model.model_dump(
                 mode="json", exclude={"metadata", "provider_options"}
             ),
+            "context_policy": configuration.agent_config.context_policy.model_dump(mode="json"),
+            "compaction": configuration.agent_config.compaction.model_dump(mode="json"),
             "workspace": str(configuration.workspace_root),
         },
         "sessions": sessions,
