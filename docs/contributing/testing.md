@@ -54,7 +54,7 @@ uv sync --group eval
 uv run --group eval pytest tests/evals/test_iris_solver.py
 ```
 
-测试使用确定性 provider 和真实 SDK，验证默认输入、回调、状态与用量投影、取消和资源收尾，不调用真实模型，也不代表 benchmark 成绩。
+测试使用确定性 provider 和真实 SDK，验证默认输入、回调、状态与用量投影、取消、资源收尾及轨迹归档，不调用真实模型，也不代表 benchmark 成绩。调用 solver 时显式提供 `trajectory_dir`；每个 sample 保存独立的 `trace.json + assets/`，`.eval` 的 `iris_trace` 保留对应结构与索引。
 
 增加评测时先明确想测的行为、固定输入与预算、结果记录和评分方式。报告实际运行条件，区分检索选对工具、工具执行正确与最终任务完成。
 

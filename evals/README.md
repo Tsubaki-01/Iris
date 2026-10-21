@@ -20,7 +20,7 @@ from evals.iris_solver import iris_solver
 from iris.config import init_config
 
 init_config()
-solve = iris_solver("examples/chat/agent.yaml")
+solve = iris_solver("examples/chat/agent.yaml", trajectory_dir="evaluation-output/iris-traces")
 ```
 
 未来将 `solve` 作为 Inspect `Task` 的 `solver`。Inspect 外层可使用 `mockllm/model` 作为
@@ -29,7 +29,7 @@ solve = iris_solver("examples/chat/agent.yaml")
 
 ## 默认执行与扩展接口
 
-`iris_solver(config_path, *, execute=None)` 返回 Inspect `Solver`。配置路径在构造时解析；
+`iris_solver(config_path, *, trajectory_dir, execute=None)` 返回 Inspect `Solver`。配置路径和轨迹目录在构造时解析；
 每次 sample 调用都会创建独立 runner、随机 session ID 和 `InMemoryLifecycleStore`。
 因此本接入不使用 YAML 的 session SQLite 后端。
 
@@ -64,7 +64,11 @@ async def execute(sample: IrisSample, state: TaskState) -> RunResult:
     )
 
 
-solve = iris_solver("examples/chat/agent.yaml", execute=execute)
+solve = iris_solver(
+    "examples/chat/agent.yaml",
+    trajectory_dir="evaluation-output/iris-traces",
+    execute=execute,
+)
 ```
 
 任务回调可顺序执行多轮 start/resume，返回作为最终输出的那份 `RunResult`。
@@ -78,7 +82,7 @@ session/store 隔离**不等于文件、memory 或外部服务隔离**：这些�
 ## 返回结果与资源生命周期
 
 最终回答映射到 `state.output.completion`；有 assistant 消息时，将这条最终输出追加到
-Inspect 消息列表。完整 Iris 轨迹不自动转换成 Inspect 消息历史。
+Inspect 消息列表。原生执行轨迹保存到独立的 `iris_trace`，不改写 Inspect 的求解消息历史。
 `state.completed=True` 只表示 solver 已完成执行，**不是题目评分成功**。
 
 `state.store.get("iris")` 读取接入层保留的结果命名空间，包含：
@@ -103,6 +107,23 @@ Inspect 消息列表。完整 Iris 轨迹不自动转换成 Inspect 消息历史
 子 Agent proxy 的 resume 取消沿用 harness 的结算方式。回调退出后，
 接入层取消尚未处理的 WAITING 并调用 `runner.aclose()`；回调异常继续向 Inspect 传播。
 关闭后不支持用导出的 run ID 恢复已释放的进程内会话。
+
+## 执行轨迹与离线归档
+
+每个 sample 收尾后，`state.store.get("iris_trace")` 保存根会话的多轮及父子 Agent
+执行记录、原生工具结果、事件和用量。相同内容另写入
+`trajectory_dir/<state.uuid>/trace.json`，明确引用的图片和长文本全文复制到其 `assets/`。
+`archive_id` 使用 Inspect 的 sample UUID，`sample_id/epoch` 仅作元数据。
+
+`trajectory_dir` 是必填参数；Inspect 不会自动打包自定义 store 中的本地文件。
+可将 Inspect 自己的 `log_dir` 与该目录放在同一实验输出目录下。
+离线复查时复制完整 sample 归档，按 `assets[].path` 的相对索引读取；只复制 `.eval`
+仍有轨迹 JSON，但不含外置图片或全文文件。具体结构见[轨迹 SDK](../docs/reference/runtime.md#导出执行轨迹与引用产物)。
+
+`iris` 保留收尾前的评测结果，`iris_trace` 反映收尾后的 store；例如原始 WAITING
+会在后者中显示取消结算。成功、provider 失败、回调异常和取消都会尝试导出。
+`export.status` 为 `complete/partial/failed`，归档失败单独记录，不改写任务停止原因，
+也不覆盖已有调用异常。原命令已经截断的输出仍保留其截断信息。
 
 ## 验证
 
