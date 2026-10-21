@@ -510,4 +510,8 @@ runtime 每个获准模型步骤读取一次，按 required contribution 注入�
 
 CLI 的 `/todo` 只读，Goal 命令见[CLI 参考](cli.md)。更多取舍见[Goal 与 Todo 设计](../design/goals.md)。
 
+默认 Todo 提示要求模型在多步骤、多交付物或需持续核对的任务中主动建单，以少量可独立验收的阶段或成果划分条目；同一结果的读、写、核对合并，不按工具调用或文件数量拆分。阶段开始前标记进行中，执行并核对结果后及时完成，避免最终一次性勾选或提前声明已验证。简单问答、单次查询及单点小修改可不建单。这些是模型提示规则，文件格式不增加条目数量或状态转换限制。
+
+默认正文位于 `todo_context.j2` 和 `todo_reminder.j2`。项目模板初始化只补缺失文件；已有项目需自行更新对应模板并重建 Agent 才会采用新正文，参见 [Context 与模板参考](context.md)。
+
 维护本页时优先核对：[Memory 配置与导出](../../src/iris/memory/__init__.py)、[生成模型](../../src/iris/memory/generation_models.py)、[Evolution 配置](../../src/iris/evolution/config.py)、[维护协调器](../../src/iris/harness/maintenance.py)、[Goal 模型](../../src/iris/goal/models.py)、[Todo 解析](../../src/iris/todo/document.py)。

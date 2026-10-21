@@ -57,6 +57,8 @@ Goal 和 Todo 都要求 `context_policy.enabled: true`，这是当前默认值�
 
 输入 `/todo` 可查看当前会话文件路径和条目。运行时也会把路径交给模型；由 `file.write` 等普通工具创建和修改文件，Iris 读取清单本身不会创建文件。
 
+默认提示会要求模型为多步骤任务主动建单，按可验收的阶段组织，而非每次读写都列一项；在阶段开始时标记进行中，核对结果后再勾选。具体规则与已有项目模板的更新方式见 [Todo 参考](../reference/memory-goals.md#todo-sdk-与文件格式)。
+
 文件使用 UTF-8，内容可以是：
 
 ```markdown
