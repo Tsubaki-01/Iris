@@ -11,6 +11,7 @@ import pytest
 
 from experiments.agentic_rl.evaluation.harbor import results
 from experiments.agentic_rl.evaluation.harbor.runner import run_agent
+from iris import harness
 from iris.agents import AgentConfig
 from iris.exceptions import IrisProviderError, IrisRunStateError
 from iris.harness import AgentRunner
@@ -248,7 +249,7 @@ async def test_missing_export_asset_keeps_success_exit(
     profile: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     install(monkeypatch, Provider(answer()))
-    collect = results.collect_trajectory
+    collect = harness.collect_trajectory
 
     def with_missing_asset(runner: AgentRunner, session_id: str) -> dict[str, Any]:
         document = collect(runner, session_id)
@@ -261,7 +262,7 @@ async def test_missing_export_asset_keeps_success_exit(
         )
         return document
 
-    monkeypatch.setattr(results, "collect_trajectory", with_missing_asset)
+    monkeypatch.setattr(harness, "collect_trajectory", with_missing_asset)
     assert await execute(profile, tmp_path, asyncio.Event()) == 0
     record = json.loads((tmp_path / "logs/result.json").read_text(encoding="utf-8"))
     assert record["cleanup_completed"]

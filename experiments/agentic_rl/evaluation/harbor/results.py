@@ -5,17 +5,19 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from iris.harness import AgentRunner, collect_trajectory, write_trajectory
-from iris.lifecycle import RunResult
-from iris.utils.files import atomic_write_text
+if TYPE_CHECKING:
+    from iris.harness import AgentRunner
+    from iris.lifecycle import RunResult
 
 logger = logging.getLogger(__name__)
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
     """原子写入本次 invocation 的控制或结果文件。"""
+    from iris.utils.files import atomic_write_text
+
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
 
 
@@ -31,6 +33,8 @@ def save_results(
     execution_error: BaseException | None,
 ) -> dict[str, Any]:
     """先保存收尾事实，再尽力导出轨迹，不让归档错误改写业务结果。"""
+    from iris.harness import collect_trajectory, write_trajectory
+
     record: dict[str, Any] = {
         "session_id": session_id,
         "run_id": run_id,

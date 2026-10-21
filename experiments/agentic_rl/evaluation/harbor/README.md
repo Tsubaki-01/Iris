@@ -2,6 +2,39 @@
 
 本目录在任务容器内通过真实 Iris SDK 执行文本终端任务。容器入口不依赖 Harbor 或 Inspect；模型、工具循环、预算与 SQLite 状态由 Iris 管理。
 
+## Harbor 宿主
+
+从仓库根目录构建 Iris wheel，并准备锁定 Harbor 0.24.0 的独立宿主环境：
+
+```shell
+uv build --out-dir dist
+uv sync --project experiments/agentic_rl
+uv run --project experiments/agentic_rl harbor agent schema evaluation.harbor.agent:IrisHarborAgent
+```
+
+Harbor 宿主只依赖 Harbor，Iris wheel 安装到任务容器自己的 Python 3.12 环境。两者依赖链的 websockets 版本要求不一致，因此分开安装。
+
+在所选任务的 `harbor run` 中，以 `-a evaluation.harbor.agent:IrisHarborAgent` 指定接入，`-m provider/model` 选择主模型，使用 `--ak` 传入下列参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| `iris_wheel` | 必填，本仓库 `uv build` 生成的 wheel 路径 |
+| `profile_dir` | 自包含 profile 目录，默认使用本目录的 terminal profile |
+| `max_model_steps` | 默认 20，Iris 的模型步数上限 |
+| `cleanup_timeout_sec` | 默认 30，外层取消后确认进程退出和 SDK 收尾的等待时间 |
+| `iris_revision` | 运行材料对应的源码 revision；省略时保留未知 |
+
+通过 Harbor `--ae` 传入 Iris 所需的 provider 环境变量。执行过程继承 Harbor 的 agent user 和 scoped environment，adapter 仅补充模块路径；任务自己的 PATH 不改变。主模型名称由 `-m` 决定，协议与采样设置由 profile 决定。
+
+正常或预算结束由 verifier 检查实际产物。普通运行失败走 Harbor 的非零 Agent 退出路径；资源收尾无法确认时走错误回收，跳过共享 verifier。结果和 token 用量在 Harbor 同步日志后回填，费用与 cache token 未知时保持空值。
+
+宿主契约测试与 SDK 入口测试分别在各自依赖环境中运行：
+
+```shell
+uv run --project experiments/agentic_rl python -m pytest tests/experiments/harbor/test_agent.py
+uv run --group eval python -m pytest tests/experiments/harbor/test_runner.py
+```
+
 ## 容器入口
 
 Linux 环境先安装本仓库构建的 Iris wheel，并将 `evaluation/` 放入 Python 可导入目录。使用独立解释器启动，不激活 venv，不改变任务自己的 PATH：
