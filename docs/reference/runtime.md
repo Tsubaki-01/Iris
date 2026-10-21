@@ -364,6 +364,34 @@ mixed 模式保留有界 submission 缓冲和 durable 事件水位，按需从 S
 
 具体命令字段与约束以[Store Protocol 和命令定义](../../src/iris/lifecycle/store.py)为唯一完整定义；实现者可复用[两种 Store 共用的契约测试](../../tests/store/test_lifecycle_store_contract.py)。启用 Goal 时，注入的 Store 还需满足 [GoalStore](../../src/iris/goal/store.py) 协议，不能用只有基础 LifecycleStore 的实现承诺 Goal 支持。
 
+## 导出执行轨迹与引用产物
+
+`iris.harness.collect_trajectory(runner, session_id)` 读取根会话的全部 Run，并沿持久父工具关系查询子 Run。每个 session 的消息只保存一次，各 Run 保留自己的结果、工具调用、事件顺序和用量。已关闭的 Runner 仍可查询 store；正常导出应在运行停止推进后进行。
+
+`write_trajectory(document, output_dir)` 将明确引用的图片、工具产物和长文本全文复制到 `assets/`，写出 `trace.json`，返回带相对索引的独立文档。以下片段在宿主已完成运行和资源收尾后调用：
+
+```python
+from pathlib import Path
+
+from iris.harness import collect_trajectory, write_trajectory
+
+document = collect_trajectory(runner, session_id)
+exported = write_trajectory(document, Path("trajectories") / session_id)
+print(exported["export"]["status"])
+```
+
+轨迹结构包含 `root_session_id`、`root_run_ids`、按 ID 索引的 `sessions/runs`、`configuration`、`assets` 与 `export`。`runs` 中的 `parent` 保留 `parent_run_id/parent_tool_call_id/agent_selector`；`result` 在运行尚无结果时为 `None`。事件 sequence 只在所属 Run 内有序，多次查询不构成全局原子快照。
+
+| 导出状态 | 含义 |
+| --- | --- |
+| `complete` | 已读取稳定运行记录，写出时全部引用文件复制成功 |
+| `partial` | 读取时仍有 ACTIVE Run，或有附件缺失/复制失败；已有记录仍保留 |
+| `failed` | 无法创建归档目录或写出 trace.json；错误保留在返回文档中 |
+
+`collect_trajectory` 只采集记录与源引用；调用 `write_trajectory` 后，`assets[].path` 才是相对归档根目录的文件位置。缺失附件的 `path` 保持空值并记录 `error`。归档错误不修改 Run 的停止原因或原始结果，写出也不修改传入文档。
+
+离线复查时一起移动 `trace.json` 和 `assets/`。导出只复制明确的图片/ToolArtifact 引用，不扫描正文中的路径或打包整个 workspace。命令执行时已丢弃的输出不能在导出阶段恢复；已有预览和截断信息原样保留。配置投影保存模型参数和工作区等基础信息，不导出任意 provider metadata/options。
+
 ## 面向内核实现者的 Runtime 接口
 
 `iris.runtime` 的 `AgentRuntime(environment: RuntimeEnvironment)` 只执行一次 Activation，入口为：
