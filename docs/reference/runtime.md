@@ -380,7 +380,7 @@ exported = write_trajectory(document, Path("trajectories") / session_id)
 print(exported["export"]["status"])
 ```
 
-轨迹结构包含 `root_session_id`、`root_run_ids`、按 ID 索引的 `sessions/runs`、`configuration`、`assets` 与 `export`。`runs` 中的 `parent` 保留 `parent_run_id/parent_tool_call_id/agent_selector`；`result` 在运行尚无结果时为 `None`。事件 sequence 只在所属 Run 内有序，多次查询不构成全局原子快照。
+当前格式的 `schema_version` 为 1，结构包含 `root_session_id`、`root_run_ids`、按 ID 索引的 `sessions/runs`、`configuration`、`assets` 与 `export`。`runs` 中的 `parent` 保留 `parent_run_id/parent_tool_call_id/agent_selector`；`result` 在运行尚无结果时为 `None`。历史分支复制的消息中，标准 artifact 元数据引用也会被收集，即使分支还没有新 Run。事件 sequence 只在所属 Run 内有序，多次查询不构成全局原子快照。
 
 | 导出状态 | 含义 |
 | --- | --- |

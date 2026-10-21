@@ -35,6 +35,19 @@ uv run --project experiments/agentic_rl python -m pytest tests/experiments/harbo
 uv run --group eval python -m pytest tests/experiments/harbor/test_runner.py
 ```
 
+## 真实容器验收
+
+启用 Linux Docker 引擎，并允许下载测试镜像、Python 与 wheel 依赖后，从仓库根目录执行：
+
+```shell
+uv run --project experiments/agentic_rl python -m pytest \
+  tests/experiments/harbor/test_integration.py --run-harbor-docker
+```
+
+测试构建当前工作树的 Iris wheel，经 Harbor 的 Trial 生命周期完成安装、运行、验收和容器删除。模型请求由容器内确定性 HTTP 服务回答；实际文件工具、命令、SQLite、SIGTERM 和 verifier 都走真实实现。
+
+fixture 使用 `/task-project` 工作目录和 Python 3.10，Iris 使用独立 Python 3.12。验收包括文件计算的正确/错误产物、两个并发 trial、超时后停止写入、清理失败跳过 verifier，以及容器销毁后读取归档图片和全文。另有 provider 错误和缺失 reward 场景，分别保留运行错误与验收缺失状态。正式题集和模型成绩不在这些测试中。
+
 ## 容器入口
 
 Linux 环境先安装本仓库构建的 Iris wheel，并将 `evaluation/` 放入 Python 可导入目录。使用独立解释器启动，不激活 venv，不改变任务自己的 PATH：

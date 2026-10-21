@@ -1,0 +1,17 @@
+schema_version = "1.4"
+
+[metadata]
+description = "Iris Harbor integration fixture, not a benchmark"
+
+[agent]
+timeout_sec = 90
+user = "agent"
+
+[verifier]
+timeout_sec = 30
+environment_mode = "shared"
+
+[environment]
+build_timeout_sec = 600
+cpus = 1
+memory_mb = 2048

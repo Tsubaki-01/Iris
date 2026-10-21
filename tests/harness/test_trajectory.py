@@ -11,7 +11,7 @@ import pytest
 from PIL import Image
 
 from iris.agents import AgentConfig
-from iris.harness import AgentRunner, collect_trajectory, write_trajectory
+from iris.harness import AgentRunner, SessionHistory, collect_trajectory, write_trajectory
 from iris.hitl import QuestionInteractionResponse
 from iris.lifecycle import AgentRunRequest, RunStopReason
 from iris.lifecycle.history import ChildRunPage, RunCursor
@@ -193,6 +193,13 @@ async def test_portable_images_full_text_and_missing_asset(tmp_path: Path) -> No
     )
     await runner.start(AgentRunRequest(input="生成", session_id="sample", run_id="run"))
     await runner.aclose()
+    branch = SessionHistory(runner.store).fork("run")
+    branch_trace = collect_trajectory(runner, branch.session_id)
+    assert branch_trace["root_run_ids"] == []
+    assert {item["source_path"] for item in branch_trace["assets"]} == {
+        str(original),
+        str(full_text),
+    }
     document = collect_trajectory(runner, "sample")
     bundle = tmp_path / "archive"
     saved = write_trajectory(document, bundle)
