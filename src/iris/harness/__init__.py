@@ -33,8 +33,11 @@ from .session_manager import (
     SubmitReceipt,
 )
 from .streaming import CommandCleanupFailed, LiveFact, LivePublisher, SessionSubmissionEvent
+from .trajectory import collect_trajectory, write_trajectory
 
 __all__ = [
+    "collect_trajectory",
+    "write_trajectory",
     "ConfigurationApplied",
     "EffectiveConfiguration",
     "GoalChanged",
