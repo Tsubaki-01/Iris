@@ -7,7 +7,6 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -16,8 +15,9 @@ pytest.importorskip("harbor")
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
+from pydantic import ValidationError
 
-from evals.harbor.agent import IrisHarborAgent
+from evals.harbor.agent import IrisHarborAgent, IrisOptions
 
 
 class Environment:
@@ -25,8 +25,9 @@ class Environment:
 
     default_user = "agent"
 
-    def __init__(self, *, code: int = 0, cleanup: bool = True) -> None:
+    def __init__(self, *, code: int = 0, cleanup: bool = True, install_code: int = 0) -> None:
         self.code = code
+        self.install_code = install_code
         self.record: dict[str, Any] = {
             "cleanup_completed": cleanup,
             "stop_reason": "completed",
@@ -65,6 +66,8 @@ class Environment:
             return ExecResult(return_code=0)
         if command.startswith("kill -0"):
             return ExecResult(return_code=0 if self.alive else 1)
+        if " pip install " in command:
+            return ExecResult(return_code=self.install_code, stderr="download failed")
         if "-m evals.harbor.runner" in command:
             self.running.set()
             if self.block:
@@ -75,19 +78,77 @@ class Environment:
 
 
 @pytest.fixture
-def agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> IrisHarborAgent:
-    """只替换 Harbor 自身的软件包准备，不跳过 adapter 安装流程。"""
+def agent(tmp_path: Path) -> IrisHarborAgent:
+    """构造完整安装材料，由环境替身记录实际安装命令。"""
     wheel = tmp_path / "iris-0.1.0-py3-none-any.whl"
     wheel.write_bytes(b"fixture")
+    uv_executable = tmp_path / "uv"
+    uv_executable.write_bytes(b"uv fixture")
+    requirements_lock = tmp_path / "requirements.lock"
+    requirements_lock.write_text("example-dependency==1.0\n", encoding="utf-8")
     instance = IrisHarborAgent(
         logs_dir=tmp_path / "logs",
         model_name="openai/test-model",
         iris_wheel=str(wheel),
+        uv_executable=str(uv_executable),
+        python_version="3.12.0",
+        requirements_lock=str(requirements_lock),
         iris_revision="test-revision",
         extra_env={"IRIS_PROVIDER_API_KEYS__OPENAI": "test-key"},
     )
-    monkeypatch.setattr(instance, "ensure_system_dependencies", AsyncMock())
     return instance
+
+
+@pytest.mark.parametrize("version", ["3.12", "3.12.*", "latest"])
+def test_install_requires_exact_python_patch(version: str) -> None:
+    """安装契约拒绝滚动 minor 版本和别名。"""
+    with pytest.raises(ValidationError) as caught:
+        IrisOptions(
+            iris_wheel=Path("iris.whl"),
+            uv_executable=Path("uv"),
+            python_version=version,
+            requirements_lock=Path("requirements.lock"),
+        )
+    assert caught.value.errors()[0]["loc"] == ("python_version",)
+    assert caught.value.errors()[0]["type"] == "string_pattern_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_install_uses_local_uv_and_locked_dependencies(agent: IrisHarborAgent) -> None:
+    """本地安装材料决定工具和依赖版本，HTTP 重试只交给 uv。"""
+    environment = Environment()
+    await agent.install(environment)
+    targets = {target for _, target in environment.uploads}
+    assert "/installed-agent/iris/uv/uv" in targets
+    assert "/installed-agent/iris/requirements.lock" in targets
+    commands = [command for command, _ in environment.commands]
+    assert not any("curl " in command or "apt-get" in command for command in commands)
+    install_commands = [
+        (command, options)
+        for command, options in environment.commands
+        if " pip install " in command
+    ]
+    assert len(install_commands) == 1
+    command, options = install_commands[0]
+    assert "python install --no-bin 3.12.0" in command
+    assert "--python 3.12.0" in command
+    assert "--managed-python" in command
+    assert "--constraint /installed-agent/iris/requirements.lock" in command
+    assert options["env"]["UV_HTTP_RETRIES"] == "2"
+    assert options["env"]["UV_PYTHON_INSTALL_DIR"] == "/installed-agent/iris/python"
+
+
+@pytest.mark.asyncio
+async def test_install_failure_does_not_retry_install_or_start_agent(
+    agent: IrisHarborAgent,
+) -> None:
+    """uv 用尽自身下载重试后，接入层直接保留失败，不叠加安装或模型重跑。"""
+    environment = Environment(install_code=1)
+    with pytest.raises(NonZeroAgentExitCodeError):
+        await agent.install(environment)
+    commands = [command for command, _ in environment.commands]
+    assert sum(" pip install " in command for command in commands) == 1
+    assert not any("-m evals.harbor.runner" in command for command in commands)
 
 
 @pytest.mark.asyncio

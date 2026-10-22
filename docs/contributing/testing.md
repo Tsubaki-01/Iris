@@ -61,11 +61,13 @@ uv run --group eval python -m pytest tests/evals/inspect/test_solver.py
 
 ## Harbor 终端评测接入
 
-[Harbor 接入说明](../../evals/harbor/README.md)提供独立宿主环境、Iris wheel 安装和容器 SDK 入口。宿主固定 Harbor 0.24.0，容器仅安装 Iris；两套依赖不混装。
+[Harbor 接入说明](../../evals/harbor/README.md)提供独立宿主环境、Iris wheel 安装和容器 SDK 入口。宿主固定 Harbor 0.24.0，容器仅安装 Iris；两套依赖不混装。容器安装材料显式指定 Linux uv 可执行文件、Python patch 版本和依赖锁文件，下载最多额外重试两次。
 
 SDK 入口测试使用仓库环境，adapter 契约与离线汇总测试使用 `evals/.venv` 环境，分别通过 `uv run --group eval` 和 `uv run --project evals` 执行。它们验证文件/命令执行与取消收尾、Harbor 安装参数与退出协议、已有结果汇总。测试专用 verifier 用于验证接线，正式题集和评分器另行选择。
 
 [离线汇总](../../evals/reporting/README.md)读取已有 Harbor job，以外部传入的任务清单和运行次数计算结果。具体题集、实验参数和批次配置保存在 `evals/experiments/`，由 `evals/.gitignore` 排除；通用接入和确定性测试 fixture 保留在 `evals/` 与 `tests/evals/`。
+
+需要人工确认评分有效性时，可传入显式复核决定。汇总保留原始 reward、自动判断和复核理由，以复核后的评分状态参与统计；复核不会修改原始结果或启动重跑。
 
 真实容器验收需要 Linux Docker 引擎及镜像/依赖下载网络，并显式指定开关：
 

@@ -77,7 +77,13 @@ async def run_trial(
             model_name="openai/fixture",
             override_timeout_sec=8 if mode == "timeout" else 90,
             override_setup_timeout_sec=600,
-            kwargs={"iris_wheel": str(wheel), "iris_revision": "integration-worktree"},
+            kwargs={
+                "iris_wheel": str(wheel),
+                "uv_executable": os.environ["IRIS_EVAL_UV_EXECUTABLE"],
+                "python_version": os.environ["IRIS_EVAL_PYTHON_VERSION"],
+                "requirements_lock": os.environ["IRIS_EVAL_REQUIREMENTS_LOCK"],
+                "iris_revision": "integration-worktree",
+            },
             env={
                 "IRIS_PROVIDER_API_KEYS__OPENAI": "fixture-key",
                 "IRIS_PROVIDERS__OPENAI__BASE_URL": "http://127.0.0.1:8765/v1",

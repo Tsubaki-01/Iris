@@ -8,10 +8,11 @@ import math
 import os
 from collections import defaultdict
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import median
-from typing import Any
+from typing import Any, Literal
 
 _METRICS = (
     "input_tokens",
@@ -28,6 +29,62 @@ _METRICS = (
     "agent_seconds",
     "verifier_seconds",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewDecision:
+    """从显式复核文件解析得到的评分有效性决定。"""
+
+    reviewed_score_status: Literal["valid", "invalid", "missing"]
+    raw_reward: float | None
+    category: str
+    reason: str
+    retry_as_infrastructure: bool
+
+
+def _read_review_decisions(path: Path) -> dict[str, _ReviewDecision]:
+    """在文件输入边界解析复核字段；原始 reward 只作为关联依据。"""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: 复核文件必须是 trial 名到决定的 JSON object")
+    required = {
+        "reviewed_score_status",
+        "raw_reward",
+        "category",
+        "reason",
+        "retry_as_infrastructure",
+    }
+    decisions = {}
+    for trial_name, value in data.items():
+        prefix = f"{path}: {trial_name}"
+        if not trial_name.strip() or not isinstance(value, dict):
+            raise ValueError(f"{prefix}: trial 名必须非空，复核决定必须是 JSON object")
+        missing = required - value.keys()
+        if missing:
+            raise ValueError(f"{prefix}: 缺少复核字段 {', '.join(sorted(missing))}")
+        status = value["reviewed_score_status"]
+        if status not in ("valid", "invalid", "missing"):
+            raise ValueError(f"{prefix}: reviewed_score_status 必须为 valid、invalid 或 missing")
+        reward = value["raw_reward"]
+        if reward is not None and type(reward) not in (int, float):
+            raise ValueError(f"{prefix}: raw_reward 必须是数值或 null")
+        if (status == "missing") != (reward is None):
+            raise ValueError(f"{prefix}: {status} 与 raw_reward 不一致，只有 missing 使用 null")
+        if status == "valid" and reward not in (0, 1):
+            raise ValueError(f"{prefix}: valid 必须对应原始二值 raw_reward")
+        for field in ("category", "reason"):
+            if not isinstance(value[field], str) or not value[field].strip():
+                raise ValueError(f"{prefix}: {field} 必须是非空字符串")
+        if not isinstance(value["retry_as_infrastructure"], bool):
+            raise ValueError(f"{prefix}: retry_as_infrastructure 必须是布尔值")
+        decisions[trial_name] = _ReviewDecision(
+            reviewed_score_status=status,
+            raw_reward=reward,
+            category=value["category"],
+            reason=value["reason"],
+            retry_as_infrastructure=value["retry_as_infrastructure"],
+        )
+    return decisions
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -56,7 +113,12 @@ def _empty_row(task_id: str) -> dict[str, Any]:
         "exception_message": None,
         "reward": None,
         "rewards": None,
+        "automatic_score_status": "missing",
+        "reviewed_score_status": None,
         "score_status": "missing",
+        "review_category": None,
+        "review_reason": None,
+        "retry_as_infrastructure": None,
         "cleanup_completed": None,
         "cleanup_error": None,
         "archive_status": "missing",
@@ -191,6 +253,7 @@ def _trial_row(path: Path) -> dict[str, Any]:
                 "partial" if missing else trace.get("export", {}).get("status", "missing")
             )
     _review_materials(path, row, result)
+    row["automatic_score_status"] = row["score_status"]
     return row
 
 
@@ -198,21 +261,48 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
-def summarize_job(job_dir: Path, *, task_ids: list[str], attempts: int) -> dict[str, Any]:
+def summarize_job(
+    job_dir: Path,
+    *,
+    task_ids: list[str],
+    attempts: int,
+    review_decisions_path: Path | None = None,
+) -> dict[str, Any]:
     """按显式任务清单和次数汇总，额外 trial 单列，不从已完成数量推断分母。
 
     Args:
         job_dir: 单个 Harbor job 目录，不接受跨 job 的隐式合并。
         task_ids: 本批计划 task ID，校准批次只传校准任务。
         attempts: 每题计划执行次数。
+        review_decisions_path: 可选的显式复核文件，只调整评分有效性，不覆盖原始分数。
 
     Returns:
         dict[str, Any]: 逐 trial、按题统计与覆盖率；未知用量保留空值。
+
+    Raises:
+        ValueError: 复核字段无效，或复核引用的 raw_reward 与实际 trial 不一致。
     """
+    decisions = (
+        _read_review_decisions(review_decisions_path) if review_decisions_path is not None else {}
+    )
+    unused_reviews = set(decisions)
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for path in sorted(job_dir.iterdir()):
         if path.is_dir() and ((path / "result.json").is_file() or (path / "config.json").is_file()):
             row = _trial_row(path)
+            if decision := decisions.get(row["trial_name"]):
+                if decision.raw_reward != row["reward"]:
+                    raise ValueError(
+                        f"{row['trial_name']}: 复核 raw_reward 与实际原始 reward 不一致"
+                    )
+                row.update(
+                    reviewed_score_status=decision.reviewed_score_status,
+                    score_status=decision.reviewed_score_status,
+                    review_category=decision.category,
+                    review_reason=decision.reason,
+                    retry_as_infrastructure=decision.retry_as_infrastructure,
+                )
+                unused_reviews.remove(row["trial_name"])
             grouped[row["task_id"]].append(row)
     rows: list[dict[str, Any]] = []
     extra: list[dict[str, Any]] = []
@@ -264,6 +354,7 @@ def summarize_job(job_dir: Path, *, task_ids: list[str], attempts: int) -> dict[
         "configured_retry": config.get("retry"),
         "task_ids": task_ids,
         "attempts": attempts,
+        "unused_review_trials": sorted(unused_reviews),
         "counts": {
             "planned": len(rows),
             "started": len(started),
@@ -328,6 +419,31 @@ def _markdown(report: dict[str, Any]) -> str:
                 f"{row['cleanup_completed']} | {row['archive_status']} | "
                 f"{row['review_materials_status']} | {row['task_artifacts_status']} | {link} |"
             )
+    reviewed = [
+        row
+        for row in report["trials"] + report["extra_trials"]
+        if row["reviewed_score_status"] is not None
+    ]
+    if reviewed:
+        lines.extend(
+            [
+                "",
+                "## 显式复核",
+                "",
+                "| trial | 自动评分 | 复核评分 | 分类 | 理由 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in reviewed:
+            values = (
+                row["trial_name"],
+                row["automatic_score_status"],
+                row["reviewed_score_status"],
+                row["review_category"],
+                row["review_reason"],
+            )
+            cells = [value.replace("|", r"\|").replace("\n", "<br>") for value in values]
+            lines.append("| " + " | ".join(cells) + " |")
     lines.extend(
         [
             "",
@@ -351,6 +467,9 @@ def _markdown(report: dict[str, Any]) -> str:
             "occurrence 是任务内按开始时间排序的展示序号，不代表受控 seed。",
             "额外 trial 不进入计划统计。",
             "review_required 保留原始 reward，需复核错误和 verifier 日志；不计入有效评分。",
+            "提供显式复核时采用 reviewed_score_status；否则采用 automatic_score_status。",
+            "复核只改变评分有效性，raw_reward 用于核对，不替换原始 reward；重跑标记不触发执行。",
+            "复核文件中未匹配本 job 的 trial 名列于 summary.json 的 unused_review_trials。",
             "Iris 收尾字段来自 SDK 回执；归档字段检查 Iris trace、数据库和引用附件。",
             "可复查覆盖在 Iris 归档基础上检查 verifier 日志和已有评分的原始 reward 文件。",
             "任务产物单列：manifest 的 failed 无法区分不存在源和下载异常，按 unknown 展示。",

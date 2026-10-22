@@ -14,17 +14,24 @@ uv run --project evals python -m harbor.cli.main agent schema evals.harbor.agent
 
 `evals/pyproject.toml` 管理 Harbor 宿主依赖，环境位于 `evals/.venv`，不安装评测包。
 从仓库根目录使用 `python -m harbor.cli.main` 启动 CLI，使其能导入 `evals.harbor`。
-Iris wheel 安装到任务容器自己的 Python 3.12 环境。两者依赖链的 websockets 版本要求不一致，因此分开安装。
+Iris wheel 安装到任务容器内的独立 Python 环境。两者依赖链的 websockets 版本要求不一致，因此分开安装。
 
 在所选任务的 `harbor run` 中，以 `-a evals.harbor.agent:IrisHarborAgent` 指定接入，`-m provider/model` 选择主模型，使用 `--ak` 传入下列参数：
 
 | 参数 | 含义 |
 | --- | --- |
 | `iris_wheel` | 必填，本仓库 `uv build` 生成的 wheel 路径 |
+| `uv_executable` | 必填，已下载的固定版本 uv 可执行文件路径，须匹配任务容器的 Linux 平台和架构 |
+| `python_version` | 必填，Iris 独立解释器的精确 patch 版本，格式为 `major.minor.patch` |
+| `requirements_lock` | 必填，与 wheel 配套的完整运行依赖约束文件路径，各依赖使用精确版本 |
 | `profile_dir` | 自包含 profile 目录，默认使用本目录的 terminal profile |
 | `max_model_steps` | 默认 20，Iris 的模型步数上限 |
 | `cleanup_timeout_sec` | 默认 30，外层取消后确认进程退出和 SDK 收尾的等待时间 |
 | `iris_revision` | 运行材料对应的源码 revision；省略时保留未知 |
+
+安装材料准备一次后供各 trial 上传复用；具体版本和文件保存在 Git 忽略的 `evals/experiments/`。依赖约束可从对应 wheel 已验证的运行环境冻结，不应混用宿主或其他 wheel 的依赖集。安装时由 uv 下载指定 Python 并按约束安装 wheel，不执行系统包安装或在线 uv 安装脚本。`UV_HTTP_RETRIES=2` 允许每个 HTTP 请求最多两次额外尝试；失败后直接结束安装，不重跑 trial。
+
+独立解释器、venv 与下载缓存均位于 `/installed-agent/iris/`，安装时不创建 Python 命令别名。安装日志记录 uv 版本、Python 版本和实际依赖；安装不修复任务系统 Python 或 pip。
 
 通过 Harbor `--ae` 传入 Iris 所需的 provider 环境变量。执行过程继承 Harbor 的 agent user 和 scoped environment，adapter 仅补充模块路径；任务自己的 PATH 不改变。主模型名称由 `-m` 决定，协议与采样设置由 profile 决定。
 
@@ -39,7 +46,7 @@ uv run --group eval python -m pytest tests/evals/harbor/test_runner.py
 
 ## 真实容器验收
 
-启用 Linux Docker 引擎，并允许下载测试镜像、Python 与 wheel 依赖后，从仓库根目录执行：
+启用 Linux Docker 引擎，并允许下载测试镜像、Python 与 wheel 依赖。先在当前进程设置 `IRIS_EVAL_UV_EXECUTABLE`、`IRIS_EVAL_PYTHON_VERSION` 和 `IRIS_EVAL_REQUIREMENTS_LOCK`，分别指向上述 uv 文件、精确 Python patch 和依赖约束，然后从仓库根目录执行：
 
 ```shell
 uv run --project evals python -m pytest \
@@ -48,7 +55,7 @@ uv run --project evals python -m pytest \
 
 测试构建当前工作树的 Iris wheel，经 Harbor 的 Trial 生命周期完成安装、运行、验收和容器删除。模型请求由容器内确定性 HTTP 服务回答；实际文件工具、命令、SQLite、SIGTERM 和 verifier 都走真实实现。
 
-fixture 使用 `/task-project` 工作目录和 Python 3.10，Iris 使用独立 Python 3.12。验收包括文件计算的正确/错误产物、两个并发 trial、超时后停止写入、清理失败跳过 verifier，以及容器销毁后读取归档图片和全文。另有 provider 错误和缺失 reward 场景，分别保留运行错误与验收缺失状态。正式题集和模型成绩不在这些测试中。
+fixture 使用 `/task-project` 工作目录和 Python 3.10，Iris 使用指定的独立 Python 版本。验收包括文件计算的正确/错误产物、两个并发 trial、超时后停止写入、清理失败跳过 verifier，以及容器销毁后读取归档图片和全文。另有 provider 错误和缺失 reward 场景，分别保留运行错误与验收缺失状态。正式题集和模型成绩不在这些测试中。
 
 ## 容器入口
 

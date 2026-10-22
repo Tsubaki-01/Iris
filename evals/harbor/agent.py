@@ -24,6 +24,9 @@ class IrisOptions(InstalledAgentOptions):
     """由 Harbor 在 CLI/构造边界解析的接入参数。"""
 
     iris_wheel: Path = Field(description="本仓库构建的 Iris wheel 路径")
+    uv_executable: Path = Field(description="固定版本、匹配任务容器平台的 uv 可执行文件")
+    python_version: str = Field(pattern=r"^\d+\.\d+\.\d+$", description="精确 Python patch 版本")
+    requirements_lock: Path = Field(description="与 wheel 配套的完整运行依赖约束文件")
     profile_dir: Path | None = Field(default=None, description="自包含的终端 profile 目录")
     max_model_steps: int = Field(default=20, gt=0)
     cleanup_timeout_sec: float = Field(default=30, gt=0)
@@ -43,6 +46,9 @@ class IrisHarborAgent(BaseInstalledAgent):
             raise ValueError("Iris requires --model provider/model")
         options = cast(IrisOptions, self.options)
         self.iris_wheel = options.iris_wheel.resolve()
+        self.uv_executable = options.uv_executable.resolve()
+        self.python_version = options.python_version
+        self.requirements_lock = options.requirements_lock.resolve()
         self.profile_dir = (
             options.profile_dir.resolve()
             if options.profile_dir is not None
@@ -69,12 +75,13 @@ class IrisHarborAgent(BaseInstalledAgent):
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         pwd = await self.exec_as_agent(environment, "pwd -P")
         self._workspace = pwd.stdout.strip()
-        await self.ensure_system_dependencies(environment, ("curl", "ca_certificates"))
         await self.exec_as_root(
             environment,
-            f"mkdir -p {INSTALL}/evals {self.iris_logs}",
+            f"mkdir -p {INSTALL}/evals {INSTALL}/uv {self.iris_logs}",
         )
         await environment.upload_file(self.iris_wheel, str(INSTALL / self.iris_wheel.name))
+        await environment.upload_file(self.uv_executable, str(INSTALL / "uv/uv"))
+        await environment.upload_file(self.requirements_lock, str(INSTALL / "requirements.lock"))
         await environment.upload_file(
             Path(__file__).parent.parent / "__init__.py", str(INSTALL / "evals/__init__.py")
         )
@@ -83,15 +90,16 @@ class IrisHarborAgent(BaseInstalledAgent):
         owner = shlex.quote(str(environment.default_user or "root"))
         await self.exec_as_root(
             environment,
-            f"chown -R {owner} {INSTALL} {self.iris_logs}",
+            f"chmod +x {INSTALL}/uv/uv && chown -R {owner} {INSTALL} {self.iris_logs}",
         )
         install_command = (
             "set -eu; "
-            f"curl -LsSf https://astral.sh/uv/install.sh -o {INSTALL}/install-uv.sh && "
-            f"UV_INSTALL_DIR={INSTALL}/uv UV_NO_MODIFY_PATH=1 sh {INSTALL}/install-uv.sh && "
-            f"{INSTALL}/uv/uv python install 3.12 && "
-            f"{INSTALL}/uv/uv venv {INSTALL}/venv --python 3.12 && "
+            f"{INSTALL}/uv/uv --version && "
+            f"{INSTALL}/uv/uv python install --no-bin {self.python_version} && "
+            f"{INSTALL}/uv/uv venv {INSTALL}/venv --python {self.python_version} "
+            "--managed-python && "
             f"{INSTALL}/uv/uv pip install --python {INSTALL}/venv/bin/python "
+            f"--constraint {INSTALL}/requirements.lock "
             f"{shlex.quote(str(INSTALL / self.iris_wheel.name))}"
         )
         await self.exec_as_agent(
@@ -100,6 +108,7 @@ class IrisHarborAgent(BaseInstalledAgent):
             env={
                 "UV_PYTHON_INSTALL_DIR": str(INSTALL / "python"),
                 "UV_CACHE_DIR": str(INSTALL / "cache"),
+                "UV_HTTP_RETRIES": "2",
             },
         )
 

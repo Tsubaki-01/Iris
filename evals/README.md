@@ -44,7 +44,8 @@ uv sync --project evals
 uv run --project evals python -m harbor.cli.main agent schema evals.harbor.agent:IrisHarborAgent
 ```
 
-容器中的 Iris 单独安装本仓库构建的 wheel，不安装 Harbor 或 Inspect。
+容器中的 Iris 单独安装本仓库构建的 wheel，不安装 Harbor 或 Inspect。安装使用显式提供的
+Linux uv 可执行文件、Python patch 版本和依赖锁文件，具体准备方式见 [Harbor 接入](harbor/README.md)。
 Inspect solver 入口为 `evals.inspect.solver`；Harbor 接入为 `evals.harbor.agent:IrisHarborAgent`；
 离线汇总入口为 `python -m evals.reporting`。导入 `evals` 本身不会加载这些可选依赖。
 

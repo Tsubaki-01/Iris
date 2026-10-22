@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -321,3 +322,173 @@ def test_missing_artifact_manifest_does_not_claim_complete(tmp_path: Path) -> No
     row = summarize_job(tmp_path, task_ids=["a"], attempts=1)["trials"][0]
     assert row["task_artifacts_status"] == "unknown"
     assert row["review_materials_status"] == "complete"
+
+
+def _review_decision(reward: float | None, status: str) -> dict[str, Any]:
+    """生成与显式复核文件一致的通用决定。"""
+    return {
+        "reviewed_score_status": status,
+        "raw_reward": reward,
+        "category": "reviewed_evidence",
+        "reason": "已检查原始执行与评分材料",
+        "retry_as_infrastructure": False,
+    }
+
+
+def test_explicit_reviews_change_validity_without_changing_execution_or_reward(
+    tmp_path: Path,
+) -> None:
+    """复核可接受预算失败的零分，也可排除没有运行评分的原始零分。"""
+    job = tmp_path / "job"
+    budget = _trial(
+        job, "budget", "a", reward=0, stop="failed", exception="NonZeroAgentExitCodeError"
+    )
+    receipt_path = budget / "agent/iris/result.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["result"] = {"error": {"code": "PROVIDER_ERROR", "details": {"status": "length"}}}
+    _json(receipt_path, receipt)
+    verifier = _trial(job, "verifier", "b", reward=0)
+    (verifier / "verifier/test-stdout.txt").write_text("uvx: command not found")
+    _trial(job, "success", "c", reward=1)
+    reviews_path = tmp_path / "reviews.json"
+    rejected = _review_decision(0, "invalid")
+    rejected["retry_as_infrastructure"] = True
+    _json(reviews_path, {"budget": _review_decision(0, "valid"), "verifier": rejected})
+    raw_before = (budget / "result.json").read_bytes()
+
+    report = summarize_job(
+        job, task_ids=["a", "b", "c"], attempts=1, review_decisions_path=reviews_path
+    )
+
+    rows = {row["trial_name"]: row for row in report["trials"]}
+    assert report["counts"]["planned"] == 3
+    assert report["counts"]["valid_scored"] == 2
+    assert report["counts"]["passed"] == 1
+    assert report["rates"]["scored_success"] == 1 / 2
+    assert report["by_task"]["a"]["valid_scored"] == 1
+    assert report["by_task"]["b"]["valid_scored"] == 0
+    assert rows["budget"]["automatic_score_status"] == "review_required"
+    assert rows["budget"]["reviewed_score_status"] == "valid"
+    assert rows["budget"]["score_status"] == "valid"
+    assert rows["budget"]["execution_status"] == "execution_error"
+    assert rows["budget"]["execution_error"] == receipt["result"]["error"]
+    assert rows["verifier"]["automatic_score_status"] == "valid"
+    assert rows["verifier"]["reviewed_score_status"] == "invalid"
+    assert rows["verifier"]["score_status"] == "invalid"
+    assert rows["verifier"]["retry_as_infrastructure"] is True
+    assert rows["budget"]["reward"] == rows["verifier"]["reward"] == 0
+    assert rows["budget"]["review_category"] == "reviewed_evidence"
+    assert rows["budget"]["review_reason"] == "已检查原始执行与评分材料"
+    assert rows["success"]["automatic_score_status"] == "valid"
+    assert rows["success"]["reviewed_score_status"] is None
+    assert rows["success"]["review_reason"] is None
+    assert report["unused_review_trials"] == []
+    assert (budget / "result.json").read_bytes() == raw_before
+
+
+@pytest.mark.parametrize(
+    ("changes", "reward", "message"),
+    [
+        ({"reviewed_score_status": "approved"}, 0, "reviewed_score_status"),
+        ({"raw_reward": 1}, 0, "raw_reward"),
+        ({"raw_reward": None}, None, "valid"),
+        ({"reviewed_score_status": "missing"}, 0, "missing"),
+        ({"reason": " "}, 0, "reason"),
+        ({"retry_as_infrastructure": "false"}, 0, "retry_as_infrastructure"),
+    ],
+)
+def test_invalid_review_decision_is_rejected(
+    tmp_path: Path, changes: dict[str, Any], reward: float | None, message: str
+) -> None:
+    """复核输入在读取边界拒绝无效状态、冲突分数和缺失依据。"""
+    job = tmp_path / "job"
+    trial = _trial(job, "done", "a", reward=reward)
+    decision = _review_decision(0, "valid")
+    decision.update(changes)
+    reviews_path = tmp_path / "reviews.json"
+    _json(reviews_path, {"done": decision})
+    before = (trial / "result.json").read_bytes()
+
+    with pytest.raises(ValueError, match=message):
+        summarize_job(job, task_ids=["a"], attempts=1, review_decisions_path=reviews_path)
+
+    assert (trial / "result.json").read_bytes() == before
+
+
+def test_shared_review_file_keeps_unused_entries_and_extra_trials_separate(
+    tmp_path: Path,
+) -> None:
+    """共享复核文件可包含其他 job，额外 trial 的决定不改变计划统计。"""
+    job = tmp_path / "job"
+    _trial(job, "01-first", "a", reward=0)
+    _trial(job, "02-extra", "a", reward=1)
+    reviews_path = tmp_path / "reviews.json"
+    _json(
+        reviews_path,
+        {
+            "01-first": _review_decision(0, "valid"),
+            "02-extra": _review_decision(1, "invalid"),
+            "other-job-trial": _review_decision(None, "missing"),
+        },
+    )
+
+    report = summarize_job(job, task_ids=["a"], attempts=1, review_decisions_path=reviews_path)
+
+    assert report["counts"]["planned"] == report["counts"]["valid_scored"] == 1
+    assert report["counts"]["passed"] == 0
+    assert report["counts"]["extra_trials"] == 1
+    assert report["extra_trials"][0]["reward"] == 1
+    assert report["extra_trials"][0]["score_status"] == "invalid"
+    assert report["unused_review_trials"] == ["other-job-trial"]
+
+
+def test_cli_exports_explicit_review_and_keeps_raw_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLI 将自动状态、复核依据和采用状态写入三种输出，不改原始结果。"""
+    job = tmp_path / "job"
+    trial = _trial(job, "done", "a", reward=1)
+    before = (trial / "result.json").read_bytes()
+    manifest = tmp_path / "manifest.json"
+    _json(manifest, {"name": "dev", "dataset_id": "source", "revision": "fixed", "task_ids": ["a"]})
+    reviews_path = tmp_path / "reviews.json"
+    decision = _review_decision(1, "invalid")
+    decision["reason"] = "评分未执行 | 已核对日志\n保留原始分数"
+    _json(reviews_path, {"done": decision})
+    output = tmp_path / "report"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "reporting",
+            str(job),
+            "--manifest",
+            str(manifest),
+            "--attempts",
+            "1",
+            "--review-decisions",
+            str(reviews_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    main()
+
+    saved = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert saved["counts"]["valid_scored"] == saved["counts"]["passed"] == 0
+    assert saved["trials"][0]["automatic_score_status"] == "valid"
+    assert saved["trials"][0]["reviewed_score_status"] == "invalid"
+    assert saved["trials"][0]["score_status"] == "invalid"
+    assert saved["trials"][0]["review_reason"] == decision["reason"]
+    with (output / "trials.csv").open(encoding="utf-8-sig", newline="") as stream:
+        row = next(csv.DictReader(stream))
+    assert row["reward"] == "1"
+    assert row["automatic_score_status"] == "valid"
+    assert row["reviewed_score_status"] == row["score_status"] == "invalid"
+    assert row["review_reason"] == decision["reason"]
+    markdown = (output / "report.md").read_text(encoding="utf-8")
+    assert "显式复核" in markdown
+    assert "评分未执行" in markdown
+    assert "保留原始分数" in markdown
+    assert (trial / "result.json").read_bytes() == before

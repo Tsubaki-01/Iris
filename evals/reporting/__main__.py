@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--attempts", type=int, required=True)
     parser.add_argument("--task-id", action="append", help="只汇总清单中指定任务，可重复传入")
+    parser.add_argument("--review-decisions", type=Path, help="显式评分复核 JSON 文件")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
@@ -26,7 +27,15 @@ def main() -> None:
         parser.error("任务清单必须非空且 ID 不重复")
     if not set(task_ids) <= set(manifest["task_ids"]):
         parser.error("--task-id 必须属于 manifest 的 task_ids")
-    report = summarize_job(args.job_dir, task_ids=task_ids, attempts=args.attempts)
+    try:
+        report = summarize_job(
+            args.job_dir,
+            task_ids=task_ids,
+            attempts=args.attempts,
+            review_decisions_path=args.review_decisions,
+        )
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     report["dataset"] = {key: manifest[key] for key in ("name", "dataset_id", "revision")}
     write_report(report, args.output)
     print(json.dumps(report["counts"], ensure_ascii=False))
