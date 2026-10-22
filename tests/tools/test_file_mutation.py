@@ -1,6 +1,9 @@
 """不同文件服务共享真实路径锁，串行检查与修改且不阻塞独立文件。"""
 
 import asyncio
+import os
+import stat
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
@@ -74,6 +77,27 @@ def _modify(
             EditFileInput(file_path=str(target), old_string="before", new_string=content), context
         )
     return service.write_file(WriteFileInput(file_path=str(target), content=content), context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX 文件权限与脚本执行语义")
+@pytest.mark.parametrize("name", ["write", "edit"])
+@pytest.mark.parametrize("mode", [0o644, 0o755])
+def test_file_mutation_preserves_existing_permissions(
+    tmp_path: Path, name: Literal["write", "edit"], mode: int
+) -> None:
+    """原子替换保留普通文件权限，可执行脚本编辑后仍能直接运行。"""
+    target = tmp_path / "run.sh"
+    target.write_text("#!/bin/sh\nprintf 'before\\n'\n", encoding="utf-8")
+    target.chmod(mode)
+    replacement = "after" if name == "edit" else "#!/bin/sh\nprintf 'after\\n'\n"
+
+    _modify(WorkspaceFileService(), name, target, _context(tmp_path, target), replacement)
+
+    assert stat.S_IMODE(target.stat().st_mode) == mode
+    assert target.read_text(encoding="utf-8") == "#!/bin/sh\nprintf 'after\\n'\n"
+    if mode == 0o755:
+        result = subprocess.run([str(target)], capture_output=True, text=True, check=True)
+        assert result.stdout == "after\n"
 
 
 @pytest.mark.parametrize(

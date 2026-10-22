@@ -129,6 +129,8 @@ executor.prepare_many(tool_uses, context)
 
 文本 `offset` 和 `column` 从 0 开始；`limit` 0–1000，省略使用 1000。正文受单次字符预算限制，按结果 `next_offset` 与 `next_column` 继续，避免超长单行无法读完。PNG/JPEG/WebP 内容走图片导入，忽略分页与行号参数。读取更新文件观测；编辑或覆盖已有文件需要满足读后未变化的约束。`file.publish` 不更新编辑前读取状态。
 
+`file.write` 和 `file.edit` 通过原子替换发布完整内容，并保留已有文件的权限模式（mode）；在 POSIX 系统上，编辑可执行脚本不会清除执行位。新文件采用临时文件的默认权限。
+
 `tools.web_provider` 选择这两个工具的服务，取值为 `tavily`（默认）或 `deepseek`，在构造时固定。`tools.builtin` 仍控制各工具是否启用；选择 provider 本身不会增加工具。
 
 ```yaml

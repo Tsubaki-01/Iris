@@ -18,7 +18,7 @@
 本文只覆盖 `src/iris/tools` 当前代码中的公共 API。常用导入路径为：
 
 `WorkspaceFileService.atomic_write()` 与项目经验发布共用 `iris.utils.files.atomic_write_text`。
-文件工具仍拥有原有路径、已读状态和并发修改检查；共享工具函数只执行单文件原子替换。
+文件工具仍拥有原有路径、已读状态和并发修改检查；共享工具函数执行单文件原子替换，并保留既有文件的权限模式（mode），包括 POSIX 可执行位。
 
 ```python
 from iris.tools import ToolRegistry, ToolExecutor, ToolExecutionContext, tool

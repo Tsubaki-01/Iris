@@ -23,7 +23,8 @@ normalization, large-output artifacts, middleware, and circuit breaking.
 
 `WorkspaceFileService.atomic_write()` and project experience publishing share
 `iris.utils.files.atomic_write_text`. File tools retain their existing path, read-state and concurrent
-mutation checks; the shared utility only performs an atomic replacement of one complete text file.
+mutation checks; the shared utility atomically replaces one complete text file while preserving the
+existing file's permission mode, including POSIX execute bits.
 
 ## Architecture
 
