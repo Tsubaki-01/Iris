@@ -18,7 +18,7 @@ from inspect_ai.dataset import Sample
 from inspect_ai.model import ChatMessageUser, ModelName
 from inspect_ai.solver import TaskState
 
-from evals.iris_solver import IrisSample, iris_solver
+from evals.inspect.solver import IrisSample, iris_solver
 from iris.agents import AgentConfig
 from iris.exceptions import IrisConfigError, IrisProviderError, IrisRunStateError
 from iris.harness import AgentRunner

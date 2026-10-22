@@ -73,7 +73,7 @@ async def run_trial(
         trial_name=trial_name,
         trials_dir=tmp_path / "trials",
         agent=AgentConfig(
-            import_path="evaluation.harbor.agent:IrisHarborAgent",
+            import_path="evals.harbor.agent:IrisHarborAgent",
             model_name="openai/fixture",
             override_timeout_sec=8 if mode == "timeout" else 90,
             override_setup_timeout_sec=600,

@@ -24,6 +24,7 @@ uv run pytest tests/harness/test_session_history.py
 | 消息 / 模型 / 图片 | [tests/message](../../tests/message)、[tests/providers](../../tests/providers)、[图片处理](../../tests/utils/test_images.py) |
 | 记忆 / 经验 / 目标 / 清单 | [tests/memory](../../tests/memory)、[tests/evolution](../../tests/evolution)、[tests/goal](../../tests/goal)、[tests/todo](../../tests/todo)及 harness 的相关集成测试 |
 | 流式 / 观测 / 语音 | [tests/streaming](../../tests/streaming)、[tests/observability](../../tests/observability)、[tests/speech](../../tests/speech) |
+| Inspect、Harbor 接入与评测汇总 | [评测入口](../../evals/README.md)、[tests/evals](../../tests/evals) |
 
 先定位现有用例和复用的 provider/store 替身，再补一个能复现新需求的测试。不要为了一个消息映射错误搭起完整 UI、远端模型或多服务集成。
 
@@ -42,7 +43,7 @@ uv run pytest tests/harness/test_session_history.py
 
 ## Inspect AI 接入
 
-[evals](../../evals/README.md) 提供仓库级 `iris_solver()`，让 Inspect 调用真实 AgentRunner、投影结果与用量并收尾资源。它不随 Iris Python 包发布，使用时在仓库根目录安装 `eval` 依赖组：
+[Inspect 接入](../../evals/inspect/README.md)提供仓库级 `iris_solver()`，入口为 `evals.inspect.solver`，让 Inspect 调用真实 AgentRunner、投影结果与用量并收尾资源。它不随 Iris Python 包发布，使用时在仓库根目录安装 `eval` 依赖组：
 
 ```shell
 uv sync --group eval
@@ -51,7 +52,7 @@ uv sync --group eval
 当前接入不附带题集、benchmark adapter 或评分器。`eval` 组包含 Inspect AI 和用于取消收尾的 AnyIO；普通 Iris 用户无需安装。安装后可运行接入测试：
 
 ```shell
-uv run --group eval pytest tests/evals/test_iris_solver.py
+uv run --group eval python -m pytest tests/evals/inspect/test_solver.py
 ```
 
 测试使用确定性 provider 和真实 SDK，验证默认输入、回调、状态与用量投影、取消、资源收尾及轨迹归档，不调用真实模型，也不代表 benchmark 成绩。调用 solver 时显式提供 `trajectory_dir`；每个 sample 保存独立的 `trace.json + assets/`，`.eval` 的 `iris_trace` 保留对应结构与索引。
@@ -60,14 +61,16 @@ uv run --group eval pytest tests/evals/test_iris_solver.py
 
 ## Harbor 终端评测接入
 
-[Harbor 接入说明](../../experiments/agentic_rl/evaluation/harbor/README.md)提供独立宿主环境、Iris wheel 安装和容器 SDK 入口。宿主固定 Harbor 0.24.0，容器仅安装 Iris；两套依赖不混装。
+[Harbor 接入说明](../../evals/harbor/README.md)提供独立宿主环境、Iris wheel 安装和容器 SDK 入口。宿主固定 Harbor 0.24.0，容器仅安装 Iris；两套依赖不混装。
 
-SDK 入口测试使用仓库环境，adapter 契约测试使用 `experiments/agentic_rl` 环境。它们分别验证文件/命令执行与取消收尾、Harbor 安装参数与退出协议。测试专用 verifier 用于验证接线，正式题集和评分器另行选择。
+SDK 入口测试使用仓库环境，adapter 契约与离线汇总测试使用 `evals/.venv` 环境，分别通过 `uv run --group eval` 和 `uv run --project evals` 执行。它们验证文件/命令执行与取消收尾、Harbor 安装参数与退出协议、已有结果汇总。测试专用 verifier 用于验证接线，正式题集和评分器另行选择。
+
+[离线汇总](../../evals/reporting/README.md)读取已有 Harbor job，以外部传入的任务清单和运行次数计算结果。具体题集、实验参数和批次配置保存在 `evals/experiments/`，由 `evals/.gitignore` 排除；通用接入和确定性测试 fixture 保留在 `evals/` 与 `tests/evals/`。
 
 真实容器验收需要 Linux Docker 引擎及镜像/依赖下载网络，并显式指定开关：
 
 ```shell
-uv run --project experiments/agentic_rl python -m pytest tests/experiments/harbor/test_integration.py --run-harbor-docker
+uv run --project evals python -m pytest tests/evals/harbor/test_integration.py --run-harbor-docker
 ```
 
 它使用容器内确定性模型服务，经过真实 Harbor → Iris → 文件/命令 → verifier 链路，并在容器销毁后检查归档。默认运行测试时，这组容器场景跳过。

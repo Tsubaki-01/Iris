@@ -72,10 +72,13 @@ class IrisHarborAgent(BaseInstalledAgent):
         await self.ensure_system_dependencies(environment, ("curl", "ca_certificates"))
         await self.exec_as_root(
             environment,
-            f"mkdir -p {INSTALL} {self.iris_logs}",
+            f"mkdir -p {INSTALL}/evals {self.iris_logs}",
         )
         await environment.upload_file(self.iris_wheel, str(INSTALL / self.iris_wheel.name))
-        await environment.upload_dir(Path(__file__).parent.parent, str(INSTALL / "evaluation"))
+        await environment.upload_file(
+            Path(__file__).parent.parent / "__init__.py", str(INSTALL / "evals/__init__.py")
+        )
+        await environment.upload_dir(Path(__file__).parent, str(INSTALL / "evals/harbor"))
         await environment.upload_dir(self.profile_dir, str(INSTALL / "profile"))
         owner = shlex.quote(str(environment.default_user or "root"))
         await self.exec_as_root(
@@ -146,7 +149,7 @@ class IrisHarborAgent(BaseInstalledAgent):
         arguments = [
             str(INSTALL / "venv/bin/python"),
             "-m",
-            "evaluation.harbor.runner",
+            "evals.harbor.runner",
             "--profile",
             str(INSTALL / "profile/agent.yaml"),
             "--model",

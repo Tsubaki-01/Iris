@@ -1,19 +1,11 @@
 [project]
 name = "iris-agent-evaluation"
 version = "0.1.0"
-description = "Repository-level Iris evaluation adapters"
+description = "Harbor host dependencies for repository-level Iris evaluation"
 requires-python = ">=3.12"
 dependencies = [
     "harbor==0.24.0",
 ]
-
-[build-system]
-requires = ["uv_build>=0.11.32,<0.12"]
-build-backend = "uv_build"
-
-[tool.uv.build-backend]
-module-name = "evaluation"
-module-root = ""
 
 [dependency-groups]
 dev = [

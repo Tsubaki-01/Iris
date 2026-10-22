@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from experiments.agentic_rl.evaluation.harbor import results
-from experiments.agentic_rl.evaluation.harbor.runner import run_agent
+from evals.harbor import results
+from evals.harbor.runner import run_agent
 from iris import harness
 from iris.agents import AgentConfig
 from iris.exceptions import IrisProviderError, IrisRunStateError
@@ -56,7 +56,7 @@ def answer(text: str = "完成", *, tool: ToolUseBlock | None = None) -> LLMResp
 @pytest.fixture
 def profile(tmp_path: Path) -> Path:
     """复制正式终端 profile，使模板写入保持在测试目录。"""
-    source = Path("experiments/agentic_rl/evaluation/harbor/profiles/terminal/agent.yaml")
+    source = Path("evals/harbor/profiles/terminal/agent.yaml")
     target = tmp_path / "profile" / "agent.yaml"
     target.parent.mkdir()
     target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")

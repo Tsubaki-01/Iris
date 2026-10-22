@@ -3,7 +3,6 @@ model:
   provider: openai
   name: configured-by-harbor
   api_style: chat_completions
-  temperature: 0
 system: >-
   完成用户给出的终端任务。先检查当前文件和运行环境，通过文件工具与 shell
   实际执行任务，并根据命令结果修正。使用 exec_command 调用任务环境的 Python
@@ -16,16 +15,6 @@ permissions:
   execute: allow
 command:
   mode: native
-context_policy:
-  enabled: true
-  preserve_recent_tool_groups: 2
-  old_result_preview_chars: 512
-  deferred_tools: false
-compaction:
-  input_budget_tokens: 96000
-  keep_recent_ratio: 0.15
-  summary_ratio: 0.05
-  timeout_seconds: 300
 memory:
   enabled: false
 evolution:

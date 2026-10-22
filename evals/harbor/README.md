@@ -8,13 +8,15 @@
 
 ```shell
 uv build --out-dir dist
-uv sync --project experiments/agentic_rl
-uv run --project experiments/agentic_rl harbor agent schema evaluation.harbor.agent:IrisHarborAgent
+uv sync --project evals
+uv run --project evals python -m harbor.cli.main agent schema evals.harbor.agent:IrisHarborAgent
 ```
 
-Harbor 宿主只依赖 Harbor，Iris wheel 安装到任务容器自己的 Python 3.12 环境。两者依赖链的 websockets 版本要求不一致，因此分开安装。
+`evals/pyproject.toml` 管理 Harbor 宿主依赖，环境位于 `evals/.venv`，不安装评测包。
+从仓库根目录使用 `python -m harbor.cli.main` 启动 CLI，使其能导入 `evals.harbor`。
+Iris wheel 安装到任务容器自己的 Python 3.12 环境。两者依赖链的 websockets 版本要求不一致，因此分开安装。
 
-在所选任务的 `harbor run` 中，以 `-a evaluation.harbor.agent:IrisHarborAgent` 指定接入，`-m provider/model` 选择主模型，使用 `--ak` 传入下列参数：
+在所选任务的 `harbor run` 中，以 `-a evals.harbor.agent:IrisHarborAgent` 指定接入，`-m provider/model` 选择主模型，使用 `--ak` 传入下列参数：
 
 | 参数 | 含义 |
 | --- | --- |
@@ -31,8 +33,8 @@ Harbor 宿主只依赖 Harbor，Iris wheel 安装到任务容器自己的 Python
 宿主契约测试与 SDK 入口测试分别在各自依赖环境中运行：
 
 ```shell
-uv run --project experiments/agentic_rl python -m pytest tests/experiments/harbor/test_agent.py
-uv run --group eval python -m pytest tests/experiments/harbor/test_runner.py
+uv run --project evals python -m pytest tests/evals/harbor/test_agent.py
+uv run --group eval python -m pytest tests/evals/harbor/test_runner.py
 ```
 
 ## 真实容器验收
@@ -40,8 +42,8 @@ uv run --group eval python -m pytest tests/experiments/harbor/test_runner.py
 启用 Linux Docker 引擎，并允许下载测试镜像、Python 与 wheel 依赖后，从仓库根目录执行：
 
 ```shell
-uv run --project experiments/agentic_rl python -m pytest \
-  tests/experiments/harbor/test_integration.py --run-harbor-docker
+uv run --project evals python -m pytest \
+  tests/evals/harbor/test_integration.py --run-harbor-docker
 ```
 
 测试构建当前工作树的 Iris wheel，经 Harbor 的 Trial 生命周期完成安装、运行、验收和容器删除。模型请求由容器内确定性 HTTP 服务回答；实际文件工具、命令、SQLite、SIGTERM 和 verifier 都走真实实现。
@@ -50,11 +52,13 @@ fixture 使用 `/task-project` 工作目录和 Python 3.10，Iris 使用独立 P
 
 ## 容器入口
 
-Linux 环境先安装本仓库构建的 Iris wheel，并将 `evaluation/` 放入 Python 可导入目录。使用独立解释器启动，不激活 venv，不改变任务自己的 PATH：
+Linux 环境先安装本仓库构建的 Iris wheel。adapter 将 `evals/__init__.py` 和 `evals/harbor/`
+上传到 `/installed-agent/iris/evals/`，自包含 profile 上传到 `/installed-agent/iris/profile/`。
+使用独立解释器启动，不激活 venv，不改变任务自己的 PATH：
 
 ```shell
-/installed-agent/iris/venv/bin/python -m evaluation.harbor.runner \
-  --profile /installed-agent/iris/evaluation/harbor/profiles/terminal/agent.yaml \
+PYTHONPATH=/installed-agent/iris /installed-agent/iris/venv/bin/python -m evals.harbor.runner \
+  --profile /installed-agent/iris/profile/agent.yaml \
   --model openai/example-model \
   --instruction-file /installed-agent/iris/instruction.txt \
   --workspace /task-project \
@@ -68,7 +72,9 @@ Linux 环境先安装本仓库构建的 Iris wheel，并将 `evaluation/` 放入
 profile 在容器内加载，workspace 使用任务实际目录；命名模板写到 profile 旁的
 `runtime-prompts/`，避免修改任务代码仓库。终端配置开放明确的文件和命令工具，默认关闭长期记忆、Goal、Todo 和自动经验维护。
 
-terminal profile 显式固定上下文回读策略与压缩参数；`trace.json` 和 `result.json` 的 `configuration` 保存本次实际采用值，便于离线比较不同 profile。
+terminal profile 是通用终端示例，采样、上下文和压缩参数沿用 Iris 默认配置。
+具体实验的参数写入 `evals/experiments/` 下的自包含 profile，通过 `--ak` 的 `profile_dir` 参数指定。
+`trace.json` 和 `result.json` 的 `configuration` 保存实际采用值，便于离线比较。
 
 ## 停止与结果
 
@@ -85,4 +91,8 @@ SIGTERM 转为 SDK 停止请求：准备阶段取消原调用，已准入的运�
 
 adapter 确认收尾回执后才交回 Harbor；读取回执期间被取消也会完成同样的确认。原始结果与清理回执在归档前写入，若归档后的状态回写失败，保留先前回执和原退出码，并在 stderr 中记录写入错误。
 
-本目录不定义正式题集或评分器。测试中的 verifier 仅验证接入链路；公共 benchmark 和付费模型运行由实验另行选择。
+接入层不定义评分器，测试中的 verifier 仅验证接入链路。
+具体题集、实验 profile、批次配置和参数保存在 Git 忽略的 `evals/experiments/`，实际运行采用对应任务的 verifier。
+已有结果通过[离线汇总入口](../reporting/README.md)读取。
+
+返回：[评测入口](../README.md)。

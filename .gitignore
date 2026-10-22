@@ -61,7 +61,7 @@ __pypackages__/
 
 # Lock files & Package Managers
 uv.lock
-!experiments/agentic_rl/uv.lock
+!evals/uv.lock
 .python-version
 # Pipfile.lock      # Uncomment if needed per pipenv#598
 # poetry.lock       # Uncomment for binary packages (https://python-poetry.org/docs/basic-usage/)

@@ -13,10 +13,11 @@ import pytest
 
 pytest.importorskip("harbor")
 
-from evaluation.harbor.agent import IrisHarborAgent
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
+
+from evals.harbor.agent import IrisHarborAgent
 
 
 class Environment:
@@ -64,7 +65,7 @@ class Environment:
             return ExecResult(return_code=0)
         if command.startswith("kill -0"):
             return ExecResult(return_code=0 if self.alive else 1)
-        if "-m evaluation.harbor.runner" in command:
+        if "-m evals.harbor.runner" in command:
             self.running.set()
             if self.block:
                 self.alive = True
@@ -100,13 +101,20 @@ async def test_install_and_run_keep_task_python_and_cwd(agent: IrisHarborAgent) 
     commands = [command for command, _ in environment.commands]
     assert not any("activate" in command or "export PATH=" in command for command in commands)
     command, options = next(
-        item for item in environment.commands if "-m evaluation.harbor.runner" in item[0]
+        item for item in environment.commands if "-m evals.harbor.runner" in item[0]
     )
     assert options["cwd"] == "/tasks/project with spaces"
     assert options["env"] == {"PYTHONPATH": "/installed-agent/iris"}
     assert "包含引号" not in command
     assert "/venv/bin/python" in command
     assert any(target.endswith("instruction.txt") for _, target in environment.uploads)
+    assert (Path("evals/__init__.py").resolve(), "/installed-agent/iris/evals/__init__.py") in (
+        environment.uploads
+    )
+    assert (Path("evals/harbor").resolve(), "/installed-agent/iris/evals/harbor") in (
+        environment.uploads
+    )
+    assert all(source.resolve() != Path("evals").resolve() for source, _ in environment.uploads)
     assert agent.extra_env["IRIS_PROVIDER_API_KEYS__OPENAI"] == "test-key"
 
 
