@@ -124,6 +124,10 @@ SDK 类型和 `ContextAccessPort.read(session_id, params, workspace_root)` / `se
 
 压缩 token 记入 `RunUsage.compaction`，主模型计数另存。具体预算投影见[运行参考](runtime.md)。
 
+默认摘要模板区分用户要求、助手采用的解释和已验证事实，并在后续批次中保留这些归属。
+规则与示例冲突时同时保留两者；助手已经按某个解释写出代码，不会使该解释成为任务要求。
+验证结论应说明实际检查范围，部分样例或自编测试通过不能替代未检查要求的验收。
+
 ## 项目命名模板
 
 `prompts.root` 默认 `.iris/prompts`，相对 root workspace。`PromptSource.initialize(workspace_root, root)` 只补齐缺失模板，不覆盖已有内容。
