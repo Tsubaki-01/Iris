@@ -70,8 +70,8 @@ def _read_review_decisions(path: Path) -> dict[str, _ReviewDecision]:
             raise ValueError(f"{prefix}: raw_reward 必须是数值或 null")
         if (status == "missing") != (reward is None):
             raise ValueError(f"{prefix}: {status} 与 raw_reward 不一致，只有 missing 使用 null")
-        if status == "valid" and reward not in (0, 1):
-            raise ValueError(f"{prefix}: valid 必须对应原始二值 raw_reward")
+        if status == "valid" and not 0 <= reward <= 1:
+            raise ValueError(f"{prefix}: valid 必须对应 [0, 1] 内的有限 raw_reward")
         for field in ("category", "reason"):
             if not isinstance(value[field], str) or not value[field].strip():
                 raise ValueError(f"{prefix}: {field} 必须是非空字符串")
@@ -174,8 +174,9 @@ def _trial_row(path: Path) -> dict[str, Any]:
     config = result.get("config") or _read(path / "config.json")
     task_id = result.get("task_name")
     if task_id is None:
-        task_id = config["task"].get("name") or (
-            config["task"]["path"].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        task_id = (
+            config["task"].get("name")
+            or (config["task"]["path"].replace("\\", "/").rstrip("/").rsplit("/", 1)[-1])
         )
     row = _empty_row(task_id)
     iris_dir = path / "agent/iris"
@@ -238,7 +239,8 @@ def _trial_row(path: Path) -> dict[str, Any]:
                 "NonZeroAgentExitCodeError",
             )
         )
-        row["score_status"] = "valid" if reward in (0, 1) and not problem else "review_required"
+        valid_reward = type(reward) in (int, float) and 0 <= reward <= 1
+        row["score_status"] = "valid" if valid_reward and not problem else "review_required"
     if iris:
         row["archive_status"] = iris["trace_status"]
         missing = [
@@ -257,7 +259,7 @@ def _trial_row(path: Path) -> dict[str, Any]:
     return row
 
 
-def _ratio(numerator: int, denominator: int) -> float | None:
+def _ratio(numerator: int | float, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
@@ -325,6 +327,7 @@ def summarize_job(
             "planned": attempts,
             "valid_scored": len(valid),
             "passed": sum(r["reward"] == 1 for r in valid),
+            "mean_reward": _ratio(sum(r["reward"] for r in valid), len(valid)),
         }
     extra.extend(row for group in grouped.values() for row in group)
     valid = [row for row in rows if row["score_status"] == "valid"]
@@ -360,6 +363,9 @@ def summarize_job(
             "started": len(started),
             "not_started": len(rows) - len(started),
             "valid_scored": len(valid),
+            "invalid_scored": sum(row["score_status"] == "invalid" for row in rows),
+            "missing_scores": sum(row["score_status"] == "missing" for row in rows),
+            "review_required": sum(row["score_status"] == "review_required" for row in rows),
             "passed": passed,
             "exceptions": sum(row["exception_type"] is not None for row in rows),
             "archive_complete": complete,
@@ -374,6 +380,7 @@ def summarize_job(
             "review_materials_coverage": _ratio(review_complete, len(started)),
         },
         "pass_at_1": _ratio(passed, len(rows)) if len(valid) == len(rows) else None,
+        "mean_reward": _ratio(sum(row["reward"] for row in valid), len(valid)),
         "by_task": by_task,
         "metrics": metrics,
         "trials": rows,
@@ -384,21 +391,26 @@ def summarize_job(
 def _markdown(report: dict[str, Any]) -> str:
     counts = report["counts"]
     n, v, p = (counts[key] for key in ("planned", "valid_scored", "passed"))
+    mean_reward = report["mean_reward"]
     lines = [
         f"# {report['job_name']} 离线汇总",
         "",
-        f"计划成功：{p} / {n}；有效评分成功：{p} / {v}；有效评分覆盖：{v} / {n}。",
+        f"计划完全通过：{p} / {n}；有效评分完全通过：{p} / {v}；有效评分覆盖：{v} / {n}。",
+        f"有效评分平均 reward：{mean_reward if mean_reward is not None else '未知'}。",
+        f"无效评分 {counts['invalid_scored']}，缺失评分 {counts['missing_scores']}，"
+        f"待复核 {counts['review_required']}。",
         f"已启动 {counts['started']}，未启动 {counts['not_started']}，异常 {counts['exceptions']}，"
         f"额外 trial {counts['extra_trials']}。",
         f"轨迹与评分材料可复查：{counts['review_materials_complete']} / {counts['started']}；"
         f"Iris 归档完整：{counts['archive_complete']} / {counts['started']}。",
         "",
-        "| task | 通过 / 计划 | 有效评分 |",
-        "| --- | ---: | ---: |",
+        "| task | 完全通过 / 计划 | 有效评分 | 平均 reward |",
+        "| --- | ---: | ---: | ---: |",
     ]
     for task, values in report["by_task"].items():
         lines.append(
-            f"| {task} | {values['passed']} / {values['planned']} | {values['valid_scored']} |"
+            f"| {task} | {values['passed']} / {values['planned']} | {values['valid_scored']} | "
+            f"{values['mean_reward'] if values['mean_reward'] is not None else ''} |"
         )
     lines.extend(
         [
@@ -466,6 +478,7 @@ def _markdown(report: dict[str, Any]) -> str:
             "未知费用和用量保持空值；已知合计仅覆盖对应数量的 trial。",
             "occurrence 是任务内按开始时间排序的展示序号，不代表受控 seed。",
             "额外 trial 不进入计划统计。",
+            "平均 reward 只覆盖有效评分；完全通过仅计 reward = 1，部分分数不计为完全通过。",
             "review_required 保留原始 reward，需复核错误和 verifier 日志；不计入有效评分。",
             "提供显式复核时采用 reviewed_score_status；否则采用 automatic_score_status。",
             "复核只改变评分有效性，raw_reward 用于核对，不替换原始 reward；重跑标记不触发执行。",

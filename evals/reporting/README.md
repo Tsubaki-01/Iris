@@ -46,7 +46,7 @@ uv run --project evals python -m evals.reporting "$env:EVAL_JOB_DIR" --manifest 
 
 每条决定的五个字段均必填：
 
-- `reviewed_score_status`：`valid` 表示原始二值评分有效；`invalid` 表示已有评分无效；`missing` 表示没有评分。
+- `reviewed_score_status`：`valid` 表示原始评分是 `[0, 1]` 内的有限数值且评分有效；`invalid` 表示已有评分无效；`missing` 表示没有评分。
 - `raw_reward`：与原始 trial 的 reward 一致，只有 `missing` 使用 `null`。它用于核对复核对象，不能覆盖原始分数。
 - `category`、`reason`：非空的分类与复核依据，随报告保存。
 - `retry_as_infrastructure`：布尔值，只记录重跑资格，不会触发任务执行。
@@ -65,7 +65,11 @@ Python API `summarize_job()` 新增可选参数 `review_decisions_path: Path | N
 输出为 `trials.csv`、`summary.json` 和 `report.md`，原始材料路径相对报告目录保存。
 
 - 计划分母由任务清单和 attempts 确定；未启动任务保留空记录，额外 trial 单列。
-- 当前成功统计采用 verifier 的二值 `reward`：有效 1 分为通过，有效 0 分为失败，缺失不补 0。
+- 有效 `reward` 接受 `[0, 1]` 内的有限数值，保留部分得分；只有有效 1 分计为完全通过，缺失不补 0。
+- `mean_reward` 是计划 trial 中有效评分的算术平均值；没有有效评分时为 `null`。每题的 `by_task` 也提供该字段。
+- `counts.passed` 统计完全通过数；`rates.planned_success` 和 `rates.scored_success` 分别以计划数和有效评分数为分母。
+  `pass_at_1` 仅在全部计划 trial 都有有效评分时给出完全通过比例，否则为 `null`。
+- `counts.valid_scored`、`invalid_scored`、`missing_scores` 和 `review_required` 分别统计计划 trial 的有效、无效、缺失和待复核评分；四者合计为 `counts.planned`。
 - `automatic_score_status` 保留自动分类；`reviewed_score_status` 保留显式复核状态，未复核时为空。
   `score_status` 是统计采用的状态：有复核时采用复核，否则采用自动分类。
 - `reward` 和 `rewards` 始终是原始分数；复核的 `review_category`、`review_reason` 和 `retry_as_infrastructure` 独立保存。
@@ -75,6 +79,9 @@ Python API `summarize_job()` 新增可选参数 `review_decisions_path: Path | N
 
 JSON 和 CSV 保存上述状态与复核字段；Markdown 另列显式复核表，展示自动判断、采用的复核状态及依据。
 `invalid`、`missing` 和仍待复核的 `review_required` 均不进入有效评分数，但继续保留在计划分母中。
+它们也不参与 `mean_reward`。例如计划 4 次运行得到 `1`、`0.5`、`0` 和缺失评分时，
+平均 reward 为 `0.5`，计划完全通过率为 `1/4`，有效评分完全通过率为 `1/3`，评分覆盖为 `3/4`。
+额外重跑仍单列，不改变这些统计。
 
 Iris 轨迹归档与可复查覆盖分别统计：后者还要求 trial 结果、verifier 输出日志，以及已有评分对应的原始 reward 文件。
 任务产物采集独立展示。Harbor artifact manifest 的 `failed` 无法单独区分源不存在和下载失败，

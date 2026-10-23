@@ -102,6 +102,9 @@ def test_plan_denominator_and_independent_statuses(tmp_path: Path) -> None:
         "started": 4,
         "not_started": 2,
         "valid_scored": 3,
+        "invalid_scored": 0,
+        "missing_scores": 3,
+        "review_required": 0,
         "passed": 2,
         "exceptions": 1,
         "archive_complete": 3,
@@ -125,6 +128,80 @@ def test_plan_denominator_and_independent_statuses(tmp_path: Path) -> None:
     assert budget["cost_usd"] is None
     assert report["metrics"]["cost_usd"] == {"known_sum": None, "known_trials": 0}
     assert report["metrics"]["agent_seconds"]["median"] == 20
+
+
+def test_partial_rewards_contribute_to_mean_but_not_full_passes(tmp_path: Path) -> None:
+    """合法部分分数进入均值，缺分与额外重跑都不参与均值。"""
+    job = tmp_path / "job"
+    _trial(job, "01-full", "a", reward=1)
+    partial = _trial(job, "02-partial", "a", reward=0.5)
+    _trial(job, "03-extra", "a", reward=1)
+    _trial(job, "zero", "b", reward=0)
+    _trial(job, "missing", "b", reward=None)
+    before = (partial / "result.json").read_bytes()
+
+    report = summarize_job(job, task_ids=["a", "b", "c"], attempts=2)
+
+    row = next(row for row in report["trials"] if row["trial_name"] == "02-partial")
+    assert row["automatic_score_status"] == row["score_status"] == "valid"
+    assert row["reward"] == 0.5
+    assert report["counts"]["valid_scored"] == 3
+    assert report["counts"]["passed"] == 1
+    assert report["mean_reward"] == 0.5
+    assert report["rates"]["planned_success"] == 1 / 6
+    assert report["rates"]["scored_success"] == 1 / 3
+    assert report["rates"]["score_coverage"] == 3 / 6
+    assert report["by_task"]["a"]["mean_reward"] == 0.75
+    assert report["by_task"]["b"]["mean_reward"] == 0
+    assert report["by_task"]["c"]["mean_reward"] is None
+
+    output = tmp_path / "report"
+    write_report(report, output)
+    saved = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert saved["mean_reward"] == 0.5
+    with (output / "trials.csv").open(encoding="utf-8-sig", newline="") as stream:
+        saved_partial = next(row for row in csv.DictReader(stream) if row["reward"] == "0.5")
+    assert saved_partial["score_status"] == "valid"
+    markdown = (output / "report.md").read_text(encoding="utf-8")
+    assert "有效评分平均 reward：0.5" in markdown
+    assert "完全通过" in markdown
+    assert "| a | 1 / 2 | 2 | 0.75 |" in markdown
+    assert (partial / "result.json").read_bytes() == before
+
+
+def test_explicit_review_can_accept_partial_reward(tmp_path: Path) -> None:
+    """正常 verifier 的部分分数可在执行异常复核后计入，原始分数保持不变。"""
+    job = tmp_path / "job"
+    _trial(job, "partial", "a", reward=0.4, execution_error="provider output ended")
+    reviews_path = tmp_path / "reviews.json"
+    _json(reviews_path, {"partial": _review_decision(0.4, "valid")})
+
+    report = summarize_job(job, task_ids=["a"], attempts=1, review_decisions_path=reviews_path)
+
+    row = report["trials"][0]
+    assert row["automatic_score_status"] == "review_required"
+    assert row["reviewed_score_status"] == row["score_status"] == "valid"
+    assert row["reward"] == 0.4
+    assert report["mean_reward"] == 0.4
+    assert report["counts"]["passed"] == 0
+    assert report["pass_at_1"] == 0
+
+
+@pytest.mark.parametrize("reward", [-0.1, 1.1, float("nan"), float("inf"), True])
+def test_invalid_reward_cannot_be_counted_as_valid(tmp_path: Path, reward: float) -> None:
+    """外部 reward 只有有限的区间内数值可计分，复核不能将其改成有效。"""
+    job = tmp_path / "job"
+    _trial(job, "invalid", "a", reward=reward)
+    report = summarize_job(job, task_ids=["a"], attempts=1)
+    assert report["trials"][0]["score_status"] == "review_required"
+    assert report["counts"]["valid_scored"] == 0
+    assert report["counts"]["review_required"] == 1
+    assert report["mean_reward"] is None
+
+    reviews_path = tmp_path / "reviews.json"
+    _json(reviews_path, {"invalid": _review_decision(reward, "valid")})
+    with pytest.raises(ValueError, match="raw_reward"):
+        summarize_job(job, task_ids=["a"], attempts=1, review_decisions_path=reviews_path)
 
 
 @pytest.mark.parametrize("exception", ["VerifierTimeoutError", "EnvironmentBuildError"])
@@ -363,6 +440,8 @@ def test_explicit_reviews_change_validity_without_changing_execution_or_reward(
     rows = {row["trial_name"]: row for row in report["trials"]}
     assert report["counts"]["planned"] == 3
     assert report["counts"]["valid_scored"] == 2
+    assert report["counts"]["invalid_scored"] == 1
+    assert report["counts"]["missing_scores"] == report["counts"]["review_required"] == 0
     assert report["counts"]["passed"] == 1
     assert report["rates"]["scored_success"] == 1 / 2
     assert report["by_task"]["a"]["valid_scored"] == 1
