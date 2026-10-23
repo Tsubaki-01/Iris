@@ -8,7 +8,7 @@
 ## 启动与普通输入
 
 ```bash
-iris chat agent.yaml --session-id work --max-steps 8
+iris chat agent.yaml --session-id work --max-steps 20
 ```
 
 `agent.yaml` 的模型和工具使用 [agents 配置](../agents/README.md)。可通过 `--env-file`

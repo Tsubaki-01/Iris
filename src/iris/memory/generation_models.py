@@ -27,10 +27,10 @@ class MemoryGenerationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     flush_input_budget_tokens: int = Field(default=32000, gt=0)
-    flush_output_budget_tokens: int = Field(default=4000, gt=0)
+    flush_output_budget_tokens: int = Field(default=8000, gt=0)
     flush_reasoning_effort: str | None = Field(default=None, min_length=1)
     dream_input_budget_tokens: int = Field(default=32000, gt=0)
-    dream_output_budget_tokens: int = Field(default=4000, gt=0)
+    dream_output_budget_tokens: int = Field(default=8000, gt=0)
 
 
 class MemoryConsumedRange(BaseModel):

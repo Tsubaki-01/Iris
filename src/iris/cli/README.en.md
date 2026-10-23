@@ -9,7 +9,7 @@ The CLI does not own authoritative run, Goal, or history state.
 ## Starting and ordinary input
 
 ```bash
-iris chat agent.yaml --session-id work --max-steps 8
+iris chat agent.yaml --session-id work --max-steps 20
 ```
 
 Models and tools follow [Agent configuration](../agents/README.en.md). `--env-file` selects a dotenv

@@ -58,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     chat = subparsers.add_parser("chat", help="启动多轮交互式 Agent chat")
     chat.add_argument("agent_config", help="agent.yaml 路径")
     chat.add_argument("--session-id", default="cli", help="会话 ID")
-    chat.add_argument("--max-steps", type=int, default=8, help="每轮最大 provider 步数")
+    chat.add_argument("--max-steps", type=int, default=20, help="每轮最大 provider 步数")
     chat.add_argument("--env-file", default=None, help="可选 dotenv 文件路径")
     chat.add_argument("--no-tools", action="store_true", help="不向 provider 暴露工具")
     return parser

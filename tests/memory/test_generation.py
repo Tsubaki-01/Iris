@@ -92,6 +92,31 @@ def service(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "budgets,expected",
+    [
+        ({}, [8000, 8000]),
+        ({"flush_output_budget_tokens": 1024, "dream_output_budget_tokens": 2048}, [1024, 2048]),
+    ],
+)
+async def test_generation_output_budgets_reach_stage_requests(
+    tmp_path: Path, budgets: dict[str, int], expected: list[int]
+) -> None:
+    """默认额度与显式覆盖分别用于对应阶段，不混用主请求预算。"""
+    provider = Provider(
+        lambda source: (
+            {"observations": []} if "records" in source else {"operations": [], "resolutions": []}
+        )
+    )
+    memory = service(tmp_path, provider, **budgets)
+    memory.observe(MemoryObserveInput(text="本次经历"))
+    memory.remember(MemoryWriteInput(text="已有事实", reason="seed"))
+    await memory.flush("project")
+    await memory.dream("project")
+    assert [request.max_tokens for request in provider.requests] == expected
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("in_cycle", [False, True])
 async def test_generation_purposes_and_results_belong_only_to_a_memory_cycle(
     tmp_path: Path,

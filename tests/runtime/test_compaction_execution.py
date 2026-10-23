@@ -151,6 +151,7 @@ async def test_compaction_accepts_only_smaller_complete_request_within_trigger(
     )
 
     assert len(port.compaction_usages) == 1
+    assert provider.requests[0].max_tokens == 9600
     assert port.compaction_usages[0].total_tokens == 22
     assert port.events.count("reserve_model_step") == 1
     assert len(provider.requests) == (2 if accepted else 1)

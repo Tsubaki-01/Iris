@@ -106,7 +106,7 @@ uv run python run_with_context.py
 compaction:
   input_budget_tokens: 32000
   keep_recent_ratio: 0.15
-  summary_ratio: 0.05
+  summary_ratio: 0.10
 context_policy:
   enabled: true
   preserve_recent_tool_groups: 2

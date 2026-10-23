@@ -387,7 +387,7 @@ class MemoryOverviewConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input_budget_tokens: int = Field(default=96000, gt=0)
-    max_tokens: int = Field(default=4096, gt=0)
+    max_tokens: int = Field(default=8192, gt=0)
     system_budget_ratio: float = Field(default=0.02, gt=0, le=1)
 
 

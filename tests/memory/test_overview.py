@@ -57,25 +57,32 @@ class _Provider:
 
 
 def _service(
-    tmp_path: Path, provider: _Provider | None = None, *, observability: Observability | None = None
+    tmp_path: Path,
+    provider: _Provider | None = None,
+    *,
+    observability: Observability | None = None,
+    **budgets: int,
 ) -> MemoryService:
     return MemoryService(
         SQLiteMemoryStore(tmp_path / "memory.db"),
         mirror=FileMemoryMirror(tmp_path / "mirror"),
         overview_provider=provider,
         overview_model="fake-model" if provider is not None else None,
-        overview_config=MemoryOverviewConfig(input_budget_tokens=100),
+        overview_config=MemoryOverviewConfig(input_budget_tokens=100, **budgets),
         prompt_source=PromptSource.initialize(tmp_path),
         observability=observability,
     )
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("budgets,expected", [({}, 8192), ({"max_tokens": 512}, 512)])
 async def test_generation_uses_complete_active_namespace_and_two_part_overview(
     tmp_path: Path,
+    budgets: dict[str, int],
+    expected: int,
 ) -> None:
     provider = _Provider()
-    service = _service(tmp_path, provider)
+    service = _service(tmp_path, provider, **budgets)
     for index in range(105):
         service.store.add_item(
             item := MemoryItem(
@@ -97,7 +104,7 @@ async def test_generation_uses_complete_active_namespace_and_two_part_overview(
         secret not in source
         for secret in ("private-secret", "episode-secret", "observation-secret")
     )
-    assert request.tools == [] and request.max_tokens == 4096
+    assert request.tools == [] and request.max_tokens == expected
     assert request.model == "fake-model"
     assert result.item_count == 105 and result.source_revision == 105
     assert result.published and result.usage["total_tokens"] == 24

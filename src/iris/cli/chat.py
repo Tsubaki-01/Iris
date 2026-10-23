@@ -154,7 +154,7 @@ class ChatOptions:
 
     config_path: Path
     session_id: str = "cli"
-    max_steps: int = 8
+    max_steps: int = 20
     env_file: Path | None = None
     include_tools: bool = True
 

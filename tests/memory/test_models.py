@@ -116,7 +116,7 @@ def test_overview_config_keeps_generation_and_window_budgets_separate() -> None:
     """生成输入、生成输出和后续窗口比例各自保留明确默认值。"""
     config = MemoryOverviewConfig()
     assert config.input_budget_tokens == 96000
-    assert config.max_tokens == 4096
+    assert config.max_tokens == 8192
     assert config.system_budget_ratio == 0.02
     assert MemoryOverviewConfig(input_budget_tokens=1, max_tokens=1, system_budget_ratio=1)
 

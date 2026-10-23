@@ -19,7 +19,7 @@ class CompactionConfig(BaseModel):
 
     input_budget_tokens: int = Field(default=96000, gt=0)
     keep_recent_ratio: float = Field(default=0.15, gt=0, lt=1, allow_inf_nan=False)
-    summary_ratio: float = Field(default=0.05, gt=0, lt=1, allow_inf_nan=False)
+    summary_ratio: float = Field(default=0.10, gt=0, lt=1, allow_inf_nan=False)
     timeout_seconds: float = Field(default=300, gt=0, allow_inf_nan=False)
 
     model_config = ConfigDict(extra="forbid", frozen=True)

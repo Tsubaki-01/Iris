@@ -262,7 +262,7 @@ BCI、reasoning 和记忆读回正文不作为新证据；观察引用具体原�
 自动采集的 Episode 以顶层 `source_id` 保存 run ID，metadata 保存 lifecycle 来源 ID；
 待处理经历读取用这两个字段关联来源的最终 outcome。
 
-默认 flush/dream 输入预算各为 32,000 tokens，输出各为 4,000 tokens。可在 `generation` 下设置
+默认 flush/dream 输入预算各为 32,000 tokens，输出各为 8,000 tokens。可在 `generation` 下设置
 `flush_input_budget_tokens`、`flush_output_budget_tokens`、`dream_input_budget_tokens`、
 `dream_output_budget_tokens`。长记录按固定片段消费；dream 以完整比较材料包为单位，放不下则
 保留 blocked 并继续无关输入。依赖知识更新、重建 Agent 后预算改变或显式
@@ -346,7 +346,7 @@ result = await service.refresh_overview("project")
 documents = await service.aload_overviews(["project"])
 ```
 
-`MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 4,096 tokens。完整输入超预算
+`MemoryOverviewConfig` 的生成输入预算为 96,000 tokens、输出为 8,192 tokens。完整输入超预算
 就报错，不截断或分批摘要。模型只返回含 `core_facts`、`knowledge_scope` 的 JSON：前者允许
 为空，后者必须非空。只有正常完成并解析成功的结果才发布；异常、截断或文件写失败保留旧文件，
 已知模型 usage 留在错误上下文中。空 active Item 快照不调用模型，直接发布“当前无记忆”。

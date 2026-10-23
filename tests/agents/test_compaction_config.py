@@ -23,12 +23,12 @@ def test_compaction_defaults_and_derived_budgets() -> None:
     assert config.compaction.model_dump() == {
         "input_budget_tokens": 96000,
         "keep_recent_ratio": 0.15,
-        "summary_ratio": 0.05,
+        "summary_ratio": 0.10,
         "timeout_seconds": 300,
     }
     assert config.compaction.trigger_tokens == 76800
     assert config.compaction.keep_recent_tokens == 14400
-    assert config.compaction.summary_tokens == 4800
+    assert config.compaction.summary_tokens == 9600
 
 
 def test_compaction_sdk_override_keeps_recent_target_soft() -> None:

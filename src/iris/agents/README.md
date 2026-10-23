@@ -281,7 +281,7 @@ MCP 工具统一标记 deferred；MCP 仍在执行前完整连接和发现。已
 compaction:
   input_budget_tokens: 96000
   keep_recent_ratio: 0.15
-  summary_ratio: 0.05
+  summary_ratio: 0.10
   timeout_seconds: 300
 ```
 

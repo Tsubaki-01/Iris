@@ -16,14 +16,14 @@
 | `memory.read_namespaces` | `list[str] = ["project"]` | 模型可读范围；空列表表示不读取任何 namespace；每项必须含非空白字符 |
 | `memory.write_namespace` | `str = "project"` | 写工具及自动捕获的单一目标 namespace，必须含非空白字符 |
 | `memory.overview.input_budget_tokens` | `int = 96000` | 显式概览生成的输入预算，必须大于 0 |
-| `memory.overview.max_tokens` | `int = 4096` | 概览生成输出上限，必须大于 0 |
+| `memory.overview.max_tokens` | `int = 8192` | 概览生成输出上限，必须大于 0 |
 | `memory.overview.system_budget_ratio` | `float = 0.02` | 所有 namespace 概览共用 `compaction.input_budget_tokens × ratio` 额度；取值 `(0, 1]` |
 | `memory.generation.enabled` | `bool = false` | 开启 Run 材料捕获与宿主自动维护；SDK 需绑定协调器 |
 | `memory.generation.flush_input_budget_tokens` | `int = 32000` | flush 输入预算，必须大于 0 |
-| `memory.generation.flush_output_budget_tokens` | `int = 4000` | flush 输出预算，必须大于 0 |
+| `memory.generation.flush_output_budget_tokens` | `int = 8000` | flush 输出预算，必须大于 0 |
 | `memory.generation.flush_reasoning_effort` | `str \| null = null` | 仅传给 flush 的 `reasoning_effort`；非空字符串，取值由所选模型支持；null 不传，不继承主模型选项 |
 | `memory.generation.dream_input_budget_tokens` | `int = 32000` | dream 输入预算，必须大于 0 |
-| `memory.generation.dream_output_budget_tokens` | `int = 4000` | dream 输出预算，必须大于 0 |
+| `memory.generation.dream_output_budget_tokens` | `int = 8000` | dream 输出预算，必须大于 0 |
 
 `memory.generation.enabled` 不取代 `memory.enabled`。所有生成预算都是对应独立请求的额度，概览占用比例则用于主模型请求的窗口采用。新会话首次输入、成功压缩采用概览；普通后续 Run 和恢复重用持久窗口。完整概览超额时尝试完整知识范围，知识范围仍超额抛出 `IrisContextError`。
 

@@ -309,7 +309,7 @@ from new evidence; observations reference stable records and half-open character
 An automatically captured Episode keeps the run ID in top-level `source_id` and the lifecycle source
 ID in metadata. Pending-Episode reads use those fields to attach the source's final outcome.
 
-Flush and dream each default to 32,000 input tokens and 4,000 output tokens. Configure these through
+Flush and dream each default to 32,000 input tokens and 8,000 output tokens. Configure these through
 `flush_input_budget_tokens`, `flush_output_budget_tokens`, `dream_input_budget_tokens`, and
 `dream_output_budget_tokens` under `generation`. Flush splits long records into fixed spans. Dream
 budgets complete comparison packages, preserving oversized inputs as blocked while processing
@@ -401,7 +401,7 @@ result = await service.refresh_overview("project")
 documents = await service.aload_overviews(["project"])
 ```
 
-`MemoryOverviewConfig` defaults to a 96,000-token generation input budget and 4,096 output tokens.
+`MemoryOverviewConfig` defaults to a 96,000-token generation input budget and 8,192 output tokens.
 An oversized complete snapshot fails without truncation or batching. One normally completed JSON
 response must contain `core_facts` and `knowledge_scope`; facts may be empty, scope must not be.
 Invalid or incomplete responses and publication errors preserve the previous complete file, with

@@ -42,6 +42,23 @@ def test_main_dispatches_only_chat(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_main_and_chat_options_default_to_twenty_model_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """命令入口和直接构造选项采用相同默认模型步数。"""
+    cli_main = importlib.import_module("iris.cli.main")
+    captured: list[ChatOptions] = []
+
+    def fake_run_chat(options: ChatOptions) -> int:
+        captured.append(options)
+        return 0
+
+    monkeypatch.setattr(cli_main, "run_chat", fake_run_chat)
+    assert cli_main.main(["chat", "agent.yaml"]) == 0
+    assert captured[0].max_steps == 20
+    assert ChatOptions(config_path=Path("agent.yaml")).max_steps == 20
+
+
 def test_main_prints_unicode_to_utf8_when_stdout_defaults_to_gbk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

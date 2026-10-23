@@ -12,14 +12,14 @@ iris chat AGENT_CONFIG [--session-id ID] [--max-steps N]
 从源码环境执行时加 `uv run`：
 
 ```powershell
-uv run iris chat examples/chat/agent.yaml --session-id example --max-steps 8
+uv run iris chat examples/chat/agent.yaml --session-id example --max-steps 20
 ```
 
 | 参数 | 默认 | 含义 |
 | --- | --- | --- |
 | `AGENT_CONFIG` | 必填 | Agent YAML 文件路径，相对当前命令目录 |
 | `--session-id` | `cli` | 使用的会话 ID；是否跨进程保留取决于 store |
-| `--max-steps` | `8` | 每轮 logical Run 的最大模型步骤数 |
+| `--max-steps` | `20` | 每轮 logical Run 的最大模型步骤数 |
 | `--env-file` | 不加载 | 指定 dotenv 文件 |
 | `--no-tools` | 不启用此选项 | 设置后不向模型提供工具 |
 

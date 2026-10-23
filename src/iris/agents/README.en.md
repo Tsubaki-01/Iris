@@ -380,7 +380,7 @@ raises `IrisConfigError`. It never creates, prepares, or closes command services
 compaction:
   input_budget_tokens: 96000
   keep_recent_ratio: 0.15
-  summary_ratio: 0.05
+  summary_ratio: 0.10
   timeout_seconds: 300
 ```
 
