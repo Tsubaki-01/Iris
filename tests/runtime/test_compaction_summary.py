@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,8 @@ from iris.runtime._compaction_summary import (
     next_summary_batch,
     serialize_history,
 )
+from iris.tools.artifacts import ToolArtifactStore
+from iris.tools.base import ToolArtifact, ToolResult
 
 
 def test_image_summary_keeps_refs_order_and_tool_facts_without_pixels_or_replay(
@@ -171,6 +174,68 @@ def test_history_preserves_all_blocks_and_necessary_tool_semantics() -> None:
     assert "1234567890" not in rendered
     assert "987654" not in rendered and "999999" not in rendered
     assert "trace-secret" not in rendered and "result-trace" not in rendered
+
+
+def test_summary_keeps_one_artifact_preview_and_its_readback_references(tmp_path: Path) -> None:
+    """真实长工具结果只投影一次正文预览，保留已保存全文的回读信息。"""
+    preview = "唯一预览片段：" + "α" * 7992
+    output = preview + "未展示的后续全文" * 1000
+    result = ToolArtifactStore(tmp_path, preview_chars=len(preview)).persist_if_large(
+        ToolResult(
+            tool_use_id="long-output",
+            tool_name="exec_command",
+            content=[TextBlock(text=output)],
+        ),
+        max_chars=10000,
+    )
+    # 摘要消费从已提交历史加载的消息。
+    message = Msg.model_validate_json(result.to_msg().model_dump_json())
+
+    (record,) = serialize_history([message], start_index=12)
+
+    assert record.text.count(preview) == 1
+    assert record.text.startswith(message.text)
+    assert "未展示的后续全文" not in record.text
+    assert 'call_id="long-output"' in record.header
+    assert 'name="exec_command"' in record.header
+    assert "execution_status=completed" in record.header
+    assert "ref=result:12:0" in record.header
+    assert result.artifact is not None
+    artifact = json.loads(record.text.split("\nartifact: ", 1)[1])
+    assert artifact == {
+        "path": str(result.artifact.path),
+        "mime_type": "text/plain",
+        "size_bytes": len(output.encode("utf-8")),
+        "text_path": str(result.artifact.text_path),
+    }
+
+
+def test_summary_artifact_projection_keeps_original_messages_and_main_request(
+    tmp_path: Path,
+) -> None:
+    """摘要使用已交付正文，不修改原消息共享的artifact元数据。"""
+    result = ToolResult(
+        tool_use_id="shortened-output",
+        tool_name="exec_command",
+        content=[TextBlock(text="已交付的短预览")],
+        artifact=ToolArtifact(
+            path=tmp_path / "result.txt",
+            text_path=tmp_path / "result.model.txt",
+            preview="已交付的短预览以及元数据中更多的预览正文",
+            size_bytes=10000,
+        ),
+    )
+    message = Msg.model_validate_json(result.to_msg().model_dump_json())
+    main_request = _main_request().model_copy(update={"messages": [message]})
+    original_message = message.model_dump_json()
+    original_request = main_request.model_dump_json()
+
+    (record,) = serialize_history(main_request.messages, start_index=0)
+
+    assert record.text.startswith("已交付的短预览\nartifact:")
+    assert "元数据中更多的预览正文" not in record.text
+    assert message.model_dump_json() == original_message
+    assert main_request.model_dump_json() == original_request
 
 
 def test_summary_request_uses_canonical_seven_headings_and_final_request_options(

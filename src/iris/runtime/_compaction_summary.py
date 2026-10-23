@@ -71,8 +71,15 @@ def serialize_history(messages: list[Msg], start_index: int) -> tuple[SummaryRec
                 text = block.text
                 for key in ("error", "artifact"):
                     if key in block.metadata:
+                        details = block.metadata[key]
+                        if key == "artifact":
+                            details = {
+                                field: value
+                                for field, value in details.items()
+                                if field != "preview"
+                            }
                         text += f"\n{key}: " + json.dumps(
-                            block.metadata[key], ensure_ascii=False, separators=(",", ":")
+                            details, ensure_ascii=False, separators=(",", ":")
                         )
                 records.append(
                     SummaryRecord(
