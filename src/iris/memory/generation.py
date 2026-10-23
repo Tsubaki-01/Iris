@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..exceptions import IrisMemoryError
+from ..exceptions import IrisMemoryError, IrisProviderError
 from ..message import LLMRequest, LLMResponse, Msg
 from ..prompts import PromptSnapshot
 from ..providers.protocols import CompletionProvider
@@ -37,6 +37,7 @@ from .models import (
     MemoryEvidenceRef,
     MemoryItemKind,
     MemoryObservation,
+    MemoryRecord,
     _new_id,
 )
 
@@ -114,7 +115,14 @@ support 只补证据不改正文，delete 删除已无保留价值的知识。
 无需修改时 operations 可为空，但仍须完成全部观察的 resolution 与 explicit_changes 检查。"""
 
 
-def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int) -> LLMRequest:
+def _request(
+    model: str,
+    prompt: str,
+    source: dict[str, object],
+    max_tokens: int,
+    *,
+    reasoning_effort: str | None = None,
+) -> LLMRequest:
     """构造一次独立预算的无工具请求。"""
     return LLMRequest(
         model=model,
@@ -122,6 +130,7 @@ def _request(model: str, prompt: str, source: dict[str, object], max_tokens: int
         max_tokens=max_tokens,
         temperature=0,
         response_format="json_object",
+        provider_options={} if reasoning_effort is None else {"reasoning_effort": reasoning_effort},
     )
 
 
@@ -179,6 +188,15 @@ async def _check_sources(
     raise_if_generation_cancelled()
     if scope is not None and not await scope.check(sources):
         raise asyncio.CancelledError
+
+
+def _record_metadata(record: MemoryRecord) -> dict[str, Any]:
+    """生成材料不重复发送工具预览；原始证据与 artifact 定位仍留在存储。"""
+    metadata = dict(record.metadata)
+    artifact = metadata.get("artifact")
+    if metadata.get("record_kind") == "tool_result" and isinstance(artifact, dict):
+        metadata["artifact"] = {key: value for key, value in artifact.items() if key != "preview"}
+    return metadata
 
 
 def _flush_input(
@@ -240,7 +258,7 @@ def _flush_input(
         }
         metadata = {
             key: value
-            for key, value in record.metadata.items()
+            for key, value in _record_metadata(record).items()
             if key != "evidence_allowed"
             and (not captured or key not in {"message_ordinal", "block_index"})
         }
@@ -282,6 +300,7 @@ def _select_flush(
             prompt,
             _flush_input(namespace, pieces, progresses),
             config.flush_output_budget_tokens,
+            reasoning_effort=config.flush_reasoning_effort,
         )
 
     for progress in progresses:
@@ -371,38 +390,83 @@ async def flush(
                 prompt,
             )
         )
-        input_ids = tuple(dict.fromkeys(piece.episode_id for piece in slices))
-        sources = tuple(
-            dict.fromkeys(
-                progress.source
-                for progress in progresses
-                if progress.episode.id in input_ids and progress.source is not None
-            )
-        )
         records = {
             (progress.episode.id, record.id): record
             for progress in progresses
             for record in progress.episode.records
         }
-        refs = {
-            f"e{i}": MemoryEvidenceRef(
-                kind="episode",
-                source_id=piece.episode_id,
-                record_id=piece.record_id,
-                start=piece.start,
-                end=piece.end,
+        model_attempts = 0
+        for attempt in range(2):
+            input_ids = tuple(dict.fromkeys(piece.episode_id for piece in slices))
+            sources = tuple(
+                dict.fromkeys(
+                    progress.source
+                    for progress in progresses
+                    if progress.episode.id in input_ids and progress.source is not None
+                )
             )
-            for i, piece in enumerate(slices)
-            if has_learning_text(records[piece.episode_id, piece.record_id], piece.start)
-        }
-        await _check_sources(scope, sources)
-        if refs:
-            with service.observability.bind({"iris.model.purpose": "memory_flush"}):
-                response = await provider.complete(request)
-            usage = _usage(response)
-            extracted = await service.run_async_io(partial(_parse, response, _FlushResponse))
-        else:
-            extracted = _FlushResponse(observations=())
+            refs = {
+                f"e{i}": MemoryEvidenceRef(
+                    kind="episode",
+                    source_id=piece.episode_id,
+                    record_id=piece.record_id,
+                    start=piece.start,
+                    end=piece.end,
+                )
+                for i, piece in enumerate(slices)
+                if has_learning_text(records[piece.episode_id, piece.record_id], piece.start)
+            }
+            await _check_sources(scope, sources)
+            if not refs:
+                extracted = _FlushResponse(observations=())
+                break
+            try:
+                model_attempts += 1
+                with service.observability.bind({"iris.model.purpose": "memory_flush"}):
+                    response = await provider.complete(request)
+                usage = dict(Counter(usage) + Counter(_usage(response)))
+                extracted = await service.run_async_io(partial(_parse, response, _FlushResponse))
+                break
+            except (IrisProviderError, IrisMemoryError) as exc:
+                usage = dict(Counter(usage) + Counter(exc.context.get("usage", {})))
+                truncated = (
+                    exc.context.get("status") == "length"
+                    or exc.context.get("finish_reason") == "length"
+                    or (
+                        exc.context.get("status") == "incomplete"
+                        and exc.context.get("reason") == {"reason": "max_output_tokens"}
+                    )
+                )
+                if not truncated or attempt == 1:
+                    raise
+                # 多条记录保留前半批；单条记录保留前半段，成功后只提交这个前缀。
+                if len(slices) > 1:
+                    slices = slices[: len(slices) // 2]
+                else:
+                    piece = slices[0]
+                    length = len(piece.text) // 2
+                    if length == 0:
+                        raise
+                    slices = (
+                        EpisodeSlice(
+                            piece.episode_id,
+                            piece.record_id,
+                            piece.start,
+                            piece.start + length,
+                            piece.text[:length],
+                        ),
+                    )
+
+                def retry_request(pieces: tuple[EpisodeSlice, ...] = slices) -> LLMRequest:
+                    return _request(
+                        model,
+                        prompt,
+                        _flush_input(namespace, list(pieces), progresses),
+                        service.generation_config.flush_output_budget_tokens,
+                        reasoning_effort=service.generation_config.flush_reasoning_effort,
+                    )
+
+                request = await service.run_async_io(retry_request)
         known_items = {
             item_id
             for piece in slices
@@ -438,7 +502,11 @@ async def flush(
             usage=usage,
             elapsed_seconds=perf_counter() - started,
             input_ids=input_ids,
-            counts={"observations": len(observations), "slices": len(slices)},
+            counts={
+                "observations": len(observations),
+                "slices": len(slices),
+                "model_attempts": model_attempts,
+            },
             consumed_ranges=tuple(
                 MemoryConsumedRange(
                     episode_id=piece.episode_id,
@@ -600,7 +668,7 @@ def _prepare_dream_request(
                 "role": record.role,
                 "text": record.text[ref.start : ref.end],
                 "occurred_at": record.occurred_at,
-                "metadata": record.metadata,
+                "metadata": _record_metadata(record),
             }
     source["original_evidence"] = excerpts
     request = _request(

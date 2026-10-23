@@ -129,6 +129,8 @@ SDK 写入会得到稳定 `item.id`，后续修改复用这个 ID。重复执行
 
 只想手动运行生成阶段时，可为服务提供 provider、model 和 `PromptSource`，依次调用 `await service.flush("project")`、`await service.dream("project")`、`await service.refresh_overview("project")`。这些是独立模型请求；查看各自结果和 usage，不把它们算作主 Run 的生成质量或成本。
 
+若 flush 经常因输出长度上限失败，可同时降低 `memory.generation.flush_input_budget_tokens`、提高 `flush_output_budget_tokens`，并在模型支持时配置 `flush_reasoning_effort: low`。这三个字段只影响 flush。Iris 会对长度截断缩批重试一次；第二次仍失败则保留材料，等待后续维护。具体默认值和消费规则见[参考](../reference/memory-goals.md)。
+
 下一步：阅读[记忆设计](../design/memory.md)，理解材料、知识、投影与模型视图的分工；精确接口见[长期能力参考](../reference/memory-goals.md)。
 
 实现入口：[记忆服务](../../src/iris/memory/service.py)、[工具装配](../../src/iris/agents/config/tools.py)、[窗口采用](../../src/iris/runtime/memory_context.py)。

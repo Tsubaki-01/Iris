@@ -12,7 +12,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from iris.exceptions import IrisMemoryError, IrisTemplateError
+from iris.exceptions import IrisMemoryError, IrisProviderError, IrisTemplateError
 from iris.memory import (
     MemoryEpisode,
     MemoryGenerationConfig,
@@ -78,7 +78,7 @@ def service(
     provider: Provider,
     *,
     observability: Observability | None = None,
-    **budgets: int,
+    **budgets: int | str,
 ) -> MemoryService:
     """构造没有镜像也能显式生成的独立 SDK。"""
     return MemoryService(
@@ -420,6 +420,130 @@ async def test_dream_receives_original_attribution_and_tool_metadata(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_generation_omits_tool_preview_without_mutating_saved_evidence(
+    tmp_path: Path,
+) -> None:
+    provider = Provider(flush_one)
+    memory = service(tmp_path, provider, flush_reasoning_effort="low")
+    metadata = {
+        "record_kind": "tool_result",
+        "tool_name": "music.search",
+        "artifact": {"path": "result.json", "preview": "重复的歌曲结果", "size_bytes": 123},
+    }
+    episode = memory.observe(
+        MemoryObserveInput(
+            records=(MemoryRecord(role="tool", text="重复的歌曲结果", metadata=metadata),)
+        )
+    )
+    await memory.flush("project")
+    observation = memory.store.list_observations("project")[0].observation
+    provider.respond = lambda _: {
+        "operations": [],
+        "resolutions": [
+            {"observation_id": observation.id, "target_id": None, "reason": "无新增偏好"}
+        ],
+    }
+    await memory.dream("project")
+    flush_request, dream_request = provider.requests
+    assert flush_request.provider_options == {"reasoning_effort": "low"}
+    assert dream_request.provider_options == {}
+    projected = json.loads(flush_request.messages[1].text)["records"][0]
+    original = json.loads(dream_request.messages[1].text)["original_evidence"]["e0"]
+    for value in (projected, original):
+        assert value["text"] == "重复的歌曲结果"
+        assert value["metadata"]["artifact"] == {"path": "result.json", "size_bytes": 123}
+    assert memory.store.get_episode(episode.id, "project").records[0].metadata == metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["chat", "responses", "returned"])
+@pytest.mark.parametrize("record_count", [1, 4])
+async def test_truncated_flush_retries_smaller_prefix_and_resumes_remainder(
+    tmp_path: Path, protocol: str, record_count: int
+) -> None:
+    class TruncatedOnce(Provider):
+        """首轮耗尽输出额度，后续返回完整观察。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            response = await super().complete(request)
+            if len(self.requests) == 1:
+                if protocol == "returned":
+                    return response.model_copy(update={"finish_reason": "length"})
+                context = (
+                    {"status": "length"}
+                    if protocol == "chat"
+                    else {"status": "incomplete", "reason": {"reason": "max_output_tokens"}}
+                )
+                raise IrisProviderError(
+                    "输出达到上限",
+                    **context,
+                    usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                )
+            return response
+
+    provider = TruncatedOnce(flush_one)
+    memory = service(tmp_path, provider)
+    episode = memory.observe(
+        MemoryObserveInput(
+            records=tuple(MemoryRecord(text="abcdefghijkl") for _ in range(record_count))
+        )
+    )
+    result = await memory.flush("project")
+    first, retry = [
+        json.loads(request.messages[1].text)["records"] for request in provider.requests
+    ]
+    assert result.status == "completed" and len(provider.requests) == 2
+    assert sum(len(record["text"]) for record in retry) < sum(
+        len(record["text"]) for record in first
+    )
+    assert result.usage == {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}
+    assert result.counts["model_attempts"] == 2
+    assert [(item.start, item.end) for item in result.consumed_ranges] == [
+        (record["start"], record["end"]) for record in retry
+    ]
+    assert result.has_more
+    saved = memory.store.list_observations("project")[0].observation.evidence[0]
+    assert saved.end == retry[0]["end"]
+    next_result = await memory.flush("project")
+    assert not next_result.has_more
+    consumed = (*result.consumed_ranges, *next_result.consumed_ranges)
+    for record in episode.records:
+        ranges = [(item.start, item.end) for item in consumed if item.record_id == record.id]
+        assert ranges[0][0] == 0 and ranges[-1][1] == len(record.text)
+        assert all(left[1] == right[0] for left, right in zip(ranges, ranges[1:], strict=False))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["provider", "json", "cancel", "repeated_length"])
+async def test_flush_retry_does_not_consume_failed_input(tmp_path: Path, error: str) -> None:
+    class FailedProvider(Provider):
+        """覆盖不该重试的错误与重复截断。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            response = await super().complete(request)
+            if error == "provider":
+                raise IrisProviderError("服务暂时不可用", status=503)
+            if error == "cancel":
+                raise asyncio.CancelledError
+            if error == "repeated_length":
+                return response.model_copy(update={"finish_reason": "length"})
+            return response.model_copy(update={"content": [TextBlock(text="{不完整JSON")]})
+
+    provider = FailedProvider(flush_one)
+    memory = service(tmp_path, provider)
+    memory.observe(MemoryObserveInput(text="有效的原始证据"))
+    expected = asyncio.CancelledError if error == "cancel" else (IrisMemoryError, IrisProviderError)
+    with pytest.raises(expected):
+        await memory.flush("project")
+    assert len(provider.requests) == (2 if error == "repeated_length" else 1)
+    progress = memory.store.list_pending_episodes("project")[0]
+    assert progress.cursor == EpisodeCursor()
+    state = memory.generation_state("project")
+    assert state.pending_observations == 0
+    assert state.latest_results[0].consumed_ranges == ()
+
+
+@pytest.mark.asyncio
 async def test_empty_flush_consumes_and_truncated_flush_does_not(
     tmp_path: Path, observability: tuple[Observability, InMemorySpanExporter]
 ) -> None:
@@ -431,14 +555,15 @@ async def test_empty_flush_consumes_and_truncated_flush_does_not(
     with observation.bind({"iris.maintenance.kind": "memory"}), observation.scope("cycle"):
         with pytest.raises(IrisMemoryError):
             await memory.flush("project")
-    model, cycle = exporter.get_finished_spans()
-    assert model.status.status_code is StatusCode.UNSET
+    *models, cycle = exporter.get_finished_spans()
+    assert len(models) == 2
+    assert all(model.status.status_code is StatusCode.UNSET for model in models)
     assert cycle.status.status_code is StatusCode.ERROR
     [event] = cycle.events
     assert event.attributes["iris.maintenance.stage"] == "flush"
     assert event.attributes["iris.maintenance.status"] == "failed"
     assert memory.generation_state("project").pending_episodes == 1
-    assert memory.generation_state("project").latest_results[0].usage["total_tokens"] == 15
+    assert memory.generation_state("project").latest_results[0].usage["total_tokens"] == 30
     provider.finish_reason = "stop"
     result = await memory.flush("project")
     assert result.counts["observations"] == 0

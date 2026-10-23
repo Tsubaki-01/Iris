@@ -75,7 +75,13 @@ def test_memory_overview_defaults_keep_generation_and_window_budgets_separate() 
     assert config.overview.system_budget_ratio == 0.02
     assert not config.generation.enabled
     assert config.generation.flush_input_budget_tokens == 32000
+    assert config.generation.flush_reasoning_effort is None
     assert config.generation.dream_input_budget_tokens == 32000
+
+
+def test_flush_reasoning_effort_rejects_empty_value() -> None:
+    with pytest.raises(ValidationError):
+        MemoryConfig.model_validate({"generation": {"flush_reasoning_effort": ""}})
 
 
 @pytest.mark.parametrize(("enabled", "injected"), [(False, False), (False, True), (True, True)])

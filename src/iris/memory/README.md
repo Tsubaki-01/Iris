@@ -268,7 +268,14 @@ BCI、reasoning 和记忆读回正文不作为新证据；观察引用具体原�
 保留 blocked 并继续无关输入。依赖知识更新、重建 Agent 后预算改变或显式
 `await service.dream(namespace, retry_blocked=True)` 才重新评估受阻输入。
 
-模型失败后等待下一次活动或重启，不紧密重试。已消费输入不会因投影失败而重新生成；后续维护
+`flush_reasoning_effort` 默认为 `None`，可传所选模型支持的非空推理强度（如 `low`），仅作用于
+flush，不继承或改变主请求、dream、概览的选项。flush/dream 材料省略工具结果的
+`metadata.artifact.preview`，原始存储、正文和 artifact 定位不变。
+
+flush 输出达到长度上限时，最多用前半批记录重试一次；单条记录则取前半段字符，一个字符
+不再缩分。仅成功的前缀推进游标，余料在后续轮次继续；两次调用的真实 usage 累计到同一结果，
+成功结果的 `counts.model_attempts` 记录调用次数。再次截断或其它失败后等待下一次活动或重启。
+已消费输入不会因投影失败而重新生成；后续维护
 按 projection revision 补分类文件、按 overview revision 补概览。维护用量保存在独立
 `GenerationResult` 中，不计入主 run 的 model steps 或 usage。`generation_state(namespace)` /
 `await ageneration_state(namespace)` 返回 pending/blocked 数量、正式/投影/概览版本及每阶段最近结果。

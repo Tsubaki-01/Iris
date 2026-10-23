@@ -262,6 +262,57 @@ async def test_flush_rechecks_actual_batch_before_consuming(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["before_retry", "during_retry"])
+async def test_truncated_flush_rechecks_scope_and_cancellation_on_retry(
+    tmp_path: Path, boundary: str
+) -> None:
+    class TruncatedProvider(ScopeProvider):
+        """首轮截断后，第二轮模拟前台取消。"""
+
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            response = await super().complete(request)
+            if len(self.requests) == 1:
+                return response.model_copy(
+                    update={
+                        "finish_reason": "length",
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15,
+                    }
+                )
+            raise asyncio.CancelledError
+
+    store = SQLiteMemoryStore(tmp_path / "memory.db")
+    capture(store, "ready")
+    provider = TruncatedProvider()
+    memory = MemoryService(
+        store,
+        generation_provider=provider,
+        generation_model="test",
+        prompt_source=PromptSource.initialize(tmp_path),
+    )
+    checks: list[tuple[MemorySource, ...]] = []
+
+    async def check(sources: tuple[MemorySource, ...]) -> bool:
+        checks.append(sources)
+        return boundary != "before_retry" or len(checks) == 1
+
+    allowed = frozenset({("host", "ready")})
+    scope = MemoryMaintenanceScope(allowed, check, episode_sources=allowed)
+    with pytest.raises(asyncio.CancelledError):
+        await memory.flush("project", scope=scope)
+    assert len(checks) == 2 and checks[0] == checks[1]
+    assert len(provider.requests) == (1 if boundary == "before_retry" else 2)
+    progress = store.list_pending_episodes("project")[0]
+    assert progress.cursor.record_index == 0 and progress.cursor.text_offset == 0
+    state = memory.generation_state("project")
+    assert state.pending_observations == 0
+    assert state.latest_results[0].status == "cancelled"
+    assert state.latest_results[0].usage["total_tokens"] == 15
+    assert state.latest_results[0].consumed_ranges == ()
+
+
+@pytest.mark.asyncio
 async def test_dream_reselection_and_blocking_keep_scope(tmp_path: Path) -> None:
     store = SQLiteMemoryStore(tmp_path / "memory.db")
     provider = ScopeProvider()

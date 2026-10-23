@@ -21,10 +21,13 @@
 | `memory.generation.enabled` | `bool = false` | 开启 Run 材料捕获与宿主自动维护；SDK 需绑定协调器 |
 | `memory.generation.flush_input_budget_tokens` | `int = 32000` | flush 输入预算，必须大于 0 |
 | `memory.generation.flush_output_budget_tokens` | `int = 4000` | flush 输出预算，必须大于 0 |
+| `memory.generation.flush_reasoning_effort` | `str \| null = null` | 仅传给 flush 的 `reasoning_effort`；非空字符串，取值由所选模型支持；null 不传，不继承主模型选项 |
 | `memory.generation.dream_input_budget_tokens` | `int = 32000` | dream 输入预算，必须大于 0 |
 | `memory.generation.dream_output_budget_tokens` | `int = 4000` | dream 输出预算，必须大于 0 |
 
 `memory.generation.enabled` 不取代 `memory.enabled`。所有生成预算都是对应独立请求的额度，概览占用比例则用于主模型请求的窗口采用。新会话首次输入、成功压缩采用概览；普通后续 Run 和恢复重用持久窗口。完整概览超额时尝试完整知识范围，知识范围仍超额抛出 `IrisContextError`。
+
+flush 遇到模型输出长度上限时，最多用前半批记录重试一次；仅有一条记录时改用前半段字符。成功只提交该前缀，余料留给后续轮次；再次截断、其他模型错误或取消均不消费本批。已小到一个字符时不再重试。结果的 `usage` 汇总实际两次调用成本，`counts.model_attempts` 记录调用次数；无法获得的 provider 用量不估算。flush/dream 的工具材料投影省略 `metadata.artifact.preview`，存储中的原始记录、正文及 artifact 定位保持完整。
 
 ### Evolution 与共享维护
 
