@@ -17,6 +17,7 @@ from .base import (
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
 from .decision import AgentDecisionConfig
+from .environment_recovery import EnvironmentRecoveryConfig
 from .hooks import (
     CommandHookHandlerConfig,
     HookConfig,
@@ -38,6 +39,7 @@ __all__ = [
     "ContextPolicyConfig",
     "CommandConfig",
     "CommandHookHandlerConfig",
+    "EnvironmentRecoveryConfig",
     "HookConfig",
     "HookHandlerConfig",
     "MaintenanceConfig",

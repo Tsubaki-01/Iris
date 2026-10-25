@@ -34,6 +34,7 @@ from ...utils.sources import SourceDocument
 from .compaction import CompactionConfig
 from .context_policy import ContextPolicyConfig
 from .decision import AgentDecisionConfig
+from .environment_recovery import EnvironmentRecoveryConfig
 from .hooks import HookConfig, MiddlewareConfig
 from .mcp import AgentMCPConfig
 
@@ -276,6 +277,7 @@ class AgentConfig(BaseModel):
         middleware (MiddlewareConfig): 普通工具调用的包装链配置。
         permissions (PermissionsConfig): 权限配置。
         command (CommandConfig): root 命令环境配置，不自动注册工具。
+        environment_recovery (EnvironmentRecoveryConfig): 默认关闭的 root 环境保存与恢复。
         session (SessionConfig): 会话配置。
     """
 
@@ -303,6 +305,9 @@ class AgentConfig(BaseModel):
     middleware: MiddlewareConfig = Field(default_factory=MiddlewareConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     command: CommandConfig = Field(default_factory=CommandConfig)
+    environment_recovery: EnvironmentRecoveryConfig = Field(
+        default_factory=EnvironmentRecoveryConfig
+    )
     session: SessionConfig = Field(default_factory=SessionConfig)
 
     model_config = ConfigDict(extra="forbid", frozen=True)

@@ -107,6 +107,8 @@ def resolve_runtime_boundary(
     """解析 ROOT 边界，或将 CHILD 的 workspace/policy 收窄到父边界。"""
     if parent_boundary is not None and "command" in config.model_fields_set:
         raise IrisConfigError("child 不能显式声明 command，必须继承 root 执行配置")
+    if parent_boundary is not None and "environment_recovery" in config.model_fields_set:
+        raise IrisConfigError("child 不能显式声明 environment_recovery，必须借用 root 环境")
     workspace = _resolve_relative_to_base(
         config.permissions.workspace, base_dir=_base_dir(config_path)
     ).resolve()
@@ -372,8 +374,10 @@ def assemble_runtime(
             agent_config=config,
             configuration_path=config_path,
             configuration_sources=(
-                *config._source_documents, *captured_documents(),
-                *context_renderer.source_documents(), *prompt_snapshot.source_documents(),
+                *config._source_documents,
+                *captured_documents(),
+                *context_renderer.source_documents(),
+                *prompt_snapshot.source_documents(),
             ),
             context_input=context_input,
             context_builder=ContextBuilder(template_renderer=context_renderer),
