@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -72,6 +72,17 @@ class SQLiteMemoryStore:
         except OSError as exc:
             raise IrisMemoryError("SQLite memory 目录创建失败", path=str(self.path)) from exc
         self.initialize_schema()
+
+    def backup(self, destination: Path) -> None:
+        """导出知识、捕获水位与发布记录的一致副本。"""
+        if destination.resolve() == self.path.resolve():
+            raise IrisMemoryError("备份目标不能是当前数据库", path=str(destination))
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with self._connection() as source, closing(sqlite3.connect(destination)) as target:
+                source.backup(target)
+        except (OSError, sqlite3.Error) as exc:
+            raise IrisMemoryError("Memory 备份失败", path=str(destination)) from exc
 
     def initialize_schema(self) -> None:
         """在写入任何结构前拒绝旧 schema。"""

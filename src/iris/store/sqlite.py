@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Callable
+from contextlib import closing
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -216,6 +217,20 @@ class SQLiteStore:
     def source_id(self) -> str:
         """返回数据库创建时保存的来源身份，重开数据库保持不变。"""
         return self._source_id
+
+    def backup(self, destination: Path) -> None:
+        """导出完整一致副本，保留来源身份和所有 lifecycle 关联。"""
+        if destination.resolve() == self.path.resolve():
+            raise IrisRunPersistenceError("备份目标不能是当前数据库", path=str(destination))
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock, closing(self._connect()) as source:
+                with closing(sqlite3.connect(destination)) as target:
+                    source.backup(target)
+        except (OSError, sqlite3.Error) as exc:
+            raise IrisRunPersistenceError(
+                "lifecycle 备份失败", path=str(destination), operation="backup"
+            ) from exc
 
     def get_current_goal(self, session_id: str) -> GoalSnapshot | None:
         """读取会话当前目标，不触发结算或执行。"""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -258,6 +259,17 @@ class EvolutionMaterialStore:
         self.root = workspace_root.resolve() / ".iris" / "evolution"
         self.path = self.root / "evolution.db"
         initialize(self.path)
+
+    def backup(self, destination: Path) -> None:
+        """导出项目材料、消费位置和发布记录的一致副本。"""
+        if destination.resolve() == self.path.resolve():
+            raise IrisEvolutionError("备份目标不能是当前数据库", path=str(destination))
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with connection(self.path) as source, closing(sqlite3.connect(destination)) as target:
+                source.backup(target)
+        except (OSError, sqlite3.Error) as exc:
+            raise IrisEvolutionError("Evolution 备份失败", path=str(destination)) from exc
 
     def save_publication(self, record: PublicationRecord) -> EvolutionResult | None:
         """保存候选或真实确认；旧收据不得覆盖已经完成的持久结算。"""
