@@ -147,6 +147,44 @@ class FakeContainer:
         self.archive_gate: asyncio.Event | None = None
         self.archive_entered = asyncio.Event()
         self.archive_error = False
+        self.config: dict[str, Any] = {}
+        self.image_id = "sha256:base"
+        self.paused = False
+        self.pauses = 0
+        self.unpauses = 0
+        self.commits: list[dict[str, Any]] = []
+        self.commit_gate: asyncio.Event | None = None
+        self.commit_entered = asyncio.Event()
+        self.pause_error = False
+        self.unpause_error = False
+        self.commit_error = False
+        self.image_refs: dict[str, str] = {}
+
+    async def pause(self) -> None:
+        """暂停成功但响应可丢失。"""
+        self.pauses += 1
+        self.paused = True
+        if self.pause_error:
+            raise FakeDockerError(500, "pause response lost")
+
+    async def unpause(self) -> None:
+        """确认本次解除暂停。"""
+        self.unpauses += 1
+        if self.unpause_error:
+            raise FakeDockerError(500, "unpause failed")
+        self.paused = False
+
+    async def commit(self, **kwargs: Any) -> dict[str, str]:
+        """按真实 API 返回镜像 ID 并记录 tag。"""
+        self.commits.append(kwargs)
+        self.commit_entered.set()
+        if self.commit_gate is not None:
+            await self.commit_gate.wait()
+        if self.commit_error:
+            raise FakeDockerError(500, "commit failed")
+        image_id = f"sha256:snapshot-{len(self.commits)}"
+        self.image_refs[f"{kwargs['repository']}:{kwargs['tag']}"] = image_id
+        return {"Id": image_id}
 
     async def put_archive(self, path: str, data: bytes) -> None:
         assert path == "/tmp"
@@ -200,7 +238,16 @@ class FakeContainer:
 
     async def show(self) -> dict[str, Any]:
         self.shows += 1
-        return {"State": {"Running": self.running}}
+        return {
+            "State": {"Running": self.running, "Paused": self.paused},
+            "Image": self.image_id,
+            "Config": self.config,
+            "HostConfig": self.config.get("HostConfig", {}),
+            "Mounts": [
+                {"Destination": "/workspace", "RW": not mount["ReadOnly"]}
+                for mount in self.config.get("HostConfig", {}).get("Mounts", [])
+            ],
+        }
 
     async def delete(self, **kwargs: Any) -> None:
         assert not self.running
@@ -224,6 +271,10 @@ class FakeContainers:
 
     async def create(self, config: dict[str, Any], *, name: str) -> FakeContainer:
         self.created.append((config, name))
+        self.container.config = config
+        self.container.image_id = self.container.image_refs.get(config["Image"], config["Image"])
+        if not self.container.image_id.startswith("sha256:"):
+            self.container.image_id = "sha256:base"
         self.create_entered.set()
         if self.create_gate is not None:
             await self.create_gate.wait()
@@ -243,7 +294,12 @@ class FakeClient:
 
     def __init__(self) -> None:
         self.containers = FakeContainers()
-        self.images = SimpleNamespace(inspect=self.inspect_image)
+        self.images = SimpleNamespace(
+            inspect=self.inspect_image,
+            tag=self.tag_image,
+            list=self.list_images,
+            delete=self.delete_image,
+        )
         self.system = SimpleNamespace(info=self.info)
         self.info_calls = 0
         self.image_calls: list[str] = []
@@ -251,6 +307,33 @@ class FakeClient:
         self.os_type = "linux"
         self.image_missing = False
         self.kwargs: dict[str, Any] = {}
+        self.image_refs: dict[str, str] = {"iris-command:local": "sha256:base"}
+        self.containers.container.image_refs = self.image_refs
+        self.deleted_images: list[str] = []
+
+    async def tag_image(self, name: str, repo: str, *, tag: str) -> bool:
+        """添加独占引用。"""
+        self.image_refs[f"{repo}:{tag}"] = name
+        return True
+
+    async def list_images(self, *, filters: dict[str, list[str]]) -> list[dict[str, Any]]:
+        """保留同一 ID 的全部 RepoTags，以检验定向删除。"""
+        repository = filters["reference"][0].removesuffix(":*")
+        ids = {value for key, value in self.image_refs.items() if key.startswith(repository + ":")}
+        return [
+            {
+                "Id": value,
+                "RepoTags": [key for key, item in self.image_refs.items() if item == value],
+            }
+            for value in ids
+        ]
+
+    async def delete_image(self, name: str, *, force: bool, noprune: bool) -> list[Any]:
+        """只允许按引用清理，且发生在 client 关闭前。"""
+        assert not force and noprune and not self.closed
+        self.deleted_images.append(name)
+        del self.image_refs[name]
+        return []
 
     async def info(self) -> dict[str, Any]:
         self.info_calls += 1
@@ -260,7 +343,12 @@ class FakeClient:
         self.image_calls.append(image)
         if self.image_missing:
             raise FakeDockerError(404, "missing image")
-        return {"Config": {"Env": ["PATH=/image/bin:/usr/bin", "IMAGE_ONLY=yes"]}}
+        return {
+            "Id": self.image_refs.get(
+                image, image if image.startswith("sha256:") else "sha256:base"
+            ),
+            "Config": {"Env": ["PATH=/image/bin:/usr/bin", "IMAGE_ONLY=yes"]},
+        }
 
     async def close(self) -> None:
         self.closed = True

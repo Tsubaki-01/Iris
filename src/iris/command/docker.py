@@ -6,11 +6,13 @@ import asyncio
 import io
 import logging
 import tarfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -22,6 +24,7 @@ from ..exceptions import (
 )
 from ..sandbox import DockerConfig
 from ..sandbox.docker import CONTROL_SECONDS, DockerSandbox
+from ..sandbox.snapshot import DockerSnapshot
 from ._output import OutputBuffer
 from ._python import PYTHON_LOADER_SOURCE
 from .models import (
@@ -158,9 +161,96 @@ class DockerCommandService:
         self._closing = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._snapshot_retention: tuple[str, str | None] | None = None
         self._helper_source = (
             files("iris.command").joinpath("_container_helper.py").read_text(encoding="utf-8")
         )
+
+    @classmethod
+    def from_snapshot(cls, workspace_root: Path, snapshot: DockerSnapshot) -> DockerCommandService:
+        """以保存的有效参数构造新的惰性命令服务。"""
+        service = cls(
+            workspace_root, snapshot.config, workspace_writable=snapshot.workspace_writable
+        )
+        service._sandbox = DockerSandbox(
+            workspace_root,
+            snapshot.config,
+            workspace_writable=snapshot.workspace_writable,
+            owner_id=service._service_id,
+            restored_snapshot=snapshot,
+        )
+        return service
+
+    @asynccontextmanager
+    async def snapshot(self, *, source_id: str, snapshot_id: UUID) -> AsyncIterator[DockerSnapshot]:
+        """在控制锁内生成镜像，直到调用方保存完成才解除本次暂停。"""
+        await self.prepare()
+        async with self._control_lock:
+            if self._closing:
+                raise IrisCommandError("Docker 执行服务正在关闭", started=False)
+            if self._snapshot_retention is None:
+                self._snapshot_retention = (source_id, None)
+            paused_here = False
+
+            async def create_snapshot() -> DockerSnapshot:
+                nonlocal paused_here
+                paused_here = await self._sandbox.freeze_for_snapshot()
+                return await self._sandbox.commit_snapshot(
+                    source_id=source_id, snapshot_id=snapshot_id
+                )
+
+            task = asyncio.create_task(create_snapshot())
+
+            async def finish() -> None:
+                # 已派发请求必须完成，才能解除暂停并释放控制锁。
+                await asyncio.gather(task, return_exceptions=True)
+                try:
+                    await self._sandbox.release_snapshot(paused_here=paused_here)
+                except IrisSandboxError as error:
+                    raise IrisCommandCleanupError(error.message, **error.context) from error
+
+            completed = False
+            try:
+                yield await asyncio.shield(task)
+                completed = True
+            except IrisSandboxError as error:
+                error_type = (
+                    IrisCommandCleanupError
+                    if error.context.get("operation") == "unpause"
+                    else IrisCommandError
+                )
+                raise error_type(error.message, **error.context) from error
+            finally:
+                cleanup = asyncio.create_task(finish())
+                cancelled = False
+                while True:
+                    try:
+                        await asyncio.shield(cleanup)
+                        break
+                    except asyncio.CancelledError:
+                        cancelled = True
+                        if cleanup.done():
+                            cleanup.result()
+                            break
+                if cancelled and completed:
+                    raise asyncio.CancelledError
+
+    def adopt_snapshot_retention(self, *, source_id: str, keep_image_ref: str) -> None:
+        """记录上层已经发布的唯一镜像引用。"""
+        self._snapshot_retention = (source_id, keep_image_ref)
+
+    async def prune_snapshot_images(
+        self, *, source_id: str, keep_image_ref: str | None
+    ) -> tuple[str, ...]:
+        """准备资源后定向清理本环境旧引用。"""
+        await self.prepare()
+        async with self._control_lock:
+            try:
+                return await self._sandbox.prune_snapshot_images(
+                    source_id=source_id, keep_image_ref=keep_image_ref
+                )
+            except IrisSandboxError as error:
+                raise IrisCommandError(error.message, **error.context) from error
 
     async def prepare(self) -> None:
         """只准备一次 driver、Linux engine 与现有镜像，不创建容器。"""
@@ -238,7 +328,13 @@ class DockerCommandService:
             await asyncio.gather(asyncio.shield(self._prepare_task), return_exceptions=True)
         await self.stop(CommandScope("", "")).wait_drained()
         try:
-            await self._sandbox.aclose()
+            await self._sandbox.delete_container()
+            if self._snapshot_retention is not None:
+                source_id, keep_image_ref = self._snapshot_retention
+                await self._sandbox.prune_snapshot_images(
+                    source_id=source_id, keep_image_ref=keep_image_ref
+                )
+            await self._sandbox.close_client()
         except IrisSandboxError as error:
             raise IrisCommandCleanupError(error.message, **error.context) from error
         self._closed = True
