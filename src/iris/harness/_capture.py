@@ -44,6 +44,28 @@ class RunCapture:
         self._capture_requests: dict[str, int] = {}
         self._capture_task: asyncio.Task[None] | None = None
         self._known_runs: dict[str, RunRecord] = {}
+        self._snapshot_errors: list[Exception] | None = None
+
+    async def drain_for_snapshot(self) -> None:
+        """排空当前 root 的来源和真实 IO；捕获失败使本次保存失败。"""
+        from ..exceptions import IrisRunPersistenceError
+
+        errors: list[Exception] = []
+        self._snapshot_errors = errors
+        try:
+            if self._capture_task is not None:
+                await asyncio.shield(self._capture_task)
+            if self._capture_requests:
+                await self._drain_capture_requests()
+            await self.capture_pending()
+        finally:
+            if self.service is not None:
+                await self.service.wait_pending_io()
+            if self.evolution_service is not None:
+                await self.evolution_service.wait_pending_io()
+            self._snapshot_errors = None
+        if errors:
+            raise IrisRunPersistenceError("环境保存前的原文捕获失败") from errors[0]
 
     async def prepare(self) -> None:
         """首次进入事件循环时补采已登记来源。"""
@@ -263,6 +285,8 @@ class RunCapture:
         self, error: Exception, run_id: str | None = None, *, evolution: bool = False
     ) -> None:
         """将 capture 故障留在记忆状态中，主任务仍使用自己的完成结果。"""
+        if self._snapshot_errors is not None:
+            self._snapshot_errors.append(error)
         if evolution:
             logger.warning("项目经验原文捕获失败 run=%s", run_id, exc_info=error)
             return

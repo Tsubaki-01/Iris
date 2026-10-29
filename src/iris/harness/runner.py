@@ -23,7 +23,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
 
@@ -144,6 +144,7 @@ from ._context_access import ContextAccess
 from ._events import _RunEventCollector
 from ._goal import validate_goal_options
 from ._hooks import HookLifecycle, HookStartControl, run_started
+from ._recovery_admission import recovery_mutation, recovery_operation
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .configuration import (
     ConfigurationApplied,
@@ -159,6 +160,8 @@ from .maintenance import (
     ProjectEvolutionBinding,
 )
 from .observer import RunEventObserver
+from .recovery_models import EnvironmentSnapshotManifest
+from .recovery_point import RootRecoveryCoordinator
 
 if TYPE_CHECKING:
     from ..decision import DecisionEvaluator
@@ -198,7 +201,7 @@ def _with_maintenance_foreground[Result, **Parameters](
             finally:
                 maintenance.foreground_exit()
 
-    return invoke
+    return recovery_operation(invoke)
 
 
 class Clock(Protocol):
@@ -359,6 +362,12 @@ class AgentRunner:
         self._capture: RunCapture | None = None
         self._started = False
         environment = runtime.environment
+        self._recovery = (
+            RootRecoveryCoordinator(self)
+            if environment.execution_scope is RuntimeExecutionScope.ROOT
+            and environment.agent_config.environment_recovery.enabled
+            else None
+        )
         self._goal_state_readers: dict[str, Callable[[], GoalProcessState]] = {}
         self._session_fact_callbacks: dict[
             str, Callable[[RunEvent | CommandCleanupFailed], None]
@@ -422,6 +431,7 @@ class AgentRunner:
             ):
                 raise IrisConfigError("自动记忆生成需要 flush/dream、overview 模型及 mirror")
 
+    @recovery_mutation
     def bind_maintenance(
         self,
         coordinator: MaintenanceCoordinator,
@@ -480,6 +490,7 @@ class AgentRunner:
             raise IrisConfigError("自动项目经验维护需要宿主先调用 runner.bind_maintenance()")
         self._started = True
 
+    @recovery_operation
     async def aprepare(self) -> None:
         """准备运行资源；失败后释放资源，必须新建 runner。"""
         if self._closed:
@@ -488,6 +499,8 @@ class AgentRunner:
         if not self._prepared:
             if self._prepare_task is None:
                 self._prepare_task = asyncio.create_task(self._prepare_owned_environment())
+                if self._recovery is not None:
+                    self._recovery.track_task(self._prepare_task)
             await asyncio.shield(self._prepare_task)
         if self._closed:
             raise IrisRunStateError("runner 已关闭")
@@ -560,6 +573,8 @@ class AgentRunner:
         Raises:
             IrisRunStateError: 当前仍有 active activation，不能提前关闭资源。
         """
+        if self._recovery is not None:
+            await self._recovery.wait_for_saves()
         if self._resources_closed:
             return
         if self._active or (self._maintenance is not None and self._maintenance.foreground_active):
@@ -571,6 +586,10 @@ class AgentRunner:
             await self._command_lifecycle.aclose()
             await self._hook_lifecycle.aclose()
         await self._close_owned_resources()
+        if self._recovery is not None and (
+            self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT
+        ):
+            await self._recovery.cleanup_files()
 
     async def _close_owned_resources(self) -> None:
         """前一资源失败也尝试后续关闭，仅全部成功后标记完成。"""
@@ -758,6 +777,15 @@ class AgentRunner:
     #              Run Lifecycle
     # ==========================================
     # region
+    async def save_environment_snapshot(self, directory: Path) -> EnvironmentSnapshotManifest:
+        """在 root 空闲点显式保存整套环境，目录须位于 workspace 外。"""
+        if self._recovery is None:
+            raise IrisConfigError("environment_recovery 未启用")
+        if self.runtime.environment.execution_scope is not RuntimeExecutionScope.ROOT:
+            raise IrisConfigError("环境快照只能由 root 保存")
+        return await self._recovery.save(directory)
+
+    @recovery_operation
     async def import_image(
         self, source: Path | bytes, *, session_id: str, name: str | None = None
     ) -> ImageBlock:
@@ -781,7 +809,16 @@ class AgentRunner:
         workspace = self.runtime.environment.workspace_root
         resolved = workspace / source if isinstance(source, Path) else source
         cache_dir = workspace / ".iris" / "image-cache" / safe_path_segment(normalized)
-        saved = await asyncio.to_thread(save_image, resolved, cache_dir=cache_dir)
+        if self._recovery is None:
+            saved = await asyncio.to_thread(save_image, resolved, cache_dir=cache_dir)
+        else:
+            task = asyncio.create_task(
+                self._recovery.io.run(
+                    partial(save_image, resolved, cache_dir=cache_dir), complete_on_cancel=True
+                )
+            )
+            self._recovery.track_task(task)
+            saved = await asyncio.shield(task)
         return image_block_from_saved(saved, name=name)
 
     async def start(
@@ -1406,6 +1443,7 @@ class AgentRunner:
         control.close()
         return await self._run_activation(active, activation=activation, port=port)
 
+    @recovery_mutation
     def request_cancel(
         self,
         run_id: str,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -94,6 +94,8 @@ class CommandLifecycle:
             pending.attempt.done() and pending.attempt.exception() is not None
         ):
             pending.attempt = asyncio.create_task(self._attempt(pending))
+            if self.root._recovery is not None:
+                self.root._recovery.track_task(pending.attempt)
             pending.attempt.add_done_callback(_retrieve_exception)
         return await asyncio.shield(pending.attempt)
 
@@ -146,13 +148,18 @@ class CommandLifecycle:
                 await asyncio.sleep(remaining)
             entry.fired = True
             try:
-                pending = self.pending.get(run.run_id)
-                if pending is not None:
-                    if pending.attempt is not None and not pending.attempt.done():
-                        await asyncio.shield(pending.attempt)
-                    return
-                async with target.open(run.run_id) as runner:
-                    await runner._command_deadline_due(run.run_id)
+                async with (
+                    self.root._recovery.internal_operation()
+                    if self.root._recovery is not None
+                    else nullcontext()
+                ):
+                    pending = self.pending.get(run.run_id)
+                    if pending is not None:
+                        if pending.attempt is not None and not pending.attempt.done():
+                            await asyncio.shield(pending.attempt)
+                        return
+                    async with target.open(run.run_id) as runner:
+                        await runner._command_deadline_due(run.run_id)
             except IrisCommandCleanupError:
                 # attempt 已报告；timer 只负责取回异常。
                 pass

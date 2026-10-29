@@ -202,7 +202,7 @@ class SQLiteStore:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             is_empty = not self.path.exists() or self.path.stat().st_size == 0
             if is_empty:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     create_schema(connection)
             self._source_id = require_exact_schema(self.path)
         except IrisLifecycleSchemaError:
@@ -439,7 +439,7 @@ class SQLiteStore:
         """在 Goal 存储边界归一化 SQL、编码与 durable row 解析错误。"""
         with self._lock:
             try:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     _execute(connection, "BEGIN IMMEDIATE" if write else "BEGIN")
                     result = handler(connection)
                     connection.commit()
@@ -586,7 +586,7 @@ class SQLiteStore:
         """在一个 IMMEDIATE transaction 中创建 child 与 link；重入优先复用 link。"""
         with self._lock:
             try:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     _execute(connection, "BEGIN IMMEDIATE")
                     link = self._select_subagent_link(
                         connection,
@@ -1375,7 +1375,7 @@ class SQLiteStore:
         operation = "fork_session"
         with self._lock:
             try:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     _execute(connection, "BEGIN IMMEDIATE")
                     run = self._require_fork_source(
                         connection, command.source_run_id, operation=operation
@@ -1605,7 +1605,7 @@ class SQLiteStore:
     ) -> _MutationT:
         with self._lock:
             try:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     _execute(connection, "BEGIN IMMEDIATE")
                     commit = handler(connection, deepcopy(command))
                     connection.commit()
@@ -3650,7 +3650,7 @@ class SQLiteStore:
     ) -> _ReadT:
         with self._lock:
             try:
-                with self._connect() as connection:
+                with closing(self._connect()) as connection, connection:
                     connection.execute("BEGIN")
                     result = reader(connection)
                     connection.commit()

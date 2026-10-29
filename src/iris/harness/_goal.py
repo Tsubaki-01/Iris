@@ -30,8 +30,10 @@ from ..hitl import InteractionStatus
 from ..lifecycle import AgentRunOptions, RunErrorInfo, RunEvent, RunEventKind, RunPhase, RunResult
 from ..runtime import RuntimeCursor
 from ..runtime.runtime import _normalize_run_error
+from ._recovery_admission import recovery_internal_operation, recovery_operation
 
 if TYPE_CHECKING:
+    from .recovery_point import RootRecoveryCoordinator
     from .session_manager import SessionManager
     from .streaming import CommandCleanupFailed
 
@@ -66,6 +68,11 @@ class _GoalControl:
         self.runner._goal_state_readers[manager._session_id] = self.process_state
         self.api = GoalSession(service, self)
 
+    @property
+    def _recovery(self) -> RootRecoveryCoordinator | None:
+        """Goal mutation 与普通输入共用 root 保存准入。"""
+        return self.runner._recovery
+
     def process_state(self) -> GoalProcessState:
         """提供只读进程状态，不启动或结算执行。"""
         return GoalProcessState(armed_goal_id=self.driver.armed_goal_id, error=self.error)
@@ -76,6 +83,7 @@ class _GoalControl:
             self.manager._require_open()
             return self.service.get_view(self.manager._session_id)
 
+    @recovery_operation
     async def create(self, input_data: GoalCreateInput) -> GoalControlResult:
         """保存显式目标后允许本 manager 自动推进。"""
         async with self.manager._lock:
@@ -87,6 +95,7 @@ class _GoalControl:
             self.schedule_locked()
             return self._result("scheduled")
 
+    @recovery_operation
     async def edit(self, input_data: GoalEditInput) -> GoalControlResult:
         """在同一准入锁内读取版本并编辑，暂停后续轮次。"""
         async with self.manager._lock:
@@ -109,6 +118,7 @@ class _GoalControl:
         """接受用户完成决定，不取消已准入 Run。"""
         return await self._stop(reason, complete=True)
 
+    @recovery_operation
     async def _stop(self, reason: GoalReason, *, complete: bool) -> GoalControlResult:
         async with self.manager._lock:
             self.manager._require_open()
@@ -126,6 +136,7 @@ class _GoalControl:
                 raise
             return self._result("stopped")
 
+    @recovery_operation
     async def clear(self) -> GoalControlResult:
         """清除当前选择，保留旧 Run 及其绑定。"""
         async with self.manager._lock:
@@ -143,6 +154,7 @@ class _GoalControl:
                 raise
             return self._result("stopped")
 
+    @recovery_operation
     async def resume(self, *, expected_activation_id: str | None = None) -> GoalControlResult:
         """显式接手原 Run；空闲时才允许创建下一轮。"""
         async with self.manager._lock:
@@ -372,12 +384,14 @@ class _GoalControl:
             if isinstance(error, Exception):
                 self.fail(error)
 
+    @recovery_internal_operation
     async def _retry_resume(self, expected: str | None) -> None:
         try:
             await self.resume(expected_activation_id=expected)
         except Exception as exc:
             self.fail(exc)
 
+    @recovery_internal_operation
     async def _start_intent(self, intent: GoalContinuationIntent) -> None:
         manager = self.manager
         admitted = False

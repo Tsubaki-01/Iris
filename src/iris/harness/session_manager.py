@@ -52,10 +52,12 @@ from ..lifecycle.models import normalize_run_input
 from ..message import DataBlock, Msg
 from ..runtime import SteeringInput
 from ._goal import _GoalControl
+from ._recovery_admission import recovery_internal_operation, recovery_operation
 from .control import PendingSubmission, RestoreReceipt, SessionControlSnapshot
 from .runner import AgentRunner
 
 if TYPE_CHECKING:
+    from .recovery_point import RootRecoveryCoordinator
     from .streaming import LivePublisher
 
 # endregion
@@ -785,6 +787,11 @@ class SessionManager:
         self._finished_callback = self._on_finished
         self._runner._hook_lifecycle.subscribe(self._session_id, self._finished_callback)
 
+    @property
+    def _recovery(self) -> RootRecoveryCoordinator | None:
+        """借用 exact runner 的 root 保存准入。"""
+        return self._runner._recovery
+
     def snapshot(self) -> SessionControlSnapshot:
         """返回最近完整投影；不等待锁，不读取 store，也不推进运行。"""
         return self._control
@@ -889,6 +896,7 @@ class SessionManager:
     #               Input Admission
     # ==========================================
     # region
+    @recovery_operation
     async def submit(
         self,
         input: str | list[DataBlock],
@@ -1082,6 +1090,7 @@ class SessionManager:
         receipt, _ = await self._admit_resume(interaction_id=interaction_id, response=response)
         return receipt
 
+    @recovery_operation
     async def _admit_resume(
         self,
         *,
@@ -1118,6 +1127,7 @@ class SessionManager:
             await self._wait_for_admission(task, started)
         return ResumeReceipt(run_id=run_id, interaction_id=interaction_id.strip()), task
 
+    @recovery_operation
     async def restore(
         self, run_id: str, *, expected_activation_id: str | None = None
     ) -> RestoreReceipt:
@@ -1191,6 +1201,7 @@ class SessionManager:
                 self._refresh_control(run=current)
             return RestoreReceipt(run_id, disposition, self._control)
 
+    @recovery_operation
     async def interrupt(self, *, reason: str | None = None) -> RunSnapshot | None:
         """请求取消 facade 当前 exact run，并保留 follow-up 到真实 terminal。
 
@@ -1292,6 +1303,7 @@ class SessionManager:
         self._event_consumer_started = True
         return self._iterate_events(self._event_buffer)
 
+    @recovery_internal_operation
     async def close(self, *, cancel_run: bool = False, reason: str | None = None) -> None:
         """关闭 admission；host 退出时可选择取消并等待当前 run 结算。
 
@@ -1307,6 +1319,8 @@ class SessionManager:
             已进入 create 的 follow-up 按 run 是否已 durable 区分处理：已存在则视为投递成功，
             尚未成型才以 ``session_closed`` 失败并取消其 task。
         """
+        if self._recovery is not None:
+            await self._recovery.wait_for_saves()
         async with self._lock:
             if self._close_complete:
                 return
@@ -1344,6 +1358,8 @@ class SessionManager:
                     self._close_owned_tasks = tuple(self._managed_tasks)
             if self._close_task is None or self._close_task.done():
                 self._close_task = asyncio.create_task(self._finish_close(reason=reason))
+                if self._recovery is not None:
+                    self._recovery.track_task(self._close_task)
             task = self._close_task
             self._refresh_control()
         try:
@@ -1468,6 +1484,8 @@ class SessionManager:
                 self._schedule_tracker_reconcile()
 
         self._managed_tasks.add(task)
+        if self._recovery is not None:
+            self._recovery.track_task(task)
         task.add_done_callback(schedule)
 
     async def _wait_for_admission(
@@ -1500,6 +1518,7 @@ class SessionManager:
                 self._admitting_submission = None
                 self._refresh_control()
 
+    @recovery_internal_operation
     async def _settle_managed_task(
         self,
         task: asyncio.Task[RunResult],
@@ -1761,6 +1780,7 @@ class SessionManager:
             return
         self._tracker_reconcile_task = asyncio.create_task(self._reconcile_after_tracker_release())
 
+    @recovery_internal_operation
     async def _reconcile_after_tracker_release(self) -> None:
         """在 manager 锁内按最新 durable 事实恢复 FIFO 推进。"""
         try:

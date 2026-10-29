@@ -205,6 +205,8 @@ class HarnessSubagentController:
             body_failed = sys.exception() is not None
             interrupted = False
             cleanup = asyncio.create_task(runner.aclose())
+            if runner._recovery is not None:
+                runner._recovery.track_task(cleanup)
             try:
                 while not cleanup.done():
                     try:
@@ -274,6 +276,7 @@ class HarnessSubagentController:
         )
         runner._command_lifecycle = cast("CommandLifecycle", self.command_lifecycle)
         runner._hook_lifecycle = runner._command_lifecycle.root._hook_lifecycle
+        runner._recovery = runner._command_lifecycle.root._recovery
         runner._command_target = ChildCommandTarget(self, route)
         if runner._subagent_controller is not None:
             runner._subagent_controller.command_lifecycle = self.command_lifecycle

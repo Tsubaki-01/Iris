@@ -7,8 +7,8 @@ import json
 import logging
 import math
 import os
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -416,6 +416,27 @@ class MaintenanceCoordinator:
         resource.probe_only = False
         resource.revision += 1
         self._schedule()
+
+    @asynccontextmanager
+    async def suspend_for_snapshot(self) -> AsyncIterator[None]:
+        """暂缓新维护并等待真实 worker，退出后继续原空闲调度。"""
+        self._foreground_enter()
+        tasks = tuple(task for task in (self._task, self._evolution_task) if task is not None)
+
+        async def drain() -> None:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._worker.wait_idle()
+            await self._evolution_worker.wait_idle()
+
+        draining = asyncio.create_task(drain())
+        try:
+            await asyncio.shield(draining)
+            yield
+        finally:
+            try:
+                await asyncio.shield(draining)
+            finally:
+                self._foreground_exit()
 
     def _foreground_enter(self) -> None:
         """立即停止维护 admission 并撤销未提交生成，不等待模型或锁。"""
