@@ -23,6 +23,7 @@ from .evolution import build_project_evolution_binding
 from .maintenance import MaintenanceCoordinator, MemoryMaintenanceBinding, ProjectEvolutionBinding
 from .maintenance_models import MaintenanceChanged, MaintenanceSnapshot, ResourceMaintenanceView
 from .observer import RunEventObserver
+from .recovery_models import EnvironmentSnapshotManifest
 from .runner import AgentRunner
 from .session_history import SessionHistory
 from .session_manager import (
@@ -40,6 +41,7 @@ __all__ = [
     "write_trajectory",
     "ConfigurationApplied",
     "EffectiveConfiguration",
+    "EnvironmentSnapshotManifest",
     "GoalChanged",
     "GoalControlResult",
     "GoalSession",

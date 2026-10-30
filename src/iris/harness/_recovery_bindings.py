@@ -9,6 +9,7 @@ from ..evolution.materials import EvolutionMaterialStore
 from ..evolution.service import EvolutionService
 from ..exceptions import IrisConfigError, IrisError, IrisRunPersistenceError
 from ..memory import MemoryService
+from ..memory.config import MemoryConfig
 from ..memory.mirror import FileMemoryMirror
 from ..memory.sqlite import SQLiteMemoryStore
 from .recovery_models import (
@@ -66,6 +67,46 @@ def describe_evolution_state(
         if service.config_target is None
         else _relative(service.config_target.path, workspace),
     )
+
+
+def describe_configured_memory(config: MemoryConfig, *, workspace: Path) -> MemoryStateSnapshot:
+    """只投影默认构造将采用的路径，不创建数据库和 mirror。"""
+    return MemoryStateSnapshot.model_construct(
+        role="memory",
+        database_path=_relative(workspace / config.path, workspace),
+        projection_root=_relative(workspace / config.root, workspace),
+        write_namespace=config.write_namespace,
+    )
+
+
+def validate_memory_restore(
+    config: MemoryConfig,
+    injected: MemoryService | None,
+    *,
+    workspace: Path,
+    expected: MemoryStateSnapshot | None,
+) -> None:
+    """在还原文件前比较本次真正采用的持久绑定。"""
+    if not config.enabled:
+        return
+    actual = (
+        describe_configured_memory(config, workspace=workspace)
+        if injected is None
+        else describe_memory_state(injected, workspace=workspace, namespace=config.write_namespace)
+    )
+    if actual != expected:
+        raise IrisConfigError("Memory 持久绑定与环境恢复点不一致")
+
+
+def validate_evolution_restore(
+    service: EvolutionService,
+    *,
+    workspace: Path,
+    expected: EvolutionStateSnapshot | None,
+) -> None:
+    """在首次维护绑定时比较实际材料和发布目标。"""
+    if describe_evolution_state(service, workspace=workspace) != expected:
+        raise IrisConfigError("Evolution 持久绑定与环境恢复点不一致")
 
 
 def collect_state_snapshots(runner: AgentRunner) -> tuple[StateSnapshot, ...]:

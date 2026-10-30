@@ -103,6 +103,8 @@ def resolve_runtime_boundary(
     config_path: Path | None = None,
     permission_policy: PermissionPolicy | None = None,
     parent_boundary: RuntimeAssemblyBoundary | None = None,
+    restored_command_binding: CommandBinding | None = None,
+    restored_workspace_writable: bool | None = None,
 ) -> RuntimeAssemblyBoundary:
     """解析 ROOT 边界，或将 CHILD 的 workspace/policy 收窄到父边界。"""
     if parent_boundary is not None and "command" in config.model_fields_set:
@@ -112,7 +114,11 @@ def resolve_runtime_boundary(
     workspace = _resolve_relative_to_base(
         config.permissions.workspace, base_dir=_base_dir(config_path)
     ).resolve()
-    writable = config.permissions.writes != "deny"
+    writable = (
+        config.permissions.writes != "deny"
+        if restored_workspace_writable is None
+        else restored_workspace_writable
+    )
     if parent_boundary is None:
         policy = (
             permission_policy
@@ -121,7 +127,11 @@ def resolve_runtime_boundary(
                 write_mode=config.permissions.writes, execute_mode=config.permissions.execute
             )
         )
-        binding = _create_command_binding(config.command, workspace, writable=writable)
+        binding = (
+            restored_command_binding
+            if restored_command_binding is not None
+            else _create_command_binding(config.command, workspace, writable=writable)
+        )
         slots: dict[tuple[str, str], CommandStopSlot] = {}
     else:
         parent_root = parent_boundary.workspace_root

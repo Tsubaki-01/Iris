@@ -116,6 +116,7 @@ from ..runtime import (
     RuntimeStreamEvent,
 )
 from ..runtime._assembly import (
+    RuntimeAssemblyBoundary,
     RuntimeExecutionScope,
     SubagentAssembly,
     assemble_runtime,
@@ -145,6 +146,8 @@ from ._events import _RunEventCollector
 from ._goal import validate_goal_options
 from ._hooks import HookLifecycle, HookStartControl, run_started
 from ._recovery_admission import recovery_mutation, recovery_operation
+from ._recovery_bindings import validate_evolution_restore
+from ._recovery_files import SnapshotStorage
 from ._subagent import ChildProviderFactory, HarnessSubagentController
 from .configuration import (
     ConfigurationApplied,
@@ -160,8 +163,12 @@ from .maintenance import (
     ProjectEvolutionBinding,
 )
 from .observer import RunEventObserver
-from .recovery_models import EnvironmentSnapshotManifest
-from .recovery_point import RootRecoveryCoordinator
+from .recovery_models import (
+    EnvironmentSnapshotManifest,
+    EvolutionStateSnapshot,
+    MemoryStateSnapshot,
+)
+from .recovery_point import RootRecoveryCoordinator, restore_environment
 
 if TYPE_CHECKING:
     from ..decision import DecisionEvaluator
@@ -368,6 +375,7 @@ class AgentRunner:
             and environment.agent_config.environment_recovery.enabled
             else None
         )
+        self._restored_manifest: EnvironmentSnapshotManifest | None = None
         self._goal_state_readers: dict[str, Callable[[], GoalProcessState]] = {}
         self._session_fact_callbacks: dict[
             str, Callable[[RunEvent | CommandCleanupFailed], None]
@@ -457,6 +465,27 @@ class AgentRunner:
             or evolution.service.workspace_root != environment.workspace_root
         ):
             raise IrisConfigError("项目经验绑定必须使用 runner 的实际 workspace")
+        if self._restored_manifest is not None:
+            states = self._restored_manifest.states
+            if memory is not None:
+                expected_memory = next(
+                    (state for state in states if isinstance(state, MemoryStateSnapshot)), None
+                )
+                if (
+                    expected_memory is None
+                    or memory.database_path.resolve()
+                    != environment.workspace_root / expected_memory.database_path
+                ):
+                    raise IrisConfigError("Memory 维护数据库路径与环境恢复点不一致")
+            if evolution is not None:
+                expected_evolution = next(
+                    (state for state in states if isinstance(state, EvolutionStateSnapshot)), None
+                )
+                validate_evolution_restore(
+                    evolution.service,
+                    workspace=environment.workspace_root,
+                    expected=expected_evolution,
+                )
         resource, project = coordinator._attach(memory, self.store, evolution=evolution)
         self._maintenance = MaintenanceAttachment(coordinator, resource, project)
         if memory is not None or evolution is not None:
@@ -676,6 +705,141 @@ class AgentRunner:
         resolved_store = (
             store if store is not None else _build_lifecycle_store(config, config_path=config_path)
         )
+        boundary = resolve_runtime_boundary(
+            config,
+            config_path=config_path,
+            permission_policy=permission_policy,
+        )
+        return cls._assemble_runner(
+            config,
+            resolved_store=resolved_store,
+            boundary=boundary,
+            store_injected=store is not None,
+            config_path=config_path,
+            provider=provider,
+            child_provider_factory=child_provider_factory,
+            memory_service=memory_service,
+            prompt_source=prompt_source,
+            observability=observability,
+            decision_client=decision_client,
+            context_source=context_source,
+            hooks=hooks,
+            tool_middlewares=tool_middlewares,
+            observers=observers,
+            observer_event_timeout_s=observer_event_timeout_s,
+            clock=clock,
+            api_key=api_key,
+            live_publisher=live_publisher,
+        )
+
+    @classmethod
+    async def from_environment_snapshot(
+        cls,
+        config: AgentConfig,
+        directory: Path,
+        *,
+        config_path: Path | None = None,
+        provider: CompletionProvider | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        child_provider_factory: ChildProviderFactory | None = None,
+        memory_service: MemoryService | None = None,
+        prompt_source: PromptSource | None = None,
+        observability: Observability | None = None,
+        decision_client: DecisionEvaluator | None = None,
+        context_source: ContextSource | None = None,
+        hooks: Sequence[HookRegistration] = (),
+        tool_middlewares: Sequence[ToolMiddleware] = (),
+        observers: Sequence[RunEventObserver] = (),
+        observer_event_timeout_s: float = 30.0,
+        clock: Clock | None = None,
+        api_key: str | None = None,
+        live_publisher: LivePublisher | None = None,
+    ) -> AgentRunner:
+        """离线还原最新环境点的原路径与配套工作库，返回尚未启动 Run 的 Runner。"""
+        restored = await restore_environment(config, directory, memory_service=memory_service)
+        try:
+            manifest = restored.manifest
+            effective = config.model_copy(
+                update={
+                    "permissions": config.permissions.model_copy(
+                        update={"workspace": str(manifest.workspace_root)}
+                    ),
+                    "command": restored.command_binding.config,
+                    "session": config.session.model_copy(
+                        update={"backend": "sqlite", "path": str(manifest.lifecycle_path)}
+                    ),
+                }
+            )
+            boundary = resolve_runtime_boundary(
+                effective,
+                config_path=config_path,
+                permission_policy=permission_policy,
+                restored_command_binding=restored.command_binding,
+                restored_workspace_writable=manifest.docker.workspace_writable,
+            )
+            runner = cls._assemble_runner(
+                effective,
+                resolved_store=restored.store,
+                boundary=boundary,
+                store_injected=False,
+                config_path=config_path,
+                provider=provider,
+                child_provider_factory=child_provider_factory,
+                memory_service=memory_service,
+                prompt_source=prompt_source,
+                observability=observability,
+                decision_client=decision_client,
+                context_source=context_source,
+                hooks=hooks,
+                tool_middlewares=tool_middlewares,
+                observers=observers,
+                observer_event_timeout_s=observer_event_timeout_s,
+                clock=clock,
+                api_key=api_key,
+                live_publisher=live_publisher,
+            )
+            runner._restored_manifest = manifest
+            runner._prepared = runner.runtime.environment.mcp_manager is None
+            runner._configuration = replace(runner._configuration, prepared=runner._prepared)
+            cast(RootRecoveryCoordinator, runner._recovery)._storage = SnapshotStorage(
+                directory.resolve()
+            )
+            from ..command.docker import DockerCommandService
+
+            cast(DockerCommandService, restored.command_binding.service).adopt_snapshot_retention(
+                source_id=manifest.source_id,
+                keep_image_ref=manifest.docker.image_ref,
+            )
+            return runner
+        except BaseException:
+            await restored.command_binding.service.aclose()
+            raise
+
+    @classmethod
+    def _assemble_runner(
+        cls,
+        config: AgentConfig,
+        *,
+        resolved_store: LifecycleStore,
+        boundary: RuntimeAssemblyBoundary,
+        store_injected: bool,
+        config_path: Path | None,
+        provider: CompletionProvider | None,
+        child_provider_factory: ChildProviderFactory | None,
+        memory_service: MemoryService | None,
+        prompt_source: PromptSource | None,
+        observability: Observability | None,
+        decision_client: DecisionEvaluator | None,
+        context_source: ContextSource | None,
+        hooks: Sequence[HookRegistration],
+        tool_middlewares: Sequence[ToolMiddleware],
+        observers: Sequence[RunEventObserver],
+        observer_event_timeout_s: float,
+        clock: Clock | None,
+        api_key: str | None,
+        live_publisher: LivePublisher | None,
+    ) -> AgentRunner:
+        """普通构造和环境恢复共用已解析的资源与宿主依赖。"""
         resolved_clock = clock if clock is not None else _SystemClock()
         goal_service = (
             GoalService(
@@ -685,11 +849,6 @@ class AgentRunner:
             )
             if config.goal.enabled
             else None
-        )
-        boundary = resolve_runtime_boundary(
-            config,
-            config_path=config_path,
-            permission_policy=permission_policy,
         )
         if prompt_source is None:
             prompt_source = PromptSource.initialize(boundary.workspace_root, config.prompts.root)
@@ -751,7 +910,7 @@ class AgentRunner:
                         provider if provider is not None else runtime.environment.provider,
                         provider is not None,
                     ),
-                    ("store", resolved_store, store is not None),
+                    ("store", resolved_store, store_injected),
                     ("memory", runtime.environment.memory_service, memory_service is not None),
                     (
                         "context_source",

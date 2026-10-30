@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import platform
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from functools import partial
@@ -10,18 +11,39 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
+from ..command.config import CommandConfig
 from ..command.docker import DockerCommandService
-from ..exceptions import IrisCommandCleanupError, IrisConfigError, IrisRunStateError
+from ..command.models import CommandEnvironment, CommandMode
+from ..command.service import CommandBinding
+from ..exceptions import (
+    IrisCommandCleanupError,
+    IrisCommandError,
+    IrisConfigError,
+    IrisRunRecoveryError,
+    IrisRunStateError,
+)
 from ..lifecycle import RunPhase, RunSnapshot, ToolCallPhase
 from ..lifecycle.history import RunCursor, SessionCursor
 from ..runtime.environment import RuntimeExecutionScope
 from ..store import SQLiteStore
 from ..utils.background_io import BackgroundIO
-from ._recovery_bindings import backup_state_snapshots, collect_state_snapshots
-from ._recovery_files import SnapshotStorage, archive_workspace
-from .recovery_models import EnvironmentSnapshotManifest, SnapshotFiles, StateSnapshot
+from ._recovery_bindings import (
+    backup_state_snapshots,
+    collect_state_snapshots,
+    validate_memory_restore,
+)
+from ._recovery_files import SnapshotStorage, archive_workspace, restore_database, restore_workspace
+from .recovery_models import (
+    EnvironmentSnapshotManifest,
+    MemoryStateSnapshot,
+    RestoredEnvironment,
+    SnapshotFiles,
+    StateSnapshot,
+)
 
 if TYPE_CHECKING:
+    from ..agents import AgentConfig
+    from ..memory import MemoryService
     from .runner import AgentRunner
 
 
@@ -299,3 +321,110 @@ def _require_stable_runs(store: SQLiteStore) -> None:
         session_cursor = sessions.next_cursor
         if session_cursor is None:
             return
+
+
+async def restore_environment(
+    config: AgentConfig,
+    directory: Path,
+    *,
+    memory_service: MemoryService | None,
+) -> RestoredEnvironment:
+    """固定一次 latest，先确认绑定和目标，再还原同套工作副本。"""
+    if not config.environment_recovery.enabled:
+        raise IrisConfigError("environment_recovery 未启用")
+    io = BackgroundIO()
+    service: DockerCommandService | None = None
+    try:
+        storage = SnapshotStorage(directory.resolve())
+        manifest = await io.run(storage.load_latest)
+        if manifest is None:
+            raise IrisRunRecoveryError("没有已发布的环境恢复点", path=str(directory))
+        expected = next(
+            (state for state in manifest.states if isinstance(state, MemoryStateSnapshot)), None
+        )
+        validate_memory_restore(
+            config.memory, memory_service, workspace=manifest.workspace_root, expected=expected
+        )
+        files = SnapshotFiles(storage.directory, manifest.snapshot_id)
+        await io.run(partial(_require_restore_targets, manifest, files))
+        service = DockerCommandService.from_snapshot(manifest.workspace_root, manifest.docker)
+        try:
+            await service.prepare()
+        except IrisCommandError as error:
+            raise IrisRunRecoveryError(
+                "恢复镜像或本地 Docker 引擎不可用", error=str(error)
+            ) from error
+        store = await io.run(partial(_restore_files, manifest, files))
+        command_config = CommandConfig.model_construct(
+            mode=CommandMode.DOCKER,
+            docker=manifest.docker.config,
+            timeout_seconds=config.command.timeout_seconds,
+        )
+        return RestoredEnvironment(
+            manifest,
+            store,
+            CommandBinding(
+                config=command_config,
+                service=service,
+                environment=CommandEnvironment(
+                    host_os=platform.system(),
+                    mode=CommandMode.DOCKER,
+                    command_os="Linux",
+                    command_shell="/bin/sh",
+                ),
+            ),
+        )
+    except BaseException:
+
+        async def cleanup() -> None:
+            await io.wait_pending()
+            if service is not None:
+                await service.aclose()
+
+        task = asyncio.create_task(cleanup())
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    task.result()
+                    break
+        raise
+
+
+def _require_restore_targets(manifest: EnvironmentSnapshotManifest, files: SnapshotFiles) -> None:
+    """离线恢复边界只检查本次使用的固定产物和原路径。"""
+    workspace = manifest.workspace_root
+    try:
+        if files.directory.is_relative_to(workspace):
+            raise IrisRunRecoveryError("快照目录必须位于 workspace 外")
+        if workspace.exists() and (not workspace.is_dir() or any(workspace.iterdir())):
+            raise IrisRunRecoveryError("恢复 workspace 必须为空或不存在", path=str(workspace))
+        if manifest.lifecycle_path.exists():
+            raise IrisRunRecoveryError(
+                "恢复工作数据库路径必须已腾空", path=str(manifest.lifecycle_path)
+            )
+        required = [files.workspace_archive, files.lifecycle_backup]
+        required.extend(
+            files.memory_backup if state.role == "memory" else files.evolution_backup
+            for state in manifest.states
+        )
+        for path in required:
+            if not path.is_file():
+                raise IrisRunRecoveryError("恢复点缺少必要产物", path=str(path))
+    except OSError as error:
+        raise IrisRunRecoveryError("恢复目标不可用", path=str(workspace)) from error
+
+
+def _restore_files(manifest: EnvironmentSnapshotManifest, files: SnapshotFiles) -> SQLiteStore:
+    """文件工作副本还原完成后才打开 lifecycle 的解析边界。"""
+    restore_workspace(files.workspace_archive, manifest.workspace_root)
+    restore_database(files.lifecycle_backup, manifest.lifecycle_path)
+    for state in manifest.states:
+        backup = files.memory_backup if state.role == "memory" else files.evolution_backup
+        restore_database(backup, manifest.workspace_root / state.database_path)
+    store = SQLiteStore(manifest.lifecycle_path)
+    if store.source_id != manifest.source_id:
+        raise IrisRunRecoveryError("恢复点数据库与 manifest 的 source_id 不一致")
+    return store
