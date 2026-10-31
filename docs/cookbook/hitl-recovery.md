@@ -165,6 +165,38 @@ uv run python -m examples.lifecycle.recover --env-file .env --run-id $runId --ac
 
 这里 `$runId`、`$activationId` 必须来自实际遗留 Run 的状态输出。恢复可能继续执行，也可能返回 `outcome_unknown`：当工具已开始但结果未提交，框架不会重放它。检查 `result.error` 和 `runner.list_tool_calls(run_id)`，结合实际工具效果决定下一步。模型输出已完整提交、只差结算时，恢复可以直接完成，不再调用模型。
 
+## 保存环境并在新进程继续
+
+如果继续任务还需要保存点当时的文件、容器依赖和内置状态库，使用显式环境恢复。
+它按 root 保存最新一套环境，原 `resume/recover` 继续负责 Run 的逻辑推进。
+
+准备同一本地 Linux Docker 引擎和 `iris-command:local` 镜像，步骤见
+[Docker 环境](commands.md#使用本地-docker-环境)。在仓库根目录运行固定 provider 示例：
+
+```shell
+uv run --extra sandbox python -m examples.lifecycle.environment_recovery save --workspace demo/workspace --database demo/state.sqlite --snapshot-directory demo/snapshots --run-docker
+```
+
+示例离线安装一个微型 wheel 到容器用户目录、写入 `snapshot-value.txt`，并在第二个
+session 保留一个人工问题。输出恢复点、Run 和 interaction ID，然后正常关闭原容器。
+快照镜像和 `demo/snapshots` 中的配套数据继续保留。
+
+把原 `demo/workspace` 和 `demo/state.sqlite` 移到其他位置，使恢复目标为空/不存在；
+保留 `demo/snapshots`。再开启一个新进程：
+
+```shell
+uv run --extra sandbox python -m examples.lifecycle.environment_recovery restore --workspace demo/workspace --database demo/state.sqlite --snapshot-directory demo/snapshots --run-docker
+```
+
+恢复工厂先还原保存点，然后示例回答原问题、导入容器中安装的依赖并读取保存文件。
+成功输出包含 `stop_reason: completed` 和 `file: saved`。示例自行关闭资源，原目标的
+腾空由运行者完成。完整实现见[环境恢复示例](../../examples/lifecycle/environment_recovery.py)。
+
+自己的宿主在空闲点调用 `await runner.save_environment_snapshot(directory)`，恢复时调用
+`await AgentRunner.from_environment_snapshot(config, directory)`。开启的 Memory 路径和写入
+namespace 要与保存点匹配；Evolution 通过宿主维护绑定接回。完整参数、返回值和错误见
+[环境 SDK](../reference/runtime.md#显式保存和恢复环境)。
+
 ## 取消与正常失败怎么处理
 
 `await runner.cancel(run_id, reason="用户停止", settlement_timeout=10)` 请求取消并等待终态；超时抛出 `IrisRunObservationTimeoutError`，只说明这次等待到期。取消请求仍然保留，宿主可重新读取结果，不应据此宣称取消失败或任务已完成。

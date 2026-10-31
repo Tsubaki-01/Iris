@@ -143,3 +143,64 @@ async def test_restore_preconditions_precede_target_writes(
     assert not current.requests
     if problem != "nonempty":
         assert not (tmp_path / "workspace").exists()
+
+
+@pytest.mark.asyncio
+async def test_parent_child_waiting_restore_uses_original_links_and_budget(
+    tmp_path: Path,
+    driver: FakeClient,
+) -> None:
+    from iris.agents import CommandConfig, SessionConfig, load_agent_config
+
+    from .test_runner_subagent import ChildProviders, _parent_provider, _write_configs
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_path = _write_configs(workspace)
+    config = load_agent_config(config_path).model_copy(
+        update={
+            "environment_recovery": EnvironmentRecoveryConfig(enabled=True),
+            "command": CommandConfig(mode="docker"),
+            "session": SessionConfig(backend="sqlite", path=str(tmp_path / "live.sqlite")),
+        }
+    )
+    runner = AgentRunner.from_config(
+        config,
+        config_path=config_path,
+        provider=_parent_provider(),
+        child_provider_factory=ChildProviders(
+            StaticProvider(
+                tool_response(
+                    ToolUseBlock(id="ask", name="ask_question", input={"question": "继续？"})
+                ),
+            )
+        ),
+    )
+    waiting = await runner.start(AgentRunRequest(input="delegate", session_id="parent"))
+    assert waiting.run.phase is RunPhase.WAITING
+    link = runner.store.load_subagent_link(waiting.run.run_id, "delegate")
+    before_child = runner.get_run(link.child_run_id)
+    assert before_child.phase is RunPhase.WAITING
+    directory = tmp_path / "snapshots"
+    await runner.save_environment_snapshot(directory)
+    await runner.aclose()
+    vacate(runner, tmp_path)
+    driver.closed = False
+    restored = await AgentRunner.from_environment_snapshot(
+        config,
+        directory,
+        config_path=config_path,
+        provider=StaticProvider(text_response("parent done")),
+        child_provider_factory=ChildProviders(StaticProvider(text_response("child done"))),
+    )
+    assert restored.store.load_subagent_link(waiting.run.run_id, "delegate") == link
+    result = await restored.resume(
+        waiting.run.run_id,
+        interaction_id=waiting.pending_interaction.interaction_id,
+        response=QuestionInteractionResponse(answer="continue"),
+    )
+    assert result.run.phase is RunPhase.TERMINAL
+    child = restored.get_run(link.child_run_id)
+    assert child.phase is RunPhase.TERMINAL
+    assert child.usage.model_steps_committed == before_child.usage.model_steps_committed + 1
+    await restored.aclose()

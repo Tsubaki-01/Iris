@@ -24,7 +24,7 @@ from .fakes import StaticProvider, text_response
 __all__ = ["driver"]
 
 
-def snapshot_runner(tmp_path: Path, *, enabled: bool = True) -> AgentRunner:
+def snapshot_runner(tmp_path: Path, *, enabled: bool = True, memory: bool = False) -> AgentRunner:
     """独立 workspace、工作库与 fake Docker root。"""
     config = AgentConfig.model_validate(
         {
@@ -34,6 +34,7 @@ def snapshot_runner(tmp_path: Path, *, enabled: bool = True) -> AgentRunner:
             "permissions": {"workspace": str(tmp_path / "workspace")},
             "session": {"backend": "sqlite", "path": str(tmp_path / "live.sqlite")},
             "command": {"mode": "docker"},
+            "memory": {"enabled": memory},
             "environment_recovery": {"enabled": enabled},
         }
     )
@@ -218,3 +219,83 @@ async def test_capture_failure_keeps_previous_latest(
     assert not capture._closed
     runner._capture = None
     await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_changing_snapshot_directory_preserves_existing_point(
+    tmp_path: Path,
+    driver: FakeClient,
+) -> None:
+    runner = snapshot_runner(tmp_path)
+    saved = await runner.save_environment_snapshot(tmp_path / "snapshots")
+    try:
+        with pytest.raises(IrisConfigError, match="目录"):
+            await runner.save_environment_snapshot(tmp_path / "another")
+        assert saved.docker.image_ref in driver.image_refs
+        assert SnapshotStorage(tmp_path / "snapshots").load_latest() == saved
+    finally:
+        await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_capture_drain_cancellation_waits_for_existing_capture(tmp_path: Path) -> None:
+    from iris.harness._capture import RunCapture
+    from iris.memory import MemoryService, SQLiteMemoryStore
+    from iris.store import InMemoryLifecycleStore
+
+    memory = MemoryService(SQLiteMemoryStore(tmp_path / "memory.db"))
+    capture = RunCapture(
+        memory_service=memory, namespace="project", lifecycle_store=InMemoryLifecycleStore()
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def current_capture() -> None:
+        entered.set()
+        await release.wait()
+        (tmp_path / "captured.txt").write_text("completed")
+
+    capture._capture_task = asyncio.create_task(current_capture())
+    await entered.wait()
+    draining = asyncio.create_task(capture.drain_for_snapshot())
+    await asyncio.sleep(0)
+    draining.cancel()
+    await asyncio.sleep(0)
+    try:
+        assert not draining.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await draining
+        await capture._capture_task
+    assert (tmp_path / "captured.txt").read_text() == "completed"
+
+
+@pytest.mark.asyncio
+async def test_close_retries_snapshot_file_cleanup_after_resources_close(
+    tmp_path: Path,
+    driver: FakeClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from uuid import uuid4
+
+    runner = snapshot_runner(tmp_path)
+    directory = tmp_path / "snapshots"
+    saved = await runner.save_environment_snapshot(directory)
+    old = SnapshotStorage(directory).prepare_candidate(uuid4())
+    remove = SnapshotStorage.remove_candidate
+    attempts = 0
+
+    def fail_once(storage: SnapshotStorage, snapshot_id: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise IrisRunPersistenceError("file is busy")
+        remove(storage, snapshot_id)
+
+    monkeypatch.setattr(SnapshotStorage, "remove_candidate", fail_once)
+    with pytest.raises(IrisRunPersistenceError):
+        await runner.aclose()
+    assert driver.closed
+    await runner.aclose()
+    assert not old.candidate_directory.exists()
+    assert SnapshotStorage(directory).load_latest() == saved

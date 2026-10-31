@@ -113,3 +113,31 @@ async def test_prune_defers_active_image_and_close_releases_it(
     assert "iris-recovery/source:new" in driver.image_refs
     assert "iris-recovery/other:keep" in driver.image_refs
     assert "iris-command:local" in driver.image_refs
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_failed_pause_still_reports_failed_cleanup(
+    tmp_path: Path,
+    driver: FakeClient,
+) -> None:
+    service = DockerCommandService(tmp_path, DockerConfig(), workspace_writable=True)
+    await service.execute(CommandScope("s", "r"), request(tmp_path, "first"))
+    container = driver.containers.container
+    container.pause_gate = asyncio.Event()
+    container.pause_error = container.unpause_error = True
+
+    async def save() -> None:
+        async with service.snapshot(source_id="source", snapshot_id=uuid4()):
+            pytest.fail("pause failed")
+
+    task = asyncio.create_task(save())
+    await container.pause_entered.wait()
+    task.cancel()
+    container.pause_gate.set()
+    try:
+        with pytest.raises(IrisCommandCleanupError):
+            await task
+        assert container.paused
+    finally:
+        container.unpause_error = False
+        await service.aclose()

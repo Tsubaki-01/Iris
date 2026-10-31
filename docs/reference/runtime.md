@@ -56,6 +56,69 @@ AgentRunner(
 
 自动记忆生成与项目经验维护启用时，宿主必须在首次使用前完成对应维护绑定。协调器的独立生命周期与具体装配见[长期能力参考](memory-goals.md)。SessionManager 的关闭不代替 Runner 关闭；Runner 也不替宿主结束事件循环。
 
+## 显式保存和恢复环境
+
+先开启 `environment_recovery.enabled`。两个环境入口与普通 `recover/resume` 分开使用：
+
+```text
+await runner.save_environment_snapshot(directory: Path) -> EnvironmentSnapshotManifest
+
+await AgentRunner.from_environment_snapshot(
+    config: AgentConfig,
+    directory: Path,
+    *,
+    config_path: Path | None = None,
+    provider: CompletionProvider | None = None,
+    permission_policy: PermissionPolicy | None = None,
+    child_provider_factory: ChildProviderFactory | None = None,
+    memory_service: MemoryService | None = None,
+    prompt_source: PromptSource | None = None,
+    observability: Observability | None = None,
+    decision_client: DecisionEvaluator | None = None,
+    context_source: ContextSource | None = None,
+    hooks: Sequence[HookRegistration] = (),
+    tool_middlewares: Sequence[ToolMiddleware] = (),
+    observers: Sequence[RunEventObserver] = (),
+    observer_event_timeout_s: float = 30.0,
+    clock: Clock | None = None,
+    api_key: str | None = None,
+    live_publisher: LivePublisher | None = None,
+) -> AgentRunner
+```
+
+保存入口仅适用于 root、本地 Docker 和专用 SQLiteStore。root 的所有 session/child
+共用同一个环境点；它包含 workspace、容器文件系统中的已安装依赖、有效容器参数、完整
+lifecycle 数据库，以及当前绑定的内置 Memory/Evolution 数据库。状态库、投影和发布目标
+须位于 workspace 内并由本环境独占。`directory` 必须在 workspace 外，同一 root
+始终使用同一个专用快照目录。
+
+保存要求前台任务与资源收尾结束，待继续的 Run 处于 WAITING 或 TERMINAL。忙碌时立即
+抛出 `IrisRunStateError`。保存期间新的公开写操作同样返回忙碌，内部 deadline、follow-up
+与 Goal 调度等待后继续，绝对期限保持。宿主在这段时间串行处理独立文件编辑、raw Store
+和直接 service 写入。保存后原 Runner 可以继续使用。
+
+`EnvironmentSnapshotManifest` 从 `iris.harness` 导入，返回 `snapshot_id`、UTC `created_at`、
+`source_id`、原 `workspace_root/lifecycle_path`、`docker` 描述和 `states` 绑定。
+每次成功发布替换 `latest.json`，随后清理旧产物。发布前失败保留旧点；发布后清理失败
+仍保留新点。若解除容器暂停失败，抛出 `IrisCommandCleanupError` 并停止接纳执行，
+宿主可显式关闭 Runner。
+
+恢复使用同一本地 Docker 引擎和原绝对路径。调用前关闭原环境及独立写入者，并腾空
+原 workspace 和工作数据库路径。工厂固定读取一次 latest，核对持久绑定后复制工作库，
+按保存的 image ID 与完整 Env 重建惰性命令服务；恢复包中的数据库保持独立。
+工厂返回时没有模型调用、工具执行或 Goal 自动推进。之后使用原 interaction ID 调用
+`resume()`，或按原规则调用 `recover()`；Run 身份、预算与绝对 deadline 保持。
+
+Memory 开启时，当前配置或注入服务的实际数据库、mirror、write namespace 必须匹配。
+若注入同路径的现成 MemoryService，应先构造未附着且没有在途 IO 的对象，再腾空目标，
+最后将同一对象传入工厂。Evolution 在首次 `bind_maintenance()` 时核对材料库、Skill、
+prompt/config 目标。当前关闭的角色仅还原文件。provider、system 和其他宿主依赖按当前
+配置装配。`describe_configuration()` 描述还原后实际使用的 workspace、存储与命令配置。
+
+未开启或不支持的组合、持久绑定不匹配抛出 `IrisConfigError`；缺失/损坏恢复点、非空目标
+或不可用镜像抛出 `IrisRunRecoveryError`。恢复中途失败的目标可能含已复制文件，宿主腾空
+目标后可重试。操作配方见[环境恢复示例](../cookbook/hitl-recovery.md#保存环境并在新进程继续)。
+
 ## 请求与固定运行选项
 
 这些类型可从 `iris.harness` 或 `iris.lifecycle` 导入，是禁止未知字段的冻结 Pydantic 模型。

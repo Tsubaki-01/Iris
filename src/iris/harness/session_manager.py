@@ -58,7 +58,7 @@ from .runner import AgentRunner
 
 if TYPE_CHECKING:
     from .recovery_point import RootRecoveryCoordinator
-    from .streaming import LivePublisher
+    from .streaming import CommandCleanupFailed, LivePublisher
 
 # endregion
 
@@ -785,6 +785,8 @@ class SessionManager:
             self._goal_control.api if self._goal_control is not None else None
         )
         self._finished_callback = self._on_finished
+        if self._recovery is not None and self._goal_control is None:
+            self._runner._register_session_fact_callback(self._session_id, self._on_run_fact)
         self._runner._hook_lifecycle.subscribe(self._session_id, self._finished_callback)
 
     @property
@@ -1326,6 +1328,10 @@ class SessionManager:
                 return
             if not self._closed:
                 self._closed = True
+                if self._recovery is not None and self._goal_control is None:
+                    self._runner._unregister_session_fact_callback(
+                        self._session_id, self._on_run_fact
+                    )
                 self._admission_wakeup.set()
                 self._runner._hook_lifecycle.unsubscribe(self._session_id, self._finished_callback)
                 if self._goal_control is not None:
@@ -1765,6 +1771,11 @@ class SessionManager:
         for helper in (admission.waiter, admission.finalizer):
             if helper is not None and helper is not current and not helper.done():
                 helper.cancel()
+
+    def _on_run_fact(self, fact: RunEvent | CommandCleanupFailed) -> None:
+        """未启用 Goal 时也由已提交终态唤醒快照后延迟的 follow-up。"""
+        if isinstance(fact, RunEvent) and fact.kind is RunEventKind.RUN_TERMINAL:
+            self._on_finished()
 
     def _on_finished(self) -> None:
         """共享结束 owner 完成后唤醒普通 submit，并主动推进 FIFO/Goal。"""

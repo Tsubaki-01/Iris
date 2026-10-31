@@ -64,6 +64,11 @@ Docker Desktop 使用 `1000:1000`。`HOME=/tmp`、`PYTHONUSERBASE=/tmp/.local`�
 重建镜像 tag 不替换已有容器；使用新镜像前先关闭旧 root，再创建 runner。
 最终关闭只删除本实例容器并关闭客户端，保留宿主挂载文件。
 
+可选环境快照在 `snapshot.py` 中描述有效镜像和创建参数；资源层按未创建、运行中、已停止
+三态分别 tag/commit，只撤销本次 pause。命令服务持有跨文件保存的控制锁，harness 负责
+成套发布。恢复按保存的 image ID 和完整 Env 创建新容器。最新自有镜像独立保留，在用的
+旧镜像在容器删除后清理；普通 CommandService 协议和 Native 后端不承担快照职责。
+
 ## 实现边界
 
 `DockerSandbox` 位于 `sandbox/docker.py`，供 Docker 命令适配层使用：

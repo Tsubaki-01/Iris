@@ -24,7 +24,6 @@ from ..exceptions import (
 )
 from ..lifecycle import RunPhase, RunSnapshot, ToolCallPhase
 from ..lifecycle.history import RunCursor, SessionCursor
-from ..runtime.environment import RuntimeExecutionScope
 from ..store import SQLiteStore
 from ..utils.background_io import BackgroundIO
 from ._recovery_bindings import (
@@ -86,8 +85,10 @@ class RootRecoveryCoordinator:
         """在派发时占用计数，真实作业结束后释放。"""
         self._operations += 1
 
-        def finished(_: asyncio.Task[Result]) -> None:
+        def finished(completed: asyncio.Task[Result]) -> None:
             self._operations -= 1
+            if not completed.cancelled():
+                completed.exception()
 
         task.add_done_callback(finished)
 
@@ -126,8 +127,6 @@ class RootRecoveryCoordinator:
         """确认本次支持范围后，派发拥有完整收尾的保存作业。"""
         root = self.root
         environment = root.runtime.environment
-        if environment.execution_scope is not RuntimeExecutionScope.ROOT:
-            raise IrisConfigError("环境快照只能由 root 保存")
         if not isinstance(root.store, SQLiteStore):
             raise IrisConfigError("环境快照要求专用 SQLiteStore")
         binding = environment.command_binding
@@ -164,6 +163,8 @@ class RootRecoveryCoordinator:
         states: tuple[StateSnapshot, ...],
     ) -> EnvironmentSnapshotManifest:
         async with self._snapshot_lock:
+            if self._storage is not None and self._storage.directory != storage.directory:
+                raise IrisConfigError("同一 root 必须使用同一个专用快照目录")
             self.begin_snapshot()
             published = False
             candidate: SnapshotFiles | None = None

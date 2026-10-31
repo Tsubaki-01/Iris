@@ -52,13 +52,16 @@ class RunCapture:
 
         errors: list[Exception] = []
         self._snapshot_errors = errors
+        pending = self._capture_task
         try:
-            if self._capture_task is not None:
-                await asyncio.shield(self._capture_task)
+            if pending is not None:
+                await asyncio.shield(pending)
             if self._capture_requests:
                 await self._drain_capture_requests()
             await self.capture_pending()
         finally:
+            if pending is not None:
+                await asyncio.shield(pending)
             if self.service is not None:
                 await self.service.wait_pending_io()
             if self.evolution_service is not None:

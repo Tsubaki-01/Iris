@@ -23,7 +23,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from functools import partial, wraps
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, Protocol, cast
 
@@ -604,17 +604,18 @@ class AgentRunner:
         """
         if self._recovery is not None:
             await self._recovery.wait_for_saves()
-        if self._resources_closed:
-            return
-        if self._active or (self._maintenance is not None and self._maintenance.foreground_active):
-            raise IrisRunStateError("runner 仍有 active activation，不能关闭")
-        self._closed = True
-        if self._prepare_task is not None:
-            await asyncio.shield(self._prepare_task)
-        if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
-            await self._command_lifecycle.aclose()
-            await self._hook_lifecycle.aclose()
-        await self._close_owned_resources()
+        if not self._resources_closed:
+            if self._active or (
+                self._maintenance is not None and self._maintenance.foreground_active
+            ):
+                raise IrisRunStateError("runner 仍有 active activation，不能关闭")
+            self._closed = True
+            if self._prepare_task is not None:
+                await asyncio.shield(self._prepare_task)
+            if self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT:
+                await self._command_lifecycle.aclose()
+                await self._hook_lifecycle.aclose()
+            await self._close_owned_resources()
         if self._recovery is not None and (
             self.runtime.environment.execution_scope is RuntimeExecutionScope.ROOT
         ):
@@ -971,11 +972,7 @@ class AgentRunner:
         if self._recovery is None:
             saved = await asyncio.to_thread(save_image, resolved, cache_dir=cache_dir)
         else:
-            task = asyncio.create_task(
-                self._recovery.io.run(
-                    partial(save_image, resolved, cache_dir=cache_dir), complete_on_cancel=True
-                )
-            )
+            task = asyncio.create_task(asyncio.to_thread(save_image, resolved, cache_dir=cache_dir))
             self._recovery.track_task(task)
             saved = await asyncio.shield(task)
         return image_block_from_saved(saved, name=name)

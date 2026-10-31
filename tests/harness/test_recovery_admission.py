@@ -157,7 +157,8 @@ async def test_prepare_waiter_cancellation_keeps_actual_work_admitted(
 
 
 @pytest.mark.asyncio
-async def test_deadline_and_follow_up_wait_without_losing_queue(tmp_path: Path) -> None:
+@pytest.mark.parametrize("goal", [False, True])
+async def test_deadline_and_follow_up_wait_without_losing_queue(tmp_path: Path, goal: bool) -> None:
     from datetime import UTC, datetime, timedelta
 
     from iris.lifecycle import AgentRunOptions, AgentRunRequest, RunLimits, RunPhase, RunStopReason
@@ -174,7 +175,7 @@ async def test_deadline_and_follow_up_wait_without_losing_queue(tmp_path: Path) 
             "permissions": {"workspace": str(tmp_path)},
             "environment_recovery": {"enabled": True},
             "tools": {"builtin": ["human.ask"]},
-            "goal": {"enabled": True},
+            "goal": {"enabled": goal},
         }
     )
     runner = AgentRunner.from_config(
@@ -230,4 +231,47 @@ async def test_restore_resume_cancel_and_close_respect_snapshot_boundary(tmp_pat
     runner._recovery.release_execution()
     await closing
     assert manager._close_complete
+    await runner.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_import_remains_admitted_until_thread_exits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import threading
+
+    from PIL import Image
+
+    from iris.harness import runner as runner_module
+
+    from .test_goal_controls import _until
+
+    runner = recovery_runner(tmp_path)
+    data = io.BytesIO()
+    Image.new("RGB", (2, 2), "white").save(data, format="PNG")
+    entered, release = threading.Event(), threading.Event()
+    save = runner_module.save_image
+
+    def delayed(source: object, *, cache_dir: Path) -> object:
+        entered.set()
+        assert release.wait(5)
+        return save(source, cache_dir=cache_dir)
+
+    monkeypatch.setattr(runner_module, "save_image", delayed)
+    task = asyncio.create_task(runner.import_image(data.getvalue(), session_id="s"))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    try:
+        with pytest.raises(IrisRunStateError):
+            runner._recovery.begin_snapshot()
+    finally:
+        release.set()
+    await _until(lambda: runner._recovery._operations == 0)
+    runner._recovery.begin_snapshot()
+    runner._recovery.release_execution()
+    assert list((tmp_path / ".iris/image-cache").rglob("*.png"))
     await runner.aclose()

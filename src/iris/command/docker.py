@@ -194,16 +194,27 @@ class DockerCommandService:
 
             async def create_snapshot() -> DockerSnapshot:
                 nonlocal paused_here
-                paused_here = await self._sandbox.freeze_for_snapshot()
-                return await self._sandbox.commit_snapshot(
-                    source_id=source_id, snapshot_id=snapshot_id
-                )
+                try:
+                    paused_here = await self._sandbox.freeze_for_snapshot()
+                    return await self._sandbox.commit_snapshot(
+                        source_id=source_id, snapshot_id=snapshot_id
+                    )
+                except IrisSandboxError as error:
+                    error_type = (
+                        IrisCommandCleanupError
+                        if error.context.get("operation") == "unpause"
+                        else IrisCommandError
+                    )
+                    raise error_type(error.message, **error.context) from error
 
             task = asyncio.create_task(create_snapshot())
 
             async def finish() -> None:
                 # 已派发请求必须完成，才能解除暂停并释放控制锁。
                 await asyncio.gather(task, return_exceptions=True)
+                error = task.exception()
+                if isinstance(error, IrisCommandCleanupError):
+                    raise error
                 try:
                     await self._sandbox.release_snapshot(paused_here=paused_here)
                 except IrisSandboxError as error:
@@ -213,13 +224,6 @@ class DockerCommandService:
             try:
                 yield await asyncio.shield(task)
                 completed = True
-            except IrisSandboxError as error:
-                error_type = (
-                    IrisCommandCleanupError
-                    if error.context.get("operation") == "unpause"
-                    else IrisCommandError
-                )
-                raise error_type(error.message, **error.context) from error
             finally:
                 cleanup = asyncio.create_task(finish())
                 cancelled = False

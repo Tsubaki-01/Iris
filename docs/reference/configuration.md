@@ -68,6 +68,7 @@ Iris 有两层配置：进程配置提供服务凭据、provider 注册和统一
 | `hooks` | `[]` | 四事件处理器，按声明顺序执行；[扩展配方](../cookbook/extensions.md) |
 | `middleware` | tools `[]` | 工具包装链；[工具参考](tools.md) |
 | `command` | Native 环境 | 不会自动注册命令工具；[工具参考](tools.md) |
+| `environment_recovery` | enabled `false` | root 的显式环境保存与恢复；[运行参考](runtime.md#显式保存和恢复环境) |
 | `memory` | enabled `false` | [记忆配置与 SDK](memory-goals.md) |
 | `prompts` | root `.iris/prompts` | [命名模板](context.md#项目命名模板) |
 | `maintenance` | idle_seconds `300`、min_pending_runs `10` | 新自动原文批次同时要求空闲时间和合格新 Run 数；空闲秒数允许 `0`，Run 门槛须为正整数，领域生成预算另设 |
@@ -78,6 +79,22 @@ Iris 有两层配置：进程配置提供服务凭据、provider 注册和统一
 | `speech` | enabled `false` | 由宿主装配 ASR，不自动提供录音 UI；[媒体参考](media.md) |
 
 配置一般在 Runner 构建时确定。命名模板有自己的操作快照语义；这不等于 Agent 所有配置支持热更新。
+
+## 环境恢复开关
+
+```yaml
+environment_recovery:
+  enabled: true
+```
+
+`EnvironmentRecoveryConfig` 从 `iris.agents` 导入，唯一字段是 `enabled: bool = False`。
+开关在 root 构建时采用，开启后由宿主显式调用保存或恢复 API。child 省略该段并借用
+root；child 显式声明该段，包括 `enabled: false`，都会触发配置错误。
+
+配置解析只保存声明。普通 Native 或内存 Store 的 Runner 可以开启该配置；实际环境
+保存要求本地 Docker 和专用于该 root 的 SQLiteStore。快照目录由方法参数指定，位于
+workspace 外，每套环境独占一个目录，固定保留最新一套。
+`recover()` 与 `resume()` 始终读取当前工作 Store，不读取环境恢复包。
 
 ## 模型与协议
 

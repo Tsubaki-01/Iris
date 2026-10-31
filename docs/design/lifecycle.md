@@ -72,7 +72,25 @@ flowchart LR
 
 模型调用也可能在故障后重发：若请求已发送但完整响应尚未提交，检查点仍在模型步之前。恢复复用已经预留的步数，不把同一逻辑步骤重复计入预算，但这不等于服务商只收到过一次请求。
 
-恢复保存的是任务事实，而不是整个 Python 环境。新 Runner 使用当前配置重新组装 system、provider 和工具；已创建 Run 的请求及运行选项仍来自 Store。若要复现同一行为，宿主应提供相同的配置和工作区资源。
+普通 `recover/resume` 读取工作 Store 中的任务事实。新 Runner 使用当前配置重新组装
+system、provider 和工具；已创建 Run 的请求及运行选项仍来自 Store。
+
+## 把逻辑位置与环境保存为同一个恢复点
+
+默认关闭的 `environment_recovery` 提供另一条显式入口：在整个 root 空闲后，把 lifecycle
+数据库、workspace、Docker 镜像和当前内置状态库保存为同一套数据。先停写并排空维护和
+捕获，再冻结运行中的容器；数据库与文件复制完成后，以原子替换 `latest.json` 作为唯一
+发布时刻。保存结束后原会话可以继续，环境点保留最新一套。
+
+`from_environment_snapshot()` 在离线状态还原原路径，创建独立工作数据库并重建命令
+服务。Memory/Evolution 的数据库与捕获水位一并还原，实际绑定在采用前核对。
+恢复工厂返回静止的 Runner，随后继续原 `resume/recover`，保留 Run、interaction、预算
+与 deadline。普通 checkpoint 恢复始终读取当前工作库，因此工作库推进到 S3 后，普通
+恢复使用 S3；显式环境恢复可以回到最近保存的 S2。
+
+快照覆盖 root 的共享资源，保持同一本地引擎、原路径和环境独占的状态库边界。进程内存
+不进入恢复点；provider/system 等非持久宿主依赖由本次装配提供。
+使用步骤见[环境恢复配方](../cookbook/hitl-recovery.md#保存环境并在新进程继续)。
 
 ## 取消不是立即宣告完成
 

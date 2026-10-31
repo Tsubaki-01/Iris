@@ -115,19 +115,21 @@ def collect_state_snapshots(runner: AgentRunner) -> tuple[StateSnapshot, ...]:
     states: list[StateSnapshot] = []
     attachment = runner._maintenance
     if environment.memory_service is not None:
-        if (
-            attachment is not None
-            and attachment.resource is not None
-            and attachment.resource.attachments > 1
-        ):
-            raise IrisConfigError("环境恢复要求本 root 独占 Memory 服务")
-        states.append(
-            describe_memory_state(
-                environment.memory_service,
-                workspace=environment.workspace_root,
-                namespace=environment.agent_config.memory.write_namespace,
-            )
+        memory = describe_memory_state(
+            environment.memory_service,
+            workspace=environment.workspace_root,
+            namespace=environment.agent_config.memory.write_namespace,
         )
+        if attachment is not None:
+            database = environment.workspace_root / memory.database_path
+            owners = sum(
+                resource.attachments
+                for resource in attachment.coordinator._resources.values()
+                if resource.binding.database_path.resolve() == database
+            )
+            if owners > (1 if attachment.resource is not None else 0):
+                raise IrisConfigError("环境恢复要求本 root 独占 Memory 数据库")
+        states.append(memory)
     if attachment is not None and attachment.project is not None:
         if attachment.project.attachments > 1:
             raise IrisConfigError("环境恢复要求本 root 独占 Evolution 服务")

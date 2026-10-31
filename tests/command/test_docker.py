@@ -156,6 +156,8 @@ class FakeContainer:
         self.commit_gate: asyncio.Event | None = None
         self.commit_entered = asyncio.Event()
         self.pause_error = False
+        self.pause_gate: asyncio.Event | None = None
+        self.pause_entered = asyncio.Event()
         self.unpause_error = False
         self.commit_error = False
         self.image_refs: dict[str, str] = {}
@@ -164,6 +166,9 @@ class FakeContainer:
         """暂停成功但响应可丢失。"""
         self.pauses += 1
         self.paused = True
+        self.pause_entered.set()
+        if self.pause_gate is not None:
+            await self.pause_gate.wait()
         if self.pause_error:
             raise FakeDockerError(500, "pause response lost")
 

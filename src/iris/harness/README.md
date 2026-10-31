@@ -22,6 +22,12 @@ Goal 不因此自动 arm，历史读取也不会触发 restore。
 
 ## 快速入门
 
+默认关闭的 `environment_recovery` 由 root 持有保存准入，child 借用。
+`save_environment_snapshot(directory)` 发布整套 Docker/workspace/SQLite 恢复点；
+`from_environment_snapshot(config, directory)` 离线重建原路径，随后仍使用原
+`resume/recover`。保存编排与数据契约分别在 `recovery_point.py` 和 `recovery_models.py`，
+文件层与持久绑定各由包内 helper 管理。[接口和前提](../../../docs/reference/runtime.md#显式保存和恢复环境)。
+
 `from_config*()` 接受 `observability=` 完整服务注入；同一实例交给 runtime、工具执行器和
 child。显式注入优先于各 Agent 的采集配置，child 仍读取当前 YAML 的其他业务设置。
 未注入且启用时，runtime 装配从全局 `Config.observability` 自建服务，由 environment

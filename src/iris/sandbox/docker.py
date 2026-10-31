@@ -188,8 +188,13 @@ class DockerSandbox:
                 async with asyncio.timeout(CONTROL_SECONDS):
                     await self.container.pause()
             except self.driver_errors:
-                async with asyncio.timeout(CONTROL_SECONDS):
-                    state = await self.container.show()
+                try:
+                    async with asyncio.timeout(CONTROL_SECONDS):
+                        state = await self.container.show()
+                except self.driver_errors as error:
+                    raise IrisSandboxError(
+                        "Docker 快照暂停状态无法确认", operation="unpause", error=str(error)
+                    ) from error
                 if state["State"]["Paused"]:
                     await self.release_snapshot(paused_here=True)
                 raise
@@ -281,16 +286,17 @@ class DockerSandbox:
             raise IrisSandboxError("Docker 快照引用清理失败", error=str(error)) from error
 
     def _container_config(self) -> dict[str, Any]:
-        environment = dict(self._image_environment)
-        environment.update(
-            HOME="/tmp",
-            PYTHONUSERBASE="/tmp/.local",
-            PATH=f"/tmp/.local/bin:{environment.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
-        )
-        environment.update(self._config.environment)
         restored = self._restored_snapshot
         if restored is not None:
             environment = restored.config.environment
+        else:
+            environment = dict(self._image_environment)
+            environment.update(
+                HOME="/tmp",
+                PYTHONUSERBASE="/tmp/.local",
+                PATH=f"/tmp/.local/bin:{environment.get('PATH', '/usr/local/bin:/usr/bin:/bin')}",
+            )
+            environment.update(self._config.environment)
         return {
             "Image": self._config.image,
             "Entrypoint": ["sleep"] if restored is None else list(restored.entrypoint),
